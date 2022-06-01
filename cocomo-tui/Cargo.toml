@@ -9,8 +9,8 @@ homepage = "https://github.com/mamrhein/cocomo"
 repository = "https://github.com/mamrhein/cocomo"
 documentation = "https://docs.rs/cocomo-tui/"
 license-file = "../LICENSE.TXT"
-keywords = ["directory", "file", "compare", "copy", "move", "filemanager"]
-categories = ["command-line-utilities"]
+keywords = ["directory", "file", "compare", "copy", "move"]
+categories = ["command-line-utilities", "filesystem"]
 
 [dependencies]
 clap = { version = "3.1.18", features = ["derive", "unicode", "wrap_help"] }

@@ -9,7 +9,7 @@ homepage = "https://github.com/mamrhein/cocomo"
 repository = "https://github.com/mamrhein/cocomo"
 documentation = "https://docs.rs/cocomo-core/"
 license-file = "../LICENSE.TXT"
-keywords = ["directory", "file", "compare", "copy", "move", "filemanager"]
-categories = ["command-line-utilities"]
+keywords = ["directory", "file", "compare", "copy", "move"]
+categories = ["command-line-utilities", "filesystem"]
 
 [dependencies]
