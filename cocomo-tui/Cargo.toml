@@ -1,0 +1,17 @@
+[package]
+name = "cocomo-tui"
+version = "0.0.0"
+edition = "2021"
+authors = ["Michael Amrhein <michael@adrhinum.de>"]
+description = "CLI-App: COmpare, COpy & MOve directories and files."
+readme = "README.md"
+homepage = "https://github.com/mamrhein/cocomo"
+repository = "https://github.com/mamrhein/cocomo"
+documentation = "https://docs.rs/cocomo-tui/"
+license-file = "../LICENSE.TXT"
+keywords = ["directory", "file", "compare", "copy", "move", "filemanager"]
+categories = ["command-line-utilities"]
+
+[dependencies]
+clap = { version = "3.1.18", features = ["derive", "unicode", "wrap_help"] }
+cocomo-core = { version = "0.0.0", path = "../cocomo-core" }

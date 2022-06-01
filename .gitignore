@@ -1,0 +1,6 @@
+# All compiled files and executables
+**/target
+# all hidden files
+.*
+# except
+!.gitignore
