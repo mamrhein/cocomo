@@ -9,11 +9,14 @@
 
 #[allow(dead_code)]
 mod cmdargs;
+mod terminal;
 
 use std::io;
 
 use cmdargs::CmdLineArgs;
 use cocomo_core::{FSItem, ItemType};
+
+use crate::terminal::{reset_terminal, setup_terminal, start_terminal};
 
 fn exit_with_error(msg: String) {
     eprintln!("{}", msg);
@@ -60,6 +63,12 @@ fn main() -> Result<(), io::Error> {
         }
         (..) => {}
     }
+
+    setup_terminal()?;
+    let mut terminal = start_terminal(io::stdout())?;
+
+    reset_terminal(&mut terminal)?;
+
     println!(
         "Compare '{}' and '{}'!",
         left_item.path.display(),
