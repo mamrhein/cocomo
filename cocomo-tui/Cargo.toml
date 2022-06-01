@@ -15,3 +15,7 @@ categories = ["command-line-utilities"]
 [dependencies]
 clap = { version = "3.1.18", features = ["derive", "unicode", "wrap_help"] }
 cocomo-core = { version = "0.0.0", path = "../cocomo-core" }
+
+[[bin]]
+name = "cocomo"
+path = "src/main.rs"
