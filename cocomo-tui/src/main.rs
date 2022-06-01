@@ -22,14 +22,8 @@ fn exit_with_error(msg: String) {
 
 fn main() -> Result<(), io::Error> {
     let args = CmdLineArgs::get();
-    println!(
-        "Args '{}' and '{}'!",
-        args.left.as_ref().unwrap_or(&"None".to_string()),
-        args.right.as_ref().unwrap_or(&"None".to_string())
-    );
-
     if args.left.is_none() || args.right.is_none() {
-        exit_with_error("Need input!".to_string());
+        exit_with_error("Please specify left and right path!".to_string());
     }
 
     let left_item: FSItem;
