@@ -1,6 +1,6 @@
 [package]
 name = "cocomo-tui"
-version = "0.0.0"
+version = "0.0.1"
 edition = "2021"
 authors = ["Michael Amrhein <michael@adrhinum.de>"]
 description = "CLI-App: COmpare, COpy & MOve directories and files."
@@ -14,7 +14,7 @@ categories = ["command-line-utilities"]
 
 [dependencies]
 clap = { version = "3.1.18", features = ["derive", "unicode", "wrap_help"] }
-cocomo-core = { version = "0.0.0", path = "../cocomo-core" }
+cocomo-core = { version = "0.0.1", path = "../cocomo-core" }
 
 [[bin]]
 name = "cocomo"
