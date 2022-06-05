@@ -12,7 +12,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-#[derive(Debug)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum ItemType {
     Directory,
     File,
