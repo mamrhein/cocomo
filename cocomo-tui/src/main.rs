@@ -7,8 +7,10 @@
 // $Source$
 // $Revision$
 
+mod app;
 #[allow(dead_code)]
 mod cmdargs;
+mod session;
 mod terminal;
 
 use std::io;
@@ -16,7 +18,10 @@ use std::io;
 use cmdargs::CmdLineArgs;
 use cocomo_core::{FSItem, ItemType};
 
-use crate::terminal::{reset_terminal, setup_terminal, start_terminal};
+use crate::{
+    session::Session,
+    terminal::{reset_terminal, setup_terminal, start_terminal},
+};
 
 fn exit_with_error(msg: String) {
     eprintln!("{}", msg);
@@ -32,7 +37,7 @@ fn main() -> Result<(), io::Error> {
     let left_item: FSItem;
     let right_item: FSItem;
 
-    let left = args.left.unwrap();
+    let mut left = args.left.unwrap();
     match FSItem::try_from(&left) {
         Ok(item) => left_item = item,
         Err(err) => {
@@ -40,7 +45,7 @@ fn main() -> Result<(), io::Error> {
             unreachable!()
         }
     }
-    let right = args.right.unwrap();
+    let mut right = args.right.unwrap();
     match FSItem::try_from(&right) {
         Ok(item) => right_item = item,
         Err(err) => {
@@ -61,19 +66,20 @@ fn main() -> Result<(), io::Error> {
                 left, right
             ));
         }
-        (..) => {}
+        (..) => {
+            left = left_item.path.display().to_string();
+            right = right_item.path.display().to_string();
+        }
     }
 
+    let session = Session::new(None, left_item, right_item);
+    let app = app::App::new(session);
     setup_terminal()?;
     let mut terminal = start_terminal(io::stdout())?;
-
+    app.run(&mut terminal)?;
     reset_terminal(&mut terminal)?;
 
-    println!(
-        "Compare '{}' and '{}'!",
-        left_item.path.display(),
-        right_item.path.display()
-    );
+    println!("Compare '{}' and '{}'!", left, right);
 
     Ok(())
 }
