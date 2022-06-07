@@ -15,10 +15,10 @@ use crossterm::{
 };
 use tui::{
     backend::Backend,
-    layout::{Constraint, Direction, Layout},
+    layout::{Alignment, Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
     text::{Span, Spans},
-    widgets::{Block, Borders, Tabs},
+    widgets::{Block, Borders, Paragraph, Tabs},
     Frame, Terminal,
 };
 
@@ -76,24 +76,43 @@ impl App {
             .map(|(idx, s)| {
                 let name = &s.name;
                 Spans::from(vec![
-                    Span::styled(name, Style::default()),
-                    Span::styled(" ", Style::default()),
                     Span::styled(
                         idx.to_string(),
-                        Style::default().fg(Color::Green),
+                        Style::default().add_modifier(Modifier::UNDERLINED),
                     ),
+                    Span::styled(":", Style::default()),
+                    Span::styled(name, Style::default()),
                 ])
             })
             .collect();
-        let tabs = Tabs::new(titles).select(self.curr_session).highlight_style(
-            Style::default().add_modifier(Modifier::UNDERLINED),
-        );
+        let tabs = Tabs::new(titles)
+            .select(self.curr_session)
+            .highlight_style(Style::default().bg(Color::Gray));
         frame.render_widget(tabs, chunks[0]);
         frame.render_widget(
-            Block::default().title("dummy view").borders(Borders::ALL),
+            Block::default()
+                .title(format!("view '{}'", self.curr_session))
+                .borders(Borders::ALL),
             chunks[1],
         );
-        let cmd_bar = Tabs::new(vec![Spans::from("quit <q>")]);
+        let cmd_bar = Paragraph::new(Spans::from(vec![
+            Span::styled(
+                "q",
+                Style::default()
+                    .add_modifier(Modifier::UNDERLINED)
+                    .bg(Color::LightYellow),
+            ),
+            Span::styled("uit", Style::default().bg(Color::LightYellow)),
+            Span::from(" "),
+            Span::styled(
+                "n",
+                Style::default()
+                    .add_modifier(Modifier::UNDERLINED)
+                    .bg(Color::LightYellow),
+            ),
+            Span::styled("ext", Style::default().bg(Color::LightYellow)),
+        ]))
+        .alignment(Alignment::Left);
         frame.render_widget(cmd_bar, chunks[2]);
     }
 }
