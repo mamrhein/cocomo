@@ -7,23 +7,25 @@
 // $Source$
 // $Revision$
 
+use std::rc::Rc;
+
 use cocomo_core::{FSItem, ItemType};
 
 pub(crate) struct Session {
     pub(crate) name: String,
-    pub(crate) left: FSItem,
-    pub(crate) right: FSItem,
+    pub(crate) left: Rc<FSItem>,
+    pub(crate) right: Rc<FSItem>,
 }
 
 impl Session {
     pub(crate) fn new(
         name: Option<String>,
-        left: FSItem,
-        right: FSItem,
+        left: Rc<FSItem>,
+        right: Rc<FSItem>,
     ) -> Self {
         assert_eq!(left.item_type, right.item_type);
         Self {
-            name: name.unwrap_or("unnamed".to_string()),
+            name: name.unwrap_or("".to_string()),
             left,
             right,
         }

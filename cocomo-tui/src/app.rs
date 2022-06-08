@@ -7,7 +7,7 @@
 // $Source$
 // $Revision$
 
-use std::io;
+use std::{io, ops::Add};
 
 use crossterm::{
     event,
@@ -26,29 +26,94 @@ use crate::session::Session;
 
 pub(crate) struct App {
     sessions: Vec<Session>,
-    curr_session: usize,
+    curr_session_idx: usize,
 }
 
 impl App {
     pub(crate) fn new(session: Session) -> Self {
         Self {
             sessions: vec![session],
-            curr_session: 0,
+            curr_session_idx: 0,
         }
     }
 
+    #[inline(always)]
+    pub(crate) fn n_sessions(&self) -> usize {
+        self.sessions.len()
+    }
+
+    #[inline(always)]
+    pub(crate) fn curr_session(&self) -> &Session {
+        &self.sessions[self.curr_session_idx]
+    }
+
+    pub(crate) fn next_session(&mut self) -> bool {
+        if self.n_sessions() == 1 {
+            return false;
+        }
+        self.curr_session_idx = (self.curr_session_idx + 1) % self.n_sessions();
+        true
+    }
+
+    pub(crate) fn prev_session(&mut self) -> bool {
+        if self.n_sessions() == 1 {
+            return false;
+        }
+        self.curr_session_idx = self
+            .curr_session_idx
+            .checked_sub(1)
+            .unwrap_or(self.n_sessions() - 1);
+        true
+    }
+
+    pub(crate) fn add_session(&mut self) {
+        // TODO: call new session params popup
+        let session = Session::new(
+            Some("fake".to_string()),
+            self.curr_session().left.clone(),
+            self.curr_session().right.clone(),
+        );
+        let new_idx = self.n_sessions();
+        self.sessions.push(session);
+        self.curr_session_idx = new_idx;
+    }
+
     pub(crate) fn run<B: Backend>(
-        &self,
+        &mut self,
         terminal: &mut Terminal<B>,
     ) -> io::Result<()> {
+        let mut redraw = true;
         loop {
-            terminal.draw(|f| self.draw(f))?;
-
+            if redraw {
+                terminal.draw(|f| self.draw(f))?;
+            }
+            redraw = false;
             if let Event::Key(key) = event::read()? {
                 match key.code {
                     KeyCode::Char('q') => break,
-                    // KeyCode::Right => app.next(),
-                    // KeyCode::Left => app.previous(),
+                    KeyCode::Char('>') if self.n_sessions() > 1 => {
+                        if self.next_session() {
+                            redraw = true;
+                        }
+                    }
+                    KeyCode::Char('<') if self.n_sessions() > 1 => {
+                        if self.prev_session() {
+                            redraw = true;
+                        }
+                    }
+                    KeyCode::Char(c) if c.is_digit(10) => {
+                        let idx = c.to_digit(10).unwrap() as usize;
+                        if idx != self.curr_session_idx
+                            && idx < self.n_sessions()
+                        {
+                            self.curr_session_idx = idx;
+                            redraw = true;
+                        }
+                    }
+                    KeyCode::Char('n') => {
+                        self.add_session();
+                        redraw = true
+                    }
                     _ => {}
                 }
             }
@@ -63,7 +128,7 @@ impl App {
             .constraints(
                 [
                     Constraint::Length(1),
-                    Constraint::Min(0),
+                    Constraint::Min(5),
                     Constraint::Length(1),
                 ]
                 .as_ref(),
@@ -74,43 +139,36 @@ impl App {
             .iter()
             .enumerate()
             .map(|(idx, s)| {
-                let name = &s.name;
-                Spans::from(vec![
-                    Span::styled(
-                        idx.to_string(),
-                        Style::default().add_modifier(Modifier::UNDERLINED),
-                    ),
-                    Span::styled(":", Style::default()),
-                    Span::styled(name, Style::default()),
-                ])
+                let name = format!("{} [{}]", &s.name, idx);
+                Spans::from(name)
             })
             .collect();
         let tabs = Tabs::new(titles)
-            .select(self.curr_session)
-            .highlight_style(Style::default().bg(Color::Gray));
+            .select(self.curr_session_idx)
+            .highlight_style(Style::default().bg(Color::Gray))
+            .divider("|");
         frame.render_widget(tabs, chunks[0]);
         frame.render_widget(
             Block::default()
-                .title(format!("view '{}'", self.curr_session))
+                .title(format!("view '{}'", self.curr_session_idx))
                 .borders(Borders::ALL),
             chunks[1],
         );
         let cmd_bar = Paragraph::new(Spans::from(vec![
+            Span::styled("Quit [q]", Style::default().bg(Color::LightYellow)),
+            Span::raw(" "),
             Span::styled(
-                "q",
-                Style::default()
-                    .add_modifier(Modifier::UNDERLINED)
-                    .bg(Color::LightYellow),
+                format!(
+                    "Tab [{}><]",
+                    "0123456789".split_at(self.n_sessions()).0
+                ),
+                Style::default().bg(Color::LightYellow),
             ),
-            Span::styled("uit", Style::default().bg(Color::LightYellow)),
-            Span::from(" "),
+            Span::raw(" "),
             Span::styled(
-                "n",
-                Style::default()
-                    .add_modifier(Modifier::UNDERLINED)
-                    .bg(Color::LightYellow),
+                "New session [n]",
+                Style::default().bg(Color::LightYellow),
             ),
-            Span::styled("ext", Style::default().bg(Color::LightYellow)),
         ]))
         .alignment(Alignment::Left);
         frame.render_widget(cmd_bar, chunks[2]);

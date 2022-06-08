@@ -13,7 +13,7 @@ mod cmdargs;
 mod session;
 mod terminal;
 
-use std::io;
+use std::{io, rc::Rc};
 
 use cmdargs::CmdLineArgs;
 use cocomo_core::{FSItem, ItemType};
@@ -72,8 +72,8 @@ fn main() -> Result<(), io::Error> {
         }
     }
 
-    let session = Session::new(None, left_item, right_item);
-    let app = app::App::new(session);
+    let session = Session::new(None, Rc::new(left_item), Rc::new(right_item));
+    let mut app = app::App::new(session);
     setup_terminal()?;
     let mut terminal = start_terminal(io::stdout())?;
     app.run(&mut terminal)?;
