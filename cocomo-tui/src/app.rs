@@ -7,7 +7,7 @@
 // $Source$
 // $Revision$
 
-use std::{io, ops::Add};
+use std::{borrow::BorrowMut, io, ops::Add};
 
 use crossterm::{
     event,
@@ -22,7 +22,7 @@ use tui::{
     Frame, Terminal,
 };
 
-use crate::session::Session;
+use crate::{session::Session, view::View};
 
 pub(crate) struct App {
     sessions: Vec<Session>,
@@ -47,6 +47,11 @@ impl App {
         &self.sessions[self.curr_session_idx]
     }
 
+    #[inline(always)]
+    pub(crate) fn curr_session_mut(&mut self) -> &mut Session {
+        &mut self.sessions[self.curr_session_idx]
+    }
+
     pub(crate) fn next_session(&mut self) -> bool {
         if self.n_sessions() == 1 {
             return false;
@@ -69,6 +74,7 @@ impl App {
     pub(crate) fn add_session(&mut self) {
         // TODO: call new session params popup
         let session = Session::new(
+            self.n_sessions() + 1,
             Some("fake".to_string()),
             self.curr_session().left.clone(),
             self.curr_session().right.clone(),
@@ -84,10 +90,7 @@ impl App {
     ) -> io::Result<()> {
         let mut redraw = true;
         loop {
-            if redraw {
-                terminal.draw(|f| self.draw(f))?;
-            }
-            redraw = false;
+            terminal.draw(|f| self.draw(f))?;
             if let Event::Key(key) = event::read()? {
                 match key.code {
                     KeyCode::Char('q') => break,
@@ -102,15 +105,13 @@ impl App {
                         }
                     }
                     KeyCode::Char(c) if c.is_digit(10) => {
-                        let idx = c.to_digit(10).unwrap() as usize;
-                        if idx != self.curr_session_idx
-                            && idx < self.n_sessions()
-                        {
-                            self.curr_session_idx = idx;
+                        let id = c.to_digit(10).unwrap() as usize;
+                        if id > 0 && id <= self.n_sessions() {
+                            self.curr_session_idx = id - 1;
                             redraw = true;
                         }
                     }
-                    KeyCode::Char('n') => {
+                    KeyCode::Char('n') if self.n_sessions() < 9 => {
                         self.add_session();
                         redraw = true
                     }
@@ -121,7 +122,7 @@ impl App {
         Ok(())
     }
 
-    pub(crate) fn draw<B: Backend>(&self, frame: &mut Frame<B>) {
+    pub(crate) fn draw<B: Backend>(&mut self, frame: &mut Frame<B>) {
         let size = frame.size();
         let chunks = Layout::default()
             .direction(Direction::Vertical)
@@ -134,12 +135,13 @@ impl App {
                 .as_ref(),
             )
             .split(size);
+        // TODO: replace by TabBar
         let titles = self
             .sessions
             .iter()
             .enumerate()
             .map(|(idx, s)| {
-                let name = format!("{} [{}]", &s.name, idx);
+                let name = format!("{} [{}]", &s.name, idx + 1);
                 Spans::from(name)
             })
             .collect();
@@ -148,19 +150,17 @@ impl App {
             .highlight_style(Style::default().bg(Color::Gray))
             .divider("|");
         frame.render_widget(tabs, chunks[0]);
-        frame.render_widget(
-            Block::default()
-                .title(format!("view '{}'", self.curr_session_idx))
-                .borders(Borders::ALL),
-            chunks[1],
-        );
+        // Session view
+        let session = self.curr_session_mut();
+        session.set_area(chunks[1]).draw::<B>(frame);
+        // TODO: replace by CmdBar
         let cmd_bar = Paragraph::new(Spans::from(vec![
             Span::styled("Quit [q]", Style::default().bg(Color::LightYellow)),
             Span::raw(" "),
             Span::styled(
                 format!(
                     "Tab [{}><]",
-                    "0123456789".split_at(self.n_sessions()).0
+                    "123456789".split_at(self.n_sessions()).0
                 ),
                 Style::default().bg(Color::LightYellow),
             ),

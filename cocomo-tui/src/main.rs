@@ -7,11 +7,12 @@
 // $Source$
 // $Revision$
 
-mod app;
 #[allow(dead_code)]
+mod app;
 mod cmdargs;
 mod session;
 mod terminal;
+mod view;
 
 use std::{io, rc::Rc};
 
@@ -72,7 +73,8 @@ fn main() -> Result<(), io::Error> {
         }
     }
 
-    let session = Session::new(None, Rc::new(left_item), Rc::new(right_item));
+    let session =
+        Session::new(1, None, Rc::new(left_item), Rc::new(right_item));
     let mut app = app::App::new(session);
     setup_terminal()?;
     let mut terminal = start_terminal(io::stdout())?;
