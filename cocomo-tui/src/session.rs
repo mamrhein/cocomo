@@ -19,26 +19,25 @@ use tui::{
 
 use crate::view::View;
 
-pub(crate) struct Session {
+#[derive(Clone, Debug)]
+pub(crate) struct Session<'a> {
     id: usize,
-    area: Rect,
-    pub(crate) name: String,
+    pub(crate) name: &'a str,
     pub(crate) left: Rc<FSItem>,
     pub(crate) right: Rc<FSItem>,
 }
 
-impl Session {
+impl<'a> Session<'a> {
     pub(crate) fn new(
         id: usize,
-        name: Option<String>,
+        name: Option<&'a str>,
         left: Rc<FSItem>,
         right: Rc<FSItem>,
     ) -> Self {
         assert_eq!(left.item_type, right.item_type);
         Self {
             id,
-            area: Rect::default(),
-            name: name.unwrap_or("".to_string()),
+            name: name.unwrap_or(""),
             left,
             right,
         }
@@ -49,26 +48,17 @@ impl Session {
     }
 }
 
-impl View for Session {
-    fn area(&self) -> Rect {
-        self.area
-    }
-
-    fn set_area(&mut self, area: Rect) -> &Self {
-        self.area = area;
-        self
-    }
-
+impl<'a, B: Backend> View<B> for &Session<'a> {
     fn want_layout(&self) -> Constraint {
         Constraint::Min(3)
     }
 
-    fn draw<B: Backend>(&self, frame: &mut Frame<B>) {
+    fn draw(&self, frame: &mut Frame<B>, area: Rect) {
         frame.render_widget(
             Block::default()
                 .title(format!("view '{}'", self.id))
                 .borders(Borders::ALL),
-            self.area,
+            area,
         );
     }
 }
