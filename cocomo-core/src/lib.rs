@@ -7,6 +7,7 @@
 // $Source$
 // $Revision$
 
+mod dirtree;
 mod fs_item;
 
-pub use fs_item::{FSItem, ItemType};
+pub use fs_item::{FSItem, FSItemType};

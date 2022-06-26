@@ -7,44 +7,85 @@
 // $Source$
 // $Revision$
 
-use std::{
-    fs, io,
-    path::{Path, PathBuf},
-};
+use std::{fmt, fs, io, path};
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum ItemType {
+// TODO: replace by struct from extern file type matcher (maybe 'infer').
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct FileType {}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum FSItemType {
     Directory,
-    File,
+    File { file_type: FileType },
+    SymLink { path: path::PathBuf },
 }
 
-impl Default for ItemType {
-    fn default() -> Self {
-        Self::Directory
+impl fmt::Display for FSItemType {
+    fn fmt(&self, form: &mut fmt::Formatter) -> fmt::Result {
+        write!(
+            form,
+            "{}",
+            match self {
+                Self::Directory => "Directory",
+                Self::File { .. } => "File",
+                Self::SymLink { .. } => "SymLink",
+            }
+        )
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct FSItem {
-    pub path: PathBuf,
-    pub item_type: ItemType,
-    pub metadata: fs::Metadata,
+    item_type: FSItemType,
+    name: String,
+    path: path::PathBuf,
+    metadata: fs::Metadata,
 }
 
-impl TryFrom<&String> for FSItem {
-    type Error = io::Error;
-
-    fn try_from(s: &String) -> Result<Self, Self::Error> {
-        let path = Path::new(&s).canonicalize()?;
-        let metadata = fs::metadata(&path)?;
+impl FSItem {
+    pub fn new(item: &fs::DirEntry) -> io::Result<Self> {
+        let meta = item.metadata()?;
+        // TODO: examine file type
+        let file_type = FileType {};
         Ok(Self {
-            path,
-            item_type: if metadata.is_dir() {
-                ItemType::Directory
-            } else {
-                ItemType::File
+            item_type: match &meta {
+                m if m.is_dir() => FSItemType::Directory,
+                m if m.is_file() => FSItemType::File {
+                    file_type: file_type,
+                },
+                m if m.is_symlink() => FSItemType::SymLink {
+                    path: fs::read_link(item.path())?,
+                },
+                _ => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::Unsupported,
+                        "Unknown directory entry",
+                    ))
+                }
             },
-            metadata,
+            name: item.file_name().to_string_lossy().into(),
+            path: item.path(),
+            metadata: meta,
         })
+    }
+
+    #[inline(always)]
+    pub fn item_type(&self) -> &FSItemType {
+        &self.item_type
+    }
+
+    #[inline(always)]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    #[inline(always)]
+    pub fn path(&self) -> &path::PathBuf {
+        &self.path
+    }
+
+    #[inline(always)]
+    pub fn metadata(&self) -> &fs::Metadata {
+        &self.metadata
     }
 }
