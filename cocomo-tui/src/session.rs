@@ -9,7 +9,7 @@
 
 use std::rc::Rc;
 
-use cocomo_core::{FSItem, ItemType};
+use cocomo_core::{FSItem, FSItemType};
 use tui::{
     backend::Backend,
     layout::{Constraint, Rect},
@@ -34,7 +34,7 @@ impl<'a> Session<'a> {
         left: Rc<FSItem>,
         right: Rc<FSItem>,
     ) -> Self {
-        assert_eq!(left.item_type, right.item_type);
+        assert_eq!(left.item_type(), right.item_type());
         Self {
             id,
             name: name.unwrap_or(""),
@@ -43,8 +43,8 @@ impl<'a> Session<'a> {
         }
     }
 
-    pub(crate) fn session_type(&self) -> ItemType {
-        self.left.item_type
+    pub(crate) fn session_type(&self) -> &FSItemType {
+        self.left.item_type()
     }
 }
 

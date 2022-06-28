@@ -43,18 +43,18 @@ pub struct FSItem {
 }
 
 impl FSItem {
-    pub fn new(item: &fs::DirEntry) -> io::Result<Self> {
-        let meta = item.metadata()?;
+    fn new(path: &path::PathBuf, meta: &fs::Metadata) -> io::Result<Self> {
+        let path = path.canonicalize()?;
         // TODO: examine file type
         let file_type = FileType {};
         Ok(Self {
-            item_type: match &meta {
+            item_type: match meta {
                 m if m.is_dir() => FSItemType::Directory,
                 m if m.is_file() => FSItemType::File {
                     file_type: file_type,
                 },
                 m if m.is_symlink() => FSItemType::SymLink {
-                    path: fs::read_link(item.path())?,
+                    path: fs::read_link(&path)?,
                 },
                 _ => {
                     return Err(io::Error::new(
@@ -63,9 +63,9 @@ impl FSItem {
                     ))
                 }
             },
-            name: item.file_name().to_string_lossy().into(),
-            path: item.path(),
-            metadata: meta,
+            name: path.file_name().unwrap().to_string_lossy().into(),
+            path: path.clone(),
+            metadata: meta.clone(),
         })
     }
 
@@ -87,5 +87,23 @@ impl FSItem {
     #[inline(always)]
     pub fn metadata(&self) -> &fs::Metadata {
         &self.metadata
+    }
+}
+
+impl TryFrom<&String> for FSItem {
+    type Error = io::Error;
+
+    fn try_from(s: &String) -> Result<Self, Self::Error> {
+        let path = path::PathBuf::from(s);
+        let meta = fs::metadata(&path)?;
+        Self::new(&path, &meta)
+    }
+}
+
+impl TryFrom<&fs::DirEntry> for FSItem {
+    type Error = io::Error;
+
+    fn try_from(item: &fs::DirEntry) -> Result<Self, Self::Error> {
+        Self::new(&item.path(), &item.metadata()?)
     }
 }

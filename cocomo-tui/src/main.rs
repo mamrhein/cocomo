@@ -66,7 +66,7 @@ mod view;
 use std::{io, rc::Rc};
 
 use cmdargs::CmdLineArgs;
-use cocomo_core::{FSItem, ItemType};
+use cocomo_core::{FSItem, FSItemType};
 
 use crate::{
     session::Session,
@@ -103,22 +103,22 @@ fn main() -> Result<(), io::Error> {
             unreachable!()
         }
     }
-    match (left_item.item_type, right_item.item_type) {
-        (ItemType::Directory, ItemType::File) => {
+    match (left_item.item_type(), right_item.item_type()) {
+        (FSItemType::Directory, FSItemType::File { .. }) => {
             exit_with_error(format!(
                 "Can't compare directory '{}' to file '{}'.",
                 left, right
             ));
         }
-        (ItemType::File, ItemType::Directory) => {
+        (FSItemType::File { .. }, FSItemType::Directory) => {
             exit_with_error(format!(
                 "Can't compare file '{}' to directory '{}'.",
                 left, right
             ));
         }
         (..) => {
-            left = left_item.path.display().to_string();
-            right = right_item.path.display().to_string();
+            left = left_item.path().display().to_string();
+            right = right_item.path().display().to_string();
         }
     }
 

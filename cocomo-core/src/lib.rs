@@ -7,7 +7,9 @@
 // $Source$
 // $Revision$
 
-mod dirtree;
-mod fs_item;
+#![allow(dead_code)]
 
-pub use fs_item::{FSItem, FSItemType};
+mod dirtree;
+mod fsitem;
+
+pub use fsitem::{FSItem, FSItemType};
