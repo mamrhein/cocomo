@@ -1,2 +1,3 @@
 [workspace]
 members = ["cocomo-core", "cocomo-tui"]
+resolver = "3"
