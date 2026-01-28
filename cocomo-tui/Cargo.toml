@@ -1,7 +1,7 @@
 [package]
 name = "cocomo-tui"
 version = "0.0.1"
-edition = "2021"
+edition = "2024"
 authors = ["Michael Amrhein <michael@adrhinum.de>"]
 description = "CLI-App: COmpare, COpy & MOve directories and files."
 readme = "../README.md"
