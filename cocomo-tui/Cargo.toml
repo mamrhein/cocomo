@@ -13,10 +13,10 @@ keywords = ["directory", "file", "compare", "copy", "move"]
 categories = ["command-line-utilities", "filesystem"]
 
 [dependencies]
-clap = { version = "3.1.18", features = ["derive", "unicode", "wrap_help"] }
+clap = { version = "^4.5", features = ["derive", "unicode", "wrap_help"] }
 cocomo-core = { version = "0.0.1", path = "../cocomo-core" }
-crossterm = "0.23"
-tui = "0.18"
+crossterm = "^0.25"
+tui = "^0.19"
 
 [[bin]]
 name = "cocomo"
