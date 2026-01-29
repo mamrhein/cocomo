@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// Copyright:   (c) 2022 ff. Michael Amrhein (michael@adrhinum.de)
+// Copyright:   (c) 2026 ff. Michael Amrhein (michael@adrhinum.de)
 // License:     This program is part of a larger application. For license
 //              details please read the file LICENSE.TXT provided together
 //              with the application.
@@ -7,124 +7,114 @@
 // $Source$
 // $Revision$
 
-use std::io;
-
-use crossterm::{
-    event,
-    event::{Event, KeyCode},
-};
-use tui::{backend::Backend, layout::Direction, Frame, Terminal};
-
-use crate::{
-    cmdbar::CmdBar,
-    session::Session,
-    tabbar::TabBar,
-    view::{CompositeView, View},
+/// Holds the state and application logic.
+use crate::event::{AppEvent, Event, EventHandler};
+use ratatui::{
+    DefaultTerminal,
+    crossterm::event::{KeyCode, KeyEvent, KeyModifiers},
 };
 
-pub(crate) struct App<'a> {
-    sessions: Vec<Session<'a>>,
-    curr_session_idx: usize,
+/// Compare items
+#[derive(Debug, Default)]
+pub(crate) struct CmpItems {
+    pub left: Option<String>,
+    pub right: Option<String>,
 }
 
-impl<'a> App<'a> {
-    pub(crate) fn new(session: Session<'a>) -> Self {
+/// Application.
+#[derive(Debug)]
+pub(crate) struct App {
+    /// Is the application running?
+    pub running: bool,
+    /// Items to compare
+    pub cmp_items: CmpItems,
+    /// Event handler.
+    pub events: EventHandler,
+}
+
+impl Default for App {
+    fn default() -> Self {
         Self {
-            sessions: vec![session],
-            curr_session_idx: 0,
+            running: true,
+            cmp_items: CmpItems::default(),
+            events: EventHandler::new(),
         }
     }
+}
 
-    #[inline(always)]
-    pub(crate) fn n_sessions(&self) -> usize {
-        self.sessions.len()
+impl App {
+    /// Constructs a new instance of [`App`].
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
     }
 
-    #[inline(always)]
-    pub(crate) fn curr_session(&self) -> &'a Session {
-        &self.sessions[self.curr_session_idx]
-    }
-
-    #[inline(always)]
-    pub(crate) fn curr_session_mut(&mut self) -> &'a mut Session {
-        &mut self.sessions[self.curr_session_idx]
-    }
-
-    pub(crate) fn activate_next_session(&mut self) {
-        self.curr_session_idx = (self.curr_session_idx + 1) % self.n_sessions();
-    }
-
-    pub(crate) fn activate_prev_session(&mut self) {
-        self.curr_session_idx = self
-            .curr_session_idx
-            .checked_sub(1)
-            .unwrap_or(self.n_sessions() - 1);
-    }
-
-    pub(crate) fn add_session(&mut self) {
-        // TODO: call new session params popup
-        let session = Session::new(
-            self.n_sessions() + 1,
-            Some("fake"),
-            self.curr_session().left.clone(),
-            self.curr_session().right.clone(),
-        );
-        let new_idx = self.n_sessions();
-        self.sessions.push(session);
-        self.curr_session_idx = new_idx;
-    }
-
-    pub(crate) fn run<B: Backend>(
-        &'a mut self,
-        terminal: &mut Terminal<B>,
-    ) -> io::Result<()> {
-        loop {
-            terminal.draw(|f| self.draw(f))?;
-            if let Event::Key(key) = event::read()? {
-                match key.code {
-                    KeyCode::Char('q') => break,
-                    KeyCode::Char('>') => {
-                        self.activate_next_session();
-                    }
-                    KeyCode::Char('<') => {
-                        self.activate_prev_session();
-                    }
-                    KeyCode::Char(c) if c.is_digit(10) => {
-                        let id = c.to_digit(10).unwrap() as usize;
-                        if id > 0 && id <= self.n_sessions() {
-                            self.curr_session_idx = id - 1;
-                        }
-                    }
-                    KeyCode::Char('n') if self.n_sessions() < 9 => {
-                        self.add_session();
+    /// Run the application's main loop.
+    ///
+    /// # Errors
+    ///
+    /// tbd
+    pub async fn run(
+        mut self,
+        mut terminal: DefaultTerminal,
+    ) -> color_eyre::Result<()> {
+        while self.running {
+            terminal
+                .draw(|frame| frame.render_widget(&self, frame.area()))?;
+            match self.events.next().await? {
+                Event::Tick => self.tick(),
+                Event::Crossterm(event) => match event {
+                    crossterm::event::Event::Key(key_event)
+                        if key_event.kind
+                            == crossterm::event::KeyEventKind::Press =>
+                    {
+                        self.handle_key_events(key_event)?;
                     }
                     _ => {}
-                }
+                },
+                Event::App(app_event) => match app_event {
+                    AppEvent::Quit => self.quit(),
+                },
             }
         }
         Ok(())
     }
 
-    fn draw<B: Backend>(&'a self, frame: &mut Frame<B>) {
-        let tabbar = TabBar::new(
-            self.sessions.iter().map(|s| s.name).collect::<Vec<&str>>(),
-            self.curr_session_idx,
-        );
-        let session = self.curr_session();
-        let tab_sel_hint = format!(
-            "{}{}{}",
-            "123456789".split_at(self.n_sessions()).0,
-            ">",
-            "<"
-        );
-        let cmdbar = CmdBar::new()
-            .append_cmd("Tab", tab_sel_hint.as_str())
-            .append_cmd("New session", "n")
-            .append_cmd("Quit", "q");
-        let view = CompositeView::new(Direction::Vertical)
-            .add(Box::new(&tabbar))
-            .add(Box::new(session))
-            .add(Box::new(&cmdbar));
-        view.draw(frame, frame.size());
+    /// Handles the key events and updates the state of [`App`].
+    ///
+    /// # Errors
+    ///
+    /// tbd
+    pub fn handle_key_events(
+        &mut self,
+        key_event: KeyEvent,
+    ) -> color_eyre::Result<()> {
+        match key_event.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.events.send(AppEvent::Quit);
+            }
+            KeyCode::Char('c' | 'C')
+                if key_event.modifiers == KeyModifiers::CONTROL =>
+            {
+                self.events.send(AppEvent::Quit);
+            }
+            // KeyCode::Right => self.events.send(AppEvent::Increment),
+            // KeyCode::Left => self.events.send(AppEvent::Decrement),
+            // Other handlers you could add here.
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Handles the tick event of the terminal.
+    ///
+    /// The tick event is where you can update the state of your application with any logic that
+    /// needs to be updated at a fixed frame rate. E.g. polling a server, updating an animation.
+    #[allow(clippy::unused_self)]
+    pub const fn tick(&self) {}
+
+    /// Set running to false to quit the application.
+    pub const fn quit(&mut self) {
+        self.running = false;
     }
 }

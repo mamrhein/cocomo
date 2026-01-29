@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// Copyright:   (c) 2022 ff. Michael Amrhein (michael@adrhinum.de)
+// Copyright:   (c) 2026 ff. Michael Amrhein (michael@adrhinum.de)
 // License:     This program is part of a larger application. For license
 //              details please read the file LICENSE.TXT provided together
 //              with the application.
@@ -32,7 +32,7 @@
 #![warn(clippy::integer_division)]
 #![warn(clippy::manual_assert)]
 #![warn(clippy::match_same_arms)]
-// #![warn(clippy::mismatching_type_param_order)] TODO: enable when 1.62 stable
+#![warn(clippy::mismatching_type_param_order)]
 #![warn(clippy::missing_const_for_fn)]
 #![warn(clippy::missing_errors_doc)]
 #![warn(clippy::missing_panics_doc)]
@@ -44,7 +44,6 @@
 #![warn(clippy::print_stdout)]
 #![warn(clippy::semicolon_if_nothing_returned)]
 #![warn(clippy::str_to_string)]
-#![warn(clippy::string_to_string)]
 #![warn(clippy::undocumented_unsafe_blocks)]
 #![warn(clippy::unicode_not_nfc)]
 #![warn(clippy::unimplemented)]
@@ -55,82 +54,29 @@
 #![warn(clippy::used_underscore_binding)]
 #![warn(clippy::wildcard_imports)]
 
-mod app;
 mod cmdargs;
-mod cmdbar;
-mod session;
-mod tabbar;
-mod terminal;
-mod view;
 
-use std::{io, rc::Rc};
+/// Holds the state and application logic.
+pub mod app;
+/// Handles the terminal events (key press, mouse click, resize, etc.).
+pub mod event;
+/// Renders the widgets / UI.
+pub mod ui;
 
+use crate::app::App;
 use cmdargs::CmdLineArgs;
-use cocomo_core::{FSItem, FSItemType};
+use color_eyre::eyre::OptionExt;
 
-use crate::{
-    session::Session,
-    terminal::{reset_terminal, setup_terminal, start_terminal},
-};
-
-fn exit_with_error(msg: String) {
-    eprintln!("{}", msg);
-    std::process::exit(1)
-}
-
-fn main() -> Result<(), io::Error> {
+#[tokio::main]
+async fn main() -> color_eyre::Result<()> {
     let args = CmdLineArgs::get();
-    if args.left.is_none() || args.right.is_none() {
-        exit_with_error("Please specify left and right path!".to_string());
-    }
+    args.left
+        .and(args.right)
+        .ok_or_eyre("Please specify left and right path!")?;
 
-    let left_item: FSItem;
-    let right_item: FSItem;
-
-    let mut left = args.left.unwrap();
-    match FSItem::try_from(&left) {
-        Ok(item) => left_item = item,
-        Err(err) => {
-            exit_with_error(format!("{}: {}", left, err.to_string()));
-            unreachable!()
-        }
-    }
-    let mut right = args.right.unwrap();
-    match FSItem::try_from(&right) {
-        Ok(item) => right_item = item,
-        Err(err) => {
-            exit_with_error(format!("{}: {}", right, err.to_string()));
-            unreachable!()
-        }
-    }
-    match (left_item.item_type(), right_item.item_type()) {
-        (FSItemType::Directory, FSItemType::File { .. }) => {
-            exit_with_error(format!(
-                "Can't compare directory '{}' to file '{}'.",
-                left, right
-            ));
-        }
-        (FSItemType::File { .. }, FSItemType::Directory) => {
-            exit_with_error(format!(
-                "Can't compare file '{}' to directory '{}'.",
-                left, right
-            ));
-        }
-        (..) => {
-            left = left_item.path().display().to_string();
-            right = right_item.path().display().to_string();
-        }
-    }
-
-    let session =
-        Session::new(1, None, Rc::new(left_item), Rc::new(right_item));
-    let mut app = app::App::new(session);
-    setup_terminal()?;
-    let mut terminal = start_terminal(io::stdout())?;
-    app.run(&mut terminal)?;
-    reset_terminal(&mut terminal)?;
-
-    println!("Compare '{}' and '{}'!", left, right);
-
-    Ok(())
+    color_eyre::install()?;
+    let terminal = ratatui::init();
+    let result = App::new().run(terminal).await;
+    ratatui::restore();
+    result
 }
