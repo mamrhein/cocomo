@@ -9,6 +9,7 @@
 
 /// Holds the state and application logic.
 use crate::event::{AppEvent, Event, EventHandler};
+use cocomo_core::FSItem;
 use ratatui::{
     DefaultTerminal,
     crossterm::event::{KeyCode, KeyEvent, KeyModifiers},
@@ -17,8 +18,8 @@ use ratatui::{
 /// Compare items
 #[derive(Debug, Default)]
 pub(crate) struct CmpItems {
-    pub left: Option<String>,
-    pub right: Option<String>,
+    pub left: Option<FSItem>,
+    pub right: Option<FSItem>,
 }
 
 /// Application.
@@ -45,8 +46,12 @@ impl Default for App {
 impl App {
     /// Constructs a new instance of [`App`].
     #[must_use]
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(left: Option<FSItem>, right: Option<FSItem>) -> Self {
+        Self {
+            running: true,
+            cmp_items: CmpItems { left, right },
+            events: EventHandler::new(),
+        }
     }
 
     /// Run the application's main loop.

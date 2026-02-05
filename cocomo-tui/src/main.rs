@@ -65,18 +65,47 @@ pub mod ui;
 
 use crate::app::App;
 use cmdargs::CmdLineArgs;
-use color_eyre::eyre::OptionExt;
+use cocomo_core::FSItem;
+use color_eyre::{Report, Section, eyre::eyre};
+use core::convert::TryFrom;
+use std::io;
 
 #[tokio::main]
-async fn main() -> color_eyre::Result<()> {
-    let args = CmdLineArgs::get();
-    args.left
-        .and(args.right)
-        .ok_or_eyre("Please specify left and right path!")?;
-
+async fn main() -> Result<(), Report> {
     color_eyre::install()?;
+    let mut errors = Vec::<io::Error>::new();
+    let args = CmdLineArgs::get();
+    let left = match args.left {
+        Some(s) => match FSItem::try_from(s.as_str()) {
+            Ok(item) => Some(item),
+            Err(err) => {
+                errors.push(err);
+                None
+            }
+        },
+        None => None,
+    };
+    let right = match args.right {
+        Some(s) => match FSItem::try_from(s.as_str()) {
+            Ok(item) => Some(item),
+            Err(err) => {
+                errors.push(err);
+                None
+            }
+        },
+        None => None,
+    };
+    if !errors.is_empty() {
+        let err = errors
+            .into_iter()
+            .fold(eyre!("Could not acces given item(s)."), |report, err| {
+                report.error(err)
+            });
+        return Err(err);
+    }
+    let app = App::new(left, right);
     let terminal = ratatui::init();
-    let result = App::new().run(terminal).await;
+    let result = app.run(terminal).await;
     ratatui::restore();
     result
 }

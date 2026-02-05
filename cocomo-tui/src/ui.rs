@@ -39,9 +39,19 @@ impl Widget for &App {
         // Create widgets
         let menu = Paragraph::new("Menu").left_aligned();
         let key_hints = Paragraph::new("q: quit").left_aligned();
-        let left_view = Block::bordered().title("left dir");
+        let left_path = self
+            .cmp_items
+            .left
+            .as_ref()
+            .map_or("<empty>", |item| item.path().to_str().unwrap());
+        let left_view = Block::bordered().title(left_path);
         let indicator_column = Block::default();
-        let right_view = Block::bordered().title("right dir");
+        let right_path = self
+            .cmp_items
+            .right
+            .as_ref()
+            .map_or("<empty>", |item| item.path().to_str().unwrap());
+        let right_view = Block::bordered().title(right_path);
         // Render widgets
         menu.render(menu_bar, buf);
         key_hints.render(key_bar, buf);
