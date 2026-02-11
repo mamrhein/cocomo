@@ -51,10 +51,11 @@ pub struct FSItem {
 }
 
 impl FSItem {
-    fn new(path: &path::Path, meta: &fs::Metadata) -> io::Result<Self> {
+    pub fn new(path: &path::Path) -> io::Result<Self> {
         let path = path.canonicalize()?;
+        let meta = path.metadata()?;
         Ok(Self {
-            item_type: match meta {
+            item_type: match &meta {
                 m if m.is_dir() => FSItemType::Directory,
                 m if m.is_file() => match get_from_path(&path) {
                     Ok(Some(guess)) => FSItemType::File {
@@ -78,8 +79,8 @@ impl FSItem {
                 }
             },
             name: path.file_name().unwrap().to_string_lossy().into(),
-            path: path.clone(),
-            metadata: meta.clone(),
+            path,
+            metadata: meta,
         })
     }
 
@@ -124,8 +125,7 @@ impl TryFrom<&str> for FSItem {
 
     fn try_from(s: &str) -> Result<Self, Self::Error> {
         let path = path::PathBuf::from(s);
-        let meta = fs::metadata(&path)?;
-        Self::new(&path, &meta)
+        Self::new(&path)
     }
 }
 
@@ -133,7 +133,7 @@ impl TryFrom<&fs::DirEntry> for FSItem {
     type Error = io::Error;
 
     fn try_from(item: &fs::DirEntry) -> Result<Self, Self::Error> {
-        Self::new(&item.path(), &item.metadata()?)
+        Self::new(&item.path())
     }
 }
 
