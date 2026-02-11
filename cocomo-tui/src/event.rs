@@ -129,7 +129,7 @@ impl EventTask {
               Some(Ok(evt)) = crossterm_event => {
                 self.send(Event::Crossterm(evt));
               }
-            };
+            }
         }
         Ok(())
     }
