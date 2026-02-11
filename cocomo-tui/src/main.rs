@@ -66,43 +66,59 @@ pub mod ui;
 use crate::app::App;
 use cmdargs::CmdLineArgs;
 use cocomo_core::FSItem;
-use color_eyre::{Report, Section, eyre::eyre};
-use core::convert::TryFrom;
-use std::io;
+use color_eyre::Report;
+
+fn check_args(
+    args: &CmdLineArgs,
+) -> Result<(Option<FSItem>, Option<FSItem>), Report> {
+    let left_result =
+        args.left.clone().map(|path| FSItem::new(path.as_path()));
+    let right_result =
+        args.right.clone().map(|path| FSItem::new(path.as_path()));
+    let (left_item, left_err) = left_result.map_or_else(
+        || (None, None),
+        |res| match res {
+            Ok(item) => (Some(item), None),
+            Err(err) => (None, Some(err)),
+        },
+    );
+    let (right_item, right_err) = right_result.map_or_else(
+        || (None, None),
+        |res| match res {
+            Ok(item) => (Some(item), None),
+            Err(err) => (None, Some(err)),
+        },
+    );
+    let err_report = match (left_err, right_err) {
+        (None, None) => (left_item.as_ref().unwrap().item_type()
+            != right_item.as_ref().unwrap().item_type())
+        .then_some(Report::msg("Can't compare a directory and a file.")),
+        (Some(l), None) => Some(Report::msg(format!(
+            "{}: {}",
+            l,
+            args.left.clone().unwrap().display()
+        ))),
+        (None, Some(r)) => Some(Report::msg(format!(
+            "{}: {}",
+            r,
+            args.right.clone().unwrap().display()
+        ))),
+        (Some(l), Some(r)) => Some(Report::msg(format!(
+            "{}: {}\n{}: {}",
+            l,
+            args.left.clone().unwrap().display(),
+            r,
+            args.right.clone().unwrap().display()
+        ))),
+    };
+    err_report.map_or_else(|| Ok((left_item, right_item)), Err)
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Report> {
     color_eyre::install()?;
-    let mut errors = Vec::<io::Error>::new();
     let args = CmdLineArgs::get();
-    let left = match args.left {
-        Some(s) => match FSItem::try_from(s.as_str()) {
-            Ok(item) => Some(item),
-            Err(err) => {
-                errors.push(err);
-                None
-            }
-        },
-        None => None,
-    };
-    let right = match args.right {
-        Some(s) => match FSItem::try_from(s.as_str()) {
-            Ok(item) => Some(item),
-            Err(err) => {
-                errors.push(err);
-                None
-            }
-        },
-        None => None,
-    };
-    if !errors.is_empty() {
-        let err = errors
-            .into_iter()
-            .fold(eyre!("Could not acces given item(s)."), |report, err| {
-                report.error(err)
-            });
-        return Err(err);
-    }
+    let (left, right) = check_args(&args)?;
     let app = App::new(left, right);
     let terminal = ratatui::init();
     let result = app.run(terminal).await;

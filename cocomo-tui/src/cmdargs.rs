@@ -7,23 +7,25 @@
 // $Source$
 // $Revision$
 
+use std::path::PathBuf;
+
 use clap::Parser;
 
-#[derive(Parser, Debug)]
+#[derive(Clone, Debug, Parser)]
 #[command(version, about, long_about = None)]
 struct Args {
     /// Left-side directory / file
     #[clap(short, long)]
-    left: Option<String>,
+    left: Option<PathBuf>,
 
     /// Right-side directory / file
     #[clap(short, long)]
-    right: Option<String>,
+    right: Option<PathBuf>,
 }
 
 pub(crate) struct CmdLineArgs {
-    pub(crate) left: Option<String>,
-    pub(crate) right: Option<String>,
+    pub(crate) left: Option<PathBuf>,
+    pub(crate) right: Option<PathBuf>,
 }
 
 impl CmdLineArgs {
