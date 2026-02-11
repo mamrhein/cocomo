@@ -10,9 +10,7 @@
 /// Renders the widgets / UI.
 use ratatui::{
     buffer::Buffer,
-    layout::{Constraint, Layout, Rect, Spacing},
-    style::Styled,
-    symbols::merge::MergeStrategy,
+    layout::{Constraint, Layout, Rect},
     widgets::{Block, Paragraph, Widget},
 };
 
