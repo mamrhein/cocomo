@@ -21,6 +21,30 @@ pub enum FileType {
     },
 }
 
+impl FileType {
+    pub fn mime(&self) -> &'static str {
+        match self {
+            FileType::Unknown => "",
+            FileType::Inferred { mime, .. } => *mime,
+        }
+    }
+}
+
+impl Display for FileType {
+    fn fmt(&self, form: &mut Formatter<'_>) -> fmt::Result {
+        write!(
+            form,
+            "{}",
+            match self {
+                FileType::Inferred { mime, ext: _ }
+                    if !(*mime).is_empty() =>
+                    *mime,
+                _ => "<unknown>",
+            }
+        )
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum FSItemType {
     Directory,
