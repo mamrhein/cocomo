@@ -7,41 +7,51 @@
 // $Source$
 // $Revision$
 
-use infer::get_from_path;
-use std::fmt::{Display, Formatter};
+use mimetype_detector::{detect_file, MimeType};
 use std::{fmt, fs, io, path};
 
-#[derive(Clone, Debug, PartialEq, Default)]
+#[derive(Clone, Default)]
 pub enum FileType {
     #[default]
     Unknown,
-    Inferred {
-        mime: &'static str,
-        ext: &'static str,
-    },
+    Inferred(&'static MimeType),
 }
 
 impl FileType {
     pub fn mime(&self) -> &'static str {
         match self {
-            FileType::Unknown => "",
-            FileType::Inferred { mime, .. } => *mime,
+            FileType::Unknown => "<unknown>",
+            FileType::Inferred(mime_type) => mime_type.mime(),
         }
     }
 }
 
-impl Display for FileType {
-    fn fmt(&self, form: &mut Formatter<'_>) -> fmt::Result {
-        write!(
-            form,
-            "{}",
-            match self {
-                FileType::Inferred { mime, ext: _ }
-                    if !(*mime).is_empty() =>
-                    *mime,
-                _ => "<unknown>",
+impl PartialEq for FileType {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (
+                FileType::Inferred(self_type),
+                FileType::Inferred(other_type),
+            ) => self_type.mime() == other_type.mime(),
+            (FileType::Unknown, _) | (_, FileType::Unknown) => false,
+        }
+    }
+}
+
+impl fmt::Debug for FileType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            FileType::Unknown => write!(f, "FileType: <unknown>"),
+            FileType::Inferred(mime_type) => {
+                write!(f, "FileType: {}", mime_type.mime())
             }
-        )
+        }
+    }
+}
+
+impl fmt::Display for FileType {
+    fn fmt(&self, form: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(form, "{}", self.mime())
     }
 }
 
@@ -102,12 +112,9 @@ impl FSItem {
         Ok(Self {
             item_type: match &meta {
                 m if m.is_dir() => FSItemType::Directory,
-                m if m.is_file() => match get_from_path(&path) {
-                    Ok(Some(guess)) => FSItemType::File {
-                        file_type: FileType::Inferred {
-                            mime: guess.mime_type(),
-                            ext: guess.extension(),
-                        },
+                m if m.is_file() => match detect_file(&path) {
+                    Ok(guess) => FSItemType::File {
+                        file_type: FileType::Inferred(guess),
                     },
                     _ => FSItemType::File {
                         file_type: FileType::default(),
