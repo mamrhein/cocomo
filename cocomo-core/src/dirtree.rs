@@ -9,7 +9,7 @@
 
 use std::{fs, io, path};
 
-use crate::fsitem::{FSItem, FSItemType};
+use crate::fsitem::FSItem;
 
 type DirTreeItem = (u16, FSItem);
 type DirTreeItemList = Vec<DirTreeItem>;
@@ -28,7 +28,7 @@ fn read_dir(level: u16, path: &path::PathBuf) -> io::Result<DirTreeItemList> {
     child_entries.sort_unstable_by_key(|entry| entry.file_name());
     for entry in child_entries {
         let item = FSItem::try_from(&entry)?;
-        let is_dir = item.item_type() == &FSItemType::Directory;
+        let is_dir = item.is_dir();
         let path = item.path().clone();
         items.push((level, item));
         if is_dir {
