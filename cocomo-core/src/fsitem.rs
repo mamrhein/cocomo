@@ -7,9 +7,9 @@
 // $Source$
 // $Revision$
 
-use std::{fmt, fs, io, path};
-
 use infer::get_from_path;
+use std::fmt::{Display, Formatter};
+use std::{fmt, fs, io, path};
 
 #[derive(Clone, Debug, PartialEq, Default)]
 pub enum FileType {
@@ -117,6 +117,33 @@ impl FSItem {
     #[inline(always)]
     pub fn is_link(&self) -> bool {
         matches!(self.item_type, FSItemType::SymLink { .. })
+    }
+
+    /// Follows symbolic links until a non-link is reached and returns that path as a FSItem.
+    /// For files and directories, it returns the item itself.
+    pub fn unlink(&self) -> io::Result<FSItem> {
+        match self.item_type() {
+            FSItemType::SymLink { path } => {
+                let mut current_path = path.to_path_buf();
+                // Follow symlinks until we reach a non-symlink
+                while let Ok(link_target) = fs::read_link(&current_path) {
+                    current_path = link_target;
+                }
+                FSItem::new(&current_path)
+            }
+            _ => Ok(self.clone()),
+        }
+    }
+
+    pub fn final_item_type(&self) -> FSItemType {
+        match self.item_type() {
+            FSItemType::Directory => self.item_type.clone(),
+            FSItemType::File { .. } => self.item_type.clone(),
+            FSItemType::SymLink { .. } => match self.unlink() {
+                Ok(item) => item.item_type,
+                Err(_) => BROKEN_LINK,
+            },
+        }
     }
 }
 
