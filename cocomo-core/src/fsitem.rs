@@ -52,6 +52,27 @@ pub enum FSItemType {
     SymLink { path: path::PathBuf },
 }
 
+const BROKEN_LINK: FSItemType = FSItemType::SymLink {
+    path: path::PathBuf::new(),
+};
+
+impl FSItemType {
+    pub fn comparable(&self, other: &FSItemType) -> bool {
+        match (self, other) {
+            (FSItemType::Directory, FSItemType::Directory) => true,
+            (
+                FSItemType::File {
+                    file_type: left_file_type,
+                },
+                FSItemType::File {
+                    file_type: right_file_type,
+                },
+            ) => left_file_type.mime() == right_file_type.mime(),
+            _ => false,
+        }
+    }
+}
+
 impl fmt::Display for FSItemType {
     fn fmt(&self, form: &mut fmt::Formatter) -> fmt::Result {
         write!(
