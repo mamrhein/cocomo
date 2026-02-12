@@ -65,7 +65,7 @@ pub mod ui;
 
 use crate::app::App;
 use cmdargs::CmdLineArgs;
-use cocomo_core::FSItem;
+use cocomo_core::{FSItem, FSItemType};
 use color_eyre::Report;
 
 fn check_args(
@@ -75,24 +75,45 @@ fn check_args(
         args.left.clone().map(|path| FSItem::new(path.as_path()));
     let right_result =
         args.right.clone().map(|path| FSItem::new(path.as_path()));
-    let (left_item, left_err) = left_result.map_or_else(
-        || (None, None),
+    let (left_type, left_item, left_err) = left_result.map_or_else(
+        || (None, None, None),
         |res| match res {
-            Ok(item) => (Some(item), None),
-            Err(err) => (None, Some(err)),
+            Ok(item) => (Some(item.final_item_type()), Some(item), None),
+            Err(err) => (None, None, Some(err)),
         },
     );
-    let (right_item, right_err) = right_result.map_or_else(
-        || (None, None),
+    let (right_type, right_item, right_err) = right_result.map_or_else(
+        || (None, None, None),
         |res| match res {
-            Ok(item) => (Some(item), None),
-            Err(err) => (None, Some(err)),
+            Ok(item) => (Some(item.final_item_type()), Some(item), None),
+            Err(err) => (None, None, Some(err)),
         },
     );
     let err_report = match (left_err, right_err) {
-        (None, None) => (left_item.as_ref().unwrap().item_type()
-            != right_item.as_ref().unwrap().item_type())
-        .then_some(Report::msg("Can't compare a directory and a file.")),
+        (None, None) => {
+            // Save to unwrap here.
+            let left_type = &left_type.unwrap();
+            let right_type = &right_type.unwrap();
+            match (left_type, right_type) {
+                (
+                    left_file @ FSItemType::File {
+                        file_type: left_file_type,
+                    },
+                    right_file @ FSItemType::File {
+                        file_type: right_file_type,
+                    },
+                ) => (!left_file.comparable(&right_file)).then_some(
+                    Report::msg(format!(
+                        "Can't compare files of different type:\n'{}' <> '{}'.",
+                        left_file_type, right_file_type
+                    )),
+                ),
+                _ => Some(Report::msg(format!(
+                    "Can't compare a {} and a {}.",
+                    left_type, right_type
+                ))),
+            }
+        }
         (Some(l), None) => Some(Report::msg(format!(
             "{}: {}",
             l,
