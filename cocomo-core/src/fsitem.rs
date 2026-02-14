@@ -10,55 +10,12 @@
 use mimetype_detector::{detect_file, MimeType};
 use std::{fmt, fs, io, path};
 
-#[derive(Clone, Default)]
-pub enum FileType {
-    #[default]
-    Unknown,
-    Inferred(&'static MimeType),
-}
+pub type FileType = MimeType;
 
-impl FileType {
-    pub fn mime(&self) -> &'static str {
-        match self {
-            FileType::Unknown => "<unknown>",
-            FileType::Inferred(mime_type) => mime_type.mime(),
-        }
-    }
-}
-
-impl PartialEq for FileType {
-    fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (
-                FileType::Inferred(self_type),
-                FileType::Inferred(other_type),
-            ) => self_type.mime() == other_type.mime(),
-            (FileType::Unknown, _) | (_, FileType::Unknown) => false,
-        }
-    }
-}
-
-impl fmt::Debug for FileType {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            FileType::Unknown => write!(f, "FileType: <unknown>"),
-            FileType::Inferred(mime_type) => {
-                write!(f, "FileType: {}", mime_type.mime())
-            }
-        }
-    }
-}
-
-impl fmt::Display for FileType {
-    fn fmt(&self, form: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(form, "{}", self.mime())
-    }
-}
-
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone)]
 pub enum FSItemType {
     Directory,
-    File { file_type: FileType },
+    File { file_type: &'static FileType },
     SymLink { path: path::PathBuf },
 }
 
@@ -83,17 +40,24 @@ impl FSItemType {
     }
 }
 
+impl fmt::Debug for FSItemType {
+    fn fmt(&self, form: &mut fmt::Formatter) -> fmt::Result {
+        write!(form, "FSItemType::{}", self)
+    }
+}
+
 impl fmt::Display for FSItemType {
     fn fmt(&self, form: &mut fmt::Formatter) -> fmt::Result {
-        write!(
-            form,
-            "{}",
-            match self {
-                Self::Directory => "Directory",
-                Self::File { .. } => "File",
-                Self::SymLink { .. } => "SymLink",
+        let s = match self {
+            Self::Directory => "Directory".into(),
+            Self::File { file_type } => {
+                format!("File({})", file_type)
             }
-        )
+            Self::SymLink { path } => {
+                format!("SymLink({})", path.display())
+            }
+        };
+        form.write_str(s.as_str())
     }
 }
 
@@ -112,13 +76,8 @@ impl FSItem {
         Ok(Self {
             item_type: match &meta {
                 m if m.is_dir() => FSItemType::Directory,
-                m if m.is_file() => match detect_file(&path) {
-                    Ok(guess) => FSItemType::File {
-                        file_type: FileType::Inferred(guess),
-                    },
-                    _ => FSItemType::File {
-                        file_type: FileType::default(),
-                    },
+                m if m.is_file() => FSItemType::File {
+                    file_type: detect_file(&path)?,
                 },
                 m if m.is_symlink() => FSItemType::SymLink {
                     path: fs::read_link(&path)?,
@@ -158,7 +117,7 @@ impl FSItem {
 
     #[inline(always)]
     pub fn is_dir(&self) -> bool {
-        self.item_type == FSItemType::Directory
+        matches!(self.item_type, FSItemType::Directory)
     }
 
     #[inline(always)]
