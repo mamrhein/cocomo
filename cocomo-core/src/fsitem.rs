@@ -71,8 +71,8 @@ pub struct FSItem {
 
 impl FSItem {
     pub fn new(path: &path::Path) -> io::Result<Self> {
-        let path = path.canonicalize()?;
-        let meta = path.metadata()?;
+        let path = path.to_path_buf();
+        let meta = path.symlink_metadata()?;
         Ok(Self {
             item_type: match &meta {
                 m if m.is_dir() => FSItemType::Directory,
@@ -191,5 +191,12 @@ mod tests {
         let file = FSItem::try_from("./Cargo.toml").unwrap();
         assert!(file.is_file());
         assert_eq!(file.name(), "Cargo.toml");
+    }
+
+    #[test]
+    fn test_link() {
+        let link = FSItem::try_from("/usr/lib/libz.so").unwrap();
+        assert!(link.is_link());
+        assert_eq!(link.name(), "libz.so");
     }
 }
