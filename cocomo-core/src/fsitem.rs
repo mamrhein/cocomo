@@ -12,6 +12,10 @@ use std::{fmt, fs, io, path};
 
 pub type FileType = MimeType;
 
+// MIME types not supported by mimetype_detector
+const INODE_DIR: &str = "inode/directory";
+const INODE_SYMLINK: &str = "inode/symlink";
+
 #[derive(Clone)]
 pub enum FSItemType {
     Directory,
@@ -24,6 +28,13 @@ const BROKEN_LINK: FSItemType = FSItemType::SymLink {
 };
 
 impl FSItemType {
+    pub fn mime(&self) -> &'static str {
+        match self {
+            FSItemType::Directory => INODE_DIR,
+            FSItemType::File { file_type } => file_type.mime(),
+            FSItemType::SymLink { .. } => INODE_SYMLINK,
+        }
+    }
     pub fn comparable(&self, other: &FSItemType) -> bool {
         match (self, other) {
             (FSItemType::Directory, FSItemType::Directory) => true,
@@ -70,8 +81,8 @@ pub struct FSItem {
 }
 
 impl FSItem {
-    pub fn new(path: &path::Path) -> io::Result<Self> {
-        let path = path.to_path_buf();
+    pub fn new<P: AsRef<path::Path>>(path: P) -> io::Result<Self> {
+        let path = path.as_ref();
         let meta = path.symlink_metadata()?;
         Ok(Self {
             item_type: match &meta {
@@ -89,8 +100,12 @@ impl FSItem {
                     ));
                 }
             },
-            name: path.file_name().unwrap().to_string_lossy().into(),
-            path,
+            name: path
+                .file_name()
+                .unwrap_or(path.as_os_str())
+                .to_string_lossy()
+                .into(),
+            path: path.to_path_buf(),
             metadata: meta,
         })
     }
@@ -98,6 +113,11 @@ impl FSItem {
     #[inline(always)]
     pub fn item_type(&self) -> &FSItemType {
         &self.item_type
+    }
+
+    #[inline(always)]
+    pub fn mime(&self) -> &'static str {
+        self.item_type.mime()
     }
 
     #[inline(always)]
@@ -188,14 +208,14 @@ mod tests {
 
     #[test]
     fn test_file() {
-        let file = FSItem::try_from("./Cargo.toml").unwrap();
+        let file = FSItem::new("./Cargo.toml").unwrap();
         assert!(file.is_file());
         assert_eq!(file.name(), "Cargo.toml");
     }
 
     #[test]
-    fn test_link() {
-        let link = FSItem::try_from("/usr/lib/libz.so").unwrap();
+    fn test_symlink() {
+        let link = FSItem::new("/usr/lib/libzstd.so").unwrap();
         assert!(link.is_link());
         assert_eq!(link.name(), "libz.so");
     }
