@@ -35,6 +35,7 @@ impl FSItemType {
             FSItemType::SymLink { .. } => INODE_SYMLINK,
         }
     }
+
     pub fn comparable(&self, other: &FSItemType) -> bool {
         match (self, other) {
             (FSItemType::Directory, FSItemType::Directory) => true,
@@ -194,7 +195,8 @@ mod tests {
     fn test_dir() {
         let dir = FSItem::new(".").unwrap();
         assert!(dir.is_dir());
-        assert_eq!(dir.name(), "cocomo-core");
+        assert_eq!(dir.name(), ".");
+        assert_eq!(dir.mime(), INODE_DIR);
     }
 
     #[test]
@@ -204,10 +206,12 @@ mod tests {
         assert_eq!(file.name(), "Cargo.toml");
     }
 
+    #[cfg(target_family = "unix")]
     #[test]
     fn test_symlink() {
         let link = FSItem::new("/usr/lib/libzstd.so").unwrap();
         assert!(link.is_link());
-        assert_eq!(link.name(), "libz.so");
+        assert_eq!(link.name(), "libzstd.so");
+        assert_eq!(link.mime(), INODE_SYMLINK);
     }
 }
