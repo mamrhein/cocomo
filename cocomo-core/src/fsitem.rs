@@ -178,15 +178,6 @@ impl FSItem {
     }
 }
 
-impl TryFrom<&str> for FSItem {
-    type Error = io::Error;
-
-    fn try_from(s: &str) -> Result<Self, Self::Error> {
-        let path = path::PathBuf::from(s);
-        Self::new(&path)
-    }
-}
-
 impl TryFrom<&fs::DirEntry> for FSItem {
     type Error = io::Error;
 
@@ -201,7 +192,7 @@ mod tests {
 
     #[test]
     fn test_dir() {
-        let dir = FSItem::try_from(".").unwrap();
+        let dir = FSItem::new(".").unwrap();
         assert!(dir.is_dir());
         assert_eq!(dir.name(), "cocomo-core");
     }
