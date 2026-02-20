@@ -204,6 +204,7 @@ mod tests {
         let file = FSItem::new("./Cargo.toml").unwrap();
         assert!(file.is_file());
         assert_eq!(file.name(), "Cargo.toml");
+        assert_eq!(file.mime(), "application/toml");
     }
 
     #[cfg(target_family = "unix")]
