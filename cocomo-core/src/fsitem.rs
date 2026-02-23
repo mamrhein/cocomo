@@ -86,8 +86,8 @@ impl FSItemType {
     /// Returns `true` if this item type is comparable with the other item type.
     ///
     /// Two items are comparable if they are both directories, or both files
-    /// of the same MIME type. Symbolic links and mixed types are not
-    /// comparable.
+    /// of the same MIME type. Symbolic links are compared based on their
+    /// resolved target types. Broken links are never comparable.
     pub fn comparable(&self, other: &FSItemType) -> bool {
         match (self, other) {
             (FSItemType::Directory, FSItemType::Directory) => true,
@@ -99,6 +99,10 @@ impl FSItemType {
                     file_type: right_file_type,
                 },
             ) => left_file_type.mime() == right_file_type.mime(),
+            (FSItemType::SymLink { path }, _) => FSItem::new(path)
+                .is_ok_and(|item| item.final_item_type().comparable(other)),
+            (_, FSItemType::SymLink { path }) => FSItem::new(path)
+                .is_ok_and(|item| item.final_item_type().comparable(self)),
             _ => false,
         }
     }
