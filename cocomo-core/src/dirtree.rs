@@ -20,7 +20,11 @@ pub(crate) struct FlattenedDirTree {
     items: DirTreeItemList,
 }
 
-fn read_dir(level: u16, path: &path::PathBuf) -> io::Result<DirTreeItemList> {
+fn read_dir<P: AsRef<path::Path>>(
+    level: u16,
+    path: P,
+) -> io::Result<DirTreeItemList> {
+    let path = path.as_ref();
     let mut items = DirTreeItemList::new();
     let mut child_entries: Vec<fs::DirEntry> = fs::read_dir(path)?
         .map(|r| r.expect("Error reading directory entry."))

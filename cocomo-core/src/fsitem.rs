@@ -66,11 +66,11 @@ const INODE_SYMLINK: &str = "inode/symlink";
 pub enum FSItemType {
     Directory,
     File { file_type: &'static FileType },
-    SymLink { path: path::PathBuf },
+    SymLink { target: path::PathBuf },
 }
 
 const BROKEN_LINK: FSItemType = FSItemType::SymLink {
-    path: path::PathBuf::new(),
+    target: path::PathBuf::new(),
 };
 
 impl FSItemType {
@@ -99,9 +99,9 @@ impl FSItemType {
                     file_type: right_file_type,
                 },
             ) => left_file_type.mime() == right_file_type.mime(),
-            (FSItemType::SymLink { path }, _) => FSItem::new(path)
+            (FSItemType::SymLink { target: path }, _) => FSItem::new(path)
                 .is_ok_and(|item| item.final_item_type().comparable(other)),
-            (_, FSItemType::SymLink { path }) => FSItem::new(path)
+            (_, FSItemType::SymLink { target: path }) => FSItem::new(path)
                 .is_ok_and(|item| item.final_item_type().comparable(self)),
             _ => false,
         }
@@ -121,7 +121,7 @@ impl fmt::Display for FSItemType {
             Self::File { file_type } => {
                 format!("File({})", file_type)
             }
-            Self::SymLink { path } => {
+            Self::SymLink { target: path } => {
                 format!("SymLink({})", path.display())
             }
         };
@@ -153,7 +153,7 @@ impl FSItem {
                     file_type: detect_file(&path)?,
                 },
                 m if m.is_symlink() => FSItemType::SymLink {
-                    path: fs::read_link(&path)?,
+                    target: fs::read_link(&path)?,
                 },
                 _ => {
                     return Err(io::Error::new(
@@ -229,7 +229,7 @@ impl FSItem {
     /// with an error.
     pub fn unlink(&self) -> io::Result<FSItem> {
         match self.item_type() {
-            FSItemType::SymLink { path } => {
+            FSItemType::SymLink { target: path } => {
                 let mut current_path = path.to_path_buf();
                 // Follow symlinks until we reach a non-symlink
                 while let Ok(link_target) = fs::read_link(&current_path) {
