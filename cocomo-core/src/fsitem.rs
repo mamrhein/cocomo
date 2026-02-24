@@ -67,6 +67,7 @@ pub enum FSItemType {
     Directory,
     File { file_type: &'static FileType },
     SymLink { target: path::PathBuf },
+    Invalid { cause: io::ErrorKind },
 }
 
 const BROKEN_LINK: FSItemType = FSItemType::SymLink {
@@ -80,6 +81,7 @@ impl FSItemType {
             FSItemType::Directory => INODE_DIR,
             FSItemType::File { file_type } => file_type.mime(),
             FSItemType::SymLink { .. } => INODE_SYMLINK,
+            FSItemType::Invalid { .. } => "",
         }
     }
 
@@ -123,6 +125,9 @@ impl fmt::Display for FSItemType {
             }
             Self::SymLink { target: path } => {
                 format!("SymLink({})", path.display())
+            }
+            Self::Invalid { cause } => {
+                format!("Invalid({})", cause)
             }
         };
         form.write_str(s.as_str())
