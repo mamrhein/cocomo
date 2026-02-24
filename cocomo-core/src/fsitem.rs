@@ -101,10 +101,12 @@ impl FSItemType {
                     file_type: right_file_type,
                 },
             ) => left_file_type.mime() == right_file_type.mime(),
-            (FSItemType::SymLink { target: path }, _) => FSItem::new(path)
-                .is_ok_and(|item| item.final_item_type().comparable(other)),
-            (_, FSItemType::SymLink { target: path }) => FSItem::new(path)
-                .is_ok_and(|item| item.final_item_type().comparable(self)),
+            (FSItemType::SymLink { target: path }, _) => {
+                FSItem::new(path).final_item_type().comparable(other)
+            }
+            (_, FSItemType::SymLink { target: path }) => {
+                FSItem::new(path).final_item_type().comparable(self)
+            }
             _ => false,
         }
     }
@@ -139,17 +141,41 @@ pub struct FSItem {
     item_type: FSItemType,
     name: String,
     path: path::PathBuf,
-    metadata: fs::Metadata,
+    metadata: Option<fs::Metadata>,
 }
 
 impl FSItem {
     /// Creates a new `FSItem` from the given path.
     ///
     /// Reads metadata for the entry, detects its type (file, directory or
+    /// symlink), and determines the MIME type for files. Returns an FSItem with
+    /// FSItemType::Invalid if the path does not exist or is of an
+    /// unsupported type.
+    pub fn new<P: AsRef<path::Path>>(path: P) -> Self {
+        let path = path.as_ref();
+        match Self::try_from_path(&path) {
+            Ok(item) => item,
+            Err(error) => Self {
+                item_type: FSItemType::Invalid {
+                    cause: error.kind(),
+                },
+                name: path
+                    .file_name()
+                    .unwrap_or(path.as_os_str())
+                    .to_string_lossy()
+                    .into(),
+                path: path.to_path_buf(),
+                metadata: None,
+            },
+        }
+    }
+
+    /// Creates a new `FSItem` from the given path.
+    ///
+    /// Reads metadata for the entry, detects its type (file, directory or
     /// symlink), and determines the MIME type for files. Returns an error
     /// if the path does not exist or is of an unsupported type.
-    pub fn new<P: AsRef<path::Path>>(path: P) -> io::Result<Self> {
-        let path = path.as_ref();
+    fn try_from_path(path: &path::Path) -> io::Result<Self> {
         let meta = path.symlink_metadata()?;
         Ok(Self {
             item_type: match &meta {
@@ -173,7 +199,7 @@ impl FSItem {
                 .to_string_lossy()
                 .into(),
             path: path.to_path_buf(),
-            metadata: meta,
+            metadata: Some(meta),
         })
     }
 
@@ -203,7 +229,7 @@ impl FSItem {
 
     #[inline(always)]
     /// Returns a reference to the raw `fs::Metadata` for this item.
-    pub fn metadata(&self) -> &fs::Metadata {
+    pub fn metadata(&self) -> &Option<fs::Metadata> {
         &self.metadata
     }
 
@@ -240,7 +266,7 @@ impl FSItem {
                 while let Ok(link_target) = fs::read_link(&current_path) {
                     current_path = link_target;
                 }
-                FSItem::new(&current_path)
+                FSItem::try_from_path(&current_path)
             }
             _ => Ok(self.clone()),
         }
@@ -268,7 +294,7 @@ impl TryFrom<&fs::DirEntry> for FSItem {
     type Error = io::Error;
 
     fn try_from(item: &fs::DirEntry) -> Result<Self, Self::Error> {
-        Self::new(&item.path())
+        Self::try_from_path(&item.path())
     }
 }
 
@@ -278,7 +304,7 @@ mod tests {
 
     #[test]
     fn test_dir() {
-        let dir = FSItem::new(".").unwrap();
+        let dir = FSItem::new(".");
         assert!(dir.is_dir());
         assert_eq!(dir.name(), ".");
         assert_eq!(dir.mime(), INODE_DIR);
@@ -286,7 +312,7 @@ mod tests {
 
     #[test]
     fn test_file() {
-        let file = FSItem::new("./Cargo.toml").unwrap();
+        let file = FSItem::new("./Cargo.toml");
         assert!(file.is_file());
         assert_eq!(file.name(), "Cargo.toml");
         assert_eq!(file.mime(), "application/toml");
@@ -295,7 +321,7 @@ mod tests {
     #[cfg(target_family = "unix")]
     #[test]
     fn test_symlink() {
-        let link = FSItem::new("/usr/lib/libzstd.so").unwrap();
+        let link = FSItem::new("/usr/lib/libzstd.so");
         assert!(link.is_link());
         assert_eq!(link.name(), "libzstd.so");
         assert_eq!(link.mime(), INODE_SYMLINK);
