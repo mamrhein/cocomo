@@ -249,12 +249,11 @@ impl FSItem {
     /// symlink with empty path.
     pub fn final_item_type(&self) -> FSItemType {
         match self.item_type() {
-            FSItemType::Directory => self.item_type.clone(),
-            FSItemType::File { .. } => self.item_type.clone(),
             FSItemType::SymLink { .. } => match self.unlink() {
                 Ok(item) => item.item_type,
                 Err(_) => BROKEN_LINK,
             },
+            _ => self.item_type.clone(),
         }
     }
 }
