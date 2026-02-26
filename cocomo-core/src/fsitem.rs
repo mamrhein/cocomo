@@ -56,16 +56,24 @@ use std::{fmt, fs, io, path};
 
 use mimetype_detector::{detect_file, MimeType};
 
-pub type FileType = MimeType;
+pub type MediaType = &'static MimeType;
 
 // MIME types not supported by mimetype_detector
+// const INODE: MimeKind = MimeKind(1 << 31);
 const INODE_DIR: &str = "inode/directory";
+static DIRECTORY: MediaType =
+    &MimeType::new(INODE_DIR, "Directory", "", |_p| false, &[]);
 const INODE_SYMLINK: &str = "inode/symlink";
+static SYMLINK: MediaType =
+    &MimeType::new(INODE_SYMLINK, "Symbolic link", "", |_p| false, &[]);
+const INVALID_MIME: &str = "<invalid>";
+static INVALID: MediaType =
+    &MimeType::new(INVALID_MIME, INVALID_MIME, "", |_p| false, &[]);
 
 #[derive(Clone)]
 pub enum FSItemType {
     Directory,
-    File { file_type: &'static FileType },
+    File { file_type: MediaType },
     SymLink { target: path::PathBuf },
     Invalid { cause: io::ErrorKind },
 }
@@ -76,12 +84,12 @@ const BROKEN_LINK: FSItemType = FSItemType::SymLink {
 
 impl FSItemType {
     /// Returns the MIME type string representing this item type.
-    pub fn mime(&self) -> &'static str {
+    pub fn media_type(&self) -> MediaType {
         match self {
-            FSItemType::Directory => INODE_DIR,
-            FSItemType::File { file_type } => file_type.mime(),
-            FSItemType::SymLink { .. } => INODE_SYMLINK,
-            FSItemType::Invalid { .. } => "",
+            FSItemType::Directory => DIRECTORY,
+            FSItemType::File { file_type } => file_type,
+            FSItemType::SymLink { .. } => SYMLINK,
+            FSItemType::Invalid { .. } => INVALID,
         }
     }
 
@@ -211,8 +219,8 @@ impl FSItem {
 
     #[inline(always)]
     /// Returns the MIME type string for this item.
-    pub fn mime(&self) -> &'static str {
-        self.item_type.mime()
+    pub fn media_type(&self) -> MediaType {
+        self.item_type.media_type()
     }
 
     #[inline(always)]
@@ -307,7 +315,7 @@ mod tests {
         let dir = FSItem::new(".");
         assert!(dir.is_dir());
         assert_eq!(dir.name(), ".");
-        assert_eq!(dir.mime(), INODE_DIR);
+        assert_eq!(dir.media_type().mime(), INODE_DIR);
     }
 
     #[test]
@@ -315,7 +323,7 @@ mod tests {
         let file = FSItem::new("./Cargo.toml");
         assert!(file.is_file());
         assert_eq!(file.name(), "Cargo.toml");
-        assert_eq!(file.mime(), "application/toml");
+        assert_eq!(file.media_type().mime(), "application/toml");
     }
 
     #[cfg(target_family = "unix")]
@@ -324,6 +332,6 @@ mod tests {
         let link = FSItem::new("/usr/lib/libzstd.so");
         assert!(link.is_link());
         assert_eq!(link.name(), "libzstd.so");
-        assert_eq!(link.mime(), INODE_SYMLINK);
+        assert_eq!(link.media_type().mime(), INODE_SYMLINK);
     }
 }
