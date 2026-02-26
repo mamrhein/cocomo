@@ -66,15 +66,22 @@ static DIRECTORY: MediaType =
 const INODE_SYMLINK: &str = "inode/symlink";
 static SYMLINK: MediaType =
     &MimeType::new(INODE_SYMLINK, "Symbolic link", "", |_p| false, &[]);
+const INODE_SPECIAL: &str = "inode/special";
+static SPECIAL: MediaType =
+    &MimeType::new(INODE_SPECIAL, "Special inode", "", |_p| false, &[]);
 const INVALID_MIME: &str = "<invalid>";
 static INVALID: MediaType =
     &MimeType::new(INVALID_MIME, INVALID_MIME, "", |_p| false, &[]);
+const UNKNOWN_MIME: &str = "<unknown>";
+static UNKNOWN: MediaType =
+    &MimeType::new(UNKNOWN_MIME, UNKNOWN_MIME, "", |_p| false, &[]);
 
 #[derive(Clone)]
 pub enum FSItemType {
     Directory,
     File { file_type: MediaType },
     SymLink { target: path::PathBuf },
+    Special,
     Invalid { cause: io::ErrorKind },
 }
 
@@ -89,6 +96,7 @@ impl FSItemType {
             FSItemType::Directory => DIRECTORY,
             FSItemType::File { file_type } => file_type,
             FSItemType::SymLink { .. } => SYMLINK,
+            FSItemType::Special => SPECIAL,
             FSItemType::Invalid { .. } => INVALID,
         }
     }
@@ -136,6 +144,7 @@ impl fmt::Display for FSItemType {
             Self::SymLink { target: path } => {
                 format!("SymLink({})", path.display())
             }
+            Self::Special => "Special".into(),
             Self::Invalid { cause } => {
                 format!("Invalid({})", cause)
             }
@@ -161,8 +170,27 @@ impl FSItem {
     /// unsupported type.
     pub fn new<P: AsRef<path::Path>>(path: P) -> Self {
         let path = path.as_ref();
-        match Self::try_from_path(&path) {
-            Ok(item) => item,
+        match path.symlink_metadata() {
+            Ok(meta) => Self {
+                item_type: match &meta {
+                    m if m.is_dir() => FSItemType::Directory,
+                    m if m.is_file() => FSItemType::File {
+                        file_type: detect_file(&path).unwrap_or(UNKNOWN),
+                    },
+                    m if m.is_symlink() => FSItemType::SymLink {
+                        target: fs::read_link(&path)
+                            .unwrap_or(path::PathBuf::new()),
+                    },
+                    _ => FSItemType::Special,
+                },
+                name: path
+                    .file_name()
+                    .unwrap_or(path.as_os_str())
+                    .to_string_lossy()
+                    .into(),
+                path: path.to_path_buf(),
+                metadata: Some(meta),
+            },
             Err(error) => Self {
                 item_type: FSItemType::Invalid {
                     cause: error.kind(),
@@ -176,39 +204,6 @@ impl FSItem {
                 metadata: None,
             },
         }
-    }
-
-    /// Creates a new `FSItem` from the given path.
-    ///
-    /// Reads metadata for the entry, detects its type (file, directory or
-    /// symlink), and determines the MIME type for files. Returns an error
-    /// if the path does not exist or is of an unsupported type.
-    fn try_from_path(path: &path::Path) -> io::Result<Self> {
-        let meta = path.symlink_metadata()?;
-        Ok(Self {
-            item_type: match &meta {
-                m if m.is_dir() => FSItemType::Directory,
-                m if m.is_file() => FSItemType::File {
-                    file_type: detect_file(&path)?,
-                },
-                m if m.is_symlink() => FSItemType::SymLink {
-                    target: fs::read_link(&path)?,
-                },
-                _ => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::Unsupported,
-                        "Unknown directory entry",
-                    ));
-                }
-            },
-            name: path
-                .file_name()
-                .unwrap_or(path.as_os_str())
-                .to_string_lossy()
-                .into(),
-            path: path.to_path_buf(),
-            metadata: Some(meta),
-        })
     }
 
     #[inline(always)]
@@ -266,17 +261,17 @@ impl FSItem {
     /// Note: This method does not check if the ultimate target exists; for
     /// broken symlinks it will try to access the nonexistent path and fail
     /// with an error.
-    pub fn unlink(&self) -> io::Result<FSItem> {
+    pub fn unlink(&self) -> FSItem {
         match self.item_type() {
             FSItemType::SymLink { target: path } => {
                 let mut current_path = path.to_path_buf();
-                // Follow symlinks until we reach a non-symlink
+                // Follow symlinks until we reach a non-symlink or a broken link
                 while let Ok(link_target) = fs::read_link(&current_path) {
                     current_path = link_target;
                 }
-                FSItem::try_from_path(&current_path)
+                FSItem::new(&current_path)
             }
-            _ => Ok(self.clone()),
+            _ => self.clone(),
         }
     }
 
@@ -288,21 +283,16 @@ impl FSItem {
     /// symlink with empty path.
     pub fn final_item_type(&self) -> FSItemType {
         match self.item_type() {
-            FSItemType::SymLink { .. } => match self.unlink() {
-                Ok(item) => item.item_type,
-                Err(_) => BROKEN_LINK,
-            },
+            FSItemType::SymLink { .. } => self.unlink().item_type,
             _ => self.item_type.clone(),
         }
     }
 }
 
 /// Creates an `FSItem` from a directory entry obtained via `fs::ReadDir`.
-impl TryFrom<&fs::DirEntry> for FSItem {
-    type Error = io::Error;
-
-    fn try_from(item: &fs::DirEntry) -> Result<Self, Self::Error> {
-        Self::try_from_path(&item.path())
+impl From<&fs::DirEntry> for FSItem {
+    fn from(item: &fs::DirEntry) -> Self {
+        Self::new(&item.path())
     }
 }
 

@@ -31,7 +31,7 @@ fn read_dir<P: AsRef<path::Path>>(
         .collect();
     child_entries.sort_unstable_by_key(|entry| entry.file_name());
     for entry in child_entries {
-        let item = FSItem::try_from(&entry)?;
+        let item = FSItem::from(&entry);
         let is_dir = item.is_dir();
         let path = item.path().clone();
         items.push((level, item));
