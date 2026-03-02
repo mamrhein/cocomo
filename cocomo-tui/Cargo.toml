@@ -16,7 +16,7 @@ categories = ["command-line-utilities", "filesystem"]
 crossterm = { version = "0.29.0", features = ["event-stream"] }
 futures = "0.3.31"
 ratatui = "0.30.0"
-tokio = { version = "1.40.0", features = ["full"] }
+tokio = { version = "1.49", features = ["macros", "rt-multi-thread", "sync", "time"] }
 color-eyre = { version = "0.6", default-features = false }
 clap = { version = "4.5.55", features = ["derive", "unicode", "wrap_help"] }
 cocomo-core = { version = "0.0.1", path = "../cocomo-core" }
