@@ -79,6 +79,30 @@ fn check_args(
     let right_item_type =
         right_item.as_ref().map(|item| item.final_item_type());
     let err_report = match (&left_item_type, &right_item_type) {
+        (
+            Some(FSItemType::Invalid { cause: left_cause }),
+            Some(FSItemType::Invalid { cause: right_cause }),
+        ) => Some(Report::msg(format!(
+            "{}: {}\n{}: {}",
+            left_item.as_ref().unwrap().path().display(),
+            left_cause,
+            right_item.as_ref().unwrap().path().display(),
+            right_cause
+        ))),
+        (Some(FSItemType::Invalid { cause }), ..) => {
+            Some(Report::msg(format!(
+                "{}: {}",
+                left_item.as_ref().unwrap().path().display(),
+                cause
+            )))
+        }
+        (.., Some(FSItemType::Invalid { cause })) => {
+            Some(Report::msg(format!(
+                "{}: {}",
+                right_item.as_ref().unwrap().path().display(),
+                cause
+            )))
+        }
         (.., None)
         | (None, ..)
         | (Some(FSItemType::Directory), Some(FSItemType::Directory)) => None,
