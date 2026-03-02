@@ -37,20 +37,7 @@
 //!   yields the resolved logical type, or a placeholder for broken links.
 //! - **Comparison support** via [`FSItemType::comparable()`], allowing
 //!   comparison only between entries of compatible types (e.g., same MIME type
-//!   for files).
-//!
-//! ## Usage Example
-//!
-//! ```
-//! use std::path::Path;
-//!
-//! use fsitem::{FSItem, FSItemType};
-//!
-//! let item = FSItem::new(Path::new("example.txt"))?;
-//! if item.is_file() {
-//!     println!("MIME: {}", item.mime());
-//! }
-//! ```
+//!   for files).`
 
 use std::{fmt, fs, io, path};
 
@@ -98,32 +85,6 @@ impl FSItemType {
             FSItemType::SymLink { .. } => SYMLINK,
             FSItemType::Special => SPECIAL,
             FSItemType::Invalid { .. } => INVALID,
-        }
-    }
-
-    /// Returns `true` if this item type is comparable with the other item type.
-    ///
-    /// Two items are comparable if they are both directories, or both files
-    /// of the same MIME type. Symbolic links are compared based on their
-    /// resolved target types. Broken links are never comparable.
-    pub fn comparable(&self, other: &FSItemType) -> bool {
-        match (self, other) {
-            (FSItemType::Directory, FSItemType::Directory) => true,
-            (
-                FSItemType::File {
-                    file_type: left_file_type,
-                },
-                FSItemType::File {
-                    file_type: right_file_type,
-                },
-            ) => left_file_type.mime() == right_file_type.mime(),
-            (FSItemType::SymLink { target: path }, _) => {
-                FSItem::new(path).final_item_type().comparable(other)
-            }
-            (_, FSItemType::SymLink { target: path }) => {
-                FSItem::new(path).final_item_type().comparable(self)
-            }
-            _ => false,
         }
     }
 }
@@ -287,6 +248,29 @@ impl FSItem {
             _ => self.item_type.clone(),
         }
     }
+
+    /// Returns `true` if this item is comparable with the other item.
+    ///
+    /// Two items are comparable if they are both directories, or both files
+    /// of the same MIME kind. Symbolic links are compared based on their
+    /// resolved target types. Broken links and special files are never
+    /// comparable.
+    pub fn comparable(&self, other: &FSItem) -> bool {
+        let self_final_item_type = self.final_item_type();
+        let other_final_item_type = other.final_item_type();
+        match (self_final_item_type, other_final_item_type) {
+            (FSItemType::Directory, FSItemType::Directory) => true,
+            (
+                FSItemType::File {
+                    file_type: left_file_type,
+                },
+                FSItemType::File {
+                    file_type: right_file_type,
+                },
+            ) => left_file_type.kind() == right_file_type.kind(),
+            _ => false,
+        }
+    }
 }
 
 /// Creates an `FSItem` from a directory entry obtained via `fs::ReadDir`.
@@ -302,9 +286,9 @@ mod tests {
 
     #[test]
     fn test_dir() {
-        let dir = FSItem::new(".");
+        let dir = FSItem::new(path::Path::new("../target"));
         assert!(dir.is_dir());
-        assert_eq!(dir.name(), ".");
+        assert_eq!(dir.name(), "target");
         assert_eq!(dir.media_type().mime(), INODE_DIR);
     }
 
@@ -323,5 +307,22 @@ mod tests {
         assert!(link.is_link());
         assert_eq!(link.name(), "libzstd.so");
         assert_eq!(link.media_type().mime(), INODE_SYMLINK);
+    }
+
+    #[test]
+    fn test_comparable() {
+        let dir1 = FSItem::new("../cocomo-tui");
+        let dir2 = FSItem::new(".");
+        let file1 = FSItem::new("./Cargo.toml");
+        let file2 = FSItem::new("./Cargo.lock");
+        let file3 = FSItem::new("../cocomo-tui/Cargo.toml");
+        let invalid = FSItem::new("./coc");
+        assert!(dir1.comparable(&dir1));
+        assert!(dir1.comparable(&dir2));
+        assert!(!dir1.comparable(&file2));
+        assert!(!dir2.comparable(&invalid));
+        assert!(file1.comparable(&file3));
+        assert!(!file1.comparable(&file2));
+        assert!(!file1.comparable(&invalid));
     }
 }

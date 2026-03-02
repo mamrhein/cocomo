@@ -83,16 +83,16 @@ fn check_args(
         | (None, ..)
         | (Some(FSItemType::Directory), Some(FSItemType::Directory)) => None,
         (
-            left_item_type @ Some(FSItemType::File {
+            Some(FSItemType::File {
                 file_type: left_file_type,
             }),
-            right_item_type @ Some(FSItemType::File {
+            Some(FSItemType::File {
                 file_type: right_file_type,
             }),
-        ) => (!left_item_type
+        ) => (!left_item
             .as_ref()
             .unwrap()
-            .comparable(&right_item_type.as_ref().unwrap()))
+            .comparable(right_item.as_ref().unwrap()))
         .then_some(Report::msg(format!(
             "Can't compare files of different type:\n'{}' <> '{}'.",
             left_file_type, right_file_type
