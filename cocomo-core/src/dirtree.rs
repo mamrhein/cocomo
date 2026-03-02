@@ -7,7 +7,9 @@
 // $Source$
 // $Revision$
 
-use std::{fs, io, path};
+use std::path;
+
+use tokio::{fs, io};
 
 use crate::fsitem::FSItem;
 
@@ -20,32 +22,24 @@ pub(crate) struct FlattenedDirTree {
     items: DirTreeItemList,
 }
 
-fn read_dir<P: AsRef<path::Path>>(
+async fn read_dir<P: AsRef<path::Path>>(
     level: u16,
     path: P,
 ) -> io::Result<DirTreeItemList> {
     let path = path.as_ref();
     let mut items = DirTreeItemList::new();
-    let mut child_entries: Vec<fs::DirEntry> = fs::read_dir(path)?
-        .map(|r| r.expect("Error reading directory entry."))
-        .collect();
-    child_entries.sort_unstable_by_key(|entry| entry.file_name());
-    for entry in child_entries {
-        let item = FSItem::from(&entry);
-        let is_dir = item.is_dir();
-        let path = item.path().clone();
+    let mut rd = fs::read_dir(path).await?;
+    while let Some(entry) = rd.next_entry().await? {
+        let item = FSItem::new(entry.path()).await;
         items.push((level, item));
-        if is_dir {
-            items.append(&mut read_dir(level + 1, &path)?);
-        }
     }
     Ok(items)
 }
 
 impl FlattenedDirTree {
-    pub(crate) fn new(root: &path::Path) -> io::Result<Self> {
+    pub(crate) async fn new(root: &path::Path) -> io::Result<Self> {
         let root = root.to_path_buf();
-        let items = read_dir(0, &root)?;
+        let items = read_dir(0, &root).await?;
         Ok(Self { root, items })
     }
 }
@@ -62,9 +56,10 @@ impl IntoIterator for FlattenedDirTree {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_dirtree() {
-        let tree = FlattenedDirTree::new(path::Path::new("."))
+    #[tokio::test]
+    async fn test_dirtree() {
+        let tree = FlattenedDirTree::new(path::Path::new(".."))
+            .await
             .expect("Error reading '.'");
         assert!(tree.root.is_dir());
     }

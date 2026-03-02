@@ -39,9 +39,10 @@
 //!   comparison only between entries of compatible types (e.g., same MIME type
 //!   for files).`
 
-use std::{fmt, fs, io, path};
+use std::{fmt, fs, path};
 
 use mimetype_detector::{detect_file, MimeType};
+use tokio::{fs as async_fs, io};
 
 pub type MediaType = &'static MimeType;
 
@@ -129,9 +130,9 @@ impl FSItem {
     /// symlink), and determines the MIME type for files. Returns an FSItem with
     /// FSItemType::Invalid if the path does not exist or is of an
     /// unsupported type.
-    pub fn new<P: AsRef<path::Path>>(path: P) -> Self {
+    pub async fn new<P: AsRef<path::Path>>(path: P) -> Self {
         let path = path.as_ref();
-        match path.symlink_metadata() {
+        match async_fs::symlink_metadata(path).await {
             Ok(meta) => Self {
                 item_type: match &meta {
                     m if m.is_dir() => FSItemType::Directory,
@@ -139,7 +140,8 @@ impl FSItem {
                         file_type: detect_file(&path).unwrap_or(UNKNOWN),
                     },
                     m if m.is_symlink() => FSItemType::SymLink {
-                        target: fs::read_link(&path)
+                        target: async_fs::read_link(&path)
+                            .await
                             .unwrap_or(path::PathBuf::new()),
                     },
                     _ => FSItemType::Special,
@@ -222,15 +224,17 @@ impl FSItem {
     /// Note: This method does not check if the ultimate target exists; for
     /// broken symlinks it will try to access the nonexistent path and fail
     /// with an error.
-    pub fn unlink(&self) -> FSItem {
+    pub async fn unlink(&self) -> FSItem {
         match self.item_type() {
             FSItemType::SymLink { target: path } => {
                 let mut current_path = path.to_path_buf();
                 // Follow symlinks until we reach a non-symlink or a broken link
-                while let Ok(link_target) = fs::read_link(&current_path) {
+                while let Ok(link_target) =
+                    async_fs::read_link(&current_path).await
+                {
                     current_path = link_target;
                 }
-                FSItem::new(&current_path)
+                FSItem::new(&current_path).await
             }
             _ => self.clone(),
         }
@@ -242,9 +246,9 @@ impl FSItem {
     /// links, follows the chain transitively to determine the final
     /// target's type; for broken links returns a placeholder representing a
     /// symlink with empty path.
-    pub fn final_item_type(&self) -> FSItemType {
+    pub async fn final_item_type(&self) -> FSItemType {
         match self.item_type() {
-            FSItemType::SymLink { .. } => self.unlink().item_type,
+            FSItemType::SymLink { .. } => self.unlink().await.item_type,
             _ => self.item_type.clone(),
         }
     }
@@ -255,9 +259,9 @@ impl FSItem {
     /// of the same MIME kind. Symbolic links are compared based on their
     /// resolved target types. Broken links and special files are never
     /// comparable.
-    pub fn comparable(&self, other: &FSItem) -> bool {
-        let self_final_item_type = self.final_item_type();
-        let other_final_item_type = other.final_item_type();
+    pub async fn comparable(&self, other: &FSItem) -> bool {
+        let self_final_item_type = self.final_item_type().await;
+        let other_final_item_type = other.final_item_type().await;
         match (self_final_item_type, other_final_item_type) {
             (FSItemType::Directory, FSItemType::Directory) => true,
             (
@@ -273,56 +277,49 @@ impl FSItem {
     }
 }
 
-/// Creates an `FSItem` from a directory entry obtained via `fs::ReadDir`.
-impl From<&fs::DirEntry> for FSItem {
-    fn from(item: &fs::DirEntry) -> Self {
-        Self::new(&item.path())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_dir() {
-        let dir = FSItem::new(path::Path::new("../target"));
+    #[tokio::test]
+    async fn test_dir() {
+        let dir = FSItem::new("../target").await;
         assert!(dir.is_dir());
         assert_eq!(dir.name(), "target");
         assert_eq!(dir.media_type().mime(), INODE_DIR);
     }
 
-    #[test]
-    fn test_file() {
-        let file = FSItem::new("./Cargo.toml");
+    #[tokio::test]
+    async fn test_file() {
+        let file = FSItem::new("./Cargo.toml").await;
         assert!(file.is_file());
         assert_eq!(file.name(), "Cargo.toml");
         assert_eq!(file.media_type().mime(), "application/toml");
     }
 
     #[cfg(target_family = "unix")]
-    #[test]
-    fn test_symlink() {
-        let link = FSItem::new("/usr/lib/libzstd.so");
+    #[tokio::test]
+    async fn test_symlink() {
+        let link = FSItem::new("/usr/lib/libzstd.so").await;
         assert!(link.is_link());
         assert_eq!(link.name(), "libzstd.so");
         assert_eq!(link.media_type().mime(), INODE_SYMLINK);
     }
 
-    #[test]
-    fn test_comparable() {
-        let dir1 = FSItem::new("../cocomo-tui");
-        let dir2 = FSItem::new(".");
-        let file1 = FSItem::new("./Cargo.toml");
-        let file2 = FSItem::new("./Cargo.lock");
-        let file3 = FSItem::new("../cocomo-tui/Cargo.toml");
-        let invalid = FSItem::new("./coc");
-        assert!(dir1.comparable(&dir1));
-        assert!(dir1.comparable(&dir2));
-        assert!(!dir1.comparable(&file2));
-        assert!(!dir2.comparable(&invalid));
-        assert!(file1.comparable(&file3));
-        assert!(!file1.comparable(&file2));
-        assert!(!file1.comparable(&invalid));
+    #[tokio::test]
+    async fn test_comparable() {
+        let dir1 = FSItem::new("../cocomo-tui").await;
+        let dir2 = FSItem::new(".").await;
+        let file1 = FSItem::new("./Cargo.toml").await;
+        let file2 = FSItem::new("./Cargo.lock").await;
+        let file3 = FSItem::new("../cocomo-tui/Cargo.toml").await;
+        let invalid = FSItem::new("./coc").await;
+        assert!(dir1.comparable(&dir1).await);
+        assert!(dir1.comparable(&dir2).await);
+        assert!(!dir1.comparable(&file2).await);
+        assert!(!dir2.comparable(&invalid).await);
+        assert!(file1.comparable(&file3).await);
+        assert!(!file1.comparable(&file2).await);
+        assert!(!file1.comparable(&invalid).await);
     }
 }

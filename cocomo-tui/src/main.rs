@@ -69,15 +69,29 @@ use color_eyre::Report;
 
 use crate::app::App;
 
-fn check_args(
+async fn check_args(
     args: &CmdLineArgs,
 ) -> Result<(Option<FSItem>, Option<FSItem>), Report> {
-    let left_item = args.left.as_ref().map(|path| FSItem::new(path.as_path()));
-    let right_item =
-        args.right.as_ref().map(|path| FSItem::new(path.as_path()));
-    let left_item_type = left_item.as_ref().map(|item| item.final_item_type());
-    let right_item_type =
-        right_item.as_ref().map(|item| item.final_item_type());
+    let left_item = if let Some(path) = &args.left {
+        Some(FSItem::new(path).await)
+    } else {
+        None
+    };
+    let right_item = if let Some(path) = &args.right {
+        Some(FSItem::new(path).await)
+    } else {
+        None
+    };
+    let left_item_type = if let Some(item) = left_item.as_ref() {
+        Some(item.final_item_type().await)
+    } else {
+        None
+    };
+    let right_item_type = if let Some(item) = right_item.as_ref() {
+        Some(item.final_item_type().await)
+    } else {
+        None
+    };
     let err_report = match (&left_item_type, &right_item_type) {
         (
             Some(FSItemType::Invalid { cause: left_cause }),
@@ -116,11 +130,12 @@ fn check_args(
         ) => (!left_item
             .as_ref()
             .unwrap()
-            .comparable(right_item.as_ref().unwrap()))
-        .then_some(Report::msg(format!(
-            "Can't compare files of different type:\n'{}' <> '{}'.",
-            left_file_type, right_file_type
-        ))),
+            .comparable(right_item.as_ref().unwrap())
+            .await)
+            .then_some(Report::msg(format!(
+                "Can't compare files of different type:\n'{}' <> '{}'.",
+                left_file_type, right_file_type
+            ))),
         _ => Some(Report::msg(format!(
             "Can't compare a {} and a {}.",
             // save to unwrap here
@@ -135,7 +150,7 @@ fn check_args(
 async fn main() -> Result<(), Report> {
     color_eyre::install()?;
     let args = CmdLineArgs::get();
-    let (left, right) = check_args(&args)?;
+    let (left, right) = check_args(&args).await?;
     let app = App::new(left, right);
     let terminal = ratatui::init();
     let result = app.run(terminal).await;
