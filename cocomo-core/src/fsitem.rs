@@ -10,8 +10,8 @@
 //! # File System Item Module (`fsitem`)
 //!
 //! This module provides a unified abstraction for different types of file
-//! system entries, including regular files, directories, and symbolic links. It
-//! wraps low-level metadata and extends it with MIME type detection and
+//! system entries, including regular files, directories, and symbolic links.
+//! It wraps low-level metadata and extends it with MIME type detection and
 //! convenient accessors.
 //!
 //! ## Overview
@@ -39,7 +39,7 @@
 //!   comparison only between entries of compatible types (e.g., same MIME type
 //!   for files).`
 
-use std::{fmt, fs, path};
+use std::{ffi, fmt, fs, path};
 
 use mimetype_detector::{detect_file, MimeType};
 use tokio::{fs as async_fs, io};
@@ -118,7 +118,7 @@ impl fmt::Display for FSItemType {
 #[derive(Clone, Debug)]
 pub struct FSItem {
     item_type: FSItemType,
-    name: String,
+    name: ffi::OsString,
     path: path::PathBuf,
     metadata: Option<fs::Metadata>,
 }
@@ -127,8 +127,8 @@ impl FSItem {
     /// Creates a new `FSItem` from the given path.
     ///
     /// Reads metadata for the entry, detects its type (file, directory or
-    /// symlink), and determines the MIME type for files. Returns an FSItem with
-    /// FSItemType::Invalid if the path does not exist or is of an
+    /// symlink), and determines the MIME type for files. Returns an FSItem
+    /// with FSItemType::Invalid if the path does not exist or is of an
     /// unsupported type.
     pub async fn new<P: AsRef<path::Path>>(path: P) -> Self {
         let path = path.as_ref();
@@ -146,11 +146,7 @@ impl FSItem {
                     },
                     _ => FSItemType::Special,
                 },
-                name: path
-                    .file_name()
-                    .unwrap_or(path.as_os_str())
-                    .to_string_lossy()
-                    .into(),
+                name: path.file_name().unwrap_or(path.as_os_str()).into(),
                 path: path.to_path_buf(),
                 metadata: Some(meta),
             },
@@ -158,11 +154,7 @@ impl FSItem {
                 item_type: FSItemType::Invalid {
                     cause: error.kind(),
                 },
-                name: path
-                    .file_name()
-                    .unwrap_or(path.as_os_str())
-                    .to_string_lossy()
-                    .into(),
+                name: path.file_name().unwrap_or(path.as_os_str()).into(),
                 path: path.to_path_buf(),
                 metadata: None,
             },
@@ -183,7 +175,7 @@ impl FSItem {
 
     #[inline(always)]
     /// Returns the name of this file system item (basename of its path).
-    pub fn name(&self) -> &str {
+    pub fn name(&self) -> &ffi::OsString {
         &self.name
     }
 
@@ -228,7 +220,8 @@ impl FSItem {
         match self.item_type() {
             FSItemType::SymLink { target: path } => {
                 let mut current_path = path.to_path_buf();
-                // Follow symlinks until we reach a non-symlink or a broken link
+                // Follow symlinks until we reach a non-symlink or a broken
+                // link
                 while let Ok(link_target) =
                     async_fs::read_link(&current_path).await
                 {
