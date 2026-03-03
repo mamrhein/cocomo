@@ -41,33 +41,15 @@
 
 use std::{ffi, fmt, fs, path};
 
-use mimetype_detector::{detect_file, MimeType};
+use mimetype_detector::{detect_file, MimeKind};
 use tokio::{fs as async_fs, io};
 
-pub type MediaType = &'static MimeType;
-
-// MIME types not supported by mimetype_detector
-// const INODE: MimeKind = MimeKind(1 << 31);
-const INODE_DIR: &str = "inode/directory";
-static DIRECTORY: MediaType =
-    &MimeType::new(INODE_DIR, "Directory", "", |_p| false, &[]);
-const INODE_SYMLINK: &str = "inode/symlink";
-static SYMLINK: MediaType =
-    &MimeType::new(INODE_SYMLINK, "Symbolic link", "", |_p| false, &[]);
-const INODE_SPECIAL: &str = "inode/special";
-static SPECIAL: MediaType =
-    &MimeType::new(INODE_SPECIAL, "Special inode", "", |_p| false, &[]);
-const INVALID_MIME: &str = "<invalid>";
-static INVALID: MediaType =
-    &MimeType::new(INVALID_MIME, INVALID_MIME, "", |_p| false, &[]);
-const UNKNOWN_MIME: &str = "<unknown>";
-static UNKNOWN: MediaType =
-    &MimeType::new(UNKNOWN_MIME, UNKNOWN_MIME, "", |_p| false, &[]);
+pub type FileType = MimeKind;
 
 #[derive(Clone)]
 pub enum FSItemType {
     Directory,
-    File { file_type: MediaType },
+    File { file_type: FileType },
     SymLink { target: path::PathBuf },
     Special,
     Invalid { cause: io::ErrorKind },
@@ -76,19 +58,6 @@ pub enum FSItemType {
 const BROKEN_LINK: FSItemType = FSItemType::SymLink {
     target: path::PathBuf::new(),
 };
-
-impl FSItemType {
-    /// Returns the MIME type string representing this item type.
-    pub fn media_type(&self) -> MediaType {
-        match self {
-            FSItemType::Directory => DIRECTORY,
-            FSItemType::File { file_type } => file_type,
-            FSItemType::SymLink { .. } => SYMLINK,
-            FSItemType::Special => SPECIAL,
-            FSItemType::Invalid { .. } => INVALID,
-        }
-    }
-}
 
 impl fmt::Debug for FSItemType {
     fn fmt(&self, form: &mut fmt::Formatter) -> fmt::Result {
@@ -137,7 +106,8 @@ impl FSItem {
                 item_type: match &meta {
                     m if m.is_dir() => FSItemType::Directory,
                     m if m.is_file() => FSItemType::File {
-                        file_type: detect_file(&path).unwrap_or(UNKNOWN),
+                        file_type: detect_file(&path)
+                            .map_or_else(|_| MimeKind::UNKNOWN, |t| t.kind()),
                     },
                     m if m.is_symlink() => FSItemType::SymLink {
                         target: async_fs::read_link(&path)
@@ -169,8 +139,11 @@ impl FSItem {
 
     #[inline(always)]
     /// Returns the MIME type string for this item.
-    pub fn media_type(&self) -> MediaType {
-        self.item_type.media_type()
+    pub fn file_type(&self) -> Option<FileType> {
+        match self.item_type {
+            FSItemType::File { file_type } => Some(file_type),
+            _ => None,
+        }
     }
 
     #[inline(always)]
@@ -271,7 +244,7 @@ impl FSItem {
                 FSItemType::File {
                     file_type: right_file_type,
                 },
-            ) => left_file_type.kind() == right_file_type.kind(),
+            ) => left_file_type == right_file_type,
             _ => false,
         }
     }
@@ -286,7 +259,7 @@ mod tests {
         let dir = FSItem::new("../target").await;
         assert!(dir.is_dir());
         assert_eq!(dir.name(), "target");
-        assert_eq!(dir.media_type().mime(), INODE_DIR);
+        assert!(dir.file_type().is_none());
     }
 
     #[tokio::test]
@@ -294,7 +267,7 @@ mod tests {
         let file = FSItem::new("./Cargo.toml").await;
         assert!(file.is_file());
         assert_eq!(file.name(), "Cargo.toml");
-        assert_eq!(file.media_type().mime(), "application/toml");
+        assert_eq!(file.file_type().unwrap(), FileType::TEXT);
     }
 
     #[cfg(target_family = "unix")]
@@ -303,9 +276,9 @@ mod tests {
         let link = FSItem::new("/usr/lib/libzstd.so").await;
         assert!(link.is_link());
         assert_eq!(link.name(), "libzstd.so");
-        assert_eq!(link.media_type().mime(), INODE_SYMLINK);
         let file = link.unlink().await;
         assert!(file.is_file());
+        assert_eq!(file.file_type().unwrap(), FileType::EXECUTABLE);
     }
 
     #[tokio::test]
