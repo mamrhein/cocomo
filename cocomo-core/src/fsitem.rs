@@ -218,14 +218,21 @@ impl FSItem {
     /// with an error.
     pub async fn unlink(&self) -> FSItem {
         match self.item_type() {
-            FSItemType::SymLink { target: path } => {
-                let mut current_path = path.to_path_buf();
+            FSItemType::SymLink { target } => {
+                let mut current_path = self
+                    .path()
+                    .parent()
+                    .unwrap_or_else(|| path::Path::new(""))
+                    .join(target);
                 // Follow symlinks until we reach a non-symlink or a broken
                 // link
                 while let Ok(link_target) =
                     async_fs::read_link(&current_path).await
                 {
-                    current_path = link_target;
+                    current_path = current_path
+                        .parent()
+                        .unwrap_or_else(|| path::Path::new(""))
+                        .join(link_target);
                 }
                 FSItem::new(&current_path).await
             }
@@ -297,6 +304,8 @@ mod tests {
         assert!(link.is_link());
         assert_eq!(link.name(), "libzstd.so");
         assert_eq!(link.media_type().mime(), INODE_SYMLINK);
+        let file = link.unlink().await;
+        assert!(file.is_file());
     }
 
     #[tokio::test]
