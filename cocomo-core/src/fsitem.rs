@@ -219,10 +219,12 @@ impl FSItem {
     /// links, follows the chain transitively to determine the final
     /// target's type; for broken links returns a placeholder representing a
     /// symlink with empty path.
-    pub async fn final_item_type(&self) -> FSItemType {
+    pub async fn final_item_type(&self) -> Cow<'_, FSItemType> {
         match self.item_type() {
-            FSItemType::SymLink { .. } => self.unlink().await.item_type,
-            _ => self.item_type.clone(),
+            FSItemType::SymLink { .. } => {
+                Cow::Owned(self.unlink().await.item_type.clone())
+            }
+            _ => Cow::Borrowed(&self.item_type),
         }
     }
 
@@ -235,7 +237,10 @@ impl FSItem {
     pub async fn comparable(&self, other: &FSItem) -> bool {
         let self_final_item_type = self.final_item_type().await;
         let other_final_item_type = other.final_item_type().await;
-        match (self_final_item_type, other_final_item_type) {
+        match (
+            self_final_item_type.as_ref(),
+            other_final_item_type.as_ref(),
+        ) {
             (FSItemType::Directory, FSItemType::Directory) => true,
             (
                 FSItemType::File {

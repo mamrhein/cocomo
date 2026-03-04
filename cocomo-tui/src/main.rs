@@ -83,12 +83,12 @@ async fn check_args(
         None
     };
     let left_item_type = if let Some(item) = left_item.as_ref() {
-        Some(item.final_item_type().await)
+        Some(item.final_item_type().await.into_owned())
     } else {
         None
     };
     let right_item_type = if let Some(item) = right_item.as_ref() {
-        Some(item.final_item_type().await)
+        Some(item.final_item_type().await.into_owned())
     } else {
         None
     };
