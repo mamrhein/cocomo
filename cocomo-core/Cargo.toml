@@ -13,5 +13,6 @@ keywords = ["directory", "file", "compare", "copy", "move"]
 categories = ["command-line-utilities", "filesystem"]
 
 [dependencies]
+chrono = "0.4.44"
 mimetype-detector = "0.3.5"
 tokio = { version = "1.49.0", features = ["fs", "io-util", "macros", "rt-multi-thread"] }

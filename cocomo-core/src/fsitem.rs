@@ -41,6 +41,7 @@
 
 use std::{borrow::Cow, ffi, fmt, fs, path};
 
+use chrono::{DateTime, Local};
 use mimetype_detector::{detect_file, MimeKind};
 use tokio::{fs as async_fs, io};
 
@@ -162,6 +163,10 @@ impl FSItem {
     /// Returns a reference to the raw `fs::Metadata` for this item.
     pub fn metadata(&self) -> &Option<fs::Metadata> {
         &self.metadata
+    }
+
+    pub fn modified(&self) -> Option<DateTime<Local>> {
+        Some(self.metadata().as_ref()?.modified().ok()?.into())
     }
 
     #[inline(always)]
