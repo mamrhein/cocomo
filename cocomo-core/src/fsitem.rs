@@ -39,7 +39,7 @@
 //!   comparison only between entries of compatible types (e.g., same MIME type
 //!   for files).`
 
-use std::{ffi, fmt, fs, path};
+use std::{borrow::Cow, ffi, fmt, fs, path};
 
 use mimetype_detector::{detect_file, MimeKind};
 use tokio::{fs as async_fs, io};
@@ -189,7 +189,7 @@ impl FSItem {
     /// Note: This method does not check if the ultimate target exists; for
     /// broken symlinks it will try to access the nonexistent path and fail
     /// with an error.
-    pub async fn unlink(&self) -> FSItem {
+    pub async fn unlink(&self) -> Cow<'_, Self> {
         match self.item_type() {
             FSItemType::SymLink { target } => {
                 let mut current_path = self
@@ -207,9 +207,9 @@ impl FSItem {
                         .unwrap_or_else(|| path::Path::new(""))
                         .join(link_target);
                 }
-                FSItem::new(&current_path).await
+                Cow::Owned(FSItem::new(&current_path).await)
             }
-            _ => self.clone(),
+            _ => Cow::Borrowed(&self),
         }
     }
 
