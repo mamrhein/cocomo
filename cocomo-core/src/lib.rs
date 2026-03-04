@@ -9,7 +9,8 @@
 
 #![allow(dead_code)]
 
-mod dirtree;
+mod dirdiff;
 mod fsitem;
+mod readdir;
 
 pub use fsitem::{FSItem, FSItemType};

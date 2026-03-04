@@ -1,0 +1,213 @@
+// ---------------------------------------------------------------------------
+// Copyright:   (c) 2026 ff. Michael Amrhein (michael@adrhinum.de)
+// License:     This program is part of a larger application. For license
+//              details please read the file LICENSE.TXT provided together
+//              with the application.
+// ---------------------------------------------------------------------------
+// $Source$
+// $Revision$
+
+use std::{cmp, ffi, io};
+
+use crate::{fsitem::FSItem, readdir::read_dir};
+
+const EMPTY: &ffi::OsString = &ffi::OsString::new();
+
+#[derive(Copy, Clone, Debug)]
+pub(crate) enum DiffSide {
+    Left,
+    Right,
+}
+
+#[derive(Copy, Clone, Debug)]
+pub(crate) enum By {
+    Metadata,
+    Content,
+}
+
+#[derive(Copy, Clone, Debug)]
+pub(crate) enum DiffItemType {
+    LeftOnly,
+    RightOnly,
+    Different { newer: Option<DiffSide> },
+    Same { by: By },
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct DiffItem {
+    diff_item_type: DiffItemType,
+    left_item: Option<FSItem>,
+    right_item: Option<FSItem>,
+}
+
+impl DiffItem {
+    pub(crate) fn new(
+        left_item: &Option<FSItem>,
+        right_item: &Option<FSItem>,
+    ) -> io::Result<Self> {
+        match (left_item, right_item) {
+            (Some(left), Some(right)) => Ok(Self {
+                diff_item_type: match (left.metadata(), right.metadata()) {
+                    (None, _) | (_, None) => {
+                        DiffItemType::Different { newer: None }
+                    }
+                    (Some(left_meta), Some(right_meta)) => {
+                        match (left_meta.modified(), right_meta.modified()) {
+                            (Ok(left_time), Ok(right_time)) => match left_time
+                                .cmp(&right_time)
+                            {
+                                cmp::Ordering::Less => {
+                                    DiffItemType::Different {
+                                        newer: Some(DiffSide::Right),
+                                    }
+                                }
+                                cmp::Ordering::Greater => {
+                                    DiffItemType::Different {
+                                        newer: Some(DiffSide::Left),
+                                    }
+                                }
+                                _ => {
+                                    if left_meta.len() == right_meta.len() {
+                                        DiffItemType::Same { by: By::Metadata }
+                                    } else {
+                                        DiffItemType::Different { newer: None }
+                                    }
+                                }
+                            },
+                            _ => DiffItemType::Different { newer: None },
+                        }
+                    }
+                },
+                left_item: left_item.clone(),
+                right_item: right_item.clone(),
+            }),
+            (Some(..), None) => Ok(Self {
+                diff_item_type: DiffItemType::LeftOnly,
+                left_item: left_item.clone(),
+                right_item: right_item.clone(),
+            }),
+            (None, Some(..)) => Ok(Self {
+                diff_item_type: DiffItemType::RightOnly,
+                left_item: left_item.clone(),
+                right_item: right_item.clone(),
+            }),
+            _ => Err(io::Error::new(
+                io::ErrorKind::Other,
+                "Internal error: both sides of diff item empty.",
+            )),
+        }
+    }
+
+    pub(crate) fn name(&self) -> &ffi::OsString {
+        if let Some(left_item) = &self.left_item {
+            return left_item.name();
+        }
+        if let Some(right_item) = &self.right_item {
+            return right_item.name();
+        }
+        // should never happen
+        &EMPTY
+    }
+
+    pub(crate) fn left_newer(&self) -> bool {
+        matches!(
+            self.diff_item_type,
+            DiffItemType::Different {
+                newer: Some(DiffSide::Left)
+            }
+        )
+    }
+
+    pub(crate) fn right_newer(&self) -> bool {
+        matches!(
+            self.diff_item_type,
+            DiffItemType::Different {
+                newer: Some(DiffSide::Right)
+            }
+        )
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct DirDiff {
+    left_dir: FSItem,
+    right_dir: FSItem,
+    items: Vec<DiffItem>,
+}
+
+#[inline]
+fn cmp_items(a: &FSItem, b: &FSItem) -> cmp::Ordering {
+    (!a.is_dir(), a.name()).cmp(&(!b.is_dir(), b.name()))
+}
+
+impl DirDiff {
+    pub(crate) async fn new(
+        left_dir: &FSItem,
+        right_dir: &FSItem,
+    ) -> io::Result<Self> {
+        // debug_assert!(left_dir.is_dir());
+        // debug_assert!(right_dir.is_dir());
+        let mut left_items = read_dir(left_dir).await?;
+        let mut right_items = read_dir(right_dir).await?;
+        left_items.sort_by(|a, b| cmp_items(b, a));
+        right_items.sort_by(|a, b| cmp_items(b, a));
+        let mut diff_items: Vec<DiffItem> = Vec::new();
+        let mut left_item = left_items.pop();
+        let mut right_item = right_items.pop();
+        loop {
+            match (&left_item, &right_item) {
+                (Some(left), Some(right)) => match cmp_items(left, right) {
+                    cmp::Ordering::Equal => {
+                        diff_items
+                            .push(DiffItem::new(&left_item, &right_item)?);
+                        left_item = left_items.pop();
+                        right_item = right_items.pop();
+                    }
+                    cmp::Ordering::Less => {
+                        diff_items.push(DiffItem::new(&left_item, &None)?);
+                        left_item = left_items.pop();
+                    }
+                    cmp::Ordering::Greater => {
+                        diff_items.push(DiffItem::new(&None, &right_item)?);
+                        right_item = right_items.pop();
+                    }
+                },
+                (Some(..), None) => {
+                    diff_items.push(DiffItem::new(&left_item, &right_item)?);
+                    left_item = left_items.pop();
+                }
+                (None, Some(..)) => {
+                    diff_items.push(DiffItem::new(&left_item, &right_item)?);
+                    right_item = right_items.pop();
+                }
+                _ => {
+                    break;
+                }
+            }
+        }
+        Ok(Self {
+            left_dir: left_dir.clone(),
+            right_dir: right_dir.clone(),
+            items: diff_items,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn test_dirdiff() {
+        let path1 = path::Path::new("../cocomo-core");
+        let dir1 = FSItem::new(path1).await;
+        let path2 = path::Path::new("../cocomo-tui");
+        let dir2 = FSItem::new(path2).await;
+        let diff = DirDiff::new(&dir1, &dir2)
+            .await
+            .expect("Error creating diff");
+        assert!(diff.items.len() > 0);
+    }
+}
