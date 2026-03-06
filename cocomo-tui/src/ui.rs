@@ -13,7 +13,7 @@ use ratatui::{
     widgets::{Paragraph, Widget},
 };
 
-use crate::{app::App, dirview::DirView};
+use crate::app::App;
 
 impl Widget for &App {
     /// Renders the user interface widgets.
@@ -34,12 +34,12 @@ impl Widget for &App {
             .render(key_bar, buf);
 
         // Render items if available
-        if let Some(diff) = &self.diff {
-            DirView {
-                diff,
-                selected: self.selected,
+        if let Some(view) = self.current_view() {
+            match view {
+                crate::app::AppView::Dir(dir_view) => {
+                    dir_view.render(main_view, buf);
+                }
             }
-            .render(main_view, buf);
         }
     }
 }

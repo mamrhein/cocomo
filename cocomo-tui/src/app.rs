@@ -14,13 +14,23 @@ use ratatui::{
 };
 
 /// Holds the state and application logic.
-use crate::event::{AppEvent, Event, EventHandler};
+use crate::{
+    dirview::DirView,
+    event::{AppEvent, Event, EventHandler},
+};
 
 /// Compare items
 #[derive(Debug, Default)]
 pub(crate) struct CmpItems {
     pub left: Option<FSItem>,
     pub right: Option<FSItem>,
+}
+
+/// Views available in the application.
+#[derive(Debug)]
+pub(crate) enum AppView {
+    /// Directory comparison view.
+    Dir(DirView),
 }
 
 /// Application.
@@ -32,10 +42,10 @@ pub(crate) struct App {
     pub cmp_items: CmpItems,
     /// Event handler.
     pub events: EventHandler,
-    /// Comparison result
-    pub diff: Option<DirDiff>,
-    /// Selected item index
-    pub selected: usize,
+    /// List of views
+    pub views: Vec<AppView>,
+    /// Index of the active view
+    pub active_view: usize,
 }
 
 impl Default for App {
@@ -44,8 +54,8 @@ impl Default for App {
             running: true,
             cmp_items: CmpItems::default(),
             events: EventHandler::new(),
-            diff: None,
-            selected: 0,
+            views: Vec::new(),
+            active_view: 0,
         }
     }
 }
@@ -54,8 +64,9 @@ impl App {
     /// Constructs a new instance of [`App`].
     #[must_use]
     pub async fn new(left: Option<FSItem>, right: Option<FSItem>) -> Self {
-        let mut diff = None;
+        let mut views = Vec::new();
         if let (Some(l), Some(r)) = (&left, &right) {
+            let mut diff = None;
             if l.is_dir() && r.is_dir() {
                 diff = DirDiff::new(l, r).await.ok();
             } else if l.is_file() && r.is_file() {
@@ -67,14 +78,27 @@ impl App {
                     });
                 }
             }
+            if let Some(d) = diff {
+                views.push(AppView::Dir(DirView::new(d)));
+            }
         }
         Self {
             running: true,
             cmp_items: CmpItems { left, right },
             events: EventHandler::new(),
-            diff,
-            selected: 0,
+            views,
+            active_view: 0,
         }
+    }
+
+    /// Returns the active view.
+    pub fn current_view(&self) -> Option<&AppView> {
+        self.views.get(self.active_view)
+    }
+
+    /// Returns a mutable reference to the active view.
+    pub fn current_view_mut(&mut self) -> Option<&mut AppView> {
+        self.views.get_mut(self.active_view)
     }
 
     /// Run the application's main loop.
@@ -126,24 +150,23 @@ impl App {
                 self.events.send(AppEvent::Quit);
             }
             KeyCode::Up | KeyCode::Char('k') => {
-                self.selected = self.selected.saturating_sub(1);
+                if let Some(AppView::Dir(view)) = self.current_view_mut() {
+                    view.move_up();
+                }
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                if let Some(diff) = &self.diff {
-                    if !diff.items.is_empty() {
-                        self.selected = (self.selected + 1)
-                            .min(diff.items.len().saturating_sub(1));
-                    }
+                if let Some(AppView::Dir(view)) = self.current_view_mut() {
+                    view.move_down();
                 }
             }
             KeyCode::Home => {
-                self.selected = 0;
+                if let Some(AppView::Dir(view)) = self.current_view_mut() {
+                    view.move_home();
+                }
             }
             KeyCode::End => {
-                if let Some(diff) = &self.diff {
-                    if !diff.items.is_empty() {
-                        self.selected = diff.items.len().saturating_sub(1);
-                    }
+                if let Some(AppView::Dir(view)) = self.current_view_mut() {
+                    view.move_end();
                 }
             }
             _ => {}

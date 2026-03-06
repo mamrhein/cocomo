@@ -17,14 +17,47 @@ use ratatui::{
 
 /// View for displaying directory comparison results.
 #[derive(Debug)]
-pub struct DirView<'a> {
+pub struct DirView {
     /// The comparison results.
-    pub diff: &'a DirDiff,
+    pub diff: DirDiff,
     /// The index of the selected item.
     pub selected: usize,
 }
 
-impl Widget for DirView<'_> {
+impl DirView {
+    /// Creates a new `DirView` with the given comparison results.
+    #[must_use]
+    pub const fn new(diff: DirDiff) -> Self {
+        Self { diff, selected: 0 }
+    }
+
+    /// Moves the selection up by one item.
+    pub fn move_up(&mut self) {
+        self.selected = self.selected.saturating_sub(1);
+    }
+
+    /// Moves the selection down by one item.
+    pub fn move_down(&mut self) {
+        if !self.diff.items.is_empty() {
+            self.selected = (self.selected + 1)
+                .min(self.diff.items.len().saturating_sub(1));
+        }
+    }
+
+    /// Moves the selection to the first item.
+    pub fn move_home(&mut self) {
+        self.selected = 0;
+    }
+
+    /// Moves the selection to the last item.
+    pub fn move_end(&mut self) {
+        if !self.diff.items.is_empty() {
+            self.selected = self.diff.items.len().saturating_sub(1);
+        }
+    }
+}
+
+impl Widget for &DirView {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let horiz_constraints = [
             Constraint::Min(3),
