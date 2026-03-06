@@ -203,14 +203,20 @@ impl FSItem {
                     .unwrap_or_else(|| path::Path::new(""))
                     .join(target);
                 // Follow symlinks until we reach a non-symlink or a broken
-                // link
-                while let Ok(link_target) =
-                    async_fs::read_link(&current_path).await
-                {
-                    current_path = current_path
-                        .parent()
-                        .unwrap_or_else(|| path::Path::new(""))
-                        .join(link_target);
+                // link, with a limit to avoid infinite loops
+                let mut hops = 0;
+                while hops < 32 {
+                    if let Ok(link_target) =
+                        async_fs::read_link(&current_path).await
+                    {
+                        current_path = current_path
+                            .parent()
+                            .unwrap_or_else(|| path::Path::new(""))
+                            .join(link_target);
+                        hops += 1;
+                    } else {
+                        break;
+                    }
                 }
                 Cow::Owned(FSItem::new(&current_path).await)
             }
