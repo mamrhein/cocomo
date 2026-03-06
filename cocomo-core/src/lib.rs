@@ -9,8 +9,9 @@
 
 #![allow(dead_code)]
 
-mod dirdiff;
+pub mod dirdiff;
 mod fsitem;
 mod readdir;
 
+pub use dirdiff::{By, DiffItem, DiffItemType, DiffSide, DirDiff};
 pub use fsitem::{FSItem, FSItemType};

@@ -13,20 +13,20 @@ use crate::{fsitem::FSItem, readdir::read_dir};
 
 const EMPTY: &ffi::OsString = &ffi::OsString::new();
 
-#[derive(Copy, Clone, Debug)]
-pub(crate) enum DiffSide {
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub enum DiffSide {
     Left,
     Right,
 }
 
-#[derive(Copy, Clone, Debug)]
-pub(crate) enum By {
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub enum By {
     Metadata,
     Content,
 }
 
-#[derive(Copy, Clone, Debug)]
-pub(crate) enum DiffItemType {
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub enum DiffItemType {
     LeftOnly,
     RightOnly,
     Different { newer: Option<DiffSide> },
@@ -34,14 +34,14 @@ pub(crate) enum DiffItemType {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct DiffItem {
-    diff_item_type: DiffItemType,
-    left_item: Option<FSItem>,
-    right_item: Option<FSItem>,
+pub struct DiffItem {
+    pub diff_item_type: DiffItemType,
+    pub left_item: Option<FSItem>,
+    pub right_item: Option<FSItem>,
 }
 
 impl DiffItem {
-    pub(crate) fn new(
+    pub fn new(
         left_item: &Option<FSItem>,
         right_item: &Option<FSItem>,
     ) -> io::Result<Self> {
@@ -98,7 +98,7 @@ impl DiffItem {
         }
     }
 
-    pub(crate) fn name(&self) -> &ffi::OsString {
+    pub fn name(&self) -> &ffi::OsString {
         if let Some(left_item) = &self.left_item {
             return left_item.name();
         }
@@ -109,7 +109,7 @@ impl DiffItem {
         &EMPTY
     }
 
-    pub(crate) fn left_newer(&self) -> bool {
+    pub fn left_newer(&self) -> bool {
         matches!(
             self.diff_item_type,
             DiffItemType::Different {
@@ -118,7 +118,7 @@ impl DiffItem {
         )
     }
 
-    pub(crate) fn right_newer(&self) -> bool {
+    pub fn right_newer(&self) -> bool {
         matches!(
             self.diff_item_type,
             DiffItemType::Different {
@@ -129,10 +129,10 @@ impl DiffItem {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct DirDiff {
-    left_dir: FSItem,
-    right_dir: FSItem,
-    items: Vec<DiffItem>,
+pub struct DirDiff {
+    pub left_dir: FSItem,
+    pub right_dir: FSItem,
+    pub items: Vec<DiffItem>,
 }
 
 #[inline]
@@ -141,7 +141,7 @@ fn cmp_items(a: &FSItem, b: &FSItem) -> cmp::Ordering {
 }
 
 impl DirDiff {
-    pub(crate) async fn new(
+    pub async fn new(
         left_dir: &FSItem,
         right_dir: &FSItem,
     ) -> io::Result<Self> {
