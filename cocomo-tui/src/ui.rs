@@ -7,14 +7,13 @@
 // $Source$
 // $Revision$
 
-/// Renders the widgets / UI.
 use ratatui::{
     buffer::Buffer,
     layout::{Constraint, Layout, Rect},
-    widgets::{Block, Paragraph, Widget},
+    widgets::{Paragraph, Widget},
 };
 
-use crate::app::App;
+use crate::{app::App, dirview::DirView};
 
 impl Widget for &App {
     /// Renders the user interface widgets.
@@ -27,34 +26,20 @@ impl Widget for &App {
         ];
         let [menu_bar, main_view, key_bar] =
             Layout::vertical(vert_constraints).areas(area);
-        let horiz_constraints = [
-            Constraint::Min(3),
-            Constraint::Length(1),
-            Constraint::Min(3),
-        ];
-        let [left, mid, right] =
-            Layout::horizontal(horiz_constraints).areas(main_view);
-        // Create widgets
-        let menu = Paragraph::new("Menu").left_aligned();
-        let key_hints = Paragraph::new("q: quit").left_aligned();
-        let left_path = self
-            .cmp_items
-            .left
-            .as_ref()
-            .map_or("<empty>", |item| item.path().to_str().unwrap());
-        let left_view = Block::bordered().title(left_path);
-        let indicator_column = Block::default();
-        let right_path = self
-            .cmp_items
-            .right
-            .as_ref()
-            .map_or("<empty>", |item| item.path().to_str().unwrap());
-        let right_view = Block::bordered().title(right_path);
-        // Render widgets
-        menu.render(menu_bar, buf);
-        key_hints.render(key_bar, buf);
-        left_view.render(left, buf);
-        indicator_column.render(mid, buf);
-        right_view.render(right, buf);
+
+        // Render menu and key hints
+        Paragraph::new("Menu").left_aligned().render(menu_bar, buf);
+        Paragraph::new("q: quit | ↑/↓: navigate | Home/End: top/bottom")
+            .left_aligned()
+            .render(key_bar, buf);
+
+        // Render items if available
+        if let Some(diff) = &self.diff {
+            DirView {
+                diff,
+                selected: self.selected,
+            }
+            .render(main_view, buf);
+        }
     }
 }
