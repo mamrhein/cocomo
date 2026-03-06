@@ -16,3 +16,7 @@ categories = ["command-line-utilities", "filesystem"]
 chrono = "0.4.44"
 mimetype-detector = "0.3.5"
 tokio = { version = "1.49.0", features = ["fs", "io-util", "macros", "rt-multi-thread"] }
+
+[dev-dependencies]
+tempfile = "3"
+filetime = "0.2"
