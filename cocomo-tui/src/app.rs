@@ -17,6 +17,7 @@ use ratatui::{
 use crate::{
     dirview::DirView,
     event::{AppEvent, Event, EventHandler},
+    fileview::FileView,
 };
 
 /// Compare items
@@ -31,6 +32,8 @@ pub(crate) struct CmpItems {
 pub(crate) enum AppView {
     /// Directory comparison view.
     Dir(DirView),
+    /// File comparison view.
+    File(FileView),
 }
 
 /// Application.
@@ -46,6 +49,8 @@ pub(crate) struct App {
     pub views: Vec<AppView>,
     /// Index of the active view
     pub active_view: usize,
+    /// Should we show a quit confirmation?
+    pub show_quit_confirm: bool,
 }
 
 impl Default for App {
@@ -56,6 +61,7 @@ impl Default for App {
             events: EventHandler::new(),
             views: Vec::new(),
             active_view: 0,
+            show_quit_confirm: false,
         }
     }
 }
@@ -88,6 +94,7 @@ impl App {
             events: EventHandler::new(),
             views,
             active_view: 0,
+            show_quit_confirm: false,
         }
     }
 
@@ -125,6 +132,23 @@ impl App {
                 },
                 Event::App(app_event) => match app_event {
                     AppEvent::Quit => self.quit(),
+                    AppEvent::CloseTab => self.close_tab(),
+                    AppEvent::OpenDiff(left, right) => {
+                        if let (Some(l), Some(r)) = (left, right) {
+                            if l.is_dir() && r.is_dir() {
+                                if let Ok(d) = DirDiff::new(&l, &r).await {
+                                    self.views
+                                        .push(AppView::Dir(DirView::new(d)));
+                                    self.active_view = self.views.len() - 1;
+                                }
+                            } else if l.is_file() && r.is_file() {
+                                // For now, we assume it's a text file
+                                let view = FileView::new(l, r).await;
+                                self.views.push(AppView::File(view));
+                                self.active_view = self.views.len() - 1;
+                            }
+                        }
+                    }
                 },
             }
         }
@@ -140,9 +164,24 @@ impl App {
         &mut self,
         key_event: KeyEvent,
     ) -> color_eyre::Result<()> {
+        if self.show_quit_confirm {
+            match key_event.code {
+                KeyCode::Char('y' | 'Y') => {
+                    self.quit();
+                }
+                KeyCode::Char('n' | 'N') | KeyCode::Esc => {
+                    self.show_quit_confirm = false;
+                }
+                _ => {}
+            }
+            return Ok(());
+        }
         match key_event.code {
             KeyCode::Esc | KeyCode::Char('q') => {
                 self.events.send(AppEvent::Quit);
+            }
+            KeyCode::Char('x' | 'X') => {
+                self.events.send(AppEvent::CloseTab);
             }
             KeyCode::Char('c' | 'C')
                 if key_event.modifiers == KeyModifiers::CONTROL =>
@@ -169,6 +208,37 @@ impl App {
                     view.move_end();
                 }
             }
+            KeyCode::Enter => {
+                let mut open_diff = None;
+                if let Some(AppView::Dir(view)) = self.current_view_mut() {
+                    if let Some(i) = view.table_state.borrow().selected() {
+                        if let Some(item) = view.diff.items.get(i) {
+                            open_diff = Some((
+                                item.left_item.clone(),
+                                item.right_item.clone(),
+                            ));
+                        }
+                    }
+                }
+                if let Some((left, right)) = open_diff {
+                    self.events.send(AppEvent::OpenDiff(left, right));
+                }
+            }
+            KeyCode::Tab => {
+                if !self.views.is_empty() {
+                    self.active_view =
+                        (self.active_view + 1) % self.views.len();
+                }
+            }
+            KeyCode::BackTab => {
+                if !self.views.is_empty() {
+                    self.active_view = if self.active_view == 0 {
+                        self.views.len() - 1
+                    } else {
+                        self.active_view - 1
+                    };
+                }
+            }
             _ => {}
         }
         Ok(())
@@ -183,7 +253,23 @@ impl App {
     pub const fn tick(&self) {}
 
     /// Set running to false to quit the application.
-    pub const fn quit(&mut self) {
+    pub fn quit(&mut self) {
         self.running = false;
+    }
+
+    /// Closes the current tab.
+    pub fn close_tab(&mut self) {
+        if self.views.is_empty() {
+            self.show_quit_confirm = true;
+            return;
+        }
+        if self.views.len() == 1 {
+            self.show_quit_confirm = true;
+            return;
+        }
+        self.views.remove(self.active_view);
+        if self.active_view >= self.views.len() {
+            self.active_view = self.views.len().saturating_sub(1);
+        }
     }
 }

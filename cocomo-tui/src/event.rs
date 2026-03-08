@@ -7,12 +7,15 @@
 // $Source$
 // $Revision$
 
-/// Handles the terminal events (key press, mouse click, resize, etc.).
+use std::time::Duration;
+
+use cocomo_core::FSItem;
 use color_eyre::eyre::OptionExt;
 use futures::{FutureExt, StreamExt};
 use ratatui::crossterm::event::Event as CrosstermEvent;
-use std::time::Duration;
 use tokio::sync::mpsc;
+
+/// Handles the terminal events (key press, mouse click, resize, etc.).
 
 /// The frequency at which tick events are emitted.
 const TICK_FPS: f64 = 30.0;
@@ -22,9 +25,10 @@ const TICK_FPS: f64 = 30.0;
 pub enum Event {
     /// An event that is emitted on a regular schedule.
     ///
-    /// Use this event to run any code which has to run outside of being a direct response to a user
-    /// event. e.g. polling exernal systems, updating animations, or rendering the UI based on a
-    /// fixed frame rate.
+    /// Use this event to run any code which has to run outside of being a
+    /// direct response to a user event. e.g. polling exernal systems,
+    /// updating animations, or rendering the UI based on a fixed frame
+    /// rate.
     Tick,
     /// Crossterm events.
     ///
@@ -32,7 +36,8 @@ pub enum Event {
     Crossterm(CrosstermEvent),
     /// Application events.
     ///
-    /// Use this event to emit custom events that are specific to your application.
+    /// Use this event to emit custom events that are specific to your
+    /// application.
     App(AppEvent),
 }
 
@@ -43,6 +48,10 @@ pub enum Event {
 pub enum AppEvent {
     /// Quit the application.
     Quit,
+    /// Close the current tab.
+    CloseTab,
+    /// Open a new comparison view.
+    OpenDiff(Option<FSItem>, Option<FSItem>),
 }
 
 /// Terminal event handler.
@@ -55,7 +64,8 @@ pub struct EventHandler {
 }
 
 impl EventHandler {
-    /// Constructs a new instance of [`EventHandler`] and spawns a new thread to handle events.
+    /// Constructs a new instance of [`EventHandler`] and spawns a new thread
+    /// to handle events.
     #[must_use]
     pub fn new() -> Self {
         let (sender, receiver) = mpsc::unbounded_channel();
@@ -70,9 +80,10 @@ impl EventHandler {
     ///
     /// # Errors
     ///
-    /// This function returns an error if the sender channel is disconnected. This can happen if an
-    /// error occurs in the event thread. In practice, this should not happen unless there is a
-    /// problem with the underlying terminal.
+    /// This function returns an error if the sender channel is disconnected.
+    /// This can happen if an error occurs in the event thread. In
+    /// practice, this should not happen unless there is a problem with the
+    /// underlying terminal.
     pub async fn next(&mut self) -> color_eyre::Result<Event> {
         self.receiver
             .recv()
@@ -82,11 +93,11 @@ impl EventHandler {
 
     /// Queue an app event to be sent to the event receiver.
     ///
-    /// This is useful for sending events to the event handler which will be processed by the next
-    /// iteration of the application's event loop.
+    /// This is useful for sending events to the event handler which will be
+    /// processed by the next iteration of the application's event loop.
     pub fn send(&mut self, app_event: AppEvent) {
-        // Ignore the result as the reciever cannot be dropped while this struct still has a
-        // reference to it
+        // Ignore the result as the reciever cannot be dropped while this
+        // struct still has a reference to it
         let _ = self.sender.send(Event::App(app_event));
     }
 }
@@ -97,7 +108,8 @@ impl Default for EventHandler {
     }
 }
 
-/// A thread that handles reading crossterm events and emitting tick events on a regular schedule.
+/// A thread that handles reading crossterm events and emitting tick events on
+/// a regular schedule.
 struct EventTask {
     /// Event sender channel.
     sender: mpsc::UnboundedSender<Event>,
@@ -111,7 +123,8 @@ impl EventTask {
 
     /// Runs the event thread.
     ///
-    /// This function emits tick events at a fixed rate and polls for crossterm events in between.
+    /// This function emits tick events at a fixed rate and polls for crossterm
+    /// events in between.
     async fn run(self) -> color_eyre::Result<()> {
         let tick_rate = Duration::from_secs_f64(1.0 / TICK_FPS);
         let mut reader = crossterm::event::EventStream::new();
@@ -136,8 +149,9 @@ impl EventTask {
 
     /// Sends an event to the receiver.
     fn send(&self, event: Event) {
-        // Ignores the result because shutting down the app drops the receiver, which causes the send
-        // operation to fail. This is expected behavior and should not panic.
+        // Ignores the result because shutting down the app drops the receiver,
+        // which causes the send operation to fail. This is expected
+        // behavior and should not panic.
         let _ = self.sender.send(event);
     }
 }

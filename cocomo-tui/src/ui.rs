@@ -10,10 +10,11 @@
 use ratatui::{
     buffer::Buffer,
     layout::{Constraint, Layout, Rect},
-    widgets::{Paragraph, Widget},
+    style::{Color, Style},
+    widgets::{Paragraph, Tabs, Widget},
 };
 
-use crate::app::App;
+use crate::app::{App, AppView};
 
 impl Widget for &App {
     /// Renders the user interface widgets.
@@ -21,25 +22,82 @@ impl Widget for &App {
         // Create layout
         let vert_constraints = [
             Constraint::Length(1),
-            Constraint::Min(3),
+            Constraint::Length(1),
+            Constraint::Min(0),
             Constraint::Length(1),
         ];
-        let [menu_bar, main_view, key_bar] =
+        let [menu_bar, tab_bar, main_view, key_bar] =
             Layout::vertical(vert_constraints).areas(area);
 
         // Render menu and key hints
         Paragraph::new("Menu").left_aligned().render(menu_bar, buf);
-        Paragraph::new("q: quit | ↑/↓: navigate | Home/End: top/bottom")
-            .left_aligned()
-            .render(key_bar, buf);
+        Paragraph::new(
+            "q: quit | x: close tab | Enter: open | Tab: switch | ↑/↓: \
+             navigate | Home/End: top/bottom",
+        )
+        .left_aligned()
+        .render(key_bar, buf);
 
-        // Render items if available
+        let titles: Vec<String> = self
+            .views
+            .iter()
+            .map(|v| match v {
+                AppView::Dir(dv) => {
+                    dv.diff.left_dir.name().to_string_lossy().into_owned()
+                }
+                AppView::File(fv) => {
+                    fv.left_item.name().to_string_lossy().into_owned()
+                }
+            })
+            .collect();
+
+        Tabs::new(titles)
+            .select(self.active_view)
+            .highlight_style(Style::default().fg(Color::Yellow).bold())
+            .divider("|")
+            .render(tab_bar, buf);
+
+        // Render current view
         if let Some(view) = self.current_view() {
             match view {
-                crate::app::AppView::Dir(dir_view) => {
+                AppView::Dir(dir_view) => {
                     dir_view.render(main_view, buf);
+                }
+                AppView::File(file_view) => {
+                    file_view.render(main_view, buf);
                 }
             }
         }
+
+        if self.show_quit_confirm {
+            let area = centered_rect(60, 20, area);
+            buf.set_style(
+                area,
+                Style::default().bg(Color::Red).fg(Color::White),
+            );
+            let text = "Close last tab and quit? (y/n)";
+            let x =
+                area.x + (area.width.saturating_sub(text.len() as u16)) / 2;
+            let y = area.y + area.height / 2;
+            buf.set_string(x, y, text, Style::default().bold());
+        }
     }
+}
+
+/// helper function to create a centered rect using up certain % of the
+/// available rect `r`
+fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
+    let popup_layout = Layout::vertical([
+        Constraint::Percentage((100 - percent_y) / 2),
+        Constraint::Percentage(percent_y),
+        Constraint::Percentage((100 - percent_y) / 2),
+    ])
+    .split(r);
+
+    Layout::horizontal([
+        Constraint::Percentage((100 - percent_x) / 2),
+        Constraint::Percentage(percent_x),
+        Constraint::Percentage((100 - percent_x) / 2),
+    ])
+    .split(popup_layout[1])[1]
 }

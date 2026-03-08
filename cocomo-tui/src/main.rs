@@ -62,6 +62,8 @@ pub mod app;
 pub mod dirview;
 /// Handles the terminal events (key press, mouse click, resize, etc.).
 pub mod event;
+/// Renders the file comparison view.
+pub mod fileview;
 /// Renders the widgets / UI.
 pub mod ui;
 

@@ -7,12 +7,16 @@
 // $Source$
 // $Revision$
 
-use cocomo_core::{DiffItemType, DiffSide, DirDiff};
+use std::cell::RefCell;
+
+use cocomo_core::{DiffItemType, DirDiff};
 use ratatui::{
     buffer::Buffer,
     layout::{Constraint, Layout, Rect},
     style::{Color, Style},
-    widgets::{Block, Widget},
+    widgets::{
+        Cell, Paragraph, Row, StatefulWidget, Table, TableState, Widget,
+    },
 };
 
 /// View for displaying directory comparison results.
@@ -20,139 +24,211 @@ use ratatui::{
 pub struct DirView {
     /// The comparison results.
     pub diff: DirDiff,
-    /// The index of the selected item.
-    pub selected: usize,
+    /// The state of the table.
+    pub table_state: RefCell<TableState>,
 }
 
 impl DirView {
     /// Creates a new `DirView` with the given comparison results.
     #[must_use]
-    pub const fn new(diff: DirDiff) -> Self {
-        Self { diff, selected: 0 }
+    pub fn new(diff: DirDiff) -> Self {
+        let mut table_state = TableState::default();
+        if !diff.items.is_empty() {
+            table_state.select(Some(0));
+        }
+        Self {
+            diff,
+            table_state: RefCell::new(table_state),
+        }
     }
 
     /// Moves the selection up by one item.
     pub fn move_up(&mut self) {
-        self.selected = self.selected.saturating_sub(1);
+        let mut table_state = self.table_state.borrow_mut();
+        let i = match table_state.selected() {
+            Some(i) => {
+                if i == 0 {
+                    0
+                } else {
+                    i - 1
+                }
+            }
+            None => 0,
+        };
+        table_state.select(Some(i));
     }
 
     /// Moves the selection down by one item.
     pub fn move_down(&mut self) {
-        if !self.diff.items.is_empty() {
-            self.selected = (self.selected + 1)
-                .min(self.diff.items.len().saturating_sub(1));
-        }
+        let mut table_state = self.table_state.borrow_mut();
+        let i = match table_state.selected() {
+            Some(i) => {
+                if i >= self.diff.items.len().saturating_sub(1) {
+                    i
+                } else {
+                    i + 1
+                }
+            }
+            None => 0,
+        };
+        table_state.select(Some(i));
     }
 
     /// Moves the selection to the first item.
     pub fn move_home(&mut self) {
-        self.selected = 0;
+        if !self.diff.items.is_empty() {
+            self.table_state.borrow_mut().select(Some(0));
+        }
     }
 
     /// Moves the selection to the last item.
     pub fn move_end(&mut self) {
         if !self.diff.items.is_empty() {
-            self.selected = self.diff.items.len().saturating_sub(1);
+            let last = self.diff.items.len().saturating_sub(1);
+            self.table_state.borrow_mut().select(Some(last));
         }
     }
 }
 
 impl Widget for &DirView {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let horiz_constraints = [
-            Constraint::Min(3),
-            Constraint::Length(3),
-            Constraint::Min(3),
+        let vert_constraints = [
+            Constraint::Length(1),
+            Constraint::Min(0),
+            Constraint::Length(1),
         ];
-        let [left_area, mid_area, right_area] =
-            Layout::horizontal(horiz_constraints).areas(area);
+        let [header_area, table_area, footer_area] =
+            Layout::vertical(vert_constraints).areas(area);
 
         // Path headers
         let left_path = self.diff.left_dir.path().to_string_lossy();
         let right_path = self.diff.right_dir.path().to_string_lossy();
 
-        let left_block = Block::bordered().title(left_path.as_ref());
-        let right_block = Block::bordered().title(right_path.as_ref());
+        let header_horiz_constraints = [
+            Constraint::Min(10),    // Left Name
+            Constraint::Length(10), // Left Size
+            Constraint::Length(19), // Left Modified
+            Constraint::Length(4),  // Indicator
+            Constraint::Min(10),    // Right Name
+            Constraint::Length(10), // Right Size
+            Constraint::Length(19), // Right Modified
+        ];
+        let header_layout =
+            Layout::horizontal(header_horiz_constraints).split(header_area);
 
-        let left_inner = left_block.inner(left_area);
-        let right_inner = right_block.inner(right_area);
+        buf.set_string(
+            header_layout[0].x,
+            header_layout[0].y,
+            left_path.as_ref(),
+            Style::default().bold(),
+        );
+        buf.set_string(
+            header_layout[4].x,
+            header_layout[4].y,
+            right_path.as_ref(),
+            Style::default().bold(),
+        );
 
-        left_block.render(left_area, buf);
-        right_block.render(right_area, buf);
+        // Table
+        let header_cells =
+            ["Name", "Size", "Modified", "", "Name", "Size", "Modified"]
+                .into_iter()
+                .map(|h| Cell::from(h).style(Style::default().bold()));
+        let header = Row::new(header_cells).height(1).bottom_margin(0);
 
-        let height = left_inner.height as usize;
-        let total = self.diff.items.len();
-        if total > 0 {
-            // Simple scrolling logic
-            let start = if self.selected >= height / 2 {
-                (self.selected - height / 2).min(total.saturating_sub(height))
+        let rows = self.diff.items.iter().enumerate().map(|(i, item)| {
+            let mut cells = Vec::new();
+
+            // Left item
+            if let Some(left) = &item.left_item {
+                cells.push(Cell::from(
+                    left.name().to_string_lossy().into_owned(),
+                ));
+                cells.push(Cell::from(
+                    left.metadata()
+                        .as_ref()
+                        .map_or("".to_string(), |m| m.len().to_string()),
+                ));
+                cells.push(Cell::from(
+                    left.modified().map_or("".to_string(), |t| {
+                        t.format("%Y-%m-%d %H:%M:%S").to_string()
+                    }),
+                ));
             } else {
-                0
-            };
-
-            for (i, item) in
-                self.diff.items.iter().skip(start).take(height).enumerate()
-            {
-                let y = left_inner.y + i as u16;
-                let is_selected = (start + i) == self.selected;
-
-                let mut style = Style::default();
-                if is_selected {
-                    style = style.bg(Color::Blue).fg(Color::White);
-                }
-
-                // Render left item name
-                if let Some(left_item) = &item.left_item {
-                    let name = left_item.name().to_string_lossy();
-                    buf.set_stringn(
-                        left_inner.x,
-                        y,
-                        &name,
-                        left_inner.width as usize,
-                        style,
-                    );
-                }
-
-                // Render indicator
-                let (indicator, ind_style) = match &item.diff_item_type {
-                    DiffItemType::LeftOnly => {
-                        (" + ", Style::default().fg(Color::Yellow))
-                    }
-                    DiffItemType::RightOnly => {
-                        (" + ", Style::default().fg(Color::Yellow))
-                    }
-                    DiffItemType::Same { .. } => {
-                        (" = ", Style::default().fg(Color::Green))
-                    }
-                    DiffItemType::Different { newer } => match newer {
-                        Some(DiffSide::Left) => {
-                            (" > ", Style::default().fg(Color::Red))
-                        }
-                        Some(DiffSide::Right) => {
-                            (" < ", Style::default().fg(Color::Red))
-                        }
-                        None => (" ! ", Style::default().fg(Color::Red)),
-                    },
-                };
-                buf.set_string(
-                    mid_area.x,
-                    y,
-                    indicator,
-                    if is_selected { style } else { ind_style },
-                );
-
-                // Render right item name
-                if let Some(right_item) = &item.right_item {
-                    let name = right_item.name().to_string_lossy();
-                    buf.set_stringn(
-                        right_inner.x,
-                        y,
-                        &name,
-                        right_inner.width as usize,
-                        style,
-                    );
-                }
+                cells.push(Cell::from(""));
+                cells.push(Cell::from(""));
+                cells.push(Cell::from(""));
             }
-        }
+
+            // Diff type indicator
+            let type_text = match &item.diff_item_type {
+                DiffItemType::LeftOnly => "<",
+                DiffItemType::RightOnly => ">",
+                DiffItemType::Different { newer } => match newer {
+                    Some(cocomo_core::DiffSide::Left) => "<*",
+                    Some(cocomo_core::DiffSide::Right) => "*>",
+                    None => "!",
+                },
+                DiffItemType::Same { .. } => "=",
+            };
+            cells.push(Cell::from(type_text));
+
+            // Right item
+            if let Some(right) = &item.right_item {
+                cells.push(Cell::from(
+                    right.name().to_string_lossy().into_owned(),
+                ));
+                cells.push(Cell::from(
+                    right
+                        .metadata()
+                        .as_ref()
+                        .map_or("".to_string(), |m| m.len().to_string()),
+                ));
+                cells.push(Cell::from(
+                    right.modified().map_or("".to_string(), |t| {
+                        t.format("%Y-%m-%d %H:%M:%S").to_string()
+                    }),
+                ));
+            } else {
+                cells.push(Cell::from(""));
+                cells.push(Cell::from(""));
+                cells.push(Cell::from(""));
+            }
+
+            let mut style = Style::default();
+            if i % 2 != 0 {
+                style = style.bg(Color::Rgb(30, 30, 30));
+            }
+            Row::new(cells).style(style)
+        });
+
+        let table = Table::new(
+            rows,
+            [
+                Constraint::Min(10),
+                Constraint::Length(10),
+                Constraint::Length(19),
+                Constraint::Length(4),
+                Constraint::Min(10),
+                Constraint::Length(10),
+                Constraint::Length(19),
+            ],
+        )
+        .header(header)
+        .row_highlight_style(
+            Style::default().bg(Color::Blue).fg(Color::White),
+        );
+
+        StatefulWidget::render(
+            table,
+            table_area,
+            buf,
+            &mut *self.table_state.borrow_mut(),
+        );
+
+        // Footer
+        let count = self.diff.items.len();
+        let footer_text = format!("{} items", count);
+        Paragraph::new(footer_text).render(footer_area, buf);
     }
 }
