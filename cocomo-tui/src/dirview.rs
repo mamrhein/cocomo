@@ -9,15 +9,34 @@
 
 use std::cell::RefCell;
 
-use cocomo_core::{DiffItemType, DirDiff};
+use cocomo_core::{By, DiffItemType, DirDiff};
 use ratatui::{
     buffer::Buffer,
     layout::{Constraint, Layout, Rect},
     style::{Color, Style},
+    text::Text,
     widgets::{
         Cell, Paragraph, Row, StatefulWidget, Table, TableState, Widget,
     },
 };
+
+/// Map DirDiffType to indicator text
+fn indicator<'a>(t: DiffItemType) -> Text<'a> {
+    let (char, color) = match t {
+        DiffItemType::LeftOnly => ("→", Color::Green),
+        DiffItemType::RightOnly => ("←", Color::Green),
+        DiffItemType::Different { newer } => match newer {
+            Some(cocomo_core::DiffSide::Left) => ("→", Color::Yellow),
+            Some(cocomo_core::DiffSide::Right) => ("←", Color::Yellow),
+            None => ("⇄", Color::Yellow),
+        },
+        DiffItemType::Same { by } => match by {
+            By::Metadata => ("≟", Color::White),
+            By::Content => ("=", Color::White),
+        },
+    };
+    Text::from(char).style(Style::default().fg(color).bold())
+}
 
 /// View for displaying directory comparison results.
 #[derive(Debug)]
@@ -161,20 +180,7 @@ impl Widget for &DirView {
             }
 
             // Diff type indicator
-            let indicator = match &item.diff_item_type {
-                DiffItemType::LeftOnly => "→",
-                DiffItemType::RightOnly => "←",
-                DiffItemType::Different { newer } => match newer {
-                    Some(cocomo_core::DiffSide::Left) => "→",
-                    Some(cocomo_core::DiffSide::Right) => "←",
-                    None => "⇄",
-                },
-                DiffItemType::Same { by } => match by {
-                    By::Metadata => "≟",
-                    By::Content => "=",
-                },
-            };
-            cells.push(Cell::from(indicator).style(Style::default().bold()));
+            cells.push(Cell::from(indicator(item.diff_item_type)));
 
             // Right item
             if let Some(right) = &item.right_item {
