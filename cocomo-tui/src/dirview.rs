@@ -161,17 +161,20 @@ impl Widget for &DirView {
             }
 
             // Diff type indicator
-            let type_text = match &item.diff_item_type {
-                DiffItemType::LeftOnly => "<",
-                DiffItemType::RightOnly => ">",
+            let indicator = match &item.diff_item_type {
+                DiffItemType::LeftOnly => "→",
+                DiffItemType::RightOnly => "←",
                 DiffItemType::Different { newer } => match newer {
-                    Some(cocomo_core::DiffSide::Left) => "<*",
-                    Some(cocomo_core::DiffSide::Right) => "*>",
-                    None => "!",
+                    Some(cocomo_core::DiffSide::Left) => "→",
+                    Some(cocomo_core::DiffSide::Right) => "←",
+                    None => "⇄",
                 },
-                DiffItemType::Same { .. } => "=",
+                DiffItemType::Same { by } => match by {
+                    By::Metadata => "≟",
+                    By::Content => "=",
+                },
             };
-            cells.push(Cell::from(type_text));
+            cells.push(Cell::from(indicator).style(Style::default().bold()));
 
             // Right item
             if let Some(right) = &item.right_item {
