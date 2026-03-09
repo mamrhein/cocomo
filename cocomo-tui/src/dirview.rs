@@ -13,7 +13,7 @@ use cocomo_core::{By, DiffItemType, DirDiff};
 use ratatui::{
     buffer::Buffer,
     layout::{Constraint, Layout, Rect},
-    style::{Color, Style},
+    style::{Color, Style, Stylize},
     text::Text,
     widgets::{
         Cell, Paragraph, Row, StatefulWidget, Table, TableState, Widget,
@@ -35,7 +35,9 @@ fn indicator<'a>(t: DiffItemType) -> Text<'a> {
             By::Content => ("=", Color::White),
         },
     };
-    Text::from(char).style(Style::default().fg(color).bold())
+    Text::from(char)
+        .style(Style::default().fg(color).bold())
+        .centered()
 }
 
 /// View for displaying directory comparison results.
@@ -123,17 +125,17 @@ impl Widget for &DirView {
         let left_path = self.diff.left_dir.path().to_string_lossy();
         let right_path = self.diff.right_dir.path().to_string_lossy();
 
-        let header_horiz_constraints = [
+        let horiz_constraints = [
             Constraint::Min(10),    // Left Name
             Constraint::Length(10), // Left Size
             Constraint::Length(19), // Left Modified
-            Constraint::Length(4),  // Indicator
+            Constraint::Length(3),  // Indicator
             Constraint::Min(10),    // Right Name
             Constraint::Length(10), // Right Size
             Constraint::Length(19), // Right Modified
         ];
         let header_layout =
-            Layout::horizontal(header_horiz_constraints).split(header_area);
+            Layout::horizontal(horiz_constraints).split(header_area);
 
         buf.set_string(
             header_layout[0].x,
@@ -142,7 +144,7 @@ impl Widget for &DirView {
             Style::default().bold(),
         );
         buf.set_string(
-            header_layout[4].x,
+            header_layout[4].x + 1,
             header_layout[4].y,
             right_path.as_ref(),
             Style::default().bold(),
@@ -153,7 +155,9 @@ impl Widget for &DirView {
             ["Name", "Size", "Modified", "", "Name", "Size", "Modified"]
                 .into_iter()
                 .map(|h| Cell::from(h).style(Style::default().bold()));
-        let header = Row::new(header_cells).height(1).bottom_margin(0);
+        let header = Row::new(header_cells)
+            .height(1)
+            .style(Style::default().bg(Color::Rgb(70, 70, 70)));
 
         let rows = self.diff.items.iter().enumerate().map(|(i, item)| {
             let mut cells = Vec::new();
@@ -206,27 +210,16 @@ impl Widget for &DirView {
 
             let mut style = Style::default();
             if i % 2 != 0 {
-                style = style.bg(Color::Rgb(30, 30, 30));
+                style = style.bg(Color::Rgb(40, 40, 40));
             }
             Row::new(cells).style(style)
         });
 
-        let table = Table::new(
-            rows,
-            [
-                Constraint::Min(10),
-                Constraint::Length(10),
-                Constraint::Length(19),
-                Constraint::Length(4),
-                Constraint::Min(10),
-                Constraint::Length(10),
-                Constraint::Length(19),
-            ],
-        )
-        .header(header)
-        .row_highlight_style(
-            Style::default().bg(Color::Blue).fg(Color::White),
-        );
+        let table = Table::new(rows, horiz_constraints)
+            .header(header)
+            .row_highlight_style(
+                Style::default().bg(Color::Blue).fg(Color::White),
+            );
 
         StatefulWidget::render(
             table,
