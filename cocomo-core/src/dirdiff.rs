@@ -7,40 +7,67 @@
 // $Source$
 // $Revision$
 
+//! # Directory Comparison Module (`dirdiff`)
+//!
+//! This module provides the logic for comparing two directories. It computes
+//! a list of differences between the files and subdirectories found in each.
+
 use std::{cmp, ffi, io};
 
 use crate::{fsitem::FSItem, readdir::read_dir};
 
 const EMPTY: &ffi::OsString = &ffi::OsString::new();
 
+/// Identifies which side of a comparison an item belongs to or is newer on.
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum DiffSide {
+    /// The left side (typically the first directory).
     Left,
+    /// The right side (typically the second directory).
     Right,
 }
 
+/// The criteria used to determine that two items are the same.
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum By {
+    /// Metadata (size and modification time) match.
     Metadata,
+    /// Full content match.
     Content,
 }
 
+/// The type of difference found between two items with the same name.
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum DiffItemType {
+    /// Item exists only on the left side.
     LeftOnly,
+    /// Item exists only on the right side.
     RightOnly,
-    Different { newer: Option<DiffSide> },
-    Same { by: By },
+    /// Item exists on both sides but is different.
+    Different {
+        /// Which side has the newer version, if determined by metadata.
+        newer: Option<DiffSide>,
+    },
+    /// Item exists on both sides and is considered the same.
+    Same {
+        /// How the equality was determined.
+        by: By,
+    },
 }
 
+/// A single entry in a directory comparison result.
 #[derive(Clone, Debug)]
 pub struct DiffItem {
+    /// The result of the comparison for this item.
     pub diff_item_type: DiffItemType,
+    /// The file system item from the left side, if it exists.
     pub left_item: Option<FSItem>,
+    /// The file system item from the right side, if it exists.
     pub right_item: Option<FSItem>,
 }
 
 impl DiffItem {
+    /// Compares two optional [`FSItem`]s and returns a `DiffItem`.
     pub fn new(
         left_item: &Option<FSItem>,
         right_item: &Option<FSItem>,
@@ -98,6 +125,7 @@ impl DiffItem {
         }
     }
 
+    /// Returns the name of the item.
     pub fn name(&self) -> &ffi::OsString {
         if let Some(left_item) = &self.left_item {
             return left_item.name();
@@ -109,6 +137,8 @@ impl DiffItem {
         &EMPTY
     }
 
+    /// Returns `true` if the item exists on both sides and the left one is
+    /// newer.
     pub fn left_newer(&self) -> bool {
         matches!(
             self.diff_item_type,
@@ -118,6 +148,8 @@ impl DiffItem {
         )
     }
 
+    /// Returns `true` if the item exists on both sides and the right one is
+    /// newer.
     pub fn right_newer(&self) -> bool {
         matches!(
             self.diff_item_type,
@@ -128,10 +160,14 @@ impl DiffItem {
     }
 }
 
+/// A complete result of a comparison between two directories.
 #[derive(Clone, Debug)]
 pub struct DirDiff {
+    /// The source directory on the left side.
     pub left_dir: FSItem,
+    /// The source directory on the right side.
     pub right_dir: FSItem,
+    /// The list of compared entries within these directories.
     pub items: Vec<DiffItem>,
 }
 
@@ -141,6 +177,7 @@ fn cmp_items(a: &FSItem, b: &FSItem) -> cmp::Ordering {
 }
 
 impl DirDiff {
+    /// Compares the contents of two directories.
     pub async fn new(
         left_dir: &FSItem,
         right_dir: &FSItem,

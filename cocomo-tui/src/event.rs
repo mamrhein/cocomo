@@ -7,6 +7,12 @@
 // $Source$
 // $Revision$
 
+//! # Event Handling Module (`event`)
+//!
+//! This module provides the infrastructure for handling terminal events
+//! (via `crossterm`) and custom application events using an asynchronous
+//! event loop.
+
 use std::time::Duration;
 
 use cocomo_core::FSItem;

@@ -7,10 +7,18 @@
 // $Source$
 // $Revision$
 
+//! # Directory Reading Module (`readdir`)
+//!
+//! This internal module provides a helper for asynchronously reading the
+//! contents of a directory and wrapping them into [`FSItem`] objects.
+
 use tokio::{fs, io};
 
 use crate::fsitem::FSItem;
 
+/// Reads the contents of a directory and returns a vector of [`FSItem`]s.
+///
+/// If `dir` is a symbolic link, it is first resolved to its target directory.
 pub(crate) async fn read_dir(dir: &FSItem) -> io::Result<Vec<FSItem>> {
     let dir = dir.unlink().await.into_owned();
     let path = dir.path();

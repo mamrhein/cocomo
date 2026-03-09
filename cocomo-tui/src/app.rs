@@ -7,6 +7,11 @@
 // $Source$
 // $Revision$
 
+//! # Application Module (`app`)
+//!
+//! This module contains the main application state and logic. It handles
+//! events, manages views (tabs), and drives the main loop.
+
 use cocomo_core::{DirDiff, FSItem};
 use ratatui::{
     crossterm::event::{KeyCode, KeyEvent, KeyModifiers},
@@ -20,10 +25,12 @@ use crate::{
     fileview::FileView,
 };
 
-/// Compare items
+/// Container for items currently being compared.
 #[derive(Debug, Default)]
 pub(crate) struct CmpItems {
+    /// Left side item.
     pub left: Option<FSItem>,
+    /// Right side item.
     pub right: Option<FSItem>,
 }
 
@@ -36,20 +43,20 @@ pub(crate) enum AppView {
     File(FileView),
 }
 
-/// Application.
+/// Main application state.
 #[derive(Debug)]
 pub(crate) struct App {
-    /// Is the application running?
+    /// Flag indicating if the application is running.
     pub running: bool,
-    /// Items to compare
+    /// The initial items to compare.
     pub cmp_items: CmpItems,
-    /// Event handler.
+    /// Handler for terminal and application events.
     pub events: EventHandler,
-    /// List of views
+    /// Open views (tabs).
     pub views: Vec<AppView>,
-    /// Index of the active view
+    /// Index of the currently active view.
     pub active_view: usize,
-    /// Should we show a quit confirmation?
+    /// Flag to show a confirmation dialog before quitting.
     pub show_quit_confirm: bool,
 }
 
@@ -112,7 +119,7 @@ impl App {
     ///
     /// # Errors
     ///
-    /// tbd
+    /// Returns an error if terminal drawing or event handling fails.
     pub async fn run(
         mut self,
         mut terminal: DefaultTerminal,
@@ -159,7 +166,7 @@ impl App {
     ///
     /// # Errors
     ///
-    /// tbd
+    /// Returns an error if an application event cannot be sent.
     pub fn handle_key_events(
         &mut self,
         key_event: KeyEvent,

@@ -7,6 +7,11 @@
 // $Source$
 // $Revision$
 
+//! # Command Line Arguments Module (`cmdargs`)
+//!
+//! This module defines the command line arguments for the Cocomo TUI
+//! application and uses `clap` for parsing.
+
 use std::path::PathBuf;
 
 use clap::Parser;
@@ -23,12 +28,16 @@ struct Args {
     right: Option<PathBuf>,
 }
 
+/// Command line arguments for the application.
 pub(crate) struct CmdLineArgs {
+    /// Path to the left side directory or file.
     pub(crate) left: Option<PathBuf>,
+    /// Path to the right side directory or file.
     pub(crate) right: Option<PathBuf>,
 }
 
 impl CmdLineArgs {
+    /// Parses the command line arguments and returns a `CmdLineArgs` instance.
     pub(crate) fn get() -> Self {
         let args = Args::parse();
         Self {

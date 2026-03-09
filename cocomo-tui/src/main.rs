@@ -7,6 +7,11 @@
 // $Source$
 // $Revision$
 
+//! # Cocomo TUI
+//!
+//! This crate provides the Terminal User Interface for the Cocomo directory
+//! comparison tool.
+
 #![doc = include_str ! ("../../README.md")]
 // activate some rustc lints
 #![deny(non_ascii_idents)]
@@ -73,6 +78,8 @@ use color_eyre::Report;
 
 use crate::app::App;
 
+/// Validates the command line arguments and returns the left and right
+/// [`FSItem`]s if they are valid for comparison.
 async fn check_args(
     args: &CmdLineArgs,
 ) -> Result<(Option<FSItem>, Option<FSItem>), Report> {

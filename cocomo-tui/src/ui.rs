@@ -7,6 +7,11 @@
 // $Source$
 // $Revision$
 
+//! # UI Module (`ui`)
+//!
+//! This module implements the `Widget` trait for the `App` struct,
+//! defining how the entire user interface is rendered.
+
 use ratatui::{
     buffer::Buffer,
     layout::{Constraint, Layout, Rect},

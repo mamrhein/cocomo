@@ -47,12 +47,18 @@ use tokio::{fs as async_fs, io};
 
 pub type FileType = MimeKind;
 
+/// Types of items in the file system.
 #[derive(Clone)]
 pub enum FSItemType {
+    /// A directory.
     Directory,
+    /// A regular file with its detected type.
     File { file_type: FileType },
+    /// A symbolic link with its target path.
     SymLink { target: path::PathBuf },
+    /// A special file system entry (e.g., socket, pipe).
     Special,
+    /// An entry that could not be processed, with the error cause.
     Invalid { cause: io::ErrorKind },
 }
 
@@ -85,6 +91,10 @@ impl fmt::Display for FSItemType {
     }
 }
 
+/// A representation of a file system entry.
+///
+/// `FSItem` bundles the path, metadata, and logical type of a file system
+/// entry.
 #[derive(Clone, Debug)]
 pub struct FSItem {
     item_type: FSItemType,

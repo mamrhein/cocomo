@@ -7,13 +7,18 @@
 // $Source$
 // $Revision$
 
+//! # Directory View Module (`dirview`)
+//!
+//! This module provides the `DirView` struct and its `Widget` implementation
+//! for rendering directory comparison results in a table.
+
 use std::{cell::RefCell, path};
 
 use cocomo_core::{By, DiffItemType, DirDiff};
 use ratatui::{
     buffer::Buffer,
     layout::{Constraint, Layout, Rect},
-    style::{Color, Style, Stylize},
+    style::{Color, Style},
     text::Text,
     widgets::{
         Cell, Paragraph, Row, StatefulWidget, Table, TableState, Widget,

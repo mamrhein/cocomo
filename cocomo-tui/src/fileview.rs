@@ -5,6 +5,11 @@
 //              with the application.
 // ---------------------------------------------------------------------------
 
+//! # File View Module (`fileview`)
+//!
+//! This module provides the `FileView` struct and its `Widget` implementation
+//! for side-by-side comparison of text files.
+
 use std::fs;
 
 use cocomo_core::FSItem;

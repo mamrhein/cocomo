@@ -9,6 +9,12 @@
 
 #![allow(dead_code)]
 
+//! # Cocomo Core
+//!
+//! `cocomo-core` provides the core functionality for the Cocomo directory
+//! comparison tool. It includes types for representing file system items,
+//! reading directory contents, and computing differences between directories.
+
 pub mod dirdiff;
 mod fsitem;
 mod readdir;
