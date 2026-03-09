@@ -7,7 +7,7 @@
 // $Source$
 // $Revision$
 
-use std::cell::RefCell;
+use std::{cell::RefCell, path};
 
 use cocomo_core::{By, DiffItemType, DirDiff};
 use ratatui::{
@@ -164,9 +164,11 @@ impl Widget for &DirView {
 
             // Left item
             if let Some(left) = &item.left_item {
-                cells.push(Cell::from(
-                    left.name().to_string_lossy().into_owned(),
-                ));
+                let mut name = left.name().to_string_lossy();
+                if left.is_dir() {
+                    name += path::MAIN_SEPARATOR_STR;
+                };
+                cells.push(Cell::from(name.into_owned()));
                 cells.push(Cell::from(
                     left.metadata()
                         .as_ref()
@@ -188,9 +190,11 @@ impl Widget for &DirView {
 
             // Right item
             if let Some(right) = &item.right_item {
-                cells.push(Cell::from(
-                    right.name().to_string_lossy().into_owned(),
-                ));
+                let mut name = right.name().to_string_lossy();
+                if right.is_dir() {
+                    name += path::MAIN_SEPARATOR_STR;
+                };
+                cells.push(Cell::from(name.into_owned()));
                 cells.push(Cell::from(
                     right
                         .metadata()
