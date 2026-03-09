@@ -11,7 +11,7 @@ use ratatui::{
     buffer::Buffer,
     layout::{Constraint, Layout, Rect},
     style::{Color, Style},
-    widgets::{Paragraph, Tabs, Widget},
+    widgets::{Block, Clear, Paragraph, Tabs, Widget},
 };
 
 use crate::app::{App, AppView};
@@ -70,16 +70,13 @@ impl Widget for &App {
         }
 
         if self.show_quit_confirm {
-            let area = centered_rect(60, 20, area);
-            buf.set_style(
-                area,
-                Style::default().bg(Color::Red).fg(Color::White),
-            );
+            let area = centered_rect(40, 10, area);
+            Clear.render(area, buf);
             let text = "Close last tab and quit? (y/n)";
-            let x =
-                area.x + (area.width.saturating_sub(text.len() as u16)) / 2;
-            let y = area.y + area.height / 2;
-            buf.set_string(x, y, text, Style::default().bold());
+            Paragraph::new(text)
+                .centered()
+                .block(Block::bordered())
+                .render(area, buf);
         }
     }
 }
