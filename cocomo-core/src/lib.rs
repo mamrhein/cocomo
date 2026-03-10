@@ -16,8 +16,10 @@
 //! reading directory contents, and computing differences between directories.
 
 pub mod dirdiff;
+pub mod filediff;
 mod fsitem;
 mod readdir;
 
 pub use dirdiff::{By, DiffItem, DiffItemType, DiffSide, DirDiff};
+pub use filediff::{DiffLine, FileDiff, LineDiffType};
 pub use fsitem::{FSItem, FSItemType};

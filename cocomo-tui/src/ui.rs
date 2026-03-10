@@ -50,9 +50,12 @@ impl Widget for &App {
                 AppView::Dir(dv) => {
                     dv.diff.left_dir.name().to_string_lossy().into_owned()
                 }
-                AppView::File(fv) => {
-                    fv.left_item.name().to_string_lossy().into_owned()
-                }
+                AppView::File(fv) => fv
+                    .file_diff
+                    .left_file
+                    .name()
+                    .to_string_lossy()
+                    .into_owned(),
             })
             .collect();
 

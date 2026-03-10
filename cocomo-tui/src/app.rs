@@ -78,21 +78,14 @@ impl App {
     #[must_use]
     pub async fn new(left: Option<FSItem>, right: Option<FSItem>) -> Self {
         let mut views = Vec::new();
-        if let (Some(l), Some(r)) = (&left, &right) {
-            let mut diff = None;
+        if let (Some(l), Some(r)) = (left.clone(), right.clone()) {
             if l.is_dir() && r.is_dir() {
-                diff = DirDiff::new(l, r).await.ok();
-            } else if l.is_file() && r.is_file() {
-                if let Ok(item) = cocomo_core::DiffItem::new(&left, &right) {
-                    diff = Some(DirDiff {
-                        left_dir: l.clone(),
-                        right_dir: r.clone(),
-                        items: vec![item],
-                    });
+                if let Ok(d) = DirDiff::new(&l, &r).await {
+                    views.push(AppView::Dir(DirView::new(d)));
                 }
-            }
-            if let Some(d) = diff {
-                views.push(AppView::Dir(DirView::new(d)));
+            } else if l.is_file() && r.is_file() {
+                let view = FileView::new(l, r).await;
+                views.push(AppView::File(view));
             }
         }
         Self {
@@ -196,25 +189,45 @@ impl App {
                 self.events.send(AppEvent::Quit);
             }
             KeyCode::Up | KeyCode::Char('k') => {
-                if let Some(AppView::Dir(view)) = self.current_view_mut() {
-                    view.move_up();
+                match self.current_view_mut() {
+                    Some(AppView::Dir(view)) => {
+                        view.move_up();
+                    }
+                    Some(AppView::File(view)) => {
+                        view.move_up();
+                    }
+                    None => {}
                 }
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                if let Some(AppView::Dir(view)) = self.current_view_mut() {
-                    view.move_down();
+                match self.current_view_mut() {
+                    Some(AppView::Dir(view)) => {
+                        view.move_down();
+                    }
+                    Some(AppView::File(view)) => {
+                        view.move_down();
+                    }
+                    None => {}
                 }
             }
-            KeyCode::Home => {
-                if let Some(AppView::Dir(view)) = self.current_view_mut() {
+            KeyCode::Home => match self.current_view_mut() {
+                Some(AppView::Dir(view)) => {
                     view.move_home();
                 }
-            }
-            KeyCode::End => {
-                if let Some(AppView::Dir(view)) = self.current_view_mut() {
+                Some(AppView::File(view)) => {
+                    view.move_home();
+                }
+                None => {}
+            },
+            KeyCode::End => match self.current_view_mut() {
+                Some(AppView::Dir(view)) => {
                     view.move_end();
                 }
-            }
+                Some(AppView::File(view)) => {
+                    view.move_end();
+                }
+                None => {}
+            },
             KeyCode::Enter => {
                 let mut open_diff = None;
                 if let Some(AppView::Dir(view)) = self.current_view_mut() {
