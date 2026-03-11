@@ -78,15 +78,39 @@ impl App {
     #[must_use]
     pub async fn new(left: Option<FSItem>, right: Option<FSItem>) -> Self {
         let mut views = Vec::new();
-        if let (Some(l), Some(r)) = (left.clone(), right.clone()) {
-            if l.is_dir() && r.is_dir() {
-                if let Ok(d) = DirDiff::new(&l, &r).await {
-                    views.push(AppView::Dir(DirView::new(d)));
+        match (left.as_ref(), right.as_ref()) {
+            (Some(l), Some(r)) => {
+                if l.is_dir() && r.is_dir() {
+                    if let Ok(d) = DirDiff::new(Some(l), Some(r)).await {
+                        views.push(AppView::Dir(DirView::new(d)));
+                    }
+                } else if l.is_file() && r.is_file() {
+                    let view =
+                        FileView::new(Some(l.clone()), Some(r.clone())).await;
+                    views.push(AppView::File(view));
                 }
-            } else if l.is_file() && r.is_file() {
-                let view = FileView::new(l, r).await;
-                views.push(AppView::File(view));
             }
+            (Some(l), None) => {
+                if l.is_dir() {
+                    if let Ok(d) = DirDiff::new(Some(l), None).await {
+                        views.push(AppView::Dir(DirView::new(d)));
+                    }
+                } else if l.is_file() {
+                    let view = FileView::new(Some(l.clone()), None).await;
+                    views.push(AppView::File(view));
+                }
+            }
+            (None, Some(r)) => {
+                if r.is_dir() {
+                    if let Ok(d) = DirDiff::new(None, Some(r)).await {
+                        views.push(AppView::Dir(DirView::new(d)));
+                    }
+                } else if r.is_file() {
+                    let view = FileView::new(None, Some(r.clone())).await;
+                    views.push(AppView::File(view));
+                }
+            }
+            _ => {}
         }
         Self {
             running: true,
@@ -134,19 +158,67 @@ impl App {
                     AppEvent::Quit => self.quit(),
                     AppEvent::CloseTab => self.close_tab(),
                     AppEvent::OpenDiff(left, right) => {
-                        if let (Some(l), Some(r)) = (left, right) {
-                            if l.is_dir() && r.is_dir() {
-                                if let Ok(d) = DirDiff::new(&l, &r).await {
-                                    self.views
-                                        .push(AppView::Dir(DirView::new(d)));
+                        match (left.as_ref(), right.as_ref()) {
+                            (Some(l), Some(r)) => {
+                                if l.is_dir() && r.is_dir() {
+                                    if let Ok(d) =
+                                        DirDiff::new(Some(l), Some(r)).await
+                                    {
+                                        self.views.push(AppView::Dir(
+                                            DirView::new(d),
+                                        ));
+                                        self.active_view =
+                                            self.views.len() - 1;
+                                    }
+                                } else if l.is_file() && r.is_file() {
+                                    let view = FileView::new(
+                                        Some(l.clone()),
+                                        Some(r.clone()),
+                                    )
+                                    .await;
+                                    self.views.push(AppView::File(view));
                                     self.active_view = self.views.len() - 1;
                                 }
-                            } else if l.is_file() && r.is_file() {
-                                // For now, we assume it's a text file
-                                let view = FileView::new(l, r).await;
-                                self.views.push(AppView::File(view));
-                                self.active_view = self.views.len() - 1;
                             }
+                            (Some(l), None) => {
+                                if l.is_dir() {
+                                    if let Ok(d) =
+                                        DirDiff::new(Some(l), None).await
+                                    {
+                                        self.views.push(AppView::Dir(
+                                            DirView::new(d),
+                                        ));
+                                        self.active_view =
+                                            self.views.len() - 1;
+                                    }
+                                } else if l.is_file() {
+                                    let view =
+                                        FileView::new(Some(l.clone()), None)
+                                            .await;
+                                    self.views.push(AppView::File(view));
+                                    self.active_view = self.views.len() - 1;
+                                }
+                            }
+                            (None, Some(r)) => {
+                                if r.is_dir() {
+                                    if let Ok(d) =
+                                        DirDiff::new(None, Some(r)).await
+                                    {
+                                        self.views.push(AppView::Dir(
+                                            DirView::new(d),
+                                        ));
+                                        self.active_view =
+                                            self.views.len() - 1;
+                                    }
+                                } else if r.is_file() {
+                                    let view =
+                                        FileView::new(None, Some(r.clone()))
+                                            .await;
+                                    self.views.push(AppView::File(view));
+                                    self.active_view = self.views.len() - 1;
+                                }
+                            }
+                            _ => {}
                         }
                     }
                 },

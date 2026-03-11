@@ -127,8 +127,16 @@ impl Widget for &DirView {
             Layout::vertical(vert_constraints).areas(area);
 
         // Path headers
-        let left_path = self.diff.left_dir.path().to_string_lossy();
-        let right_path = self.diff.right_dir.path().to_string_lossy();
+        let left_path = if self.diff.left_dir.name().is_empty() {
+            "".to_string()
+        } else {
+            self.diff.left_dir.path().to_string_lossy().to_string()
+        };
+        let right_path = if self.diff.right_dir.name().is_empty() {
+            "".to_string()
+        } else {
+            self.diff.right_dir.path().to_string_lossy().to_string()
+        };
 
         let horiz_constraints = [
             Constraint::Min(10),    // Left Name
@@ -145,13 +153,13 @@ impl Widget for &DirView {
         buf.set_string(
             header_layout[0].x,
             header_layout[0].y,
-            left_path.as_ref(),
+            &left_path,
             Style::default().bold(),
         );
         buf.set_string(
             header_layout[4].x + 1,
             header_layout[4].y,
-            right_path.as_ref(),
+            &right_path,
             Style::default().bold(),
         );
 

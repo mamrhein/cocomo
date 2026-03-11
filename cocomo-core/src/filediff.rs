@@ -64,11 +64,19 @@ pub struct FileDiff {
 impl FileDiff {
     /// Compares the contents of two text files.
     pub async fn new(
-        left_file: FSItem,
-        right_file: FSItem,
+        left_file: Option<FSItem>,
+        right_file: Option<FSItem>,
     ) -> io::Result<Self> {
-        let left_content = fs::read_to_string(left_file.path())?;
-        let right_content = fs::read_to_string(right_file.path())?;
+        let left_content = if let Some(ref f) = left_file {
+            fs::read_to_string(f.path())?
+        } else {
+            String::new()
+        };
+        let right_content = if let Some(ref f) = right_file {
+            fs::read_to_string(f.path())?
+        } else {
+            String::new()
+        };
 
         let diff = TextDiff::from_lines(&left_content, &right_content);
         let mut chunks = Vec::new();
@@ -233,8 +241,8 @@ impl FileDiff {
         }
 
         Ok(Self {
-            left_file,
-            right_file,
+            left_file: left_file.unwrap_or_default(),
+            right_file: right_file.unwrap_or_default(),
             chunks,
         })
     }
@@ -264,7 +272,7 @@ mod tests {
         let (_l_file, _l_item) = create_test_file(left_content).await;
         let (_r_file, _r_item) = create_test_file(right_content).await;
 
-        let diff = FileDiff::new(_l_item, _r_item).await.unwrap();
+        let diff = FileDiff::new(Some(_l_item), Some(_r_item)).await.unwrap();
 
         // 1. Equal { old_index: 0, new_index: 0, len: 1 }
         // 2. Replace { old_index: 1, old_len: 2, new_index: 1, new_len: 2 }
@@ -300,7 +308,7 @@ mod tests {
         let (_l_file, _l_item) = create_test_file(left_content).await;
         let (_r_file, _r_item) = create_test_file(right_content).await;
 
-        let diff = FileDiff::new(_l_item, _r_item).await.unwrap();
+        let diff = FileDiff::new(Some(_l_item), Some(_r_item)).await.unwrap();
 
         // 1. Equal { old_index: 0, new_index: 0, len: 1 }
         // 2. Replace { old_index: 1, old_len: 1, new_index: 1, new_len: 2 }

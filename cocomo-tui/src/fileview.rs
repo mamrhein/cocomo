@@ -33,7 +33,10 @@ pub struct FileView {
 
 impl FileView {
     /// Creates a new `FileView` for two text files.
-    pub async fn new(left_item: FSItem, right_item: FSItem) -> Self {
+    pub async fn new(
+        left_item: Option<FSItem>,
+        right_item: Option<FSItem>,
+    ) -> Self {
         let file_diff = FileDiff::new(left_item, right_item)
             .await
             .expect("Failed to read files for diffing");
@@ -121,16 +124,35 @@ impl Widget for &FileView {
         let header_layout =
             Layout::horizontal(horiz_constraints).split(header_area);
 
+        let left_path = if self.file_diff.left_file.name().is_empty() {
+            "".to_string()
+        } else {
+            self.file_diff
+                .left_file
+                .path()
+                .to_string_lossy()
+                .to_string()
+        };
+        let right_path = if self.file_diff.right_file.name().is_empty() {
+            "".to_string()
+        } else {
+            self.file_diff
+                .right_file
+                .path()
+                .to_string_lossy()
+                .to_string()
+        };
+
         buf.set_string(
             header_layout[0].x,
             header_layout[0].y,
-            self.file_diff.left_file.path().to_string_lossy().as_ref(),
+            &left_path,
             Style::default().bold(),
         );
         buf.set_string(
             header_layout[3].x,
             header_layout[3].y,
-            self.file_diff.right_file.path().to_string_lossy().as_ref(),
+            &right_path,
             Style::default().bold(),
         );
 

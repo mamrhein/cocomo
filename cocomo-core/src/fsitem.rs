@@ -103,6 +103,19 @@ pub struct FSItem {
     metadata: Option<fs::Metadata>,
 }
 
+impl Default for FSItem {
+    fn default() -> Self {
+        Self {
+            item_type: FSItemType::Invalid {
+                cause: io::ErrorKind::NotFound,
+            },
+            name: ffi::OsString::new(),
+            path: path::PathBuf::new(),
+            metadata: None,
+        }
+    }
+}
+
 impl FSItem {
     /// Creates a new `FSItem` from the given path.
     ///

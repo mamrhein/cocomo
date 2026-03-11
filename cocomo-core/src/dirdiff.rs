@@ -179,13 +179,19 @@ fn cmp_items(a: &FSItem, b: &FSItem) -> cmp::Ordering {
 impl DirDiff {
     /// Compares the contents of two directories.
     pub async fn new(
-        left_dir: &FSItem,
-        right_dir: &FSItem,
+        left_dir: Option<&FSItem>,
+        right_dir: Option<&FSItem>,
     ) -> io::Result<Self> {
-        // debug_assert!(left_dir.is_dir());
-        // debug_assert!(right_dir.is_dir());
-        let mut left_items = read_dir(left_dir).await?;
-        let mut right_items = read_dir(right_dir).await?;
+        let mut left_items = if let Some(dir) = left_dir {
+            read_dir(dir).await?
+        } else {
+            Vec::new()
+        };
+        let mut right_items = if let Some(dir) = right_dir {
+            read_dir(dir).await?
+        } else {
+            Vec::new()
+        };
         left_items.sort_by(|a, b| cmp_items(b, a));
         right_items.sort_by(|a, b| cmp_items(b, a));
         let mut diff_items: Vec<DiffItem> = Vec::new();
@@ -223,8 +229,8 @@ impl DirDiff {
             }
         }
         Ok(Self {
-            left_dir: left_dir.clone(),
-            right_dir: right_dir.clone(),
+            left_dir: left_dir.cloned().unwrap_or_else(|| FSItem::default()),
+            right_dir: right_dir.cloned().unwrap_or_else(|| FSItem::default()),
             items: diff_items,
         })
     }
@@ -242,7 +248,7 @@ mod tests {
         let dir1 = FSItem::new(path1).await;
         let path2 = path::Path::new("../cocomo-tui");
         let dir2 = FSItem::new(path2).await;
-        let diff = DirDiff::new(&dir1, &dir2)
+        let diff = DirDiff::new(Some(&dir1), Some(&dir2))
             .await
             .expect("Error creating diff");
         assert!(diff.items.len() > 0);
