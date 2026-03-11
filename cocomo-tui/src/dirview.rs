@@ -54,6 +54,7 @@ pub struct DirView {
     pub table_state: RefCell<TableState>,
 }
 
+// TODO: Unify handling of nav keys into a trait
 impl DirView {
     /// Creates a new `DirView` with the given comparison results.
     #[must_use]

@@ -31,6 +31,7 @@ pub struct FileView {
     pub selected_chunk: usize,
 }
 
+// TODO: Unify handling of nav keys into a trait
 impl FileView {
     /// Creates a new `FileView` for two text files.
     pub async fn new(
@@ -99,6 +100,7 @@ impl FileView {
     }
 }
 
+// TODO: make the indicator styled analog to dirview
 fn map_diff_type(dt: LineDiffType) -> &'static str {
     match dt {
         LineDiffType::Removed => "-",
