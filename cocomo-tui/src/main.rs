@@ -62,15 +62,16 @@
 mod cmdargs;
 
 /// Holds the state and application logic.
-pub mod app;
+pub(crate) mod app;
 /// Renders the directory comparison view.
-pub mod dirview;
+pub(crate) mod dirview;
 /// Handles the terminal events (key press, mouse click, resize, etc.).
-pub mod event;
+pub(crate) mod event;
 /// Renders the file comparison view.
-pub mod fileview;
+pub(crate) mod fileview;
 /// Renders the widgets / UI.
-pub mod ui;
+pub(crate) mod ui;
+pub(crate) mod view;
 
 use cmdargs::CmdLineArgs;
 use cocomo_core::{FSItem, FSItemType};
