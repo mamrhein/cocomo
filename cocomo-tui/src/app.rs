@@ -285,10 +285,10 @@ impl App {
     ) -> color_eyre::Result<()> {
         if self.show_quit_confirm {
             match key_event.code {
-                KeyCode::Char('y' | 'Y') => {
+                KeyCode::Char('y') => {
                     self.quit();
                 }
-                KeyCode::Char('n' | 'N') | KeyCode::Esc => {
+                KeyCode::Char('n') | KeyCode::Esc => {
                     self.show_quit_confirm = false;
                 }
                 _ => {}
@@ -299,31 +299,27 @@ impl App {
             KeyCode::Esc | KeyCode::Char('q') => {
                 self.events.send(AppEvent::Quit);
             }
-            KeyCode::Char('x' | 'X') => {
+            KeyCode::Char('x') => {
                 self.events.send(AppEvent::CloseTab);
             }
-            KeyCode::Up | KeyCode::Char('k') => {
-                match self.current_view_mut() {
-                    Some(AppView::Dir(view)) => {
-                        view.move_up();
-                    }
-                    Some(AppView::File(view)) => {
-                        view.move_up();
-                    }
-                    None => {}
+            KeyCode::Up => match self.current_view_mut() {
+                Some(AppView::Dir(view)) => {
+                    view.move_up();
                 }
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                match self.current_view_mut() {
-                    Some(AppView::Dir(view)) => {
-                        view.move_down();
-                    }
-                    Some(AppView::File(view)) => {
-                        view.move_down();
-                    }
-                    None => {}
+                Some(AppView::File(view)) => {
+                    view.move_up();
                 }
-            }
+                None => {}
+            },
+            KeyCode::Down => match self.current_view_mut() {
+                Some(AppView::Dir(view)) => {
+                    view.move_down();
+                }
+                Some(AppView::File(view)) => {
+                    view.move_down();
+                }
+                None => {}
+            },
             KeyCode::Home => match self.current_view_mut() {
                 Some(AppView::Dir(view)) => {
                     view.move_home();
@@ -373,7 +369,7 @@ impl App {
                     };
                 }
             }
-            KeyCode::Char('c' | 'C') => {
+            KeyCode::Char('c') => {
                 let mut copy_op = None;
                 if let Some(AppView::Dir(view)) = self.current_view() {
                     if let Some(i) = view.table_state.borrow().selected() {
@@ -398,7 +394,7 @@ impl App {
                     self.events.send(AppEvent::Copy(src, dst));
                 }
             }
-            KeyCode::Char('m' | 'M') => {
+            KeyCode::Char('m') => {
                 let mut move_op = None;
                 if let Some(AppView::Dir(view)) = self.current_view() {
                     if let Some(i) = view.table_state.borrow().selected() {
@@ -423,7 +419,7 @@ impl App {
                     self.events.send(AppEvent::Move(src, dst));
                 }
             }
-            KeyCode::Char('d' | 'D') => {
+            KeyCode::Char('d') => {
                 let mut delete_op = None;
                 if let Some(AppView::Dir(view)) = self.current_view() {
                     if let Some(i) = view.table_state.borrow().selected() {
