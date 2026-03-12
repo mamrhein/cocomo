@@ -38,7 +38,7 @@ impl Widget for &App {
         Paragraph::new("Menu").left_aligned().render(menu_bar, buf);
         Paragraph::new(
             "q: quit | x: close tab | Enter: open | Tab: switch | ↑/↓: \
-             navigate | Home/End: top/bottom",
+             navigate | Home/End: top/bottom | c: copy | m: move | d: delete",
         )
         .left_aligned()
         .render(key_bar, buf);

@@ -58,6 +58,16 @@ pub enum AppEvent {
     CloseTab,
     /// Open a new comparison view.
     OpenDiff(Option<FSItem>, Option<FSItem>),
+    /// Copy the current item to the other side.
+    Copy(FSItem, std::path::PathBuf),
+    /// Move the current item to the other side.
+    Move(FSItem, std::path::PathBuf),
+    /// Delete the current item.
+    Delete(FSItem),
+    /// Rename the current item.
+    Rename(FSItem, String),
+    /// Refresh the current view.
+    Refresh,
 }
 
 /// Terminal event handler.

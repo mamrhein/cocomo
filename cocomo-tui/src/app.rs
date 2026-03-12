@@ -12,9 +12,11 @@
 //! This module contains the main application state and logic. It handles
 //! events, manages views (tabs), and drives the main loop.
 
-use cocomo_core::{DirDiff, FSItem};
+use cocomo_core::{
+    copy_item, delete_item, move_item, rename_item, DirDiff, FSItem,
+};
 use ratatui::{
-    crossterm::event::{KeyCode, KeyEvent, KeyModifiers},
+    crossterm::event::{KeyCode, KeyEvent},
     DefaultTerminal,
 };
 
@@ -222,6 +224,50 @@ impl App {
                             _ => {}
                         }
                     }
+                    AppEvent::Copy(src, dst) => {
+                        let _ = copy_item(&src, &dst).await;
+                        self.events.send(AppEvent::Refresh);
+                    }
+                    AppEvent::Move(src, dst) => {
+                        let _ = move_item(&src, &dst).await;
+                        self.events.send(AppEvent::Refresh);
+                    }
+                    AppEvent::Delete(item) => {
+                        let _ = delete_item(&item).await;
+                        self.events.send(AppEvent::Refresh);
+                    }
+                    AppEvent::Rename(item, new_name) => {
+                        let _ = rename_item(&item, &new_name).await;
+                        self.events.send(AppEvent::Refresh);
+                    }
+                    AppEvent::Refresh => {
+                        if let Some(view) = self.current_view_mut() {
+                            if let AppView::Dir(dir_view) = view {
+                                let left = if dir_view
+                                    .diff
+                                    .left_dir
+                                    .path()
+                                    .exists()
+                                {
+                                    Some(&dir_view.diff.left_dir)
+                                } else {
+                                    None
+                                };
+                                let right =
+                                    if dir_view.diff.right_dir.path().exists()
+                                    {
+                                        Some(&dir_view.diff.right_dir)
+                                    } else {
+                                        None
+                                    };
+                                if let Ok(new_diff) =
+                                    DirDiff::new(left, right).await
+                                {
+                                    dir_view.diff = new_diff;
+                                }
+                            }
+                        }
+                    }
                 },
             }
         }
@@ -325,6 +371,73 @@ impl App {
                     } else {
                         self.active_view - 1
                     };
+                }
+            }
+            KeyCode::Char('c' | 'C') => {
+                let mut copy_op = None;
+                if let Some(AppView::Dir(view)) = self.current_view() {
+                    if let Some(i) = view.table_state.borrow().selected() {
+                        if let Some(item) = view.diff.items.get(i) {
+                            let r_dir = &view.diff.right_dir;
+                            let l_dir = &view.diff.left_dir;
+                            if let Some(l) = &item.left_item {
+                                if r_dir.path().exists() {
+                                    let dst = r_dir.path().join(l.name());
+                                    copy_op = Some((l.clone(), dst));
+                                }
+                            } else if let Some(r) = &item.right_item {
+                                if l_dir.path().exists() {
+                                    let dst = l_dir.path().join(r.name());
+                                    copy_op = Some((r.clone(), dst));
+                                }
+                            }
+                        }
+                    }
+                }
+                if let Some((src, dst)) = copy_op {
+                    self.events.send(AppEvent::Copy(src, dst));
+                }
+            }
+            KeyCode::Char('m' | 'M') => {
+                let mut move_op = None;
+                if let Some(AppView::Dir(view)) = self.current_view() {
+                    if let Some(i) = view.table_state.borrow().selected() {
+                        if let Some(item) = view.diff.items.get(i) {
+                            let r_dir = &view.diff.right_dir;
+                            let l_dir = &view.diff.left_dir;
+                            if let Some(l) = &item.left_item {
+                                if r_dir.path().exists() {
+                                    let dst = r_dir.path().join(l.name());
+                                    move_op = Some((l.clone(), dst));
+                                }
+                            } else if let Some(r) = &item.right_item {
+                                if l_dir.path().exists() {
+                                    let dst = l_dir.path().join(r.name());
+                                    move_op = Some((r.clone(), dst));
+                                }
+                            }
+                        }
+                    }
+                }
+                if let Some((src, dst)) = move_op {
+                    self.events.send(AppEvent::Move(src, dst));
+                }
+            }
+            KeyCode::Char('d' | 'D') => {
+                let mut delete_op = None;
+                if let Some(AppView::Dir(view)) = self.current_view() {
+                    if let Some(i) = view.table_state.borrow().selected() {
+                        if let Some(item) = view.diff.items.get(i) {
+                            if let Some(l) = &item.left_item {
+                                delete_op = Some(l.clone());
+                            } else if let Some(r) = &item.right_item {
+                                delete_op = Some(r.clone());
+                            }
+                        }
+                    }
+                }
+                if let Some(item) = delete_op {
+                    self.events.send(AppEvent::Delete(item));
                 }
             }
             _ => {}
