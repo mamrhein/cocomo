@@ -16,7 +16,7 @@ use cocomo_core::{
     copy_item, delete_item, move_item, rename_item, DirDiff, FSItem,
 };
 use ratatui::{
-    crossterm::event::{KeyCode, KeyEvent},
+    crossterm::event::{KeyCode, KeyEvent, KeyModifiers},
     DefaultTerminal,
 };
 
@@ -295,14 +295,16 @@ impl App {
             }
             return Ok(());
         }
-        match key_event.code {
-            KeyCode::Esc | KeyCode::Char('q') => {
+        match (key_event.code, key_event.modifiers) {
+            (KeyCode::Esc, KeyModifiers::NONE)
+            | (KeyCode::Char('q'), KeyModifiers::NONE) => {
                 self.events.send(AppEvent::Quit);
             }
-            KeyCode::Char('x') => {
+            (KeyCode::Char('x'), KeyModifiers::NONE) => {
                 self.events.send(AppEvent::CloseTab);
             }
-            KeyCode::Up => match self.current_view_mut() {
+            (KeyCode::Up, KeyModifiers::NONE) => match self.current_view_mut()
+            {
                 Some(AppView::Dir(view)) => {
                     view.move_up();
                 }
@@ -311,34 +313,40 @@ impl App {
                 }
                 None => {}
             },
-            KeyCode::Down => match self.current_view_mut() {
-                Some(AppView::Dir(view)) => {
-                    view.move_down();
+            (KeyCode::Down, KeyModifiers::NONE) => {
+                match self.current_view_mut() {
+                    Some(AppView::Dir(view)) => {
+                        view.move_down();
+                    }
+                    Some(AppView::File(view)) => {
+                        view.move_down();
+                    }
+                    None => {}
                 }
-                Some(AppView::File(view)) => {
-                    view.move_down();
+            }
+            (KeyCode::Home, KeyModifiers::NONE) => {
+                match self.current_view_mut() {
+                    Some(AppView::Dir(view)) => {
+                        view.move_home();
+                    }
+                    Some(AppView::File(view)) => {
+                        view.move_home();
+                    }
+                    None => {}
                 }
-                None => {}
-            },
-            KeyCode::Home => match self.current_view_mut() {
-                Some(AppView::Dir(view)) => {
-                    view.move_home();
+            }
+            (KeyCode::End, KeyModifiers::NONE) => {
+                match self.current_view_mut() {
+                    Some(AppView::Dir(view)) => {
+                        view.move_end();
+                    }
+                    Some(AppView::File(view)) => {
+                        view.move_end();
+                    }
+                    None => {}
                 }
-                Some(AppView::File(view)) => {
-                    view.move_home();
-                }
-                None => {}
-            },
-            KeyCode::End => match self.current_view_mut() {
-                Some(AppView::Dir(view)) => {
-                    view.move_end();
-                }
-                Some(AppView::File(view)) => {
-                    view.move_end();
-                }
-                None => {}
-            },
-            KeyCode::Enter => {
+            }
+            (KeyCode::Enter, KeyModifiers::NONE) => {
                 let mut open_diff = None;
                 if let Some(AppView::Dir(view)) = self.current_view_mut() {
                     if let Some(i) = view.table_state.borrow().selected() {
@@ -354,13 +362,13 @@ impl App {
                     self.events.send(AppEvent::OpenDiff(left, right));
                 }
             }
-            KeyCode::Tab => {
+            (KeyCode::Tab, KeyModifiers::NONE) => {
                 if !self.views.is_empty() {
                     self.active_view =
                         (self.active_view + 1) % self.views.len();
                 }
             }
-            KeyCode::BackTab => {
+            (KeyCode::BackTab, KeyModifiers::SHIFT) => {
                 if !self.views.is_empty() {
                     self.active_view = if self.active_view == 0 {
                         self.views.len() - 1
@@ -369,7 +377,7 @@ impl App {
                     };
                 }
             }
-            KeyCode::Char('c') => {
+            (KeyCode::Char('c'), KeyModifiers::NONE) => {
                 let mut copy_op = None;
                 if let Some(AppView::Dir(view)) = self.current_view() {
                     if let Some(i) = view.table_state.borrow().selected() {
@@ -394,7 +402,7 @@ impl App {
                     self.events.send(AppEvent::Copy(src, dst));
                 }
             }
-            KeyCode::Char('m') => {
+            (KeyCode::Char('m'), KeyModifiers::NONE) => {
                 let mut move_op = None;
                 if let Some(AppView::Dir(view)) = self.current_view() {
                     if let Some(i) = view.table_state.borrow().selected() {
@@ -419,7 +427,7 @@ impl App {
                     self.events.send(AppEvent::Move(src, dst));
                 }
             }
-            KeyCode::Char('d') => {
+            (KeyCode::Char('d'), KeyModifiers::NONE) => {
                 let mut delete_op = None;
                 if let Some(AppView::Dir(view)) = self.current_view() {
                     if let Some(i) = view.table_state.borrow().selected() {
