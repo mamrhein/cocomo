@@ -256,11 +256,6 @@ impl App {
             KeyCode::Char('x' | 'X') => {
                 self.events.send(AppEvent::CloseTab);
             }
-            KeyCode::Char('c' | 'C')
-                if key_event.modifiers == KeyModifiers::CONTROL =>
-            {
-                self.events.send(AppEvent::Quit);
-            }
             KeyCode::Up | KeyCode::Char('k') => {
                 match self.current_view_mut() {
                     Some(AppView::Dir(view)) => {
