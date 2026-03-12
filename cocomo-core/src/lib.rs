@@ -18,8 +18,10 @@
 pub mod dirdiff;
 pub mod filediff;
 mod fsitem;
+pub mod fsops;
 mod readdir;
 
 pub use dirdiff::{By, DiffItem, DiffItemType, DiffSide, DirDiff};
 pub use filediff::{DiffLine, FileDiff, LineDiffType};
 pub use fsitem::{FSItem, FSItemType};
+pub use fsops::{copy_item, delete_item, move_item, rename_item, FsError};

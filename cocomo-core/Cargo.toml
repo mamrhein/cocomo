@@ -16,6 +16,7 @@ categories = ["command-line-utilities", "filesystem"]
 chrono = "0.4.44"
 mimetype-detector = "0.3.5"
 similar = "2.7.0"
+thiserror = "2.0.11"
 tokio = { version = "1.49.0", features = ["fs", "io-util", "macros", "rt-multi-thread"] }
 
 [dev-dependencies]
