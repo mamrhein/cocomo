@@ -22,6 +22,8 @@ use ratatui::{
     widgets::{Block, Cell, Row, StatefulWidget, Table, TableState, Widget},
 };
 
+use crate::view::NavigableView;
+
 /// View for displaying side-by-side text file contents.
 #[derive(Debug)]
 pub struct FileView {
@@ -33,7 +35,6 @@ pub struct FileView {
     pub selected_chunk: usize,
 }
 
-// TODO: Unify handling of nav keys into a trait
 impl FileView {
     /// Creates a new `FileView` for two text files.
     pub async fn new(
@@ -62,9 +63,11 @@ impl FileView {
             .map(|c| c.left_lines.len())
             .sum()
     }
+}
 
+impl NavigableView for FileView {
     /// Moves the selection up by one chunk.
-    pub fn move_up(&mut self) {
+    fn move_up(&mut self) {
         if self.selected_chunk > 0 {
             self.selected_chunk -= 1;
         }
@@ -73,7 +76,7 @@ impl FileView {
     }
 
     /// Moves the selection down by one chunk.
-    pub fn move_down(&mut self) {
+    fn move_down(&mut self) {
         if !self.file_diff.chunks.is_empty() {
             if self.selected_chunk
                 < self.file_diff.chunks.len().saturating_sub(1)
@@ -86,13 +89,13 @@ impl FileView {
     }
 
     /// Moves the selection to the first chunk.
-    pub fn move_home(&mut self) {
+    fn move_home(&mut self) {
         self.selected_chunk = 0;
         self.table_state.borrow_mut().select(Some(0));
     }
 
     /// Moves the selection to the last chunk.
-    pub fn move_end(&mut self) {
+    fn move_end(&mut self) {
         if !self.file_diff.chunks.is_empty() {
             self.selected_chunk =
                 self.file_diff.chunks.len().saturating_sub(1);
