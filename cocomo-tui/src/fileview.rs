@@ -19,6 +19,7 @@ use ratatui::{
     buffer::Buffer,
     layout::{Constraint, Layout, Rect},
     style::{Color, Style},
+    text::Text,
     widgets::{Block, Cell, Row, StatefulWidget, Table, TableState, Widget},
 };
 
@@ -115,6 +116,18 @@ fn map_diff_type(dt: LineDiffType) -> &'static str {
     }
 }
 
+fn indicator<'a>(dt: LineDiffType) -> Text<'a> {
+    let (char, color) = match dt {
+        LineDiffType::Removed => ("-", Color::Red),
+        LineDiffType::Added => ("+", Color::Green),
+        LineDiffType::Unchanged => ("=", Color::White),
+        LineDiffType::Changed => ("⇄", Color::Yellow),
+    };
+    Text::from(char)
+        .style(Style::default().fg(color).bold())
+        .centered()
+}
+
 impl Widget for &FileView {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let vert_constraints = [Constraint::Length(1), Constraint::Min(0)];
@@ -183,8 +196,6 @@ impl Widget for &FileView {
                 chunk_style = chunk_style.fg(Color::Cyan).bold();
             }
 
-            let indicator = map_diff_type(chunk.diff_type);
-
             for (left, right) in
                 chunk.left_lines.iter().zip(&chunk.right_lines)
             {
@@ -194,7 +205,7 @@ impl Widget for &FileView {
                             .map_or("".to_string(), |n| n.to_string()),
                     ),
                     Cell::from(left.content.as_str()),
-                    Cell::from(indicator),
+                    Cell::from(indicator(chunk.diff_type)),
                     Cell::from(
                         right
                             .line_number
