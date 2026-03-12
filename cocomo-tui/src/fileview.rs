@@ -4,6 +4,8 @@
 //              details please read the file LICENSE.TXT provided together
 //              with the application.
 // ---------------------------------------------------------------------------
+// $Source$
+// $Revision$
 
 //! # File View Module (`fileview`)
 //!
