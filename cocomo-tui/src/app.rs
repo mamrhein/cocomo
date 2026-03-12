@@ -18,6 +18,7 @@ use ratatui::{
     DefaultTerminal,
 };
 
+use crate::view::NavigableView;
 /// Holds the state and application logic.
 use crate::{
     dirview::DirView,

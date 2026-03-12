@@ -25,6 +25,8 @@ use ratatui::{
     },
 };
 
+use crate::view::NavigableView;
+
 /// Map DirDiffType to indicator text
 fn indicator<'a>(t: DiffItemType) -> Text<'a> {
     let (char, color) = match t {
@@ -54,7 +56,6 @@ pub struct DirView {
     pub table_state: RefCell<TableState>,
 }
 
-// TODO: Unify handling of nav keys into a trait
 impl DirView {
     /// Creates a new `DirView` with the given comparison results.
     #[must_use]
@@ -68,9 +69,11 @@ impl DirView {
             table_state: RefCell::new(table_state),
         }
     }
+}
 
+impl NavigableView for DirView {
     /// Moves the selection up by one item.
-    pub fn move_up(&mut self) {
+    fn move_up(&mut self) {
         let mut table_state = self.table_state.borrow_mut();
         let i = match table_state.selected() {
             Some(i) => {
@@ -86,7 +89,7 @@ impl DirView {
     }
 
     /// Moves the selection down by one item.
-    pub fn move_down(&mut self) {
+    fn move_down(&mut self) {
         let mut table_state = self.table_state.borrow_mut();
         let i = match table_state.selected() {
             Some(i) => {
@@ -102,14 +105,14 @@ impl DirView {
     }
 
     /// Moves the selection to the first item.
-    pub fn move_home(&mut self) {
+    fn move_home(&mut self) {
         if !self.diff.items.is_empty() {
             self.table_state.borrow_mut().select(Some(0));
         }
     }
 
     /// Moves the selection to the last item.
-    pub fn move_end(&mut self) {
+    fn move_end(&mut self) {
         if !self.diff.items.is_empty() {
             let last = self.diff.items.len().saturating_sub(1);
             self.table_state.borrow_mut().select(Some(last));
