@@ -5,6 +5,7 @@
 # all hidden files
 .*
 # except
+!.aiignore
 !.gitignore
 !.github
 
