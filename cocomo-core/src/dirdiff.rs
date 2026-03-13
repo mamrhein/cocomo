@@ -250,6 +250,6 @@ mod tests {
         let diff = DirDiff::new(Some(&dir1), Some(&dir2))
             .await
             .expect("Error creating diff");
-        assert!(diff.items.len() > 0);
+        assert!(!diff.items.is_empty());
     }
 }
