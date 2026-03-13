@@ -22,12 +22,12 @@ use ratatui::crossterm::event::Event as CrosstermEvent;
 use tokio::sync::mpsc;
 
 /// Handles the terminal events (key press, mouse click, resize, etc.).
-
 /// The frequency at which tick events are emitted.
 const TICK_FPS: f64 = 30.0;
 
 /// Representation of all possible events.
 #[derive(Clone, Debug)]
+#[allow(clippy::large_enum_variant)]
 pub enum Event {
     /// An event that is emitted on a regular schedule.
     ///
@@ -51,6 +51,7 @@ pub enum Event {
 ///
 /// You can extend this enum with your own custom events.
 #[derive(Clone, Debug)]
+#[allow(clippy::large_enum_variant)]
 pub enum AppEvent {
     /// Quit the application.
     Quit,

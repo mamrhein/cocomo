@@ -78,12 +78,11 @@ impl NavigableView for FileView {
 
     /// Moves the selection down by one chunk.
     fn move_down(&mut self) {
-        if !self.file_diff.chunks.is_empty() {
-            if self.selected_chunk
+        if !self.file_diff.chunks.is_empty()
+            && self.selected_chunk
                 < self.file_diff.chunks.len().saturating_sub(1)
-            {
-                self.selected_chunk += 1;
-            }
+        {
+            self.selected_chunk += 1;
         }
         let row_idx = self.first_row_of_chunk(self.selected_chunk);
         self.table_state.borrow_mut().select(Some(row_idx));
@@ -103,16 +102,6 @@ impl NavigableView for FileView {
             let row_idx = self.first_row_of_chunk(self.selected_chunk);
             self.table_state.borrow_mut().select(Some(row_idx));
         }
-    }
-}
-
-// TODO: make the indicator styled analog to dirview
-fn map_diff_type(dt: LineDiffType) -> &'static str {
-    match dt {
-        LineDiffType::Removed => "-",
-        LineDiffType::Added => "+",
-        LineDiffType::Unchanged => " ",
-        LineDiffType::Changed => "M",
     }
 }
 
@@ -145,7 +134,7 @@ impl Widget for &FileView {
             Layout::horizontal(horiz_constraints).split(header_area);
 
         let left_path = if self.file_diff.left_file.name().is_empty() {
-            "".to_string()
+            String::new()
         } else {
             self.file_diff
                 .left_file
@@ -154,7 +143,7 @@ impl Widget for &FileView {
                 .to_string()
         };
         let right_path = if self.file_diff.right_file.name().is_empty() {
-            "".to_string()
+            String::new()
         } else {
             self.file_diff
                 .right_file
@@ -202,14 +191,14 @@ impl Widget for &FileView {
                 let cells = vec![
                     Cell::from(
                         left.line_number
-                            .map_or("".to_string(), |n| n.to_string()),
+                            .map_or(String::new(), |n| n.to_string()),
                     ),
                     Cell::from(left.content.as_str()),
                     Cell::from(indicator(chunk.diff_type)),
                     Cell::from(
                         right
                             .line_number
-                            .map_or("".to_string(), |n| n.to_string()),
+                            .map_or(String::new(), |n| n.to_string()),
                     ),
                     Cell::from(right.content.as_str()),
                 ];

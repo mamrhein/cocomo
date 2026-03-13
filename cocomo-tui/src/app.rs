@@ -13,11 +13,11 @@
 //! events, manages views (tabs), and drives the main loop.
 
 use cocomo_core::{
-    copy_item, delete_item, move_item, rename_item, DirDiff, FSItem,
+    DirDiff, FSItem, copy_item, delete_item, move_item, rename_item,
 };
 use ratatui::{
-    crossterm::event::{KeyCode, KeyEvent, KeyModifiers},
     DefaultTerminal,
+    crossterm::event::{KeyCode, KeyEvent, KeyModifiers},
 };
 
 use crate::view::NavigableView;
@@ -140,6 +140,7 @@ impl App {
     /// # Errors
     ///
     /// Returns an error if terminal drawing or event handling fails.
+    #[allow(clippy::cognitive_complexity)]
     pub async fn run(
         mut self,
         mut terminal: DefaultTerminal,
@@ -241,30 +242,25 @@ impl App {
                         self.events.send(AppEvent::Refresh);
                     }
                     AppEvent::Refresh => {
-                        if let Some(view) = self.current_view_mut() {
-                            if let AppView::Dir(dir_view) = view {
-                                let left = if dir_view
-                                    .diff
-                                    .left_dir
-                                    .path()
-                                    .exists()
-                                {
-                                    Some(&dir_view.diff.left_dir)
-                                } else {
-                                    None
-                                };
-                                let right =
-                                    if dir_view.diff.right_dir.path().exists()
-                                    {
-                                        Some(&dir_view.diff.right_dir)
-                                    } else {
-                                        None
-                                    };
-                                if let Ok(new_diff) =
-                                    DirDiff::new(left, right).await
-                                {
-                                    dir_view.diff = new_diff;
-                                }
+                        if let Some(AppView::Dir(dir_view)) =
+                            self.current_view_mut()
+                        {
+                            let left = dir_view
+                                .diff
+                                .left_dir
+                                .path()
+                                .exists()
+                                .then_some(&dir_view.diff.left_dir);
+                            let right = dir_view
+                                .diff
+                                .right_dir
+                                .path()
+                                .exists()
+                                .then_some(&dir_view.diff.right_dir);
+                            if let Ok(new_diff) =
+                                DirDiff::new(left, right).await
+                            {
+                                dir_view.diff = new_diff;
                             }
                         }
                     }
@@ -348,15 +344,14 @@ impl App {
             }
             (KeyCode::Enter, KeyModifiers::NONE) => {
                 let mut open_diff = None;
-                if let Some(AppView::Dir(view)) = self.current_view_mut() {
-                    if let Some(i) = view.table_state.borrow().selected() {
-                        if let Some(item) = view.diff.items.get(i) {
-                            open_diff = Some((
-                                item.left_item.clone(),
-                                item.right_item.clone(),
-                            ));
-                        }
-                    }
+                if let Some(AppView::Dir(view)) = self.current_view_mut()
+                    && let Some(i) = view.table_state.borrow().selected()
+                    && let Some(item) = view.diff.items.get(i)
+                {
+                    open_diff = Some((
+                        item.left_item.clone(),
+                        item.right_item.clone(),
+                    ));
                 }
                 if let Some((left, right)) = open_diff {
                     self.events.send(AppEvent::OpenDiff(left, right));
@@ -379,23 +374,22 @@ impl App {
             }
             (KeyCode::Char('c'), KeyModifiers::NONE) => {
                 let mut copy_op = None;
-                if let Some(AppView::Dir(view)) = self.current_view() {
-                    if let Some(i) = view.table_state.borrow().selected() {
-                        if let Some(item) = view.diff.items.get(i) {
-                            let r_dir = &view.diff.right_dir;
-                            let l_dir = &view.diff.left_dir;
-                            if let Some(l) = &item.left_item {
-                                if r_dir.path().exists() {
-                                    let dst = r_dir.path().join(l.name());
-                                    copy_op = Some((l.clone(), dst));
-                                }
-                            } else if let Some(r) = &item.right_item {
-                                if l_dir.path().exists() {
-                                    let dst = l_dir.path().join(r.name());
-                                    copy_op = Some((r.clone(), dst));
-                                }
-                            }
-                        }
+                if let Some(AppView::Dir(view)) = self.current_view()
+                    && let Some(i) = view.table_state.borrow().selected()
+                    && let Some(item) = view.diff.items.get(i)
+                {
+                    let r_dir = &view.diff.right_dir;
+                    let l_dir = &view.diff.left_dir;
+                    if let Some(l) = &item.left_item
+                        && r_dir.path().exists()
+                    {
+                        let dst = r_dir.path().join(l.name());
+                        copy_op = Some((l.clone(), dst));
+                    } else if let Some(r) = &item.right_item
+                        && l_dir.path().exists()
+                    {
+                        let dst = l_dir.path().join(r.name());
+                        copy_op = Some((r.clone(), dst));
                     }
                 }
                 if let Some((src, dst)) = copy_op {
@@ -404,23 +398,22 @@ impl App {
             }
             (KeyCode::Char('m'), KeyModifiers::NONE) => {
                 let mut move_op = None;
-                if let Some(AppView::Dir(view)) = self.current_view() {
-                    if let Some(i) = view.table_state.borrow().selected() {
-                        if let Some(item) = view.diff.items.get(i) {
-                            let r_dir = &view.diff.right_dir;
-                            let l_dir = &view.diff.left_dir;
-                            if let Some(l) = &item.left_item {
-                                if r_dir.path().exists() {
-                                    let dst = r_dir.path().join(l.name());
-                                    move_op = Some((l.clone(), dst));
-                                }
-                            } else if let Some(r) = &item.right_item {
-                                if l_dir.path().exists() {
-                                    let dst = l_dir.path().join(r.name());
-                                    move_op = Some((r.clone(), dst));
-                                }
-                            }
-                        }
+                if let Some(AppView::Dir(view)) = self.current_view()
+                    && let Some(i) = view.table_state.borrow().selected()
+                    && let Some(item) = view.diff.items.get(i)
+                {
+                    let r_dir = &view.diff.right_dir;
+                    let l_dir = &view.diff.left_dir;
+                    if let Some(l) = &item.left_item
+                        && r_dir.path().exists()
+                    {
+                        let dst = r_dir.path().join(l.name());
+                        move_op = Some((l.clone(), dst));
+                    } else if let Some(r) = &item.right_item
+                        && l_dir.path().exists()
+                    {
+                        let dst = l_dir.path().join(r.name());
+                        move_op = Some((r.clone(), dst));
                     }
                 }
                 if let Some((src, dst)) = move_op {
@@ -429,15 +422,14 @@ impl App {
             }
             (KeyCode::Char('d'), KeyModifiers::NONE) => {
                 let mut delete_op = None;
-                if let Some(AppView::Dir(view)) = self.current_view() {
-                    if let Some(i) = view.table_state.borrow().selected() {
-                        if let Some(item) = view.diff.items.get(i) {
-                            if let Some(l) = &item.left_item {
-                                delete_op = Some(l.clone());
-                            } else if let Some(r) = &item.right_item {
-                                delete_op = Some(r.clone());
-                            }
-                        }
+                if let Some(AppView::Dir(view)) = self.current_view()
+                    && let Some(i) = view.table_state.borrow().selected()
+                    && let Some(item) = view.diff.items.get(i)
+                {
+                    if let Some(l) = &item.left_item {
+                        delete_op = Some(l.clone());
+                    } else if let Some(r) = &item.right_item {
+                        delete_op = Some(r.clone());
                     }
                 }
                 if let Some(item) = delete_op {
@@ -458,7 +450,7 @@ impl App {
     pub const fn tick(&self) {}
 
     /// Set running to false to quit the application.
-    pub fn quit(&mut self) {
+    pub const fn quit(&mut self) {
         self.running = false;
     }
 

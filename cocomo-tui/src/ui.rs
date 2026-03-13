@@ -91,6 +91,7 @@ impl Widget for &App {
 
 /// helper function to create a centered rect using up certain % of the
 /// available rect `r`
+#[allow(clippy::integer_division)]
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
     let popup_layout = Layout::vertical([
         Constraint::Percentage((100 - percent_y) / 2),

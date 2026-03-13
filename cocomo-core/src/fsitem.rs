@@ -42,7 +42,7 @@
 use std::{borrow::Cow, ffi, fmt, fs, path};
 
 use chrono::{DateTime, Local};
-use mimetype_detector::{detect_file, MimeKind};
+use mimetype_detector::{MimeKind, detect_file};
 use tokio::{fs as async_fs, io};
 
 pub type FileType = MimeKind;
@@ -130,7 +130,7 @@ impl FSItem {
                 item_type: match &meta {
                     m if m.is_dir() => FSItemType::Directory,
                     m if m.is_file() => FSItemType::File {
-                        file_type: detect_file(&path)
+                        file_type: detect_file(path)
                             .map_or_else(|_| MimeKind::UNKNOWN, |t| t.kind()),
                     },
                     m if m.is_symlink() => FSItemType::SymLink {
@@ -243,7 +243,7 @@ impl FSItem {
                 }
                 Cow::Owned(FSItem::new(&current_path).await)
             }
-            _ => Cow::Borrowed(&self),
+            _ => Cow::Borrowed(self),
         }
     }
 

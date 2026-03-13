@@ -118,8 +118,7 @@ impl DiffItem {
                 left_item: left_item.clone(),
                 right_item: right_item.clone(),
             }),
-            _ => Err(io::Error::new(
-                io::ErrorKind::Other,
+            _ => Err(io::Error::other(
                 "Internal error: both sides of diff item empty.",
             )),
         }
@@ -134,7 +133,7 @@ impl DiffItem {
             return right_item.name();
         }
         // should never happen
-        &EMPTY
+        EMPTY
     }
 
     /// Returns `true` if the item exists on both sides and the left one is
@@ -229,8 +228,8 @@ impl DirDiff {
             }
         }
         Ok(Self {
-            left_dir: left_dir.cloned().unwrap_or_else(|| FSItem::default()),
-            right_dir: right_dir.cloned().unwrap_or_else(|| FSItem::default()),
+            left_dir: left_dir.cloned().unwrap_or_else(FSItem::default),
+            right_dir: right_dir.cloned().unwrap_or_else(FSItem::default),
             items: diff_items,
         })
     }

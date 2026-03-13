@@ -132,12 +132,12 @@ impl Widget for &DirView {
 
         // Path headers
         let left_path = if self.diff.left_dir.name().is_empty() {
-            "".to_string()
+            String::new()
         } else {
             self.diff.left_dir.path().to_string_lossy().to_string()
         };
         let right_path = if self.diff.right_dir.name().is_empty() {
-            "".to_string()
+            String::new()
         } else {
             self.diff.right_dir.path().to_string_lossy().to_string()
         };
@@ -189,10 +189,10 @@ impl Widget for &DirView {
                 cells.push(Cell::from(
                     left.metadata()
                         .as_ref()
-                        .map_or("".to_string(), |m| m.len().to_string()),
+                        .map_or(String::new(), |m| m.len().to_string()),
                 ));
                 cells.push(Cell::from(
-                    left.modified().map_or("".to_string(), |t| {
+                    left.modified().map_or(String::new(), |t| {
                         t.format("%Y-%m-%d %H:%M:%S").to_string()
                     }),
                 ));
@@ -216,10 +216,10 @@ impl Widget for &DirView {
                     right
                         .metadata()
                         .as_ref()
-                        .map_or("".to_string(), |m| m.len().to_string()),
+                        .map_or(String::new(), |m| m.len().to_string()),
                 ));
                 cells.push(Cell::from(
-                    right.modified().map_or("".to_string(), |t| {
+                    right.modified().map_or(String::new(), |t| {
                         t.format("%Y-%m-%d %H:%M:%S").to_string()
                     }),
                 ));
