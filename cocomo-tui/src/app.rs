@@ -21,10 +21,33 @@ use ratatui::{
 };
 
 use crate::view::NavigableView;
+
+/// Application events.
+#[derive(Clone, Debug)]
+#[allow(clippy::large_enum_variant)]
+pub(crate) enum AppEvent {
+    /// Quit the application.
+    Quit,
+    /// Close the current tab.
+    CloseTab,
+    /// Open a new comparison view.
+    OpenDiff(Option<FSItem>, Option<FSItem>),
+    /// Copy the current item to the other side.
+    Copy(FSItem, std::path::PathBuf),
+    /// Move the current item to the other side.
+    Move(FSItem, std::path::PathBuf),
+    /// Delete the current item.
+    Delete(FSItem),
+    /// Rename the current item.
+    Rename(FSItem, String),
+    /// Refresh the current view.
+    Refresh,
+}
+
 /// Holds the state and application logic.
 use crate::{
     dirview::DirView,
-    event::{AppEvent, Event, EventHandler},
+    event::{Event, EventHandler},
     fileview::FileView,
 };
 
