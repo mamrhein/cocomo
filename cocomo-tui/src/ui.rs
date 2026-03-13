@@ -48,14 +48,29 @@ impl Widget for &App {
             .iter()
             .map(|v| match v {
                 AppView::Dir(dv) => {
-                    dv.diff.left_dir.name().to_string_lossy().into_owned()
+                    // Use the name of whichever side (left or right) has content
+                    if dv.diff.left_dir.name().is_empty() {
+                        dv.diff.right_dir.name().to_string_lossy().into_owned()
+                    } else {
+                        dv.diff.left_dir.name().to_string_lossy().into_owned()
+                    }
                 }
-                AppView::File(fv) => fv
-                    .file_diff
-                    .left_file
-                    .name()
-                    .to_string_lossy()
-                    .into_owned(),
+                AppView::File(fv) => {
+                    // Use the name of whichever side (left or right) has content
+                    if fv.file_diff.left_file.name().is_empty() {
+                        fv.file_diff
+                            .right_file
+                            .name()
+                            .to_string_lossy()
+                            .into_owned()
+                    } else {
+                        fv.file_diff
+                            .left_file
+                            .name()
+                            .to_string_lossy()
+                            .into_owned()
+                    }
+                }
             })
             .collect();
 
