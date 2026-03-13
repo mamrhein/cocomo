@@ -163,7 +163,6 @@ impl App {
     /// # Errors
     ///
     /// Returns an error if terminal drawing or event handling fails.
-    #[allow(clippy::cognitive_complexity)]
     pub async fn run(
         mut self,
         mut terminal: DefaultTerminal,
@@ -181,113 +180,9 @@ impl App {
                     }
                     _ => {}
                 },
-                Event::App(app_event) => match app_event {
-                    AppEvent::Quit => self.quit(),
-                    AppEvent::CloseTab => self.close_tab(),
-                    AppEvent::OpenDiff(left, right) => {
-                        match (left.as_ref(), right.as_ref()) {
-                            (Some(l), Some(r)) => {
-                                if l.is_dir() && r.is_dir() {
-                                    if let Ok(d) =
-                                        DirDiff::new(Some(l), Some(r)).await
-                                    {
-                                        self.views.push(AppView::Dir(
-                                            DirView::new(d),
-                                        ));
-                                        self.active_view =
-                                            self.views.len() - 1;
-                                    }
-                                } else if l.is_file() && r.is_file() {
-                                    let view = FileView::new(
-                                        Some(l.clone()),
-                                        Some(r.clone()),
-                                    )
-                                    .await;
-                                    self.views.push(AppView::File(view));
-                                    self.active_view = self.views.len() - 1;
-                                }
-                            }
-                            (Some(l), None) => {
-                                if l.is_dir() {
-                                    if let Ok(d) =
-                                        DirDiff::new(Some(l), None).await
-                                    {
-                                        self.views.push(AppView::Dir(
-                                            DirView::new(d),
-                                        ));
-                                        self.active_view =
-                                            self.views.len() - 1;
-                                    }
-                                } else if l.is_file() {
-                                    let view =
-                                        FileView::new(Some(l.clone()), None)
-                                            .await;
-                                    self.views.push(AppView::File(view));
-                                    self.active_view = self.views.len() - 1;
-                                }
-                            }
-                            (None, Some(r)) => {
-                                if r.is_dir() {
-                                    if let Ok(d) =
-                                        DirDiff::new(None, Some(r)).await
-                                    {
-                                        self.views.push(AppView::Dir(
-                                            DirView::new(d),
-                                        ));
-                                        self.active_view =
-                                            self.views.len() - 1;
-                                    }
-                                } else if r.is_file() {
-                                    let view =
-                                        FileView::new(None, Some(r.clone()))
-                                            .await;
-                                    self.views.push(AppView::File(view));
-                                    self.active_view = self.views.len() - 1;
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                    AppEvent::Copy(src, dst) => {
-                        let _ = copy_item(&src, &dst).await;
-                        self.events.send(AppEvent::Refresh);
-                    }
-                    AppEvent::Move(src, dst) => {
-                        let _ = move_item(&src, &dst).await;
-                        self.events.send(AppEvent::Refresh);
-                    }
-                    AppEvent::Delete(item) => {
-                        let _ = delete_item(&item).await;
-                        self.events.send(AppEvent::Refresh);
-                    }
-                    AppEvent::Rename(item, new_name) => {
-                        let _ = rename_item(&item, &new_name).await;
-                        self.events.send(AppEvent::Refresh);
-                    }
-                    AppEvent::Refresh => {
-                        if let Some(AppView::Dir(dir_view)) =
-                            self.current_view_mut()
-                        {
-                            let left = dir_view
-                                .diff
-                                .left_dir
-                                .path()
-                                .exists()
-                                .then_some(&dir_view.diff.left_dir);
-                            let right = dir_view
-                                .diff
-                                .right_dir
-                                .path()
-                                .exists()
-                                .then_some(&dir_view.diff.right_dir);
-                            if let Ok(new_diff) =
-                                DirDiff::new(left, right).await
-                            {
-                                dir_view.diff = new_diff;
-                            }
-                        }
-                    }
-                },
+                Event::App(app_event) => {
+                    self.handle_app_event(app_event).await;
+                }
             }
         }
         Ok(())
@@ -490,6 +385,98 @@ impl App {
         self.views.remove(self.active_view);
         if self.active_view >= self.views.len() {
             self.active_view = self.views.len().saturating_sub(1);
+        }
+    }
+
+    /// Handles application events from the event channel.
+    #[allow(clippy::cognitive_complexity)]
+    async fn handle_app_event(&mut self, app_event: AppEvent) {
+        match app_event {
+            AppEvent::Quit => self.quit(),
+            AppEvent::CloseTab => self.close_tab(),
+            AppEvent::OpenDiff(left, right) => {
+                match (left.as_ref(), right.as_ref()) {
+                    (Some(l), Some(r)) => {
+                        if l.is_dir() && r.is_dir() {
+                            if let Ok(d) = DirDiff::new(Some(l), Some(r)).await
+                            {
+                                self.views.push(AppView::Dir(DirView::new(d)));
+                                self.active_view = self.views.len() - 1;
+                            }
+                        } else if l.is_file() && r.is_file() {
+                            let view = FileView::new(
+                                Some(l.clone()),
+                                Some(r.clone()),
+                            )
+                            .await;
+                            self.views.push(AppView::File(view));
+                            self.active_view = self.views.len() - 1;
+                        }
+                    }
+                    (Some(l), None) => {
+                        if l.is_dir() {
+                            if let Ok(d) = DirDiff::new(Some(l), None).await {
+                                self.views.push(AppView::Dir(DirView::new(d)));
+                                self.active_view = self.views.len() - 1;
+                            }
+                        } else if l.is_file() {
+                            let view =
+                                FileView::new(Some(l.clone()), None).await;
+                            self.views.push(AppView::File(view));
+                            self.active_view = self.views.len() - 1;
+                        }
+                    }
+                    (None, Some(r)) => {
+                        if r.is_dir() {
+                            if let Ok(d) = DirDiff::new(None, Some(r)).await {
+                                self.views.push(AppView::Dir(DirView::new(d)));
+                                self.active_view = self.views.len() - 1;
+                            }
+                        } else if r.is_file() {
+                            let view =
+                                FileView::new(None, Some(r.clone())).await;
+                            self.views.push(AppView::File(view));
+                            self.active_view = self.views.len() - 1;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            AppEvent::Copy(src, dst) => {
+                let _ = copy_item(&src, &dst).await;
+                self.events.send(AppEvent::Refresh);
+            }
+            AppEvent::Move(src, dst) => {
+                let _ = move_item(&src, &dst).await;
+                self.events.send(AppEvent::Refresh);
+            }
+            AppEvent::Delete(item) => {
+                let _ = delete_item(&item).await;
+                self.events.send(AppEvent::Refresh);
+            }
+            AppEvent::Rename(item, new_name) => {
+                let _ = rename_item(&item, &new_name).await;
+                self.events.send(AppEvent::Refresh);
+            }
+            AppEvent::Refresh => {
+                if let Some(AppView::Dir(dir_view)) = self.current_view_mut() {
+                    let left = dir_view
+                        .diff
+                        .left_dir
+                        .path()
+                        .exists()
+                        .then_some(&dir_view.diff.left_dir);
+                    let right = dir_view
+                        .diff
+                        .right_dir
+                        .path()
+                        .exists()
+                        .then_some(&dir_view.diff.right_dir);
+                    if let Ok(new_diff) = DirDiff::new(left, right).await {
+                        dir_view.diff = new_diff;
+                    }
+                }
+            }
         }
     }
 }
