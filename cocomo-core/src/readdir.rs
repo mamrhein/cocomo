@@ -40,6 +40,6 @@ mod tests {
         let content = read_dir(&FSItem::new("..").await)
             .await
             .expect("Error reading '..'");
-        assert!(content.len() > 0);
+        assert!(!content.is_empty());
     }
 }
