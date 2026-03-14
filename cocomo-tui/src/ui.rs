@@ -81,14 +81,12 @@ impl Widget for &App {
             .render(tab_bar, buf);
 
         // Render current view
-        if let Some(view) = self.current_view() {
-            match view {
-                AppView::Dir(dir_view) => {
-                    dir_view.render(main_view, buf);
-                }
-                AppView::File(file_view) => {
-                    file_view.render(main_view, buf);
-                }
+        match self.current_view() {
+            AppView::Dir(dir_view) => {
+                dir_view.render(main_view, buf);
+            }
+            AppView::File(file_view) => {
+                file_view.render(main_view, buf);
             }
         }
 

@@ -79,24 +79,12 @@ pub(crate) struct App {
     /// Handler for terminal and application events.
     pub events: EventHandler,
     /// Open views (tabs).
+    /// Invariant: !views.is_empty()
     pub views: Vec<AppView>,
     /// Index of the currently active view.
     pub active_view: usize,
     /// Flag to show a confirmation dialog before quitting.
     pub show_quit_confirm: bool,
-}
-
-impl Default for App {
-    fn default() -> Self {
-        Self {
-            running: true,
-            cmp_items: CmpItems::default(),
-            events: EventHandler::new(),
-            views: Vec::new(),
-            active_view: 0,
-            show_quit_confirm: false,
-        }
-    }
 }
 
 impl App {
@@ -149,13 +137,13 @@ impl App {
     }
 
     /// Returns the active view.
-    pub fn current_view(&self) -> Option<&AppView> {
-        self.views.get(self.active_view)
+    pub fn current_view(&self) -> &AppView {
+        self.views.get(self.active_view).unwrap()
     }
 
     /// Returns a mutable reference to the active view.
-    pub fn current_view_mut(&mut self) -> Option<&mut AppView> {
-        self.views.get_mut(self.active_view)
+    pub fn current_view_mut(&mut self) -> &mut AppView {
+        self.views.get_mut(self.active_view).unwrap()
     }
 
     /// Run the application's main loop.
@@ -193,7 +181,7 @@ impl App {
     /// # Errors
     ///
     /// Returns an error if an application event cannot be sent.
-    pub fn handle_key_events(
+    fn handle_key_events(
         &mut self,
         key_event: KeyEvent,
     ) -> color_eyre::Result<()> {
@@ -219,50 +207,46 @@ impl App {
             }
             (KeyCode::Up, KeyModifiers::NONE) => match self.current_view_mut()
             {
-                Some(AppView::Dir(view)) => {
+                AppView::Dir(view) => {
                     view.move_up();
                 }
-                Some(AppView::File(view)) => {
+                AppView::File(view) => {
                     view.move_up();
                 }
-                None => {}
             },
             (KeyCode::Down, KeyModifiers::NONE) => {
                 match self.current_view_mut() {
-                    Some(AppView::Dir(view)) => {
+                    AppView::Dir(view) => {
                         view.move_down();
                     }
-                    Some(AppView::File(view)) => {
+                    AppView::File(view) => {
                         view.move_down();
                     }
-                    None => {}
                 }
             }
             (KeyCode::Home, KeyModifiers::NONE) => {
                 match self.current_view_mut() {
-                    Some(AppView::Dir(view)) => {
+                    AppView::Dir(view) => {
                         view.move_home();
                     }
-                    Some(AppView::File(view)) => {
+                    AppView::File(view) => {
                         view.move_home();
                     }
-                    None => {}
                 }
             }
             (KeyCode::End, KeyModifiers::NONE) => {
                 match self.current_view_mut() {
-                    Some(AppView::Dir(view)) => {
+                    AppView::Dir(view) => {
                         view.move_end();
                     }
-                    Some(AppView::File(view)) => {
+                    AppView::File(view) => {
                         view.move_end();
                     }
-                    None => {}
                 }
             }
             (KeyCode::Enter, KeyModifiers::NONE) => {
                 let mut open_diff = None;
-                if let Some(AppView::Dir(view)) = self.current_view_mut()
+                if let AppView::Dir(view) = self.current_view_mut()
                     && let Some(i) = view.table_state.borrow().selected()
                     && let Some(item) = view.diff.items.get(i)
                 {
@@ -292,7 +276,7 @@ impl App {
             }
             (KeyCode::Char('c'), KeyModifiers::NONE) => {
                 let mut copy_op = None;
-                if let Some(AppView::Dir(view)) = self.current_view()
+                if let AppView::Dir(view) = self.current_view()
                     && let Some(i) = view.table_state.borrow().selected()
                     && let Some(item) = view.diff.items.get(i)
                 {
@@ -316,7 +300,7 @@ impl App {
             }
             (KeyCode::Char('m'), KeyModifiers::NONE) => {
                 let mut move_op = None;
-                if let Some(AppView::Dir(view)) = self.current_view()
+                if let AppView::Dir(view) = self.current_view()
                     && let Some(i) = view.table_state.borrow().selected()
                     && let Some(item) = view.diff.items.get(i)
                 {
@@ -340,7 +324,7 @@ impl App {
             }
             (KeyCode::Char('d'), KeyModifiers::NONE) => {
                 let mut delete_op = None;
-                if let Some(AppView::Dir(view)) = self.current_view()
+                if let AppView::Dir(view) = self.current_view()
                     && let Some(i) = view.table_state.borrow().selected()
                     && let Some(item) = view.diff.items.get(i)
                 {
@@ -459,7 +443,7 @@ impl App {
                 self.events.send(AppEvent::Refresh);
             }
             AppEvent::Refresh => {
-                if let Some(AppView::Dir(dir_view)) = self.current_view_mut() {
+                if let AppView::Dir(dir_view) = self.current_view_mut() {
                     let left = dir_view
                         .diff
                         .left_dir
