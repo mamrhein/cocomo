@@ -12,7 +12,7 @@
 //! This module contains the main application state and logic. It handles
 //! events, manages views (tabs), and drives the main loop.
 
-use cocomo_core::{DirDiff, FSItem};
+use cocomo_core::FSItem;
 use ratatui::{
     DefaultTerminal,
     crossterm::event::{KeyCode, KeyEvent, KeyModifiers},
@@ -83,8 +83,10 @@ impl App {
         match (left.as_ref(), right.as_ref()) {
             (Some(l), Some(r)) => {
                 if l.is_dir() && r.is_dir() {
-                    if let Ok(d) = DirDiff::new(Some(l), Some(r)).await {
-                        views.push(AppView::Dir(DirView::new(d)));
+                    if let Ok(view) =
+                        DirView::new(Some(l.clone()), Some(r.clone())).await
+                    {
+                        views.push(AppView::Dir(view));
                     }
                 } else if l.is_file() && r.is_file() {
                     if let Ok(view) =
@@ -96,8 +98,9 @@ impl App {
             }
             (Some(l), None) => {
                 if l.is_dir() {
-                    if let Ok(d) = DirDiff::new(Some(l), None).await {
-                        views.push(AppView::Dir(DirView::new(d)));
+                    if let Ok(view) = DirView::new(Some(l.clone()), None).await
+                    {
+                        views.push(AppView::Dir(view));
                     }
                 } else if l.is_file() {
                     if let Ok(view) =
@@ -109,8 +112,9 @@ impl App {
             }
             (None, Some(r)) => {
                 if r.is_dir() {
-                    if let Ok(d) = DirDiff::new(None, Some(r)).await {
-                        views.push(AppView::Dir(DirView::new(d)));
+                    if let Ok(view) = DirView::new(None, Some(r.clone())).await
+                    {
+                        views.push(AppView::Dir(view));
                     }
                 } else if r.is_file() {
                     if let Ok(view) =
@@ -297,13 +301,15 @@ impl App {
                     match (&item.left_item, &item.right_item) {
                         (Some(l), Some(r)) => {
                             if l.is_dir() && r.is_dir() {
-                                if let Ok(d) =
-                                    DirDiff::new(Some(l), Some(r)).await
+                                if let Ok(view) = DirView::new(
+                                    Some(l.clone()),
+                                    Some(r.clone()),
+                                )
+                                .await
                                 {
-                                    self.views
-                                        .push(AppView::Dir(DirView::new(d)));
-                                    self.active_view = self.views.len() - 1;
+                                    self.views.push(AppView::Dir(view));
                                 }
+                                self.active_view = self.views.len() - 1;
                             } else if l.is_file() && r.is_file() {
                                 if let Ok(view) = FileView::new(
                                     Some(l.clone()),
@@ -318,13 +324,12 @@ impl App {
                         }
                         (Some(l), None) => {
                             if l.is_dir() {
-                                if let Ok(d) =
-                                    DirDiff::new(Some(l), None).await
+                                if let Ok(view) =
+                                    DirView::new(Some(l.clone()), None).await
                                 {
-                                    self.views
-                                        .push(AppView::Dir(DirView::new(d)));
-                                    self.active_view = self.views.len() - 1;
+                                    self.views.push(AppView::Dir(view));
                                 }
+                                self.active_view = self.views.len() - 1;
                             } else if l.is_file() {
                                 if let Ok(view) =
                                     FileView::new(Some(l.clone()), None).await
@@ -336,13 +341,12 @@ impl App {
                         }
                         (None, Some(r)) => {
                             if r.is_dir() {
-                                if let Ok(d) =
-                                    DirDiff::new(None, Some(r)).await
+                                if let Ok(view) =
+                                    DirView::new(None, Some(r.clone())).await
                                 {
-                                    self.views
-                                        .push(AppView::Dir(DirView::new(d)));
-                                    self.active_view = self.views.len() - 1;
+                                    self.views.push(AppView::Dir(view));
                                 }
+                                self.active_view = self.views.len() - 1;
                             } else if r.is_file() {
                                 if let Ok(view) =
                                     FileView::new(None, Some(r.clone())).await

@@ -12,13 +12,14 @@
 //! This module provides the `DirView` struct and its `Widget` implementation
 //! for rendering directory comparison results in a table.
 
-use std::{cell::RefCell, path};
+use std::{cell, io, path};
 
 use cocomo_core::{
     By,
     DiffItem,
     DiffItemType,
     DirDiff,
+    FSItem,
     copy_item,
     delete_item,
     move_item,
@@ -62,21 +63,25 @@ pub struct DirView {
     /// The comparison results.
     pub diff: DirDiff,
     /// The state of the table.
-    pub table_state: RefCell<TableState>,
+    pub table_state: cell::RefCell<TableState>,
 }
 
 impl DirView {
-    /// Creates a new `DirView` with the given comparison results.
-    #[must_use]
-    pub fn new(diff: DirDiff) -> Self {
+    /// Creates a new `DirView` from the given file system items.
+    pub async fn new(
+        left_item: Option<FSItem>,
+        right_item: Option<FSItem>,
+    ) -> io::Result<Self> {
+        let diff =
+            DirDiff::new(left_item.as_ref(), right_item.as_ref()).await?;
         let mut table_state = TableState::default();
         if !diff.items.is_empty() {
             table_state.select(Some(0));
         }
-        Self {
+        Ok(Self {
             diff,
-            table_state: RefCell::new(table_state),
-        }
+            table_state: cell::RefCell::new(table_state),
+        })
     }
 
     pub fn current_item(&self) -> Option<&DiffItem> {
