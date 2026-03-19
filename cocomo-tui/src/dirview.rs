@@ -14,7 +14,16 @@
 
 use std::{cell::RefCell, path};
 
-use cocomo_core::{By, DiffItem, DiffItemType, DirDiff};
+use cocomo_core::{
+    By,
+    DiffItem,
+    DiffItemType,
+    DirDiff,
+    copy_item,
+    delete_item,
+    move_item,
+    // rename_item,
+};
 use ratatui::{
     buffer::Buffer,
     layout::{Constraint, Layout, Rect},
@@ -25,7 +34,7 @@ use ratatui::{
     },
 };
 
-use crate::view::NavigableView;
+use crate::{appevent::AppEvent, view::NavigableView};
 
 /// Map DirDiffType to indicator text
 fn indicator<'a>(t: DiffItemType) -> Text<'a> {
@@ -74,6 +83,75 @@ impl DirView {
         let table_state = self.table_state.borrow();
         let i = table_state.selected()?;
         Some(&self.diff.items[i])
+    }
+
+    pub(crate) async fn handle_app_event(&mut self, app_event: AppEvent) {
+        match app_event {
+            AppEvent::Copy => {
+                if let Some(item) = self.current_item() {
+                    let r_dir = &self.diff.right_dir;
+                    let l_dir = &self.diff.left_dir;
+                    if let Some(l) = &item.left_item
+                        && r_dir.path().exists()
+                    {
+                        let dst = r_dir.path().join(l.name());
+                        let _ = copy_item(l, &dst).await;
+                    } else if let Some(r) = &item.right_item
+                        && l_dir.path().exists()
+                    {
+                        let dst = l_dir.path().join(r.name());
+                        let _ = copy_item(r, &dst).await;
+                    }
+                }
+            }
+            AppEvent::Move => {
+                if let Some(item) = self.current_item() {
+                    let r_dir = &self.diff.right_dir;
+                    let l_dir = &self.diff.left_dir;
+                    if let Some(l) = &item.left_item
+                        && r_dir.path().exists()
+                    {
+                        let dst = r_dir.path().join(l.name());
+                        let _ = move_item(l, &dst).await;
+                    } else if let Some(r) = &item.right_item
+                        && l_dir.path().exists()
+                    {
+                        let dst = l_dir.path().join(r.name());
+                        let _ = move_item(r, &dst).await;
+                    }
+                }
+            }
+            AppEvent::Delete => {
+                if let Some(item) = self.current_item() {
+                    if let Some(l) = &item.left_item {
+                        let _ = delete_item(l).await;
+                    } else if let Some(r) = &item.right_item {
+                        let _ = delete_item(r).await;
+                    }
+                }
+            }
+            // AppEvent::Rename => {
+            // let _ = rename_item(&item, &new_name).await;
+            // }
+            AppEvent::Refresh => {
+                let left = self
+                    .diff
+                    .left_dir
+                    .path()
+                    .exists()
+                    .then_some(&self.diff.left_dir);
+                let right = self
+                    .diff
+                    .right_dir
+                    .path()
+                    .exists()
+                    .then_some(&self.diff.right_dir);
+                if let Ok(new_diff) = DirDiff::new(left, right).await {
+                    self.diff = new_diff;
+                }
+            }
+            _ => {} // ignore it (TODO: handle it)
+        }
     }
 }
 

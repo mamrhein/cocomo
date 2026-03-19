@@ -12,9 +12,7 @@
 //! This module contains the main application state and logic. It handles
 //! events, manages views (tabs), and drives the main loop.
 
-use cocomo_core::{
-    DirDiff, FSItem, copy_item, delete_item, move_item, rename_item,
-};
+use cocomo_core::{DirDiff, FSItem};
 use ratatui::{
     DefaultTerminal,
     crossterm::event::{KeyCode, KeyEvent, KeyModifiers},
@@ -344,79 +342,11 @@ impl App {
                     }
                 }
             }
-            AppEvent::Copy => {
-                if let AppView::Dir(dir_view) = self.current_view_mut()
-                    && let Some(item) = dir_view.current_item()
-                {
-                    let r_dir = &dir_view.diff.right_dir;
-                    let l_dir = &dir_view.diff.left_dir;
-                    if let Some(l) = &item.left_item
-                        && r_dir.path().exists()
-                    {
-                        let dst = r_dir.path().join(l.name());
-                        let _ = copy_item(l, &dst).await;
-                    } else if let Some(r) = &item.right_item
-                        && l_dir.path().exists()
-                    {
-                        let dst = l_dir.path().join(r.name());
-                        let _ = copy_item(r, &dst).await;
-                    }
-                }
-                self.events.send(AppEvent::Refresh);
-            }
-            AppEvent::Move => {
-                if let AppView::Dir(dir_view) = self.current_view_mut()
-                    && let Some(item) = dir_view.current_item()
-                {
-                    let r_dir = &dir_view.diff.right_dir;
-                    let l_dir = &dir_view.diff.left_dir;
-                    if let Some(l) = &item.left_item
-                        && r_dir.path().exists()
-                    {
-                        let dst = r_dir.path().join(l.name());
-                        let _ = move_item(l, &dst).await;
-                    } else if let Some(r) = &item.right_item
-                        && l_dir.path().exists()
-                    {
-                        let dst = l_dir.path().join(r.name());
-                        let _ = move_item(r, &dst).await;
-                    }
-                }
-                self.events.send(AppEvent::Refresh);
-            }
-            AppEvent::Delete => {
-                if let AppView::Dir(dir_view) = self.current_view_mut()
-                    && let Some(item) = dir_view.current_item()
-                {
-                    if let Some(l) = &item.left_item {
-                        let _ = delete_item(l).await;
-                    } else if let Some(r) = &item.right_item {
-                        let _ = delete_item(r).await;
-                    }
-                }
-                self.events.send(AppEvent::Refresh);
-            }
-            AppEvent::Rename => {
-                // let _ = rename_item(&item, &new_name).await;
-                // self.events.send(AppEvent::Refresh);
-            }
-            AppEvent::Refresh => {
+            _ => {
+                // forward to current app view
                 if let AppView::Dir(dir_view) = self.current_view_mut() {
-                    let left = dir_view
-                        .diff
-                        .left_dir
-                        .path()
-                        .exists()
-                        .then_some(&dir_view.diff.left_dir);
-                    let right = dir_view
-                        .diff
-                        .right_dir
-                        .path()
-                        .exists()
-                        .then_some(&dir_view.diff.right_dir);
-                    if let Ok(new_diff) = DirDiff::new(left, right).await {
-                        dir_view.diff = new_diff;
-                    }
+                    dir_view.handle_app_event(app_event).await;
+                    self.events.send(AppEvent::Refresh);
                 }
             }
         }
