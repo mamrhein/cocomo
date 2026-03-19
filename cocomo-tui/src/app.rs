@@ -218,8 +218,7 @@ impl App {
             return Ok(());
         }
         match (key_event.code, key_event.modifiers) {
-            (KeyCode::Esc, KeyModifiers::NONE)
-            | (KeyCode::Char('q'), KeyModifiers::NONE) => {
+            (KeyCode::Char('q'), KeyModifiers::NONE) => {
                 self.events.send(AppEvent::Quit);
             }
             (KeyCode::Char('x'), KeyModifiers::NONE) => {
