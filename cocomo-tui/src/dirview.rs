@@ -14,7 +14,7 @@
 
 use std::{cell::RefCell, path};
 
-use cocomo_core::{By, DiffItemType, DirDiff};
+use cocomo_core::{By, DiffItem, DiffItemType, DirDiff};
 use ratatui::{
     buffer::Buffer,
     layout::{Constraint, Layout, Rect},
@@ -68,6 +68,12 @@ impl DirView {
             diff,
             table_state: RefCell::new(table_state),
         }
+    }
+
+    pub fn current_item(&self) -> Option<&DiffItem> {
+        let table_state = self.table_state.borrow();
+        let i = table_state.selected()?;
+        Some(&self.diff.items[i])
     }
 }
 

@@ -237,18 +237,13 @@ impl App {
                 self.events.send(AppEvent::NavigateLast);
             }
             (KeyCode::Enter, KeyModifiers::NONE) => {
-                let mut open_diff = None;
-                if let AppView::Dir(view) = self.current_view_mut()
-                    && let Some(i) = view.table_state.borrow().selected()
-                    && let Some(item) = view.diff.items.get(i)
+                if let AppView::Dir(view) = self.current_view()
+                    && let Some(item) = view.current_item()
                 {
-                    open_diff = Some((
+                    self.events.send(AppEvent::OpenDiff(
                         item.left_item.clone(),
                         item.right_item.clone(),
                     ));
-                }
-                if let Some((left, right)) = open_diff {
-                    self.events.send(AppEvent::OpenDiff(left, right));
                 }
             }
             (KeyCode::Tab, KeyModifiers::NONE) => {
