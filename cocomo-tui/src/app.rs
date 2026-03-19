@@ -87,9 +87,11 @@ impl App {
                         views.push(AppView::Dir(DirView::new(d)));
                     }
                 } else if l.is_file() && r.is_file() {
-                    let view =
-                        FileView::new(Some(l.clone()), Some(r.clone())).await;
-                    views.push(AppView::File(view));
+                    if let Ok(view) =
+                        FileView::new(Some(l.clone()), Some(r.clone())).await
+                    {
+                        views.push(AppView::File(view));
+                    }
                 }
             }
             (Some(l), None) => {
@@ -98,8 +100,11 @@ impl App {
                         views.push(AppView::Dir(DirView::new(d)));
                     }
                 } else if l.is_file() {
-                    let view = FileView::new(Some(l.clone()), None).await;
-                    views.push(AppView::File(view));
+                    if let Ok(view) =
+                        FileView::new(Some(l.clone()), None).await
+                    {
+                        views.push(AppView::File(view));
+                    }
                 }
             }
             (None, Some(r)) => {
@@ -108,8 +113,11 @@ impl App {
                         views.push(AppView::Dir(DirView::new(d)));
                     }
                 } else if r.is_file() {
-                    let view = FileView::new(None, Some(r.clone())).await;
-                    views.push(AppView::File(view));
+                    if let Ok(view) =
+                        FileView::new(None, Some(r.clone())).await
+                    {
+                        views.push(AppView::File(view));
+                    }
                 }
             }
             _ => {}
@@ -297,13 +305,15 @@ impl App {
                                     self.active_view = self.views.len() - 1;
                                 }
                             } else if l.is_file() && r.is_file() {
-                                let view = FileView::new(
+                                if let Ok(view) = FileView::new(
                                     Some(l.clone()),
                                     Some(r.clone()),
                                 )
-                                .await;
-                                self.views.push(AppView::File(view));
-                                self.active_view = self.views.len() - 1;
+                                .await
+                                {
+                                    self.views.push(AppView::File(view));
+                                    self.active_view = self.views.len() - 1;
+                                }
                             }
                         }
                         (Some(l), None) => {
@@ -316,10 +326,12 @@ impl App {
                                     self.active_view = self.views.len() - 1;
                                 }
                             } else if l.is_file() {
-                                let view =
-                                    FileView::new(Some(l.clone()), None).await;
-                                self.views.push(AppView::File(view));
-                                self.active_view = self.views.len() - 1;
+                                if let Ok(view) =
+                                    FileView::new(Some(l.clone()), None).await
+                                {
+                                    self.views.push(AppView::File(view));
+                                    self.active_view = self.views.len() - 1;
+                                }
                             }
                         }
                         (None, Some(r)) => {
@@ -332,10 +344,12 @@ impl App {
                                     self.active_view = self.views.len() - 1;
                                 }
                             } else if r.is_file() {
-                                let view =
-                                    FileView::new(None, Some(r.clone())).await;
-                                self.views.push(AppView::File(view));
-                                self.active_view = self.views.len() - 1;
+                                if let Ok(view) =
+                                    FileView::new(None, Some(r.clone())).await
+                                {
+                                    self.views.push(AppView::File(view));
+                                    self.active_view = self.views.len() - 1;
+                                }
                             }
                         }
                         _ => {}

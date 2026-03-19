@@ -12,7 +12,7 @@
 //! This module provides the `FileView` struct and its `Widget` implementation
 //! for side-by-side comparison of text files.
 
-use std::cell::RefCell;
+use std::{cell, io};
 
 use cocomo_core::{FSItem, FileDiff, LineDiffType};
 use ratatui::{
@@ -31,7 +31,7 @@ pub struct FileView {
     /// The diff data between the two files.
     pub file_diff: FileDiff,
     /// The state of the table.
-    pub table_state: RefCell<TableState>,
+    pub table_state: cell::RefCell<TableState>,
     /// The index of the currently selected chunk.
     pub current_chunk: usize,
 }
@@ -41,19 +41,17 @@ impl FileView {
     pub async fn new(
         left_item: Option<FSItem>,
         right_item: Option<FSItem>,
-    ) -> Self {
-        let file_diff = FileDiff::new(left_item, right_item)
-            .await
-            .expect("Failed to read files for diffing");
+    ) -> io::Result<Self> {
+        let file_diff = FileDiff::new(left_item, right_item).await?;
         let mut table_state = TableState::default();
         if !file_diff.chunks.is_empty() {
             table_state.select(Some(0));
         }
-        Self {
+        Ok(Self {
             file_diff,
-            table_state: RefCell::new(table_state),
+            table_state: cell::RefCell::new(table_state),
             current_chunk: 0,
-        }
+        })
     }
 
     fn first_row_of_chunk(&self, chunk_idx: usize) -> usize {
