@@ -28,6 +28,14 @@ use crate::view::NavigableView;
 pub(crate) enum AppEvent {
     /// Quit the application.
     Quit,
+    /// Navigate the current item of the current view to the previous item.
+    NavigatePrev,
+    /// Navigate the current item of the current view to the next item.
+    NavigateNext,
+    /// Navigate the current item of the current view to the first item.
+    NavigateFirst,
+    /// Navigate the current item of the current view to the last item.
+    NavigateLast,
     /// Close the current tab.
     CloseTab,
     /// Open a new comparison view.
@@ -67,6 +75,18 @@ pub(crate) enum AppView {
     Dir(DirView),
     /// File comparison view.
     File(FileView),
+}
+
+impl AppView {
+    /// Returns a mutable reference to the view as a [`NavigableView`].
+    #[must_use]
+    #[inline(always)]
+    fn as_nav_view(&mut self) -> &mut dyn NavigableView {
+        match self {
+            Self::Dir(dir_view) => dir_view,
+            Self::File(file_view) => file_view,
+        }
+    }
 }
 
 /// Main application state.
@@ -205,44 +225,17 @@ impl App {
             (KeyCode::Char('x'), KeyModifiers::NONE) => {
                 self.events.send(AppEvent::CloseTab);
             }
-            (KeyCode::Up, KeyModifiers::NONE) => match self.current_view_mut()
-            {
-                AppView::Dir(view) => {
-                    view.move_up();
-                }
-                AppView::File(view) => {
-                    view.move_up();
-                }
-            },
+            (KeyCode::Up, KeyModifiers::NONE) => {
+                self.events.send(AppEvent::NavigatePrev);
+            }
             (KeyCode::Down, KeyModifiers::NONE) => {
-                match self.current_view_mut() {
-                    AppView::Dir(view) => {
-                        view.move_down();
-                    }
-                    AppView::File(view) => {
-                        view.move_down();
-                    }
-                }
+                self.events.send(AppEvent::NavigateNext);
             }
             (KeyCode::Home, KeyModifiers::NONE) => {
-                match self.current_view_mut() {
-                    AppView::Dir(view) => {
-                        view.move_home();
-                    }
-                    AppView::File(view) => {
-                        view.move_home();
-                    }
-                }
+                self.events.send(AppEvent::NavigateFirst);
             }
             (KeyCode::End, KeyModifiers::NONE) => {
-                match self.current_view_mut() {
-                    AppView::Dir(view) => {
-                        view.move_end();
-                    }
-                    AppView::File(view) => {
-                        view.move_end();
-                    }
-                }
+                self.events.send(AppEvent::NavigateLast);
             }
             (KeyCode::Enter, KeyModifiers::NONE) => {
                 let mut open_diff = None;
@@ -377,6 +370,22 @@ impl App {
     async fn handle_app_event(&mut self, app_event: AppEvent) {
         match app_event {
             AppEvent::Quit => self.quit(),
+            AppEvent::NavigatePrev => {
+                let view = self.current_view_mut().as_nav_view();
+                view.prev();
+            }
+            AppEvent::NavigateNext => {
+                let view = self.current_view_mut().as_nav_view();
+                view.next();
+            }
+            AppEvent::NavigateFirst => {
+                let view = self.current_view_mut().as_nav_view();
+                view.home();
+            }
+            AppEvent::NavigateLast => {
+                let view = self.current_view_mut().as_nav_view();
+                view.end();
+            }
             AppEvent::CloseTab => self.close_tab(),
             AppEvent::OpenDiff(left, right) => {
                 match (left.as_ref(), right.as_ref()) {
