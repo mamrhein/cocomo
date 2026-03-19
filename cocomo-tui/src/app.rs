@@ -39,7 +39,7 @@ pub(crate) enum AppEvent {
     /// Close the current tab.
     CloseTab,
     /// Open a new comparison view.
-    OpenDiff(Option<FSItem>, Option<FSItem>),
+    OpenDiff,
     /// Copy the current item to the other side.
     Copy(FSItem, std::path::PathBuf),
     /// Move the current item to the other side.
@@ -237,14 +237,7 @@ impl App {
                 self.events.send(AppEvent::NavigateLast);
             }
             (KeyCode::Enter, KeyModifiers::NONE) => {
-                if let AppView::Dir(view) = self.current_view()
-                    && let Some(item) = view.current_item()
-                {
-                    self.events.send(AppEvent::OpenDiff(
-                        item.left_item.clone(),
-                        item.right_item.clone(),
-                    ));
-                }
+                self.events.send(AppEvent::OpenDiff);
             }
             (KeyCode::Tab, KeyModifiers::NONE) => {
                 if !self.views.is_empty() {
@@ -381,52 +374,64 @@ impl App {
                 view.end();
             }
             AppEvent::CloseTab => self.close_tab(),
-            AppEvent::OpenDiff(left, right) => {
-                match (left.as_ref(), right.as_ref()) {
-                    (Some(l), Some(r)) => {
-                        if l.is_dir() && r.is_dir() {
-                            if let Ok(d) = DirDiff::new(Some(l), Some(r)).await
-                            {
-                                self.views.push(AppView::Dir(DirView::new(d)));
+            AppEvent::OpenDiff => {
+                if let AppView::Dir(view) = self.current_view()
+                    && let Some(item) = view.current_item()
+                {
+                    match (&item.left_item, &item.right_item) {
+                        (Some(l), Some(r)) => {
+                            if l.is_dir() && r.is_dir() {
+                                if let Ok(d) =
+                                    DirDiff::new(Some(l), Some(r)).await
+                                {
+                                    self.views
+                                        .push(AppView::Dir(DirView::new(d)));
+                                    self.active_view = self.views.len() - 1;
+                                }
+                            } else if l.is_file() && r.is_file() {
+                                let view = FileView::new(
+                                    Some(l.clone()),
+                                    Some(r.clone()),
+                                )
+                                .await;
+                                self.views.push(AppView::File(view));
                                 self.active_view = self.views.len() - 1;
                             }
-                        } else if l.is_file() && r.is_file() {
-                            let view = FileView::new(
-                                Some(l.clone()),
-                                Some(r.clone()),
-                            )
-                            .await;
-                            self.views.push(AppView::File(view));
-                            self.active_view = self.views.len() - 1;
                         }
-                    }
-                    (Some(l), None) => {
-                        if l.is_dir() {
-                            if let Ok(d) = DirDiff::new(Some(l), None).await {
-                                self.views.push(AppView::Dir(DirView::new(d)));
+                        (Some(l), None) => {
+                            if l.is_dir() {
+                                if let Ok(d) =
+                                    DirDiff::new(Some(l), None).await
+                                {
+                                    self.views
+                                        .push(AppView::Dir(DirView::new(d)));
+                                    self.active_view = self.views.len() - 1;
+                                }
+                            } else if l.is_file() {
+                                let view =
+                                    FileView::new(Some(l.clone()), None).await;
+                                self.views.push(AppView::File(view));
                                 self.active_view = self.views.len() - 1;
                             }
-                        } else if l.is_file() {
-                            let view =
-                                FileView::new(Some(l.clone()), None).await;
-                            self.views.push(AppView::File(view));
-                            self.active_view = self.views.len() - 1;
                         }
-                    }
-                    (None, Some(r)) => {
-                        if r.is_dir() {
-                            if let Ok(d) = DirDiff::new(None, Some(r)).await {
-                                self.views.push(AppView::Dir(DirView::new(d)));
+                        (None, Some(r)) => {
+                            if r.is_dir() {
+                                if let Ok(d) =
+                                    DirDiff::new(None, Some(r)).await
+                                {
+                                    self.views
+                                        .push(AppView::Dir(DirView::new(d)));
+                                    self.active_view = self.views.len() - 1;
+                                }
+                            } else if r.is_file() {
+                                let view =
+                                    FileView::new(None, Some(r.clone())).await;
+                                self.views.push(AppView::File(view));
                                 self.active_view = self.views.len() - 1;
                             }
-                        } else if r.is_file() {
-                            let view =
-                                FileView::new(None, Some(r.clone())).await;
-                            self.views.push(AppView::File(view));
-                            self.active_view = self.views.len() - 1;
                         }
+                        _ => {}
                     }
-                    _ => {}
                 }
             }
             AppEvent::Copy(src, dst) => {
