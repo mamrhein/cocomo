@@ -11,15 +11,15 @@
 
 /// Trait for views that support cursor-style navigation.
 pub(crate) trait NavigableView {
-    /// Moves the selection up by one logical item.
-    fn move_up(&mut self);
+    /// Makes the previous logical item the current item.
+    fn prev(&mut self);
 
-    /// Moves the selection down by one logical item.
-    fn move_down(&mut self);
+    /// Makes the next logical item the current item.
+    fn next(&mut self);
 
-    /// Moves the selection to the first logical item.
-    fn move_home(&mut self);
+    /// Makes the first logical item the current item.
+    fn home(&mut self);
 
-    /// Moves the selection to the last logical item.
-    fn move_end(&mut self);
+    /// Makes the last logical item the current item.
+    fn end(&mut self);
 }

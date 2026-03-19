@@ -72,8 +72,8 @@ impl DirView {
 }
 
 impl NavigableView for DirView {
-    /// Moves the selection up by one item.
-    fn move_up(&mut self) {
+    /// Makes the previous item the current item.
+    fn prev(&mut self) {
         let mut table_state = self.table_state.borrow_mut();
         let i = match table_state.selected() {
             Some(i) => {
@@ -88,8 +88,8 @@ impl NavigableView for DirView {
         table_state.select(Some(i));
     }
 
-    /// Moves the selection down by one item.
-    fn move_down(&mut self) {
+    /// Makes the next item the current item.
+    fn next(&mut self) {
         let mut table_state = self.table_state.borrow_mut();
         let i = match table_state.selected() {
             Some(i) => {
@@ -104,15 +104,15 @@ impl NavigableView for DirView {
         table_state.select(Some(i));
     }
 
-    /// Moves the selection to the first item.
-    fn move_home(&mut self) {
+    /// Makes the first item the current item.
+    fn home(&mut self) {
         if !self.diff.items.is_empty() {
             self.table_state.borrow_mut().select(Some(0));
         }
     }
 
-    /// Moves the selection to the last item.
-    fn move_end(&mut self) {
+    /// Makes the last item the current item.
+    fn end(&mut self) {
         if !self.diff.items.is_empty() {
             let last = self.diff.items.len().saturating_sub(1);
             self.table_state.borrow_mut().select(Some(last));

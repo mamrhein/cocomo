@@ -33,7 +33,7 @@ pub struct FileView {
     /// The state of the table.
     pub table_state: RefCell<TableState>,
     /// The index of the currently selected chunk.
-    pub selected_chunk: usize,
+    pub current_chunk: usize,
 }
 
 impl FileView {
@@ -52,7 +52,7 @@ impl FileView {
         Self {
             file_diff,
             table_state: RefCell::new(table_state),
-            selected_chunk: 0,
+            current_chunk: 0,
         }
     }
 
@@ -67,39 +67,38 @@ impl FileView {
 }
 
 impl NavigableView for FileView {
-    /// Moves the selection up by one chunk.
-    fn move_up(&mut self) {
-        if self.selected_chunk > 0 {
-            self.selected_chunk -= 1;
+    /// Makes the previous chunk the current chunk.
+    fn prev(&mut self) {
+        if self.current_chunk > 0 {
+            self.current_chunk -= 1;
         }
-        let row_idx = self.first_row_of_chunk(self.selected_chunk);
+        let row_idx = self.first_row_of_chunk(self.current_chunk);
         self.table_state.borrow_mut().select(Some(row_idx));
     }
 
-    /// Moves the selection down by one chunk.
-    fn move_down(&mut self) {
+    /// Makes the next chunk the current chunk.
+    fn next(&mut self) {
         if !self.file_diff.chunks.is_empty()
-            && self.selected_chunk
+            && self.current_chunk
                 < self.file_diff.chunks.len().saturating_sub(1)
         {
-            self.selected_chunk += 1;
+            self.current_chunk += 1;
         }
-        let row_idx = self.first_row_of_chunk(self.selected_chunk);
+        let row_idx = self.first_row_of_chunk(self.current_chunk);
         self.table_state.borrow_mut().select(Some(row_idx));
     }
 
-    /// Moves the selection to the first chunk.
-    fn move_home(&mut self) {
-        self.selected_chunk = 0;
+    /// Makes the first chunk the current chunk.
+    fn home(&mut self) {
+        self.current_chunk = 0;
         self.table_state.borrow_mut().select(Some(0));
     }
 
-    /// Moves the selection to the last chunk.
-    fn move_end(&mut self) {
+    /// Makes the last chunk the current chunk.
+    fn end(&mut self) {
         if !self.file_diff.chunks.is_empty() {
-            self.selected_chunk =
-                self.file_diff.chunks.len().saturating_sub(1);
-            let row_idx = self.first_row_of_chunk(self.selected_chunk);
+            self.current_chunk = self.file_diff.chunks.len().saturating_sub(1);
+            let row_idx = self.first_row_of_chunk(self.current_chunk);
             self.table_state.borrow_mut().select(Some(row_idx));
         }
     }
@@ -181,7 +180,7 @@ impl Widget for &FileView {
                 LineDiffType::Unchanged => Style::default(),
             };
 
-            if chunk_idx == self.selected_chunk {
+            if chunk_idx == self.current_chunk {
                 chunk_style = chunk_style.fg(Color::Cyan).bold();
             }
 
