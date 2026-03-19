@@ -371,8 +371,8 @@ impl App {
             }
             AppEvent::CloseTab => self.close_tab(),
             AppEvent::OpenDiff => {
-                if let AppView::Dir(view) = self.current_view()
-                    && let Some(item) = view.current_item()
+                if let AppView::Dir(dir_view) = self.current_view()
+                    && let Some(item) = dir_view.current_item()
                 {
                     match (&item.left_item, &item.right_item) {
                         (Some(l), Some(r)) => {
