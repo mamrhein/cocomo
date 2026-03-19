@@ -338,10 +338,6 @@ impl App {
 
     /// Closes the current tab.
     pub fn close_tab(&mut self) {
-        if self.views.is_empty() {
-            self.show_quit_confirm = true;
-            return;
-        }
         if self.views.len() == 1 {
             self.show_quit_confirm = true;
             return;
