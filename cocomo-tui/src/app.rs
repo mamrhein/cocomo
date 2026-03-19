@@ -41,11 +41,11 @@ pub(crate) enum AppEvent {
     /// Open a new comparison view.
     OpenDiff,
     /// Copy the current item to the other side.
-    Copy(FSItem, std::path::PathBuf),
+    Copy,
     /// Move the current item to the other side.
-    Move(FSItem, std::path::PathBuf),
+    Move,
     /// Delete the current item.
-    Delete(FSItem),
+    Delete,
     /// Rename the current item.
     Rename(FSItem, String),
     /// Refresh the current view.
@@ -255,68 +255,13 @@ impl App {
                 }
             }
             (KeyCode::Char('c'), KeyModifiers::NONE) => {
-                let mut copy_op = None;
-                if let AppView::Dir(view) = self.current_view()
-                    && let Some(i) = view.table_state.borrow().selected()
-                    && let Some(item) = view.diff.items.get(i)
-                {
-                    let r_dir = &view.diff.right_dir;
-                    let l_dir = &view.diff.left_dir;
-                    if let Some(l) = &item.left_item
-                        && r_dir.path().exists()
-                    {
-                        let dst = r_dir.path().join(l.name());
-                        copy_op = Some((l.clone(), dst));
-                    } else if let Some(r) = &item.right_item
-                        && l_dir.path().exists()
-                    {
-                        let dst = l_dir.path().join(r.name());
-                        copy_op = Some((r.clone(), dst));
-                    }
-                }
-                if let Some((src, dst)) = copy_op {
-                    self.events.send(AppEvent::Copy(src, dst));
-                }
+                self.events.send(AppEvent::Copy);
             }
             (KeyCode::Char('m'), KeyModifiers::NONE) => {
-                let mut move_op = None;
-                if let AppView::Dir(view) = self.current_view()
-                    && let Some(i) = view.table_state.borrow().selected()
-                    && let Some(item) = view.diff.items.get(i)
-                {
-                    let r_dir = &view.diff.right_dir;
-                    let l_dir = &view.diff.left_dir;
-                    if let Some(l) = &item.left_item
-                        && r_dir.path().exists()
-                    {
-                        let dst = r_dir.path().join(l.name());
-                        move_op = Some((l.clone(), dst));
-                    } else if let Some(r) = &item.right_item
-                        && l_dir.path().exists()
-                    {
-                        let dst = l_dir.path().join(r.name());
-                        move_op = Some((r.clone(), dst));
-                    }
-                }
-                if let Some((src, dst)) = move_op {
-                    self.events.send(AppEvent::Move(src, dst));
-                }
+                self.events.send(AppEvent::Move);
             }
             (KeyCode::Char('d'), KeyModifiers::NONE) => {
-                let mut delete_op = None;
-                if let AppView::Dir(view) = self.current_view()
-                    && let Some(i) = view.table_state.borrow().selected()
-                    && let Some(item) = view.diff.items.get(i)
-                {
-                    if let Some(l) = &item.left_item {
-                        delete_op = Some(l.clone());
-                    } else if let Some(r) = &item.right_item {
-                        delete_op = Some(r.clone());
-                    }
-                }
-                if let Some(item) = delete_op {
-                    self.events.send(AppEvent::Delete(item));
-                }
+                self.events.send(AppEvent::Delete);
             }
             _ => {}
         }
@@ -430,16 +375,56 @@ impl App {
                     }
                 }
             }
-            AppEvent::Copy(src, dst) => {
-                let _ = copy_item(&src, &dst).await;
+            AppEvent::Copy => {
+                if let AppView::Dir(dir_view) = self.current_view_mut()
+                    && let Some(item) = dir_view.current_item()
+                {
+                    let r_dir = &dir_view.diff.right_dir;
+                    let l_dir = &dir_view.diff.left_dir;
+                    if let Some(l) = &item.left_item
+                        && r_dir.path().exists()
+                    {
+                        let dst = r_dir.path().join(l.name());
+                        let _ = copy_item(l, &dst).await;
+                    } else if let Some(r) = &item.right_item
+                        && l_dir.path().exists()
+                    {
+                        let dst = l_dir.path().join(r.name());
+                        let _ = copy_item(r, &dst).await;
+                    }
+                }
                 self.events.send(AppEvent::Refresh);
             }
-            AppEvent::Move(src, dst) => {
-                let _ = move_item(&src, &dst).await;
+            AppEvent::Move => {
+                if let AppView::Dir(dir_view) = self.current_view_mut()
+                    && let Some(item) = dir_view.current_item()
+                {
+                    let r_dir = &dir_view.diff.right_dir;
+                    let l_dir = &dir_view.diff.left_dir;
+                    if let Some(l) = &item.left_item
+                        && r_dir.path().exists()
+                    {
+                        let dst = r_dir.path().join(l.name());
+                        let _ = move_item(l, &dst).await;
+                    } else if let Some(r) = &item.right_item
+                        && l_dir.path().exists()
+                    {
+                        let dst = l_dir.path().join(r.name());
+                        let _ = move_item(r, &dst).await;
+                    }
+                }
                 self.events.send(AppEvent::Refresh);
             }
-            AppEvent::Delete(item) => {
-                let _ = delete_item(&item).await;
+            AppEvent::Delete => {
+                if let AppView::Dir(dir_view) = self.current_view_mut()
+                    && let Some(item) = dir_view.current_item()
+                {
+                    if let Some(l) = &item.left_item {
+                        let _ = delete_item(l).await;
+                    } else if let Some(r) = &item.right_item {
+                        let _ = delete_item(r).await;
+                    }
+                }
                 self.events.send(AppEvent::Refresh);
             }
             AppEvent::Rename(item, new_name) => {
