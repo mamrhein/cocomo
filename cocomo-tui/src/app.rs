@@ -20,37 +20,7 @@ use ratatui::{
     crossterm::event::{KeyCode, KeyEvent, KeyModifiers},
 };
 
-use crate::view::NavigableView;
-
-/// Application events.
-#[derive(Clone, Debug)]
-#[allow(clippy::large_enum_variant)]
-pub(crate) enum AppEvent {
-    /// Quit the application.
-    Quit,
-    /// Navigate the current item of the current view to the previous item.
-    NavigatePrev,
-    /// Navigate the current item of the current view to the next item.
-    NavigateNext,
-    /// Navigate the current item of the current view to the first item.
-    NavigateFirst,
-    /// Navigate the current item of the current view to the last item.
-    NavigateLast,
-    /// Close the current tab.
-    CloseTab,
-    /// Open a new comparison view.
-    OpenDiff,
-    /// Copy the current item to the other side.
-    Copy,
-    /// Move the current item to the other side.
-    Move,
-    /// Delete the current item.
-    Delete,
-    /// Rename the current item.
-    Rename(FSItem, String),
-    /// Refresh the current view.
-    Refresh,
-}
+use crate::{appevent::AppEvent, view::NavigableView};
 
 /// Holds the state and application logic.
 use crate::{
@@ -294,7 +264,6 @@ impl App {
     }
 
     /// Handles application events from the event channel.
-    #[allow(clippy::cognitive_complexity)]
     async fn handle_app_event(&mut self, app_event: AppEvent) {
         match app_event {
             AppEvent::Quit => self.quit(),
@@ -427,9 +396,9 @@ impl App {
                 }
                 self.events.send(AppEvent::Refresh);
             }
-            AppEvent::Rename(item, new_name) => {
-                let _ = rename_item(&item, &new_name).await;
-                self.events.send(AppEvent::Refresh);
+            AppEvent::Rename => {
+                // let _ = rename_item(&item, &new_name).await;
+                // self.events.send(AppEvent::Refresh);
             }
             AppEvent::Refresh => {
                 if let AppView::Dir(dir_view) = self.current_view_mut() {

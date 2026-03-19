@@ -15,7 +15,7 @@
 
 use std::time::Duration;
 
-use crate::app::AppEvent;
+use crate::appevent::AppEvent;
 use color_eyre::eyre::OptionExt;
 use futures::{FutureExt, StreamExt};
 use ratatui::crossterm::event::Event as CrosstermEvent;

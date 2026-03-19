@@ -63,6 +63,8 @@ mod cmdargs;
 
 /// Holds the state and application logic.
 pub(crate) mod app;
+/// Application events.
+pub(crate) mod appevent;
 /// Renders the directory comparison view.
 pub(crate) mod dirview;
 /// Handles the terminal events (key press, mouse click, resize, etc.).
@@ -71,6 +73,7 @@ pub(crate) mod event;
 pub(crate) mod fileview;
 /// Renders the widgets / UI.
 pub(crate) mod ui;
+/// Shared behavior for interactive views.
 pub(crate) mod view;
 
 use cmdargs::CmdLineArgs;
