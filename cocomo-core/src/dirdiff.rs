@@ -175,58 +175,69 @@ fn cmp_items(a: &FSItem, b: &FSItem) -> cmp::Ordering {
     (!a.is_dir(), a.name()).cmp(&(!b.is_dir(), b.name()))
 }
 
+type DiffItemList = Vec<DiffItem>;
+
+async fn make_diff(
+    left_dir: &Option<FSItem>,
+    right_dir: &Option<FSItem>,
+) -> io::Result<DiffItemList> {
+    let mut left_items = if let Some(dir) = left_dir {
+        read_dir(dir).await?
+    } else {
+        Vec::new()
+    };
+    let mut right_items = if let Some(dir) = right_dir {
+        read_dir(dir).await?
+    } else {
+        Vec::new()
+    };
+    left_items.sort_by(|a, b| cmp_items(b, a));
+    right_items.sort_by(|a, b| cmp_items(b, a));
+    let mut diff_items: DiffItemList = Vec::new();
+    let mut left_item = left_items.pop();
+    let mut right_item = right_items.pop();
+    loop {
+        match (&left_item, &right_item) {
+            (Some(left), Some(right)) => match cmp_items(left, right) {
+                cmp::Ordering::Equal => {
+                    diff_items
+                        .push(DiffItem::new(&left_item, &right_item)?);
+                    left_item = left_items.pop();
+                    right_item = right_items.pop();
+                }
+                cmp::Ordering::Less => {
+                    diff_items.push(DiffItem::new(&left_item, &None)?);
+                    left_item = left_items.pop();
+                }
+                cmp::Ordering::Greater => {
+                    diff_items.push(DiffItem::new(&None, &right_item)?);
+                    right_item = right_items.pop();
+                }
+            },
+            (Some(..), None) => {
+                diff_items.push(DiffItem::new(&left_item, &right_item)?);
+                left_item = left_items.pop();
+            }
+            (None, Some(..)) => {
+                diff_items.push(DiffItem::new(&left_item, &right_item)?);
+                right_item = right_items.pop();
+            }
+            _ => {
+                break;
+            }
+        }
+    }
+    Ok(diff_items)
+
+}
+
 impl DirDiff {
     /// Compares the contents of two directories.
     pub async fn new(
         left_dir: &Option<FSItem>,
         right_dir: &Option<FSItem>,
     ) -> io::Result<Self> {
-        let mut left_items = if let Some(dir) = left_dir {
-            read_dir(dir).await?
-        } else {
-            Vec::new()
-        };
-        let mut right_items = if let Some(dir) = right_dir {
-            read_dir(dir).await?
-        } else {
-            Vec::new()
-        };
-        left_items.sort_by(|a, b| cmp_items(b, a));
-        right_items.sort_by(|a, b| cmp_items(b, a));
-        let mut diff_items: Vec<DiffItem> = Vec::new();
-        let mut left_item = left_items.pop();
-        let mut right_item = right_items.pop();
-        loop {
-            match (&left_item, &right_item) {
-                (Some(left), Some(right)) => match cmp_items(left, right) {
-                    cmp::Ordering::Equal => {
-                        diff_items
-                            .push(DiffItem::new(&left_item, &right_item)?);
-                        left_item = left_items.pop();
-                        right_item = right_items.pop();
-                    }
-                    cmp::Ordering::Less => {
-                        diff_items.push(DiffItem::new(&left_item, &None)?);
-                        left_item = left_items.pop();
-                    }
-                    cmp::Ordering::Greater => {
-                        diff_items.push(DiffItem::new(&None, &right_item)?);
-                        right_item = right_items.pop();
-                    }
-                },
-                (Some(..), None) => {
-                    diff_items.push(DiffItem::new(&left_item, &right_item)?);
-                    left_item = left_items.pop();
-                }
-                (None, Some(..)) => {
-                    diff_items.push(DiffItem::new(&left_item, &right_item)?);
-                    right_item = right_items.pop();
-                }
-                _ => {
-                    break;
-                }
-            }
-        }
+        let diff_items = make_diff(left_dir, right_dir).await?;
         Ok(Self {
             left_dir: left_dir.to_owned().unwrap_or_default(),
             right_dir: right_dir.to_owned().unwrap_or_default(),
