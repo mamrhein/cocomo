@@ -244,6 +244,13 @@ impl DirDiff {
             items: diff_items,
         })
     }
+
+    pub fn name(&self) -> &ffi::OsString {
+        match &self.left_dir.name().is_empty() {
+            false => self.left_dir.name(),
+            true => self.right_dir.name(),
+        }
+    }
 }
 
 #[cfg(test)]

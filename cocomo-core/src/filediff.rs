@@ -12,7 +12,7 @@
 //! This module provides the logic for comparing two text files line by line.
 //! It computes the differences and prepares them for side-by-side display.
 
-use std::{fs, io};
+use std::{ffi, fs, io};
 
 use similar::{ChangeTag, TextDiff};
 
@@ -247,6 +247,13 @@ impl FileDiff {
             right_file: right_file.to_owned().unwrap_or_default(),
             chunks,
         })
+    }
+
+    pub fn name(&self) -> &ffi::OsString {
+        match &self.left_file.name().is_empty() {
+            false => self.left_file.name(),
+            true => self.right_file.name(),
+        }
     }
 }
 
