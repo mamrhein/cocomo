@@ -69,11 +69,11 @@ pub struct DirView {
 impl DirView {
     /// Creates a new `DirView` from the given file system items.
     pub async fn new(
-        left_item: Option<FSItem>,
-        right_item: Option<FSItem>,
+        left_item: Option<&FSItem>,
+        right_item: Option<&FSItem>,
     ) -> io::Result<Self> {
         let diff =
-            DirDiff::new(left_item.as_ref(), right_item.as_ref()).await?;
+            DirDiff::new(left_item, right_item).await?;
         let mut table_state = TableState::default();
         if !diff.items.is_empty() {
             table_state.select(Some(0));

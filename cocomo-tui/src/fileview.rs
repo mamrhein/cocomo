@@ -39,8 +39,8 @@ pub struct FileView {
 impl FileView {
     /// Creates a new `FileView` for two text files.
     pub async fn new(
-        left_item: Option<FSItem>,
-        right_item: Option<FSItem>,
+        left_item: Option<&FSItem>,
+        right_item: Option<&FSItem>,
     ) -> io::Result<Self> {
         let file_diff = FileDiff::new(left_item, right_item).await?;
         let mut table_state = TableState::default();

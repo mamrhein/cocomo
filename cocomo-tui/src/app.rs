@@ -84,13 +84,13 @@ impl App {
             (Some(l), Some(r)) => {
                 if l.is_dir() && r.is_dir() {
                     if let Ok(view) =
-                        DirView::new(Some(l.clone()), Some(r.clone())).await
+                        DirView::new(Some(l), Some(r)).await
                     {
                         views.push(AppView::Dir(view));
                     }
                 } else if l.is_file() && r.is_file() {
                     if let Ok(view) =
-                        FileView::new(Some(l.clone()), Some(r.clone())).await
+                        FileView::new(Some(l), Some(r)).await
                     {
                         views.push(AppView::File(view));
                     }
@@ -98,13 +98,13 @@ impl App {
             }
             (Some(l), None) => {
                 if l.is_dir() {
-                    if let Ok(view) = DirView::new(Some(l.clone()), None).await
+                    if let Ok(view) = DirView::new(Some(l), None).await
                     {
                         views.push(AppView::Dir(view));
                     }
                 } else if l.is_file() {
                     if let Ok(view) =
-                        FileView::new(Some(l.clone()), None).await
+                        FileView::new(Some(l), None).await
                     {
                         views.push(AppView::File(view));
                     }
@@ -112,13 +112,13 @@ impl App {
             }
             (None, Some(r)) => {
                 if r.is_dir() {
-                    if let Ok(view) = DirView::new(None, Some(r.clone())).await
+                    if let Ok(view) = DirView::new(None, Some(r)).await
                     {
                         views.push(AppView::Dir(view));
                     }
                 } else if r.is_file() {
                     if let Ok(view) =
-                        FileView::new(None, Some(r.clone())).await
+                        FileView::new(None, Some(r)).await
                     {
                         views.push(AppView::File(view));
                     }
@@ -302,8 +302,8 @@ impl App {
                         (Some(l), Some(r)) => {
                             if l.is_dir() && r.is_dir() {
                                 if let Ok(view) = DirView::new(
-                                    Some(l.clone()),
-                                    Some(r.clone()),
+                                    Some(l),
+                                    Some(r),
                                 )
                                 .await
                                 {
@@ -312,8 +312,8 @@ impl App {
                                 self.active_view = self.views.len() - 1;
                             } else if l.is_file() && r.is_file() {
                                 if let Ok(view) = FileView::new(
-                                    Some(l.clone()),
-                                    Some(r.clone()),
+                                    Some(l),
+                                    Some(r),
                                 )
                                 .await
                                 {
@@ -325,14 +325,14 @@ impl App {
                         (Some(l), None) => {
                             if l.is_dir() {
                                 if let Ok(view) =
-                                    DirView::new(Some(l.clone()), None).await
+                                    DirView::new(Some(l), None).await
                                 {
                                     self.views.push(AppView::Dir(view));
                                 }
                                 self.active_view = self.views.len() - 1;
                             } else if l.is_file() {
                                 if let Ok(view) =
-                                    FileView::new(Some(l.clone()), None).await
+                                    FileView::new(Some(l), None).await
                                 {
                                     self.views.push(AppView::File(view));
                                     self.active_view = self.views.len() - 1;
@@ -342,14 +342,14 @@ impl App {
                         (None, Some(r)) => {
                             if r.is_dir() {
                                 if let Ok(view) =
-                                    DirView::new(None, Some(r.clone())).await
+                                    DirView::new(None, Some(r)).await
                                 {
                                     self.views.push(AppView::Dir(view));
                                 }
                                 self.active_view = self.views.len() - 1;
                             } else if r.is_file() {
                                 if let Ok(view) =
-                                    FileView::new(None, Some(r.clone())).await
+                                    FileView::new(None, Some(r)).await
                                 {
                                     self.views.push(AppView::File(view));
                                     self.active_view = self.views.len() - 1;
