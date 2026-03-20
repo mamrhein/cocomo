@@ -12,11 +12,12 @@
 //! This module contains the main application state and logic. It handles
 //! events, manages views (tabs), and drives the main loop.
 
-use cocomo_core::FSItem;
+use cocomo_core::{DiffItem, FSItem};
 use ratatui::{
     DefaultTerminal,
     crossterm::event::{KeyCode, KeyEvent, KeyModifiers},
 };
+use std::io;
 
 use crate::{appevent::AppEvent, view::NavigableView};
 
@@ -46,6 +47,39 @@ pub(crate) enum AppView {
 }
 
 impl AppView {
+    /// Creates a new `AppView` from the given file system items.
+    pub async fn new(
+        left_item: &Option<FSItem>,
+        right_item: &Option<FSItem>,
+    ) -> io::Result<Self> {
+        debug_assert!(left_item.is_some() || right_item.is_none());
+        match (left_item, right_item) {
+            (Some(left), _) => {
+                if left.is_dir() {
+                    Ok(Self::Dir(DirView::new(left_item, right_item).await?))
+                } else {
+                    Ok(Self::File(FileView::new(left_item, right_item).await?))
+                }
+            }
+            (_, Some(right)) => {
+                if right.is_dir() {
+                    Ok(Self::Dir(DirView::new(left_item, right_item).await?))
+                } else {
+                    Ok(Self::File(FileView::new(left_item, right_item).await?))
+                }
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    /// Creates a new `AppView` from the given diff item.
+    #[inline(always)]
+    pub async fn from_diff_item(
+        diff_item: &DiffItem
+    ) -> io::Result<Self> {
+        Self::new(&diff_item.left_item, &diff_item.right_item).await
+    }
+
     /// Returns a mutable reference to the view as a [`NavigableView`].
     #[must_use]
     #[inline(always)]
@@ -62,8 +96,6 @@ impl AppView {
 pub(crate) struct App {
     /// Flag indicating if the application is running.
     pub running: bool,
-    /// The initial items to compare.
-    pub cmp_items: CmpItems,
     /// Handler for terminal and application events.
     pub events: EventHandler,
     /// Open views (tabs).
@@ -77,63 +109,15 @@ pub(crate) struct App {
 
 impl App {
     /// Constructs a new instance of [`App`].
-    #[must_use]
-    pub async fn new(left: Option<FSItem>, right: Option<FSItem>) -> Self {
-        let mut views = Vec::new();
-        match (left.as_ref(), right.as_ref()) {
-            (Some(l), Some(r)) => {
-                if l.is_dir() && r.is_dir() {
-                    if let Ok(view) =
-                        DirView::new(Some(l), Some(r)).await
-                    {
-                        views.push(AppView::Dir(view));
-                    }
-                } else if l.is_file() && r.is_file() {
-                    if let Ok(view) =
-                        FileView::new(Some(l), Some(r)).await
-                    {
-                        views.push(AppView::File(view));
-                    }
-                }
-            }
-            (Some(l), None) => {
-                if l.is_dir() {
-                    if let Ok(view) = DirView::new(Some(l), None).await
-                    {
-                        views.push(AppView::Dir(view));
-                    }
-                } else if l.is_file() {
-                    if let Ok(view) =
-                        FileView::new(Some(l), None).await
-                    {
-                        views.push(AppView::File(view));
-                    }
-                }
-            }
-            (None, Some(r)) => {
-                if r.is_dir() {
-                    if let Ok(view) = DirView::new(None, Some(r)).await
-                    {
-                        views.push(AppView::Dir(view));
-                    }
-                } else if r.is_file() {
-                    if let Ok(view) =
-                        FileView::new(None, Some(r)).await
-                    {
-                        views.push(AppView::File(view));
-                    }
-                }
-            }
-            _ => {}
-        }
-        Self {
+    pub async fn new(left: &Option<FSItem>, right: &Option<FSItem>) -> io::Result<Self> {
+        let view = AppView::new(left, right).await?;
+        Ok(Self {
             running: true,
-            cmp_items: CmpItems { left, right },
             events: EventHandler::new(),
-            views,
+            views: vec![view],
             active_view: 0,
             show_quit_confirm: false,
-        }
+        })
     }
 
     /// Returns the active view.
@@ -164,12 +148,12 @@ impl App {
                         if key_event.kind
                             == crossterm::event::KeyEventKind::Press =>
                     {
-                        self.handle_key_events(key_event)?;
+                        self.handle_key_event(key_event)?;
                     }
                     _ => {}
                 },
                 Event::App(app_event) => {
-                    self.handle_app_event(app_event).await;
+                    self.handle_app_event(app_event).await?;
                 }
             }
         }
@@ -181,7 +165,7 @@ impl App {
     /// # Errors
     ///
     /// Returns an error if an application event cannot be sent.
-    fn handle_key_events(
+    fn handle_key_event(
         &mut self,
         key_event: KeyEvent,
     ) -> color_eyre::Result<()> {
@@ -274,7 +258,7 @@ impl App {
     }
 
     /// Handles application events from the event channel.
-    async fn handle_app_event(&mut self, app_event: AppEvent) {
+    async fn handle_app_event(&mut self, app_event: AppEvent) -> color_eyre::Result<()> {
         match app_event {
             AppEvent::Quit => self.quit(),
             AppEvent::NavigatePrev => {
@@ -298,75 +282,19 @@ impl App {
                 if let AppView::Dir(dir_view) = self.current_view()
                     && let Some(item) = dir_view.current_item()
                 {
-                    match (&item.left_item, &item.right_item) {
-                        (Some(l), Some(r)) => {
-                            if l.is_dir() && r.is_dir() {
-                                if let Ok(view) = DirView::new(
-                                    Some(l),
-                                    Some(r),
-                                )
-                                .await
-                                {
-                                    self.views.push(AppView::Dir(view));
-                                }
-                                self.active_view = self.views.len() - 1;
-                            } else if l.is_file() && r.is_file() {
-                                if let Ok(view) = FileView::new(
-                                    Some(l),
-                                    Some(r),
-                                )
-                                .await
-                                {
-                                    self.views.push(AppView::File(view));
-                                    self.active_view = self.views.len() - 1;
-                                }
-                            }
-                        }
-                        (Some(l), None) => {
-                            if l.is_dir() {
-                                if let Ok(view) =
-                                    DirView::new(Some(l), None).await
-                                {
-                                    self.views.push(AppView::Dir(view));
-                                }
-                                self.active_view = self.views.len() - 1;
-                            } else if l.is_file() {
-                                if let Ok(view) =
-                                    FileView::new(Some(l), None).await
-                                {
-                                    self.views.push(AppView::File(view));
-                                    self.active_view = self.views.len() - 1;
-                                }
-                            }
-                        }
-                        (None, Some(r)) => {
-                            if r.is_dir() {
-                                if let Ok(view) =
-                                    DirView::new(None, Some(r)).await
-                                {
-                                    self.views.push(AppView::Dir(view));
-                                }
-                                self.active_view = self.views.len() - 1;
-                            } else if r.is_file() {
-                                if let Ok(view) =
-                                    FileView::new(None, Some(r)).await
-                                {
-                                    self.views.push(AppView::File(view));
-                                    self.active_view = self.views.len() - 1;
-                                }
-                            }
-                        }
-                        _ => {}
-                    }
+                    let view = AppView::from_diff_item(item).await?;
+                    self.views.push(view);
+                    self.active_view = self.views.len() - 1;
                 }
             }
             _ => {
                 // forward to current app view
                 if let AppView::Dir(dir_view) = self.current_view_mut() {
-                    dir_view.handle_app_event(app_event).await;
+                    dir_view.handle_app_event(app_event).await?;
                     self.events.send(AppEvent::Refresh);
                 }
             }
         }
+        Ok(())
     }
 }

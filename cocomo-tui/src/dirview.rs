@@ -69,8 +69,8 @@ pub struct DirView {
 impl DirView {
     /// Creates a new `DirView` from the given file system items.
     pub async fn new(
-        left_item: Option<&FSItem>,
-        right_item: Option<&FSItem>,
+        left_item: &Option<FSItem>,
+        right_item: &Option<FSItem>,
     ) -> io::Result<Self> {
         let diff =
             DirDiff::new(left_item, right_item).await?;
@@ -90,7 +90,7 @@ impl DirView {
         Some(&self.diff.items[i])
     }
 
-    pub(crate) async fn handle_app_event(&mut self, app_event: AppEvent) {
+    pub(crate) async fn handle_app_event(&mut self, app_event: AppEvent) -> color_eyre::Result<()> {
         match app_event {
             AppEvent::Copy => {
                 if let Some(item) = self.current_item() {
@@ -100,12 +100,12 @@ impl DirView {
                         && r_dir.path().exists()
                     {
                         let dst = r_dir.path().join(l.name());
-                        let _ = copy_item(l, &dst).await;
+                        copy_item(l, &dst).await?;
                     } else if let Some(r) = &item.right_item
                         && l_dir.path().exists()
                     {
                         let dst = l_dir.path().join(r.name());
-                        let _ = copy_item(r, &dst).await;
+                        copy_item(r, &dst).await?;
                     }
                 }
             }
@@ -117,21 +117,21 @@ impl DirView {
                         && r_dir.path().exists()
                     {
                         let dst = r_dir.path().join(l.name());
-                        let _ = move_item(l, &dst).await;
+                        move_item(l, &dst).await?;
                     } else if let Some(r) = &item.right_item
                         && l_dir.path().exists()
                     {
                         let dst = l_dir.path().join(r.name());
-                        let _ = move_item(r, &dst).await;
+                        move_item(r, &dst).await?;
                     }
                 }
             }
             AppEvent::Delete => {
                 if let Some(item) = self.current_item() {
                     if let Some(l) = &item.left_item {
-                        let _ = delete_item(l).await;
+                        delete_item(l).await?;
                     } else if let Some(r) = &item.right_item {
-                        let _ = delete_item(r).await;
+                        delete_item(r).await?;
                     }
                 }
             }
@@ -144,19 +144,20 @@ impl DirView {
                     .left_dir
                     .path()
                     .exists()
-                    .then_some(&self.diff.left_dir);
+                    .then_some(self.diff.left_dir.clone());
                 let right = self
                     .diff
                     .right_dir
                     .path()
                     .exists()
-                    .then_some(&self.diff.right_dir);
-                if let Ok(new_diff) = DirDiff::new(left, right).await {
+                    .then_some(self.diff.right_dir.clone());
+                if let Ok(new_diff) = DirDiff::new(&left, &right).await {
                     self.diff = new_diff;
                 }
             }
             _ => {} // ignore it (TODO: handle it)
         }
+        Ok(())
     }
 }
 

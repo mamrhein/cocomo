@@ -178,8 +178,8 @@ fn cmp_items(a: &FSItem, b: &FSItem) -> cmp::Ordering {
 impl DirDiff {
     /// Compares the contents of two directories.
     pub async fn new(
-        left_dir: Option<&FSItem>,
-        right_dir: Option<&FSItem>,
+        left_dir: &Option<FSItem>,
+        right_dir: &Option<FSItem>,
     ) -> io::Result<Self> {
         let mut left_items = if let Some(dir) = left_dir {
             read_dir(dir).await?
@@ -228,8 +228,8 @@ impl DirDiff {
             }
         }
         Ok(Self {
-            left_dir: left_dir.cloned().unwrap_or_else(FSItem::default),
-            right_dir: right_dir.cloned().unwrap_or_else(FSItem::default),
+            left_dir: left_dir.to_owned().unwrap_or_default(),
+            right_dir: right_dir.to_owned().unwrap_or_default(),
             items: diff_items,
         })
     }
@@ -247,7 +247,7 @@ mod tests {
         let dir1 = FSItem::new(path1).await;
         let path2 = path::Path::new("../cocomo-tui");
         let dir2 = FSItem::new(path2).await;
-        let diff = DirDiff::new(Some(&dir1), Some(&dir2))
+        let diff = DirDiff::new(&Some(dir1), &Some(dir2))
             .await
             .expect("Error creating diff");
         assert!(!diff.items.is_empty());

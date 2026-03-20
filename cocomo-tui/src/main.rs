@@ -166,7 +166,7 @@ async fn main() -> Result<(), Report> {
     color_eyre::install()?;
     let args = CmdLineArgs::get();
     let (left, right) = check_args(&args).await?;
-    let app = App::new(left, right).await;
+    let app = App::new(&left, &right).await?;
     let terminal = ratatui::init();
     let result = app.run(terminal).await;
     ratatui::restore();

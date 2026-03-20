@@ -73,7 +73,7 @@ async fn test_dirdiff_all_variants() {
     let left_fsitem = FSItem::new(left_dir.path()).await;
     let right_fsitem = FSItem::new(right_dir.path()).await;
 
-    let diff = DirDiff::new(Some(&left_fsitem), Some(&right_fsitem))
+    let diff = DirDiff::new(&Some(left_fsitem), &Some(right_fsitem))
         .await
         .unwrap();
 
