@@ -18,12 +18,12 @@ use cocomo_core::{
     By,
     DiffItem,
     DiffItemType,
+    DiffSide,
     DirDiff,
     FSItem,
     copy_item,
     delete_item,
-    move_item,
-    // rename_item,
+    move_item, // rename_item,
 };
 use ratatui::{
     buffer::Buffer,
@@ -72,8 +72,7 @@ impl DirView {
         left_item: &Option<FSItem>,
         right_item: &Option<FSItem>,
     ) -> io::Result<Self> {
-        let diff =
-            DirDiff::new(left_item, right_item).await?;
+        let diff = DirDiff::new(left_item, right_item).await?;
         let mut table_state = TableState::default();
         if !diff.items.is_empty() {
             table_state.select(Some(0));
@@ -90,68 +89,107 @@ impl DirView {
         Some(&self.diff.items[i])
     }
 
-    pub(crate) async fn handle_app_event(&mut self, app_event: AppEvent) -> color_eyre::Result<()> {
+    pub(crate) async fn handle_app_event(
+        &mut self,
+        app_event: AppEvent,
+    ) -> color_eyre::Result<()> {
+        let left_dir = &self.diff.left_dir;
+        let right_dir = &self.diff.right_dir;
         match app_event {
             AppEvent::Copy => {
-                if let Some(item) = self.current_item() {
-                    let r_dir = &self.diff.right_dir;
-                    let l_dir = &self.diff.left_dir;
-                    if let Some(l) = &item.left_item
-                        && r_dir.path().exists()
-                    {
-                        let dst = r_dir.path().join(l.name());
-                        copy_item(l, &dst).await?;
-                    } else if let Some(r) = &item.right_item
-                        && l_dir.path().exists()
-                    {
-                        let dst = l_dir.path().join(r.name());
-                        copy_item(r, &dst).await?;
-                    }
+                if let Some(item) = self.current_item()
+                    && left_dir.is_some()
+                    && right_dir.is_some()
+                {
+                    let (src, dst) = match item.diff_item_type {
+                        DiffItemType::LeftOnly
+                        | DiffItemType::Different {
+                            newer: Some(DiffSide::Left),
+                        }
+                        | DiffItemType::Different { newer: None } => (
+                            item.left_item.as_ref().unwrap(),
+                            right_dir.as_ref().unwrap(),
+                        ),
+                        DiffItemType::RightOnly
+                        | DiffItemType::Different {
+                            newer: Some(DiffSide::Right),
+                        } => (
+                            item.right_item.as_ref().unwrap(),
+                            left_dir.as_ref().unwrap(),
+                        ),
+                        DiffItemType::Same { by } => {
+                            if by == By::Content {
+                                return Ok(());
+                            };
+                            (
+                                item.left_item.as_ref().unwrap(),
+                                right_dir.as_ref().unwrap(),
+                            )
+                        }
+                    };
+                    copy_item(src, dst.path()).await?;
                 }
             }
             AppEvent::Move => {
-                if let Some(item) = self.current_item() {
-                    let r_dir = &self.diff.right_dir;
-                    let l_dir = &self.diff.left_dir;
-                    if let Some(l) = &item.left_item
-                        && r_dir.path().exists()
-                    {
-                        let dst = r_dir.path().join(l.name());
-                        move_item(l, &dst).await?;
-                    } else if let Some(r) = &item.right_item
-                        && l_dir.path().exists()
-                    {
-                        let dst = l_dir.path().join(r.name());
-                        move_item(r, &dst).await?;
-                    }
+                if let Some(item) = self.current_item()
+                    && left_dir.is_some()
+                    && right_dir.is_some()
+                {
+                    let (src, dst) = match item.diff_item_type {
+                        DiffItemType::LeftOnly
+                        | DiffItemType::Different {
+                            newer: Some(DiffSide::Left),
+                        }
+                        | DiffItemType::Different { newer: None } => (
+                            item.left_item.as_ref().unwrap(),
+                            right_dir.as_ref().unwrap(),
+                        ),
+                        DiffItemType::RightOnly
+                        | DiffItemType::Different {
+                            newer: Some(DiffSide::Right),
+                        } => (
+                            item.right_item.as_ref().unwrap(),
+                            left_dir.as_ref().unwrap(),
+                        ),
+                        DiffItemType::Same { by } => {
+                            if by == By::Content {
+                                delete_item(item.left_item.as_ref().unwrap())
+                                    .await?;
+                                return Ok(());
+                            }
+                            (
+                                item.left_item.as_ref().unwrap(),
+                                right_dir.as_ref().unwrap(),
+                            )
+                        }
+                    };
+                    move_item(src, dst.path()).await?;
                 }
             }
             AppEvent::Delete => {
                 if let Some(item) = self.current_item() {
-                    if let Some(l) = &item.left_item {
-                        delete_item(l).await?;
-                    } else if let Some(r) = &item.right_item {
-                        delete_item(r).await?;
-                    }
+                    let target = match item.diff_item_type {
+                        DiffItemType::LeftOnly
+                        | DiffItemType::Different { newer: None }
+                        | DiffItemType::Different {
+                            newer: Some(DiffSide::Right),
+                        }
+                        | DiffItemType::Same { .. } => {
+                            item.left_item.as_ref().unwrap()
+                        }
+                        DiffItemType::RightOnly
+                        | DiffItemType::Different {
+                            newer: Some(DiffSide::Left),
+                        } => item.right_item.as_ref().unwrap(),
+                    };
+                    delete_item(target).await?;
                 }
             }
             // AppEvent::Rename => {
             // let _ = rename_item(&item, &new_name).await;
             // }
             AppEvent::Refresh => {
-                let left = self
-                    .diff
-                    .left_dir
-                    .path()
-                    .exists()
-                    .then_some(self.diff.left_dir.clone());
-                let right = self
-                    .diff
-                    .right_dir
-                    .path()
-                    .exists()
-                    .then_some(self.diff.right_dir.clone());
-                if let Ok(new_diff) = DirDiff::new(&left, &right).await {
+                if let Ok(new_diff) = DirDiff::new(left_dir, right_dir).await {
                     self.diff = new_diff;
                 }
             }
@@ -221,16 +259,22 @@ impl Widget for &DirView {
             Layout::vertical(vert_constraints).areas(area);
 
         // Path headers
-        let left_path = if self.diff.left_dir.name().is_empty() {
-            String::new()
-        } else {
-            self.diff.left_dir.path().to_string_lossy().to_string()
-        };
-        let right_path = if self.diff.right_dir.name().is_empty() {
-            String::new()
-        } else {
-            self.diff.right_dir.path().to_string_lossy().to_string()
-        };
+        let left_path = self
+            .diff
+            .left_dir
+            .as_ref()
+            .unwrap_or(&FSItem::default())
+            .path()
+            .to_string_lossy()
+            .to_string();
+        let right_path = self
+            .diff
+            .right_dir
+            .as_ref()
+            .unwrap_or(&FSItem::default())
+            .path()
+            .to_string_lossy()
+            .to_string();
 
         let horiz_constraints = [
             Constraint::Min(10),    // Left Name

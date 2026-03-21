@@ -163,9 +163,9 @@ impl DiffItem {
 #[derive(Clone, Debug)]
 pub struct DirDiff {
     /// The source directory on the left side.
-    pub left_dir: FSItem,
+    pub left_dir: Option<FSItem>,
     /// The source directory on the right side.
-    pub right_dir: FSItem,
+    pub right_dir: Option<FSItem>,
     /// The list of compared entries within these directories.
     pub items: Vec<DiffItem>,
 }
@@ -237,18 +237,24 @@ impl DirDiff {
         left_dir: &Option<FSItem>,
         right_dir: &Option<FSItem>,
     ) -> io::Result<Self> {
+        debug_assert!(left_dir.is_some() || right_dir.is_some());
         let diff_items = make_diff(left_dir, right_dir).await?;
         Ok(Self {
-            left_dir: left_dir.to_owned().unwrap_or_default(),
-            right_dir: right_dir.to_owned().unwrap_or_default(),
+            left_dir: left_dir.to_owned(),
+            right_dir: right_dir.to_owned(),
             items: diff_items,
         })
     }
 
     pub fn name(&self) -> &ffi::OsString {
-        match &self.left_dir.name().is_empty() {
-            false => self.left_dir.name(),
-            true => self.right_dir.name(),
+        if let Some(ref left) = self.left_dir && !left.name().is_empty() {
+            left.name()
+        } else {
+            if let Some(ref right) = self.right_dir {
+                right.name()
+            } else {
+                EMPTY
+            }
         }
     }
 }
