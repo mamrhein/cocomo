@@ -35,7 +35,10 @@ use ratatui::{
     },
 };
 
-use crate::{appevent::AppEvent, view::NavigableView};
+use crate::{
+    appevent::AppEvent,
+    view::{NavigableView, View},
+};
 
 /// Map DirDiffType to indicator text
 fn indicator<'a>(t: DiffItemType) -> Text<'a> {
@@ -196,6 +199,12 @@ impl DirView {
             _ => {} // ignore it (TODO: handle it)
         }
         Ok(())
+    }
+}
+
+impl View for &DirView {
+    fn title(self) -> String {
+        self.diff.name().to_string_lossy().into_owned()
     }
 }
 

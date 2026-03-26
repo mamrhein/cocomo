@@ -19,7 +19,10 @@ use ratatui::{
     widgets::{Block, Clear, Paragraph, Tabs, Widget},
 };
 
-use crate::app::{App, AppView};
+use crate::{
+    app::{App, AppView},
+    view::View,
+};
 
 impl Widget for &App {
     /// Renders the user interface widgets.
@@ -45,12 +48,8 @@ impl Widget for &App {
             .views
             .iter()
             .map(|v| match v {
-                AppView::Dir(dv) => {
-                    dv.diff.name().to_string_lossy().into_owned()
-                }
-                AppView::File(fv) => {
-                    fv.file_diff.name().to_string_lossy().into_owned()
-                }
+                AppView::Dir(dv) => dv.title(),
+                AppView::File(fv) => fv.title(),
             })
             .collect();
 

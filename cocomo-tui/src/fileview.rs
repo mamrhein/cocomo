@@ -23,7 +23,7 @@ use ratatui::{
     widgets::{Block, Cell, Row, StatefulWidget, Table, TableState, Widget},
 };
 
-use crate::view::NavigableView;
+use crate::view::{NavigableView, View};
 
 /// View for displaying side-by-side text file contents.
 #[derive(Debug)]
@@ -61,6 +61,12 @@ impl FileView {
             .take(chunk_idx)
             .map(|c| c.left_lines.len())
             .sum()
+    }
+}
+
+impl View for &FileView {
+    fn title(self) -> String {
+        self.file_diff.name().to_string_lossy().into_owned()
     }
 }
 

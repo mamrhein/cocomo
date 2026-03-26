@@ -9,6 +9,14 @@
 
 //! Shared behavior for interactive views.
 
+use ratatui::widgets::Widget;
+
+/// Common trait for all views
+pub(crate) trait View: Widget {
+    /// Returns the title of the view.
+    fn title(self) -> String;
+}
+
 /// Trait for views that support cursor-style navigation.
 pub(crate) trait NavigableView {
     /// Makes the previous logical item the current item.
