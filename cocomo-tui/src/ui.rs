@@ -27,15 +27,13 @@ impl Widget for &App {
         // Create layout
         let vert_constraints = [
             Constraint::Length(1),
-            Constraint::Length(1),
             Constraint::Min(0),
             Constraint::Length(1),
         ];
-        let [menu_bar, tab_bar, main_view, key_bar] =
+        let [tab_bar, main_view, key_bar] =
             Layout::vertical(vert_constraints).areas(area);
 
-        // Render menu and key hints
-        Paragraph::new("Menu").left_aligned().render(menu_bar, buf);
+        // Render key hints
         Paragraph::new(
             "q: quit | x: close tab | Enter: open | Tab: switch | ↑/↓: \
              navigate | Home/End: top/bottom | c: copy | m: move | d: delete",
