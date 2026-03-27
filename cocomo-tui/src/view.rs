@@ -14,11 +14,11 @@ use ratatui::widgets::Widget;
 /// Common trait for all views
 pub(crate) trait View: Widget {
     /// Returns the title of the view.
-    fn title(self) -> String;
+    fn title(&self) -> String;
 }
 
 /// Trait for views that support cursor-style navigation.
-pub(crate) trait NavigableView {
+pub(crate) trait NavigableView: View {
     /// Makes the previous logical item the current item.
     fn prev(&mut self);
 

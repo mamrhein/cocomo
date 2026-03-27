@@ -64,8 +64,8 @@ impl TextView {
     }
 }
 
-impl View for &TextView {
-    fn title(self) -> String {
+impl View for TextView {
+    fn title(&self) -> String {
         self.file_diff.name().to_string_lossy().into_owned()
     }
 }
@@ -118,6 +118,13 @@ fn indicator<'a>(dt: LineDiffType) -> Text<'a> {
     Text::from(char)
         .style(Style::default().fg(color).bold())
         .centered()
+}
+
+impl Widget for TextView {
+    #[inline(always)]
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        (&self).render(area, buf);
+    }
 }
 
 impl Widget for &TextView {

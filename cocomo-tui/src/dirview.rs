@@ -202,8 +202,8 @@ impl DirView {
     }
 }
 
-impl View for &DirView {
-    fn title(self) -> String {
+impl View for DirView {
+    fn title(&self) -> String {
         self.diff.name().to_string_lossy().into_owned()
     }
 }
@@ -254,6 +254,12 @@ impl NavigableView for DirView {
             let last = self.diff.items.len().saturating_sub(1);
             self.table_state.borrow_mut().select(Some(last));
         }
+    }
+}
+impl Widget for DirView {
+    #[inline(always)]
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        (&self).render(area, buf);
     }
 }
 
