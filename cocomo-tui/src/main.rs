@@ -70,7 +70,7 @@ pub(crate) mod dirview;
 /// Handles the terminal events (key press, mouse click, resize, etc.).
 pub(crate) mod event;
 /// Renders the file comparison view.
-pub(crate) mod fileview;
+pub(crate) mod textview;
 /// Renders the widgets / UI.
 pub(crate) mod ui;
 /// Shared behavior for interactive views.

@@ -7,7 +7,7 @@
 // $Source$
 // $Revision$
 
-//! # File Comparison Module (`filediff`)
+//! # Text File Comparison Module (`textdiff`)
 //!
 //! This module provides the logic for comparing two text files line by line.
 //! It computes the differences and prepares them for side-by-side display.

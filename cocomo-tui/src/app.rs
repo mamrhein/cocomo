@@ -12,20 +12,20 @@
 //! This module contains the main application state and logic. It handles
 //! events, manages views (tabs), and drives the main loop.
 
+use std::io;
+
 use cocomo_core::{DiffItem, FSItem};
 use ratatui::{
     DefaultTerminal,
     crossterm::event::{KeyCode, KeyEvent, KeyModifiers},
 };
-use std::io;
 
 use crate::{appevent::AppEvent, view::NavigableView};
-
 /// Holds the state and application logic.
 use crate::{
     dirview::DirView,
     event::{Event, EventHandler},
-    fileview::FileView,
+    textview::TextView,
 };
 
 /// Container for items currently being compared.
@@ -43,7 +43,7 @@ pub(crate) enum AppView {
     /// Directory comparison view.
     Dir(DirView),
     /// File comparison view.
-    File(FileView),
+    File(TextView),
 }
 
 impl AppView {
@@ -58,14 +58,14 @@ impl AppView {
                 if left.is_dir() {
                     Ok(Self::Dir(DirView::new(left_item, right_item).await?))
                 } else {
-                    Ok(Self::File(FileView::new(left_item, right_item).await?))
+                    Ok(Self::File(TextView::new(left_item, right_item).await?))
                 }
             }
             (_, Some(right)) => {
                 if right.is_dir() {
                     Ok(Self::Dir(DirView::new(left_item, right_item).await?))
                 } else {
-                    Ok(Self::File(FileView::new(left_item, right_item).await?))
+                    Ok(Self::File(TextView::new(left_item, right_item).await?))
                 }
             }
             _ => unreachable!(),
@@ -74,9 +74,7 @@ impl AppView {
 
     /// Creates a new `AppView` from the given diff item.
     #[inline(always)]
-    pub async fn from_diff_item(
-        diff_item: &DiffItem
-    ) -> io::Result<Self> {
+    pub async fn from_diff_item(diff_item: &DiffItem) -> io::Result<Self> {
         Self::new(&diff_item.left_item, &diff_item.right_item).await
     }
 
@@ -109,7 +107,10 @@ pub(crate) struct App {
 
 impl App {
     /// Constructs a new instance of [`App`].
-    pub async fn new(left: &Option<FSItem>, right: &Option<FSItem>) -> io::Result<Self> {
+    pub async fn new(
+        left: &Option<FSItem>,
+        right: &Option<FSItem>,
+    ) -> io::Result<Self> {
         let view = AppView::new(left, right).await?;
         Ok(Self {
             running: true,
@@ -258,7 +259,10 @@ impl App {
     }
 
     /// Handles application events from the event channel.
-    async fn handle_app_event(&mut self, app_event: AppEvent) -> color_eyre::Result<()> {
+    async fn handle_app_event(
+        &mut self,
+        app_event: AppEvent,
+    ) -> color_eyre::Result<()> {
         match app_event {
             AppEvent::Quit => self.quit(),
             AppEvent::NavigatePrev => {

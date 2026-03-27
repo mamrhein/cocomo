@@ -7,9 +7,9 @@
 // $Source$
 // $Revision$
 
-//! # File View Module (`fileview`)
+//! # Text File View Module (`textview`)
 //!
-//! This module provides the `FileView` struct and its `Widget` implementation
+//! This module provides the `TextView` struct and its `Widget` implementation
 //! for side-by-side comparison of text files.
 
 use std::{cell, io};
@@ -27,7 +27,7 @@ use crate::view::{NavigableView, View};
 
 /// View for displaying side-by-side text file contents.
 #[derive(Debug)]
-pub struct FileView {
+pub struct TextView {
     /// The diff data between the two files.
     pub file_diff: TextDiff,
     /// The state of the table.
@@ -36,7 +36,7 @@ pub struct FileView {
     pub current_chunk: usize,
 }
 
-impl FileView {
+impl TextView {
     /// Creates a new `FileView` for two text files.
     pub async fn new(
         left_item: &Option<FSItem>,
@@ -64,13 +64,13 @@ impl FileView {
     }
 }
 
-impl View for &FileView {
+impl View for &TextView {
     fn title(self) -> String {
         self.file_diff.name().to_string_lossy().into_owned()
     }
 }
 
-impl NavigableView for FileView {
+impl NavigableView for TextView {
     /// Makes the previous chunk the current chunk.
     fn prev(&mut self) {
         if self.current_chunk > 0 {
@@ -120,7 +120,7 @@ fn indicator<'a>(dt: LineDiffType) -> Text<'a> {
         .centered()
 }
 
-impl Widget for &FileView {
+impl Widget for &TextView {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let vert_constraints = [Constraint::Length(1), Constraint::Min(0)];
         let [header_area, content_area] =
