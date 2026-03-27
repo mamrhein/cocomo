@@ -43,7 +43,7 @@ pub(crate) enum AppView {
     /// Directory comparison view.
     Dir(DirView),
     /// File comparison view.
-    File(TextView),
+    TextFile(TextView),
 }
 
 impl AppView {
@@ -58,14 +58,18 @@ impl AppView {
                 if left.is_dir() {
                     Ok(Self::Dir(DirView::new(left_item, right_item).await?))
                 } else {
-                    Ok(Self::File(TextView::new(left_item, right_item).await?))
+                    Ok(Self::TextFile(
+                        TextView::new(left_item, right_item).await?,
+                    ))
                 }
             }
             (_, Some(right)) => {
                 if right.is_dir() {
                     Ok(Self::Dir(DirView::new(left_item, right_item).await?))
                 } else {
-                    Ok(Self::File(TextView::new(left_item, right_item).await?))
+                    Ok(Self::TextFile(
+                        TextView::new(left_item, right_item).await?,
+                    ))
                 }
             }
             _ => unreachable!(),
@@ -84,7 +88,7 @@ impl AppView {
     fn as_nav_view(&mut self) -> &mut dyn NavigableView {
         match self {
             Self::Dir(dir_view) => dir_view,
-            Self::File(file_view) => file_view,
+            Self::TextFile(file_view) => file_view,
         }
     }
 }

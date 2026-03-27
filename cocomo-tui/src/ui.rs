@@ -49,7 +49,7 @@ impl Widget for &App {
             .iter()
             .map(|v| match v {
                 AppView::Dir(dv) => dv.title(),
-                AppView::File(fv) => fv.title(),
+                AppView::TextFile(fv) => fv.title(),
             })
             .collect();
 
@@ -64,7 +64,7 @@ impl Widget for &App {
             AppView::Dir(dir_view) => {
                 dir_view.render(main_view, buf);
             }
-            AppView::File(file_view) => {
+            AppView::TextFile(file_view) => {
                 file_view.render(main_view, buf);
             }
         }
