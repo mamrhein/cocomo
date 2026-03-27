@@ -14,7 +14,7 @@
 
 use std::{cell, io};
 
-use cocomo_core::{FSItem, FileDiff, LineDiffType};
+use cocomo_core::{FSItem, LineDiffType, TextDiff};
 use ratatui::{
     buffer::Buffer,
     layout::{Constraint, Layout, Rect},
@@ -29,7 +29,7 @@ use crate::view::{NavigableView, View};
 #[derive(Debug)]
 pub struct FileView {
     /// The diff data between the two files.
-    pub file_diff: FileDiff,
+    pub file_diff: TextDiff,
     /// The state of the table.
     pub table_state: cell::RefCell<TableState>,
     /// The index of the currently selected chunk.
@@ -42,7 +42,7 @@ impl FileView {
         left_item: &Option<FSItem>,
         right_item: &Option<FSItem>,
     ) -> io::Result<Self> {
-        let file_diff = FileDiff::new(left_item, right_item).await?;
+        let file_diff = TextDiff::new(left_item, right_item).await?;
         let mut table_state = TableState::default();
         if !file_diff.chunks.is_empty() {
             table_state.select(Some(0));

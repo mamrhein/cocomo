@@ -14,7 +14,7 @@
 
 use std::{ffi, fs, io};
 
-use similar::{ChangeTag, TextDiff};
+use similar;
 
 use crate::FSItem;
 
@@ -54,7 +54,7 @@ pub struct DiffChunk {
 
 /// A complete result of a comparison between two text files.
 #[derive(Clone, Debug)]
-pub struct FileDiff {
+pub struct TextDiff {
     /// The source file on the left side.
     pub left_file: FSItem,
     /// The source file on the right side.
@@ -63,7 +63,7 @@ pub struct FileDiff {
     pub chunks: Vec<DiffChunk>,
 }
 
-impl FileDiff {
+impl TextDiff {
     /// Compares the contents of two text files.
     pub async fn new(
         left_file: &Option<FSItem>,
@@ -80,7 +80,8 @@ impl FileDiff {
             String::new()
         };
 
-        let diff = TextDiff::from_lines(&left_content, &right_content);
+        let diff =
+            similar::TextDiff::from_lines(&left_content, &right_content);
         let mut chunks = Vec::new();
 
         for op in diff.ops() {
@@ -167,12 +168,12 @@ impl FileDiff {
                     for i in 0..common_len {
                         let left_line = diff
                             .iter_changes(op)
-                            .filter(|c| c.tag() == ChangeTag::Delete)
+                            .filter(|c| c.tag() == similar::ChangeTag::Delete)
                             .nth(i)
                             .unwrap();
                         let right_line = diff
                             .iter_changes(op)
-                            .filter(|c| c.tag() == ChangeTag::Insert)
+                            .filter(|c| c.tag() == similar::ChangeTag::Insert)
                             .nth(i)
                             .unwrap();
                         left_lines.push(DiffLine {
@@ -197,7 +198,9 @@ impl FileDiff {
                         for i in common_len..*old_len {
                             let left_line = diff
                                 .iter_changes(op)
-                                .filter(|c| c.tag() == ChangeTag::Delete)
+                                .filter(|c| {
+                                    c.tag() == similar::ChangeTag::Delete
+                                })
                                 .nth(i)
                                 .unwrap();
                             rem_left.push(DiffLine {
@@ -220,7 +223,9 @@ impl FileDiff {
                         for i in common_len..*new_len {
                             let right_line = diff
                                 .iter_changes(op)
-                                .filter(|c| c.tag() == ChangeTag::Insert)
+                                .filter(|c| {
+                                    c.tag() == similar::ChangeTag::Insert
+                                })
                                 .nth(i)
                                 .unwrap();
                             rem_left.push(DiffLine {
@@ -281,7 +286,8 @@ mod tests {
         let (_l_file, _l_item) = create_test_file(left_content).await;
         let (_r_file, _r_item) = create_test_file(right_content).await;
 
-        let diff = FileDiff::new(&Some(_l_item), &Some(_r_item)).await.unwrap();
+        let diff =
+            TextDiff::new(&Some(_l_item), &Some(_r_item)).await.unwrap();
 
         // 1. Equal { old_index: 0, new_index: 0, len: 1 }
         // 2. Replace { old_index: 1, old_len: 2, new_index: 1, new_len: 2 }
@@ -317,7 +323,8 @@ mod tests {
         let (_l_file, _l_item) = create_test_file(left_content).await;
         let (_r_file, _r_item) = create_test_file(right_content).await;
 
-        let diff = FileDiff::new(&Some(_l_item), &Some(_r_item)).await.unwrap();
+        let diff =
+            TextDiff::new(&Some(_l_item), &Some(_r_item)).await.unwrap();
 
         // 1. Equal { old_index: 0, new_index: 0, len: 1 }
         // 2. Replace { old_index: 1, old_len: 1, new_index: 1, new_len: 2 }

@@ -16,12 +16,12 @@
 //! reading directory contents, and computing differences between directories.
 
 pub mod dirdiff;
-pub mod filediff;
 mod fsitem;
 pub mod fsops;
 mod readdir;
+pub mod textdiff;
 
 pub use dirdiff::{By, DiffItem, DiffItemType, DiffSide, DirDiff};
-pub use filediff::{DiffLine, FileDiff, LineDiffType};
 pub use fsitem::{FSItem, FSItemType};
-pub use fsops::{copy_item, delete_item, move_item, rename_item, FsError};
+pub use fsops::{FsError, copy_item, delete_item, move_item, rename_item};
+pub use textdiff::{DiffLine, LineDiffType, TextDiff};
