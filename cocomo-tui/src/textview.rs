@@ -20,7 +20,9 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Style},
     text::Text,
-    widgets::{Block, Cell, Row, StatefulWidget, Table, TableState, Widget},
+    widgets::{
+        Block, Cell, Row, StatefulWidget, Table, TableState, WidgetRef,
+    },
 };
 
 use crate::view::{NavigableView, View};
@@ -120,15 +122,8 @@ fn indicator<'a>(dt: LineDiffType) -> Text<'a> {
         .centered()
 }
 
-impl Widget for TextView {
-    #[inline(always)]
-    fn render(self, area: Rect, buf: &mut Buffer) {
-        (&self).render(area, buf);
-    }
-}
-
-impl Widget for &TextView {
-    fn render(self, area: Rect, buf: &mut Buffer) {
+impl WidgetRef for TextView {
+    fn render_ref(&self, area: Rect, buf: &mut Buffer) {
         let vert_constraints = [Constraint::Length(1), Constraint::Min(0)];
         let [header_area, content_area] =
             Layout::vertical(vert_constraints).areas(area);

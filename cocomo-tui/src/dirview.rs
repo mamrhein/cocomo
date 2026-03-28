@@ -32,6 +32,7 @@ use ratatui::{
     text::Text,
     widgets::{
         Cell, Paragraph, Row, StatefulWidget, Table, TableState, Widget,
+        WidgetRef,
     },
 };
 
@@ -256,15 +257,8 @@ impl NavigableView for DirView {
         }
     }
 }
-impl Widget for DirView {
-    #[inline(always)]
-    fn render(self, area: Rect, buf: &mut Buffer) {
-        (&self).render(area, buf);
-    }
-}
-
-impl Widget for &DirView {
-    fn render(self, area: Rect, buf: &mut Buffer) {
+impl WidgetRef for DirView {
+    fn render_ref(&self, area: Rect, buf: &mut Buffer) {
         let vert_constraints = [
             Constraint::Length(1),
             Constraint::Min(0),

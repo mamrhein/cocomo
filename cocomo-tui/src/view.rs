@@ -9,10 +9,10 @@
 
 //! Shared behavior for interactive views.
 
-use ratatui::widgets::Widget;
+use ratatui::widgets::WidgetRef;
 
 /// Common trait for all views
-pub(crate) trait View: Widget {
+pub(crate) trait View: WidgetRef {
     /// Returns the title of the view.
     fn title(&self) -> String;
 }

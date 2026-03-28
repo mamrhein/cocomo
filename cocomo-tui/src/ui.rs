@@ -16,7 +16,7 @@ use ratatui::{
     buffer::Buffer,
     layout::{Constraint, Layout, Rect},
     style::{Color, Style},
-    widgets::{Block, Clear, Paragraph, Tabs, Widget},
+    widgets::{Block, Clear, Paragraph, Tabs, Widget, WidgetRef},
 };
 
 use crate::{
@@ -62,10 +62,10 @@ impl Widget for &App {
         // Render current view
         match self.current_view() {
             AppView::Dir(dir_view) => {
-                dir_view.render(main_view, buf);
+                dir_view.render_ref(main_view, buf);
             }
             AppView::TextFile(file_view) => {
-                file_view.render(main_view, buf);
+                file_view.render_ref(main_view, buf);
             }
         }
 
