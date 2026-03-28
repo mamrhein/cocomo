@@ -101,7 +101,6 @@ pub(crate) struct App {
     /// Handler for terminal and application events.
     pub events: EventHandler,
     /// Open views (tabs).
-    /// Invariant: !views.is_empty()
     pub views: Vec<AppView>,
     /// Index of the currently active view.
     pub active_view: usize,
@@ -111,28 +110,36 @@ pub(crate) struct App {
 
 impl App {
     /// Constructs a new instance of [`App`].
-    pub async fn new(
-        left: &Option<FSItem>,
-        right: &Option<FSItem>,
-    ) -> io::Result<Self> {
-        let view = AppView::new(left, right).await?;
-        Ok(Self {
-            running: true,
+    pub(crate) fn new() -> Self {
+        Self {
+            running: false,
             events: EventHandler::new(),
-            views: vec![view],
+            views: vec![],
             active_view: 0,
             show_quit_confirm: false,
-        })
+        }
     }
 
     /// Returns the active view.
-    pub fn current_view(&self) -> &AppView {
+    pub(crate) fn current_view(&self) -> &AppView {
         self.views.get(self.active_view).unwrap()
     }
 
     /// Returns a mutable reference to the active view.
-    pub fn current_view_mut(&mut self) -> &mut AppView {
+    pub(crate) fn current_view_mut(&mut self) -> &mut AppView {
         self.views.get_mut(self.active_view).unwrap()
+    }
+
+    /// Creates a new app view.
+    pub(crate) async fn new_view(
+        &mut self,
+        left: &Option<FSItem>,
+        right: &Option<FSItem>,
+    ) -> io::Result<()> {
+        let view = AppView::new(left, right).await?;
+        self.views.push(view);
+        self.active_view = self.views.len() - 1;
+        Ok(())
     }
 
     /// Run the application's main loop.
@@ -140,12 +147,14 @@ impl App {
     /// # Errors
     ///
     /// Returns an error if terminal drawing or event handling fails.
-    pub async fn run(
-        mut self,
+    pub(crate) async fn run(
+        &mut self,
         mut terminal: DefaultTerminal,
     ) -> color_eyre::Result<()> {
+        self.running = true;
         while self.running {
-            terminal.draw(|frame| frame.render_widget(&self, frame.area()))?;
+            terminal
+                .draw(|frame| frame.render_widget(&*self, frame.area()))?;
             match self.events.next().await? {
                 Event::Tick => self.tick(),
                 Event::Crossterm(event) => match event {
