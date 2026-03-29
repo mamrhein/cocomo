@@ -17,7 +17,11 @@ use std::io;
 use cocomo_core::{DiffItem, FSItem};
 use ratatui::{
     DefaultTerminal,
+    buffer::Buffer,
     crossterm::event::{KeyCode, KeyEvent, KeyModifiers},
+    layout::{Constraint, Layout, Rect},
+    style::{Color, Style},
+    widgets::{Block, Clear, Paragraph, Tabs, Widget, WidgetRef},
 };
 
 use crate::{appevent::AppEvent, view::NavigableView};
@@ -26,6 +30,7 @@ use crate::{
     dirview::DirView,
     event::{Event, EventHandler},
     textview::TextView,
+    view::View,
 };
 
 /// Container for items currently being compared.
@@ -314,4 +319,80 @@ impl App {
         }
         Ok(())
     }
+}
+
+impl Widget for &App {
+    /// Renders the user interface widgets.
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        // Create layout
+        let vert_constraints = [
+            Constraint::Length(1),
+            Constraint::Min(0),
+            Constraint::Length(1),
+        ];
+        let [tab_bar, main_view, key_bar] =
+            Layout::vertical(vert_constraints).areas(area);
+
+        // Render key hints
+        Paragraph::new(
+            "q: quit | x: close tab | Enter: open | Tab: switch | ↑/↓: \
+             navigate | Home/End: top/bottom | c: copy | m: move | d: delete",
+        )
+        .left_aligned()
+        .render(key_bar, buf);
+
+        let titles: Vec<String> = self
+            .views
+            .iter()
+            .map(|v| match v {
+                AppView::Dir(dv) => dv.title(),
+                AppView::TextFile(fv) => fv.title(),
+            })
+            .collect();
+
+        Tabs::new(titles)
+            .select(self.active_view)
+            .highlight_style(Style::default().fg(Color::Yellow).bold())
+            .divider("|")
+            .render(tab_bar, buf);
+
+        // Render current view
+        match self.current_view() {
+            AppView::Dir(dir_view) => {
+                dir_view.render_ref(main_view, buf);
+            }
+            AppView::TextFile(file_view) => {
+                file_view.render_ref(main_view, buf);
+            }
+        }
+
+        if self.show_quit_confirm {
+            let area = centered_rect(40, 10, area);
+            Clear.render(area, buf);
+            let text = "Close last tab and quit? (y/n)";
+            Paragraph::new(text)
+                .centered()
+                .block(Block::bordered())
+                .render(area, buf);
+        }
+    }
+}
+
+/// helper function to create a centered rect using up certain % of the
+/// available rect `r`
+#[allow(clippy::integer_division)]
+fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
+    let popup_layout = Layout::vertical([
+        Constraint::Percentage((100 - percent_y) / 2),
+        Constraint::Percentage(percent_y),
+        Constraint::Percentage((100 - percent_y) / 2),
+    ])
+    .split(r);
+
+    Layout::horizontal([
+        Constraint::Percentage((100 - percent_x) / 2),
+        Constraint::Percentage(percent_x),
+        Constraint::Percentage((100 - percent_x) / 2),
+    ])
+    .split(popup_layout[1])[1]
 }

@@ -72,7 +72,6 @@ pub(crate) mod event;
 /// Renders the file comparison view.
 pub(crate) mod textview;
 /// Renders the widgets / UI.
-pub(crate) mod ui;
 /// Shared behavior for interactive views.
 pub(crate) mod view;
 
