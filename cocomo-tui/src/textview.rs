@@ -12,9 +12,11 @@
 //! This module provides the `TextView` struct and its `Widget` implementation
 //! for side-by-side comparison of text files.
 
-use std::{cell, io};
+use core::cell;
+use std::io;
 
 use cocomo_core::{FSItem, LineDiffType, TextDiff};
+use futures::executor::block_on;
 use ratatui::{
     buffer::Buffer,
     layout::{Constraint, Layout, Rect},
@@ -25,17 +27,20 @@ use ratatui::{
     },
 };
 
-use crate::view::{NavigableView, View};
+use crate::{
+    appevent::AppEvent,
+    view::{NavigableView, View},
+};
 
 /// View for displaying side-by-side text file contents.
 #[derive(Debug)]
 pub struct TextView {
     /// The diff data between the two files.
-    pub file_diff: TextDiff,
+    file_diff: TextDiff,
     /// The state of the table.
-    pub table_state: cell::RefCell<TableState>,
+    table_state: cell::RefCell<TableState>,
     /// The index of the currently selected chunk.
-    pub current_chunk: usize,
+    current_chunk: usize,
 }
 
 impl TextView {
@@ -64,11 +69,38 @@ impl TextView {
             .map(|c| c.left_lines.len())
             .sum()
     }
+
+    pub(crate) async fn handle_app_event(
+        &mut self,
+        app_event: AppEvent,
+    ) -> color_eyre::Result<()> {
+        match app_event {
+            // TODO: handle copy, move, delete events
+            AppEvent::Copy => {
+                todo!()
+            }
+            AppEvent::Move => {
+                todo!()
+            }
+            AppEvent::Delete => {
+                todo!()
+            }
+            _ => Ok(()),
+        }
+    }
 }
 
 impl View for TextView {
     fn title(&self) -> String {
         self.file_diff.name().to_string_lossy().into_owned()
+    }
+
+    fn handle_app_event(
+        &mut self,
+        app_event: AppEvent,
+    ) -> color_eyre::Result<()> {
+        block_on(self.handle_app_event(app_event))?;
+        Ok(())
     }
 }
 

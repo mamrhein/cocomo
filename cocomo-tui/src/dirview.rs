@@ -25,6 +25,7 @@ use cocomo_core::{
     delete_item,
     move_item, // rename_item,
 };
+use futures::executor::block_on;
 use ratatui::{
     buffer::Buffer,
     layout::{Constraint, Layout, Rect},
@@ -65,9 +66,9 @@ fn indicator<'a>(t: DiffItemType) -> Text<'a> {
 #[derive(Debug)]
 pub struct DirView {
     /// The comparison results.
-    pub diff: DirDiff,
+    diff: DirDiff,
     /// The state of the table.
-    pub table_state: cell::RefCell<TableState>,
+    table_state: cell::RefCell<TableState>,
 }
 
 impl DirView {
@@ -87,12 +88,6 @@ impl DirView {
         })
     }
 
-    pub fn current_item(&self) -> Option<&DiffItem> {
-        let table_state = self.table_state.borrow();
-        let i = table_state.selected()?;
-        Some(&self.diff.items[i])
-    }
-
     pub(crate) async fn handle_app_event(
         &mut self,
         app_event: AppEvent,
@@ -101,7 +96,7 @@ impl DirView {
         let right_dir = &self.diff.right_dir;
         match app_event {
             AppEvent::Copy => {
-                if let Some(item) = self.current_item()
+                if let Some(item) = self.current_diff_item()
                     && left_dir.is_some()
                     && right_dir.is_some()
                 {
@@ -135,7 +130,7 @@ impl DirView {
                 }
             }
             AppEvent::Move => {
-                if let Some(item) = self.current_item()
+                if let Some(item) = self.current_diff_item()
                     && left_dir.is_some()
                     && right_dir.is_some()
                 {
@@ -171,7 +166,7 @@ impl DirView {
                 }
             }
             AppEvent::Delete => {
-                if let Some(item) = self.current_item() {
+                if let Some(item) = self.current_diff_item() {
                     let target = match item.diff_item_type {
                         DiffItemType::LeftOnly
                         | DiffItemType::Different { newer: None }
@@ -206,6 +201,24 @@ impl DirView {
 impl View for DirView {
     fn title(&self) -> String {
         self.diff.name().to_string_lossy().into_owned()
+    }
+
+    fn is_dir_view(&self) -> bool {
+        true
+    }
+
+    fn handle_app_event(
+        &mut self,
+        app_event: AppEvent,
+    ) -> color_eyre::Result<()> {
+        block_on(self.handle_app_event(app_event))?;
+        Ok(())
+    }
+
+    fn current_diff_item(&self) -> Option<&DiffItem> {
+        let table_state = self.table_state.borrow();
+        let i = table_state.selected()?;
+        Some(&self.diff.items[i])
     }
 }
 

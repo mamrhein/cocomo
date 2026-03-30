@@ -24,7 +24,7 @@ pub(crate) enum AppEvent {
     /// Close the current tab.
     CloseTab,
     /// Open a new comparison view.
-    OpenDiff,
+    OpenView,
     /// Copy the current item to the other side.
     Copy,
     /// Move the current item to the other side.

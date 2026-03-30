@@ -14,23 +14,22 @@
 
 use std::io;
 
-use cocomo_core::{DiffItem, FSItem};
+use cocomo_core::FSItem;
 use ratatui::{
     DefaultTerminal,
     buffer::Buffer,
     crossterm::event::{KeyCode, KeyEvent, KeyModifiers},
     layout::{Constraint, Layout, Rect},
     style::{Color, Style},
-    widgets::{Block, Clear, Paragraph, Tabs, Widget, WidgetRef},
+    widgets::{Block, Clear, Paragraph, Tabs, Widget},
 };
 
-use crate::{appevent::AppEvent, view::NavigableView};
-/// Holds the state and application logic.
 use crate::{
+    appevent::AppEvent,
     dirview::DirView,
     event::{Event, EventHandler},
     textview::TextView,
-    view::View,
+    view::NavigableView,
 };
 
 /// Container for items currently being compared.
@@ -43,74 +42,21 @@ pub(crate) struct CmpItems {
 }
 
 /// Views available in the application.
-#[derive(Debug)]
-pub(crate) enum AppView {
-    /// Directory comparison view.
-    Dir(DirView),
-    /// File comparison view.
-    TextFile(TextView),
-}
-
-impl AppView {
-    /// Creates a new `AppView` from the given file system items.
-    pub async fn new(
-        left_item: &Option<FSItem>,
-        right_item: &Option<FSItem>,
-    ) -> io::Result<Self> {
-        debug_assert!(left_item.is_some() || right_item.is_none());
-        match (left_item, right_item) {
-            (Some(left), _) => {
-                if left.is_dir() {
-                    Ok(Self::Dir(DirView::new(left_item, right_item).await?))
-                } else {
-                    Ok(Self::TextFile(
-                        TextView::new(left_item, right_item).await?,
-                    ))
-                }
-            }
-            (_, Some(right)) => {
-                if right.is_dir() {
-                    Ok(Self::Dir(DirView::new(left_item, right_item).await?))
-                } else {
-                    Ok(Self::TextFile(
-                        TextView::new(left_item, right_item).await?,
-                    ))
-                }
-            }
-            _ => unreachable!(),
-        }
-    }
-
-    /// Creates a new `AppView` from the given diff item.
-    #[inline(always)]
-    pub async fn from_diff_item(diff_item: &DiffItem) -> io::Result<Self> {
-        Self::new(&diff_item.left_item, &diff_item.right_item).await
-    }
-
-    /// Returns a mutable reference to the view as a [`NavigableView`].
-    #[must_use]
-    #[inline(always)]
-    fn as_nav_view(&mut self) -> &mut dyn NavigableView {
-        match self {
-            Self::Dir(dir_view) => dir_view,
-            Self::TextFile(file_view) => file_view,
-        }
-    }
-}
+pub(crate) type AppView = Box<dyn NavigableView>;
 
 /// Main application state.
 #[derive(Debug)]
 pub(crate) struct App {
     /// Flag indicating if the application is running.
-    pub running: bool,
+    running: bool,
     /// Handler for terminal and application events.
-    pub events: EventHandler,
+    events: EventHandler,
     /// Open views (tabs).
-    pub views: Vec<AppView>,
+    views: Vec<AppView>,
     /// Index of the currently active view.
-    pub active_view: usize,
+    active_view: usize,
     /// Flag to show a confirmation dialog before quitting.
-    pub show_quit_confirm: bool,
+    show_quit_confirm: bool,
 }
 
 impl App {
@@ -138,10 +84,26 @@ impl App {
     /// Creates a new app view.
     pub(crate) async fn new_view(
         &mut self,
-        left: &Option<FSItem>,
-        right: &Option<FSItem>,
+        left_item: &Option<FSItem>,
+        right_item: &Option<FSItem>,
     ) -> io::Result<()> {
-        let view = AppView::new(left, right).await?;
+        let view: AppView = match (left_item, right_item) {
+            (Some(left), _) => {
+                if left.is_dir() {
+                    Box::new(DirView::new(left_item, right_item).await?)
+                } else {
+                    Box::new(TextView::new(left_item, right_item).await?)
+                }
+            }
+            (_, Some(right)) => {
+                if right.is_dir() {
+                    Box::new(DirView::new(left_item, right_item).await?)
+                } else {
+                    Box::new(TextView::new(left_item, right_item).await?)
+                }
+            }
+            _ => unreachable!(),
+        };
         self.views.push(view);
         self.active_view = self.views.len() - 1;
         Ok(())
@@ -220,7 +182,7 @@ impl App {
                 self.events.send(AppEvent::NavigateLast);
             }
             (KeyCode::Enter, KeyModifiers::NONE) => {
-                self.events.send(AppEvent::OpenDiff);
+                self.events.send(AppEvent::OpenView);
             }
             (KeyCode::Tab, KeyModifiers::NONE) => {
                 if !self.views.is_empty() {
@@ -284,37 +246,32 @@ impl App {
         match app_event {
             AppEvent::Quit => self.quit(),
             AppEvent::NavigatePrev => {
-                let view = self.current_view_mut().as_nav_view();
+                let view = self.current_view_mut();
                 view.prev();
             }
             AppEvent::NavigateNext => {
-                let view = self.current_view_mut().as_nav_view();
+                let view = self.current_view_mut();
                 view.next();
             }
             AppEvent::NavigateFirst => {
-                let view = self.current_view_mut().as_nav_view();
+                let view = self.current_view_mut();
                 view.home();
             }
             AppEvent::NavigateLast => {
-                let view = self.current_view_mut().as_nav_view();
+                let view = self.current_view_mut();
                 view.end();
             }
             AppEvent::CloseTab => self.close_tab(),
-            AppEvent::OpenDiff => {
-                if let AppView::Dir(dir_view) = self.current_view()
-                    && let Some(item) = dir_view.current_item()
-                {
-                    let view = AppView::from_diff_item(item).await?;
-                    self.views.push(view);
-                    self.active_view = self.views.len() - 1;
-                }
+            AppEvent::OpenView => {
+                if let Some(item) = self.current_view().current_diff_item() {
+                    let left_item = item.left_item.clone();
+                    let right_item = item.right_item.clone();
+                    self.new_view(&left_item, &right_item).await?;
+                };
             }
             _ => {
                 // forward to current app view
-                if let AppView::Dir(dir_view) = self.current_view_mut() {
-                    dir_view.handle_app_event(app_event).await?;
-                    self.events.send(AppEvent::Refresh);
-                }
+                return self.current_view_mut().handle_app_event(app_event);
             }
         }
         Ok(())
@@ -341,14 +298,8 @@ impl Widget for &App {
         .left_aligned()
         .render(key_bar, buf);
 
-        let titles: Vec<String> = self
-            .views
-            .iter()
-            .map(|v| match v {
-                AppView::Dir(dv) => dv.title(),
-                AppView::TextFile(fv) => fv.title(),
-            })
-            .collect();
+        let titles: Vec<String> =
+            self.views.iter().map(|view| view.title()).collect();
 
         Tabs::new(titles)
             .select(self.active_view)
@@ -357,14 +308,7 @@ impl Widget for &App {
             .render(tab_bar, buf);
 
         // Render current view
-        match self.current_view() {
-            AppView::Dir(dir_view) => {
-                dir_view.render_ref(main_view, buf);
-            }
-            AppView::TextFile(file_view) => {
-                file_view.render_ref(main_view, buf);
-            }
-        }
+        self.current_view().render_ref(main_view, buf);
 
         if self.show_quit_confirm {
             let area = centered_rect(40, 10, area);
