@@ -86,15 +86,16 @@ use crate::app::App;
 async fn check_args(
     args: &CmdLineArgs,
 ) -> Result<(Option<FSItem>, Option<FSItem>), Report> {
-    let left_item = if let Some(path) = &args.left {
-        Some(FSItem::new(path).await)
-    } else {
-        None
-    };
     let right_item = if let Some(path) = &args.right {
         Some(FSItem::new(path).await)
     } else {
         None
+    };
+    let left_item = if let Some(path) = &args.left {
+        Some(FSItem::new(path).await)
+    } else {
+        // If no args given, set left dir to cwd
+        Some(FSItem::new(".").await)
     };
     let left_item_type = if let Some(item) = left_item.as_ref() {
         Some(item.final_item_type().await.into_owned())
