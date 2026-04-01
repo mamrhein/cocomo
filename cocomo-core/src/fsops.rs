@@ -43,17 +43,9 @@ pub enum FsError {
 ///
 /// If `src` is a directory, it is copied recursively.
 pub async fn copy_item(src: &FSItem, dst: &Path) -> Result<(), FsError> {
-    if !fs::try_exists(src.path()).await? {
-        return Err(FsError::SourceNotFound(src.path().to_path_buf()));
-    }
-
     if src.is_dir() {
         copy_dir_recursive(src.path(), dst).await?;
     } else {
-        // Ensure destination parent directory exists
-        if let Some(parent) = dst.parent() {
-            fs::create_dir_all(parent).await?;
-        }
         fs::copy(src.path(), dst).await?;
     }
     Ok(())
@@ -61,15 +53,15 @@ pub async fn copy_item(src: &FSItem, dst: &Path) -> Result<(), FsError> {
 
 /// Recursively copies a directory.
 async fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), FsError> {
-    fs::create_dir_all(dst).await?;
+    let mut dst_path = dst.join(src.file_name().get_or_insert_default());
+    fs::create_dir(&dst_path).await.unwrap_or(());
     let mut entries = fs::read_dir(src).await?;
-
     while let Some(entry) = entries.next_entry().await? {
         let file_type = entry.file_type().await?;
         let src_path = entry.path();
-        let dst_path = dst.join(entry.file_name());
-
+        dst_path = dst_path.join(entry.file_name());
         if file_type.is_dir() {
+            fs::create_dir(&dst_path).await.unwrap_or(());
             Box::pin(copy_dir_recursive(&src_path, &dst_path)).await?;
         } else {
             fs::copy(&src_path, &dst_path).await?;
@@ -80,25 +72,12 @@ async fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), FsError> {
 
 /// Moves a file or directory from `src` to `dst`.
 pub async fn move_item(src: &FSItem, dst: &Path) -> Result<(), FsError> {
-    if !fs::try_exists(src.path()).await? {
-        return Err(FsError::SourceNotFound(src.path().to_path_buf()));
-    }
-
-    // Ensure destination parent directory exists
-    if let Some(parent) = dst.parent() {
-        fs::create_dir_all(parent).await?;
-    }
-
     fs::rename(src.path(), dst).await?;
     Ok(())
 }
 
 /// Deletes a file or directory.
 pub async fn delete_item(item: &FSItem) -> Result<(), FsError> {
-    if !fs::try_exists(item.path()).await? {
-        return Err(FsError::SourceNotFound(item.path().to_path_buf()));
-    }
-
     if item.is_dir() {
         fs::remove_dir_all(item.path()).await?;
     } else {
@@ -112,10 +91,6 @@ pub async fn rename_item(
     item: &FSItem,
     new_name: &str,
 ) -> Result<(), FsError> {
-    if !fs::try_exists(item.path()).await? {
-        return Err(FsError::SourceNotFound(item.path().to_path_buf()));
-    }
-
     let mut dst = item.path().to_path_buf();
     dst.set_file_name(new_name);
 
@@ -133,15 +108,28 @@ mod tests {
     #[tokio::test]
     async fn test_copy_file() -> Result<(), Box<dyn std::error::Error>> {
         let tmp = tempdir()?;
-        let src_path = tmp.path().join("src.txt");
-        let dst_path = tmp.path().join("dst.txt");
-
+        let tmp_dir = tmp.path();
+        let src_dir = tmp_dir.join("src");
+        let src_path = src_dir.join("src.txt");
+        let dst_dir = tmp_dir.join("dst");
+        let dst_path = dst_dir.join("dst.txt");
+        // Create src dir / file
+        fs::create_dir(&src_dir).await?;
         let mut file = File::create(&src_path).await?;
         file.write_all(b"Hello world").await?;
-
         let src_item = FSItem::new(&src_path).await;
-        copy_item(&src_item, &dst_path).await?;
-
+        // dst dir does not exist => copy should fail
+        assert!(copy_item(&src_item, &dst_path).await.is_err());
+        // Create dst dir
+        fs::create_dir(&dst_dir).await?;
+        // dst file does not exist, but dst dir does => copy should succeed
+        assert!(copy_item(&src_item, &dst_path).await.is_ok());
+        assert!(dst_path.exists());
+        // Modify dst file
+        let mut file = File::open(&dst_path).await?;
+        file.write_all(b"Huhu baloo").await?;
+        // dst file exists => copy should succeed (overwrite)
+        assert!(copy_item(&src_item, &dst_path).await.is_ok());
         assert!(dst_path.exists());
         let content = fs::read_to_string(&dst_path).await?;
         assert_eq!(content, "Hello world");
@@ -151,29 +139,52 @@ mod tests {
     #[tokio::test]
     async fn test_copy_dir() -> Result<(), Box<dyn std::error::Error>> {
         let tmp = tempdir()?;
-        let src_dir = tmp.path().join("src");
-        let dst_dir = tmp.path().join("dst");
-        fs::create_dir(&src_dir).await?;
-
+        let tmp_dir = tmp.path();
+        let src_dir = tmp_dir.join("src");
         let src_file = src_dir.join("file.txt");
-        let mut file = File::create(&src_file).await?;
-        file.write_all(b"Hello from dir").await?;
-
+        let parent_dir = tmp_dir.join("parent");
+        let dst_dir = parent_dir.join("dst");
+        let dst_file = dst_dir.join("src").join("file.txt");
+        // Create src dir / file
+        fs::create_dir(&src_dir).await?;
         let src_item = FSItem::new(&src_dir).await;
-        copy_item(&src_item, &dst_dir).await?;
-
+        let mut file = File::create(&src_file).await?;
+        file.write_all(b"Hello world").await?;
+        // parent dir does not exist => copy should fail
+        eprintln!("1:");
+        assert!(copy_item(&src_item, &dst_dir).await.is_err());
+        // Create parent dir
+        fs::create_dir(&parent_dir).await?;
+        // dst dir does not exist => copy should fail
+        eprintln!("2:");
+        assert!(copy_item(&src_item, &dst_dir).await.is_err());
+        // Create dst dir
+        fs::create_dir(&dst_dir).await?;
+        // dst dir exists => copy should succeed
+        eprintln!("3:");
+        assert!(copy_item(&src_item, &dst_dir).await.is_ok());
         assert!(dst_dir.exists());
-        assert!(dst_dir.join("file.txt").exists());
-        let content = fs::read_to_string(dst_dir.join("file.txt")).await?;
-        assert_eq!(content, "Hello from dir");
+        assert!(dst_file.exists());
+        let content = fs::read_to_string(&dst_file).await?;
+        assert_eq!(content, "Hello world");
+        // Modify dst file
+        let mut file = File::open(&dst_file).await?;
+        file.write_all(b"Huhu baloo").await?;
+        // dst file exists => copy should succeed (overwrite)
+        eprintln!("4:");
+        assert!(copy_item(&src_item, &dst_dir).await.is_ok());
+        assert!(dst_file.exists());
+        let content = fs::read_to_string(&dst_file).await?;
+        assert_eq!(content, "Hello world");
         Ok(())
     }
 
     #[tokio::test]
     async fn test_move_item() -> Result<(), Box<dyn std::error::Error>> {
         let tmp = tempdir()?;
-        let src_path = tmp.path().join("src.txt");
-        let dst_path = tmp.path().join("dst.txt");
+        let tmp_dir = tmp.path();
+        let src_path = tmp_dir.join("src.txt");
+        let dst_path = tmp_dir.join("dst.txt");
 
         File::create(&src_path).await?;
 
@@ -188,7 +199,8 @@ mod tests {
     #[tokio::test]
     async fn test_delete_item() -> Result<(), Box<dyn std::error::Error>> {
         let tmp = tempdir()?;
-        let path = tmp.path().join("to_delete.txt");
+        let tmp_dir = tmp.path();
+        let path = tmp_dir.join("to_delete.txt");
 
         File::create(&path).await?;
 
@@ -202,8 +214,9 @@ mod tests {
     #[tokio::test]
     async fn test_rename_item() -> Result<(), Box<dyn std::error::Error>> {
         let tmp = tempdir()?;
-        let path = tmp.path().join("old.txt");
-        let expected = tmp.path().join("new.txt");
+        let tmp_dir = tmp.path();
+        let path = tmp_dir.join("old.txt");
+        let expected = tmp_dir.join("new.txt");
 
         File::create(&path).await?;
 
