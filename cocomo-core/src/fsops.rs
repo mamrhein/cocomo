@@ -181,6 +181,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_copy_file_to_link() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let txt = "Hello world";
+        let tmp = tempdir()?;
+        let tmp_dir = tmp.path();
+        let src_dir = tmp_dir.join("src");
+        let src_file = src_dir.join("src.txt");
+        // Create src dir / file
+        fs::create_dir(&src_dir).await?;
+        let mut file = File::create(&src_file).await?;
+        file.write_all(txt.as_bytes()).await?;
+        let src_item = FSItem::new(&src_file).await;
+        assert!(src_item.is_file());
+        // Create dst dir and link to it
+        let dst_dir = tmp_dir.join("d1").join("d2").join("dst");
+        fs::create_dir_all(&dst_dir).await?;
+        fs::symlink(&dst_dir, &tmp_dir.join("dst")).await?;
+        let dst_link = tmp_dir.join(dst_dir.file_name().unwrap());
+        assert!(&dst_link.exists());
+        assert!(copy_item(&src_item, &dst_link).await.is_ok());
+        let dst_file = dst_link.canonicalize().unwrap().join(src_item.name());
+        assert!(&dst_file.exists());
+        // Set link to dst file
+        fs::remove_file(&dst_link).await?;
+        fs::symlink(&dst_file, &tmp_dir.join("dst")).await?;
+        assert!(&dst_link.exists());
+        // Modify dst file
+        let mut file = File::open(&dst_file).await?;
+        file.write_all(b"Huhu baloo").await?;
+        // dst file exists => copy should succeed (overwrite)
+        assert!(copy_item(&src_item, &dst_link).await.is_ok());
+        assert!(&dst_file.exists());
+        let content = fs::read_to_string(&dst_file).await?;
+        assert_eq!(content, txt);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_copy_dir() -> Result<(), Box<dyn std::error::Error>> {
         let txt = "Hello world";
         let tmp = tempdir()?;
@@ -217,44 +255,8 @@ mod tests {
         assert!(&dst_file.exists());
         let content = fs::read_to_string(&dst_file).await?;
         assert_eq!(content, txt);
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_copy_file_to_link() -> Result<(), Box<dyn std::error::Error>>
-    {
-        let txt = "Hello world";
-        let tmp = tempdir()?;
-        let tmp_dir = tmp.path();
-        let src_dir = tmp_dir.join("src");
-        let src_file = src_dir.join("src.txt");
-        // Create src dir / file
-        fs::create_dir(&src_dir).await?;
-        let mut file = File::create(&src_file).await?;
-        file.write_all(txt.as_bytes()).await?;
-        let src_item = FSItem::new(&src_file).await;
-        assert!(src_item.is_file());
-        // Create dst dir and link to it
-        let dst_dir = tmp_dir.join("d1").join("d2").join("dst");
-        fs::create_dir_all(&dst_dir).await?;
-        fs::symlink(&dst_dir, &tmp_dir.join("dst")).await?;
-        let dst_link = tmp_dir.join(dst_dir.file_name().unwrap());
-        assert!(&dst_link.exists());
-        assert!(copy_item(&src_item, &dst_link).await.is_ok());
-        let dst_file = dst_link.canonicalize().unwrap().join(src_item.name());
-        assert!(&dst_file.exists());
-        // Set link to dst file
-        fs::remove_file(&dst_link).await?;
-        fs::symlink(&dst_file, &tmp_dir.join("dst")).await?;
-        assert!(&dst_link.exists());
-        // Modify dst file
-        let mut file = File::open(&dst_file).await?;
-        file.write_all(b"Huhu baloo").await?;
-        // dst file exists => copy should succeed (overwrite)
-        assert!(copy_item(&src_item, &dst_link).await.is_ok());
-        assert!(&dst_file.exists());
-        let content = fs::read_to_string(&dst_file).await?;
-        assert_eq!(content, txt);
+        // Copying a dir to a file should fail
+        assert!(copy_item(&src_item, &dst_file).await.is_err());
         Ok(())
     }
 
@@ -298,7 +300,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_move_to_dir() -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_move_file_to_dir() -> Result<(), Box<dyn std::error::Error>>
+    {
         let txt = "Hello world";
         let tmp = tempdir()?;
         let tmp_dir = tmp.path();
