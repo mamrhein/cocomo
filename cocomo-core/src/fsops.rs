@@ -107,37 +107,39 @@ mod tests {
 
     #[tokio::test]
     async fn test_copy_file() -> Result<(), Box<dyn std::error::Error>> {
+        let txt = "Hello world";
         let tmp = tempdir()?;
         let tmp_dir = tmp.path();
         let src_dir = tmp_dir.join("src");
-        let src_path = src_dir.join("src.txt");
+        let src_file = src_dir.join("src.txt");
         let dst_dir = tmp_dir.join("dst");
-        let dst_path = dst_dir.join("dst.txt");
+        let dst_file = dst_dir.join("dst.txt");
         // Create src dir / file
         fs::create_dir(&src_dir).await?;
-        let mut file = File::create(&src_path).await?;
-        file.write_all(b"Hello world").await?;
-        let src_item = FSItem::new(&src_path).await;
+        let mut file = File::create(&src_file).await?;
+        file.write_all(txt.as_bytes()).await?;
+        let src_item = FSItem::new(&src_file).await;
         // dst dir does not exist => copy should fail
-        assert!(copy_item(&src_item, &dst_path).await.is_err());
+        assert!(copy_item(&src_item, &dst_file).await.is_err());
         // Create dst dir
         fs::create_dir(&dst_dir).await?;
         // dst file does not exist, but dst dir does => copy should succeed
-        assert!(copy_item(&src_item, &dst_path).await.is_ok());
-        assert!(dst_path.exists());
+        assert!(copy_item(&src_item, &dst_file).await.is_ok());
+        assert!(dst_file.exists());
         // Modify dst file
-        let mut file = File::open(&dst_path).await?;
+        let mut file = File::open(&dst_file).await?;
         file.write_all(b"Huhu baloo").await?;
         // dst file exists => copy should succeed (overwrite)
-        assert!(copy_item(&src_item, &dst_path).await.is_ok());
-        assert!(dst_path.exists());
-        let content = fs::read_to_string(&dst_path).await?;
-        assert_eq!(content, "Hello world");
+        assert!(copy_item(&src_item, &dst_file).await.is_ok());
+        assert!(dst_file.exists());
+        let content = fs::read_to_string(&dst_file).await?;
+        assert_eq!(content, txt);
         Ok(())
     }
 
     #[tokio::test]
     async fn test_copy_dir() -> Result<(), Box<dyn std::error::Error>> {
+        let txt = "Hello world";
         let tmp = tempdir()?;
         let tmp_dir = tmp.path();
         let src_dir = tmp_dir.join("src");
@@ -149,33 +151,29 @@ mod tests {
         fs::create_dir(&src_dir).await?;
         let src_item = FSItem::new(&src_dir).await;
         let mut file = File::create(&src_file).await?;
-        file.write_all(b"Hello world").await?;
+        file.write_all(txt.as_bytes()).await?;
         // parent dir does not exist => copy should fail
-        eprintln!("1:");
         assert!(copy_item(&src_item, &dst_dir).await.is_err());
         // Create parent dir
         fs::create_dir(&parent_dir).await?;
         // dst dir does not exist => copy should fail
-        eprintln!("2:");
         assert!(copy_item(&src_item, &dst_dir).await.is_err());
         // Create dst dir
         fs::create_dir(&dst_dir).await?;
         // dst dir exists => copy should succeed
-        eprintln!("3:");
         assert!(copy_item(&src_item, &dst_dir).await.is_ok());
         assert!(dst_dir.exists());
         assert!(dst_file.exists());
         let content = fs::read_to_string(&dst_file).await?;
-        assert_eq!(content, "Hello world");
+        assert_eq!(content, txt);
         // Modify dst file
         let mut file = File::open(&dst_file).await?;
         file.write_all(b"Huhu baloo").await?;
         // dst file exists => copy should succeed (overwrite)
-        eprintln!("4:");
         assert!(copy_item(&src_item, &dst_dir).await.is_ok());
         assert!(dst_file.exists());
         let content = fs::read_to_string(&dst_file).await?;
-        assert_eq!(content, "Hello world");
+        assert_eq!(content, txt);
         Ok(())
     }
 
