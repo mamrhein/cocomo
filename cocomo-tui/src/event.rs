@@ -15,11 +15,12 @@
 
 use std::time::Duration;
 
-use crate::appevent::AppEvent;
 use color_eyre::eyre::OptionExt;
 use futures::{FutureExt, StreamExt};
 use ratatui::crossterm::event::Event as CrosstermEvent;
 use tokio::sync::mpsc;
+
+use crate::appevent::AppEvent;
 
 /// Handles the terminal events (key press, mouse click, resize, etc.).
 /// The frequency at which tick events are emitted.

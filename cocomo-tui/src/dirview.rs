@@ -127,6 +127,7 @@ impl DirView {
                         }
                     };
                     copy_item(src, dst.path()).await?;
+                    self.diff.refresh().await?;
                 }
             }
             AppEvent::Move => {
@@ -163,6 +164,7 @@ impl DirView {
                         }
                     };
                     move_item(src, dst.path()).await?;
+                    self.diff.refresh().await?;
                 }
             }
             AppEvent::Delete => {
@@ -182,15 +184,14 @@ impl DirView {
                         } => item.right_item.as_ref().unwrap(),
                     };
                     delete_item(target).await?;
+                    self.diff.refresh().await?;
                 }
             }
             // AppEvent::Rename => {
             // let _ = rename_item(&item, &new_name).await;
             // }
             AppEvent::Refresh => {
-                if let Ok(new_diff) = DirDiff::new(left_dir, right_dir).await {
-                    self.diff = new_diff;
-                }
+                self.diff.refresh().await?;
             }
             _ => {} // ignore it (TODO: handle it)
         }
