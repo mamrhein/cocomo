@@ -200,8 +200,7 @@ async fn make_diff(
         match (&left_item, &right_item) {
             (Some(left), Some(right)) => match cmp_items(left, right) {
                 cmp::Ordering::Equal => {
-                    diff_items
-                        .push(DiffItem::new(&left_item, &right_item)?);
+                    diff_items.push(DiffItem::new(&left_item, &right_item)?);
                     left_item = left_items.pop();
                     right_item = right_items.pop();
                 }
@@ -228,7 +227,6 @@ async fn make_diff(
         }
     }
     Ok(diff_items)
-
 }
 
 impl DirDiff {
@@ -247,7 +245,9 @@ impl DirDiff {
     }
 
     pub fn name(&self) -> &ffi::OsString {
-        if let Some(ref left) = self.left_dir && !left.name().is_empty() {
+        if let Some(ref left) = self.left_dir
+            && !left.name().is_empty()
+        {
             left.name()
         } else {
             if let Some(ref right) = self.right_dir {
@@ -256,6 +256,11 @@ impl DirDiff {
                 EMPTY
             }
         }
+    }
+
+    pub async fn refresh(&mut self) -> io::Result<()> {
+        self.items = make_diff(&self.left_dir, &self.right_dir).await?;
+        Ok(())
     }
 }
 
