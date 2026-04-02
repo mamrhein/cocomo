@@ -87,6 +87,7 @@ impl App {
         left_item: &Option<FSItem>,
         right_item: &Option<FSItem>,
     ) -> io::Result<()> {
+        debug_assert!(left_item.is_some() || right_item.is_some());
         let view: AppView = match (left_item, right_item) {
             (Some(left), _) => {
                 if left.is_dir() {
