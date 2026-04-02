@@ -104,7 +104,6 @@ pub async fn rename_item(
 ) -> Result<(), FsError> {
     let mut dst = item.path().to_path_buf();
     dst.set_file_name(new_name);
-
     fs::rename(item.path(), &dst).await?;
     Ok(())
 }
@@ -424,33 +423,63 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_delete_item() -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_delete_file() -> Result<(), Box<dyn std::error::Error>> {
         let tmp = tempdir()?;
         let tmp_dir = tmp.path();
         let path = tmp_dir.join("to_delete.txt");
-
         File::create(&path).await?;
-
         let item = FSItem::new(&path).await;
         delete_item(&item).await?;
-
         assert!(!path.exists());
         Ok(())
     }
 
     #[tokio::test]
-    async fn test_rename_item() -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_delete_dir() -> Result<(), Box<dyn std::error::Error>> {
+        let tmp = tempdir()?;
+        let tmp_dir = tmp.path();
+        let dir = tmp_dir.join("1").join("2").join("3");
+        fs::create_dir_all(&dir).await?;
+        let file = dir.join("file.txt");
+        File::create(&file).await?;
+        let item = FSItem::new(&dir).await;
+        delete_item(&item).await?;
+        assert!(!dir.exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_rename_file() -> Result<(), Box<dyn std::error::Error>> {
         let tmp = tempdir()?;
         let tmp_dir = tmp.path();
         let path = tmp_dir.join("old.txt");
         let expected = tmp_dir.join("new.txt");
-
         File::create(&path).await?;
-
         let item = FSItem::new(&path).await;
-        rename_item(&item, "new.txt").await?;
-
+        assert!(rename_item(&item, "new.txt").await.is_ok());
         assert!(!path.exists());
+        assert!(expected.exists());
+        // Recreate old item
+        File::create(&path).await?;
+        let item = FSItem::new(&path).await;
+        // New name exists => should fail
+        rename_item(&item, "new.txt").await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_rename_dir() -> Result<(), Box<dyn std::error::Error>> {
+        let tmp = tempdir()?;
+        let tmp_dir = tmp.path();
+        let dir = tmp_dir.join("1").join("2").join("3");
+        fs::create_dir_all(&dir).await?;
+        let file = dir.join("file.txt");
+        File::create(&file).await?;
+        let item = FSItem::new(&dir).await;
+        let new_name = "7";
+        let expected = dir.parent().unwrap().join(new_name);
+        rename_item(&item, new_name).await?;
+        assert!(!dir.exists());
         assert!(expected.exists());
         Ok(())
     }
