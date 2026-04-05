@@ -55,6 +55,8 @@ pub(crate) struct App {
     views: Vec<AppView>,
     /// Index of the currently active view.
     active_view: usize,
+    /// Flag to show key hints.
+    show_key_hints: bool,
     /// Flag to show a confirmation dialog before quitting.
     show_quit_confirm: bool,
 }
@@ -67,6 +69,7 @@ impl App {
             events: EventHandler::new(),
             views: vec![],
             active_view: 0,
+            show_key_hints: false,
             show_quit_confirm: false,
         }
     }
@@ -164,6 +167,9 @@ impl App {
             return Ok(());
         }
         match (key_event.code, key_event.modifiers) {
+            (KeyCode::Char('?'), KeyModifiers::NONE) => {
+                self.show_key_hints = !self.show_key_hints;
+            }
             (KeyCode::Char('q'), KeyModifiers::NONE) => {
                 self.events.send(AppEvent::Quit);
             }
@@ -286,18 +292,21 @@ impl Widget for &App {
         let vert_constraints = [
             Constraint::Length(1),
             Constraint::Min(0),
-            Constraint::Length(1),
+            Constraint::Length(if self.show_key_hints { 2 } else { 0 }),
         ];
         let [tab_bar, main_view, key_bar] =
             Layout::vertical(vert_constraints).areas(area);
 
         // Render key hints
-        Paragraph::new(
-            "q: quit | x: close tab | Enter: open | Tab: switch | ↑/↓: \
-             navigate | Home/End: top/bottom | c: copy | m: move | d: delete",
-        )
-        .left_aligned()
-        .render(key_bar, buf);
+        if self.show_key_hints {
+            Paragraph::new(
+                "? hide key hints | q: quit | x: close tab | Enter: open | \
+                 Tab: switch | ↑/↓: navigate | Home/End: top/bottom | c: \
+                 copy | m: move | d: delete",
+            )
+            .left_aligned()
+            .render(key_bar, buf);
+        }
 
         let titles: Vec<String> =
             self.views.iter().map(|view| view.title()).collect();
