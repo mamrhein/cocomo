@@ -261,6 +261,14 @@ impl TextDiff {
         })
     }
 
+    /// Refreshes the comparison by re-reading the files.
+    pub async fn refresh(&mut self) -> io::Result<()> {
+        let left_content = fs::read_to_string(self.left_file.path())?;
+        let right_content = fs::read_to_string(self.right_file.path())?;
+        self.chunks = make_diff_chunks(&left_content, &right_content);
+        Ok(())
+    }
+
     pub fn name(&self) -> &ffi::OsString {
         match &self.left_file.name().is_empty() {
             false => self.left_file.name(),
