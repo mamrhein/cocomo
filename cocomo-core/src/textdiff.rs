@@ -63,6 +63,178 @@ pub struct TextDiff {
     pub chunks: Vec<DiffChunk>,
 }
 
+fn make_diff_chunks(
+    left_content: &str,
+    right_content: &str,
+) -> Vec<DiffChunk> {
+    let diff = similar::TextDiff::from_lines(left_content, right_content);
+    let mut chunks = Vec::new();
+
+    for op in diff.ops() {
+        match op {
+            similar::DiffOp::Equal {
+                old_index,
+                new_index,
+                len,
+            } => {
+                // 1. Equal { old_index, new_index, len }
+                let mut left_lines = Vec::new();
+                let mut right_lines = Vec::new();
+                for i in 0..*len {
+                    let line = diff.iter_changes(op).nth(i).unwrap();
+                    left_lines.push(DiffLine {
+                        line_number: Some(old_index + i + 1),
+                        content: line.value().to_string(),
+                    });
+                    right_lines.push(DiffLine {
+                        line_number: Some(new_index + i + 1),
+                        content: line.value().to_string(),
+                    });
+                }
+                chunks.push(DiffChunk {
+                    diff_type: LineDiffType::Unchanged,
+                    left_lines,
+                    right_lines,
+                });
+            }
+            similar::DiffOp::Delete {
+                old_index, old_len, ..
+            } => {
+                // 2. Delete { old_index, old_len, .. }
+                let mut left_lines = Vec::new();
+                let mut right_lines = Vec::new();
+                for i in 0..*old_len {
+                    let line = diff.iter_changes(op).nth(i).unwrap();
+                    left_lines.push(DiffLine {
+                        line_number: Some(old_index + i + 1),
+                        content: line.value().to_string(),
+                    });
+                    right_lines.push(DiffLine {
+                        line_number: None,
+                        content: String::new(),
+                    });
+                }
+                chunks.push(DiffChunk {
+                    diff_type: LineDiffType::Removed,
+                    left_lines,
+                    right_lines,
+                });
+            }
+            similar::DiffOp::Insert {
+                new_index, new_len, ..
+            } => {
+                // 3. Insert { new_index, new_len, .. }
+                let mut left_lines = Vec::new();
+                let mut right_lines = Vec::new();
+                for i in 0..*new_len {
+                    let line = diff.iter_changes(op).nth(i).unwrap();
+                    left_lines.push(DiffLine {
+                        line_number: None,
+                        content: String::new(),
+                    });
+                    right_lines.push(DiffLine {
+                        line_number: Some(new_index + i + 1),
+                        content: line.value().to_string(),
+                    });
+                }
+                chunks.push(DiffChunk {
+                    diff_type: LineDiffType::Added,
+                    left_lines,
+                    right_lines,
+                });
+            }
+            similar::DiffOp::Replace {
+                old_index,
+                old_len,
+                new_index,
+                new_len,
+            } => {
+                // 4. Replace { old_index, old_len, new_index, new_len }
+                let mut left_lines = Vec::new();
+                let mut right_lines = Vec::new();
+                let common_len = (*old_len).min(*new_len);
+
+                // Map overlapping lines to 'Changed'
+                for i in 0..common_len {
+                    let left_line = diff
+                        .iter_changes(op)
+                        .filter(|c| c.tag() == similar::ChangeTag::Delete)
+                        .nth(i)
+                        .unwrap();
+                    let right_line = diff
+                        .iter_changes(op)
+                        .filter(|c| c.tag() == similar::ChangeTag::Insert)
+                        .nth(i)
+                        .unwrap();
+                    left_lines.push(DiffLine {
+                        line_number: Some(old_index + i + 1),
+                        content: left_line.value().to_string(),
+                    });
+                    right_lines.push(DiffLine {
+                        line_number: Some(new_index + i + 1),
+                        content: right_line.value().to_string(),
+                    });
+                }
+                chunks.push(DiffChunk {
+                    diff_type: LineDiffType::Changed,
+                    left_lines,
+                    right_lines,
+                });
+
+                // Handle remaining lines in the Replace op
+                if old_len > new_len {
+                    let mut rem_left = Vec::new();
+                    let mut rem_right = Vec::new();
+                    for i in common_len..*old_len {
+                        let left_line = diff
+                            .iter_changes(op)
+                            .filter(|c| c.tag() == similar::ChangeTag::Delete)
+                            .nth(i)
+                            .unwrap();
+                        rem_left.push(DiffLine {
+                            line_number: Some(old_index + i + 1),
+                            content: left_line.value().to_string(),
+                        });
+                        rem_right.push(DiffLine {
+                            line_number: None,
+                            content: String::new(),
+                        });
+                    }
+                    chunks.push(DiffChunk {
+                        diff_type: LineDiffType::Removed,
+                        left_lines: rem_left,
+                        right_lines: rem_right,
+                    });
+                } else if new_len > old_len {
+                    let mut rem_left = Vec::new();
+                    let mut rem_right = Vec::new();
+                    for i in common_len..*new_len {
+                        let right_line = diff
+                            .iter_changes(op)
+                            .filter(|c| c.tag() == similar::ChangeTag::Insert)
+                            .nth(i)
+                            .unwrap();
+                        rem_left.push(DiffLine {
+                            line_number: None,
+                            content: String::new(),
+                        });
+                        rem_right.push(DiffLine {
+                            line_number: Some(new_index + i + 1),
+                            content: right_line.value().to_string(),
+                        });
+                    }
+                    chunks.push(DiffChunk {
+                        diff_type: LineDiffType::Added,
+                        left_lines: rem_left,
+                        right_lines: rem_right,
+                    });
+                }
+            }
+        }
+    }
+    chunks
+}
+
 impl TextDiff {
     /// Compares the contents of two text files.
     pub async fn new(
@@ -80,176 +252,11 @@ impl TextDiff {
             String::new()
         };
 
-        let diff =
-            similar::TextDiff::from_lines(&left_content, &right_content);
-        let mut chunks = Vec::new();
-
-        for op in diff.ops() {
-            match op {
-                similar::DiffOp::Equal {
-                    old_index,
-                    new_index,
-                    len,
-                } => {
-                    let mut left_lines = Vec::new();
-                    let mut right_lines = Vec::new();
-                    for i in 0..*len {
-                        let line = diff.iter_changes(op).nth(i).unwrap();
-                        left_lines.push(DiffLine {
-                            line_number: Some(old_index + i + 1),
-                            content: line.value().to_string(),
-                        });
-                        right_lines.push(DiffLine {
-                            line_number: Some(new_index + i + 1),
-                            content: line.value().to_string(),
-                        });
-                    }
-                    chunks.push(DiffChunk {
-                        diff_type: LineDiffType::Unchanged,
-                        left_lines,
-                        right_lines,
-                    });
-                }
-                similar::DiffOp::Delete {
-                    old_index, old_len, ..
-                } => {
-                    let mut left_lines = Vec::new();
-                    let mut right_lines = Vec::new();
-                    for i in 0..*old_len {
-                        let line = diff.iter_changes(op).nth(i).unwrap();
-                        left_lines.push(DiffLine {
-                            line_number: Some(old_index + i + 1),
-                            content: line.value().to_string(),
-                        });
-                        right_lines.push(DiffLine {
-                            line_number: None,
-                            content: String::new(),
-                        });
-                    }
-                    chunks.push(DiffChunk {
-                        diff_type: LineDiffType::Removed,
-                        left_lines,
-                        right_lines,
-                    });
-                }
-                similar::DiffOp::Insert {
-                    new_index, new_len, ..
-                } => {
-                    let mut left_lines = Vec::new();
-                    let mut right_lines = Vec::new();
-                    for i in 0..*new_len {
-                        let line = diff.iter_changes(op).nth(i).unwrap();
-                        left_lines.push(DiffLine {
-                            line_number: None,
-                            content: String::new(),
-                        });
-                        right_lines.push(DiffLine {
-                            line_number: Some(new_index + i + 1),
-                            content: line.value().to_string(),
-                        });
-                    }
-                    chunks.push(DiffChunk {
-                        diff_type: LineDiffType::Added,
-                        left_lines,
-                        right_lines,
-                    });
-                }
-                similar::DiffOp::Replace {
-                    old_index,
-                    old_len,
-                    new_index,
-                    new_len,
-                } => {
-                    let mut left_lines = Vec::new();
-                    let mut right_lines = Vec::new();
-                    let common_len = (*old_len).min(*new_len);
-
-                    // Map overlapping lines to 'Changed'
-                    for i in 0..common_len {
-                        let left_line = diff
-                            .iter_changes(op)
-                            .filter(|c| c.tag() == similar::ChangeTag::Delete)
-                            .nth(i)
-                            .unwrap();
-                        let right_line = diff
-                            .iter_changes(op)
-                            .filter(|c| c.tag() == similar::ChangeTag::Insert)
-                            .nth(i)
-                            .unwrap();
-                        left_lines.push(DiffLine {
-                            line_number: Some(old_index + i + 1),
-                            content: left_line.value().to_string(),
-                        });
-                        right_lines.push(DiffLine {
-                            line_number: Some(new_index + i + 1),
-                            content: right_line.value().to_string(),
-                        });
-                    }
-                    chunks.push(DiffChunk {
-                        diff_type: LineDiffType::Changed,
-                        left_lines,
-                        right_lines,
-                    });
-
-                    // Handle remaining lines in the Replace op
-                    if old_len > new_len {
-                        let mut rem_left = Vec::new();
-                        let mut rem_right = Vec::new();
-                        for i in common_len..*old_len {
-                            let left_line = diff
-                                .iter_changes(op)
-                                .filter(|c| {
-                                    c.tag() == similar::ChangeTag::Delete
-                                })
-                                .nth(i)
-                                .unwrap();
-                            rem_left.push(DiffLine {
-                                line_number: Some(old_index + i + 1),
-                                content: left_line.value().to_string(),
-                            });
-                            rem_right.push(DiffLine {
-                                line_number: None,
-                                content: String::new(),
-                            });
-                        }
-                        chunks.push(DiffChunk {
-                            diff_type: LineDiffType::Removed,
-                            left_lines: rem_left,
-                            right_lines: rem_right,
-                        });
-                    } else if new_len > old_len {
-                        let mut rem_left = Vec::new();
-                        let mut rem_right = Vec::new();
-                        for i in common_len..*new_len {
-                            let right_line = diff
-                                .iter_changes(op)
-                                .filter(|c| {
-                                    c.tag() == similar::ChangeTag::Insert
-                                })
-                                .nth(i)
-                                .unwrap();
-                            rem_left.push(DiffLine {
-                                line_number: None,
-                                content: String::new(),
-                            });
-                            rem_right.push(DiffLine {
-                                line_number: Some(new_index + i + 1),
-                                content: right_line.value().to_string(),
-                            });
-                        }
-                        chunks.push(DiffChunk {
-                            diff_type: LineDiffType::Added,
-                            left_lines: rem_left,
-                            right_lines: rem_right,
-                        });
-                    }
-                }
-            }
-        }
+        let chunks = make_diff_chunks(&left_content, &right_content);
 
         Ok(Self {
-            left_file: left_file.to_owned().unwrap_or_default(),
-            right_file: right_file.to_owned().unwrap_or_default(),
+            left_file: left_file.clone().unwrap_or_default(),
+            right_file: right_file.clone().unwrap_or_default(),
             chunks,
         })
     }
