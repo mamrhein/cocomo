@@ -43,7 +43,7 @@
 
 use std::fmt;
 
-use crossterm::event::KeyCode;
+use ratatui::crossterm::event::KeyCode;
 
 use crate::appevent::AppEvent;
 
