@@ -35,4 +35,8 @@ pub(crate) enum AppEvent {
     Rename,
     /// Refresh the current view.
     Refresh,
+    /// Confirm an action.
+    Confirmed,
+    /// Cancel an action.
+    NotConfirmed,
 }

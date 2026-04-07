@@ -65,6 +65,8 @@ mod cmdargs;
 pub(crate) mod app;
 /// Application events.
 pub(crate) mod appevent;
+/// Dialog pop-ups
+pub(crate) mod dialog;
 /// Renders the directory comparison view.
 pub(crate) mod dirview;
 /// Handles the terminal events (key press, mouse click, resize, etc.).

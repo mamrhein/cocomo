@@ -21,11 +21,12 @@ use ratatui::{
     crossterm::event::{KeyCode, KeyEvent, KeyModifiers},
     layout::{Constraint, Layout, Rect},
     style::{Color, Style},
-    widgets::{Block, Clear, Paragraph, Tabs, Widget},
+    widgets::{Paragraph, Tabs, Widget, WidgetRef},
 };
 
 use crate::{
     appevent::AppEvent,
+    dialog::SimpleConfirm,
     dirview::DirView,
     event::{Event, EventHandler},
     textview::TextView,
@@ -156,7 +157,7 @@ impl App {
     ) -> color_eyre::Result<()> {
         if self.show_quit_confirm {
             match key_event.code {
-                KeyCode::Char('y') => {
+                KeyCode::Char('y') | KeyCode::Enter => {
                     self.quit();
                 }
                 KeyCode::Char('n') | KeyCode::Esc => {
@@ -322,12 +323,8 @@ impl Widget for &App {
 
         if self.show_quit_confirm {
             let area = centered_rect(40, 10, area);
-            Clear.render(area, buf);
-            let text = "Close last tab and quit? (y/n)";
-            Paragraph::new(text)
-                .centered()
-                .block(Block::bordered())
-                .render(area, buf);
+            let msg = "Close last tab and quit?";
+            SimpleConfirm::new("", msg).render_ref(area, buf);
         }
     }
 }
