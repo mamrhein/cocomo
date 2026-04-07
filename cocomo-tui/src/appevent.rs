@@ -8,7 +8,7 @@
 // $Revision$
 
 /// Application events.
-#[derive(Clone, Debug)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 #[allow(clippy::large_enum_variant)]
 pub(crate) enum AppEvent {
     /// Quit the application.
