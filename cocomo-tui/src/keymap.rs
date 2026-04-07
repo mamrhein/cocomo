@@ -188,13 +188,13 @@ impl fmt::Display for KeyMapItem {
         if let Some(alt) = self.alt_key_code {
             write!(
                 f,
-                "{}: {}/{}",
+                "{}: [{}]/[{}]",
                 self.name,
                 repr_key_code(&self.key_code),
                 repr_key_code(&alt)
             )
         } else {
-            write!(f, "{}: {}", self.name, repr_key_code(&self.key_code))
+            write!(f, "{}: [{}]", self.name, repr_key_code(&self.key_code))
         }
     }
 }
@@ -420,7 +420,7 @@ mod tests {
             AppEvent::Copy,
         );
 
-        assert_eq!(format!("{}", key_map), "Copy: c");
+        assert_eq!(format!("{}", key_map), "Copy: [c]");
     }
 
     /// Tests display formatting with special keys (arrows, etc.).
@@ -434,7 +434,7 @@ mod tests {
             AppEvent::OpenView,
         );
 
-        assert_eq!(format!("{}", key_map), "Open: ↵/F10");
+        assert_eq!(format!("{}", key_map), "Open: [↵]/[F10]");
     }
 
     /// Tests successful key mapping lookups for enabled keys.
@@ -502,11 +502,11 @@ mod tests {
     fn test_keymapper_display_multiple_keys() {
         let display = format!("{}", &*KEY_MAPPER);
         // Check that all keys are in the display
-        assert!(display.contains("Open: ↵/o"));
-        assert!(display.contains("Quit: q"));
-        assert!(display.contains("Copy: c"));
-        assert!(display.contains("Move: m"));
-        assert!(display.contains("Delete: d"));
+        assert!(display.contains("Open: [↵]/[o]"));
+        assert!(display.contains("Quit: [q]"));
+        assert!(display.contains("Copy: [c]"));
+        assert!(display.contains("Move: [m]"));
+        assert!(display.contains("Delete: [d]"));
 
         // Check delimiter
         assert!(display.contains("|"));
