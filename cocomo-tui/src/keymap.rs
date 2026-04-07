@@ -59,6 +59,8 @@ use crate::appevent::AppEvent;
 pub(crate) struct KeyMapItem {
     /// The keyboard key that triggers this mapping.
     key_code: KeyCode,
+    /// An optional alternate key code for this mapping.
+    alt_key_code: Option<KeyCode>,
     /// Human-readable name of the action for display purposes.
     name: &'static str,
     /// Whether this key mapping is currently enabled.
@@ -73,17 +75,20 @@ impl KeyMapItem {
     /// # Arguments
     ///
     /// - `key_code`: The keyboard key to bind
+    /// - `alt_key_code`: An optional alternate key code for this mapping
     /// - `name`: A descriptive name for display purposes
     /// - `enabled`: Whether the mapping should be enabled initially
     /// - `event`: The event that will be triggered when this key is pressed
     pub(crate) const fn new(
         key_code: KeyCode,
+        alt_key_code: Option<KeyCode>,
         name: &'static str,
         enabled: bool,
         event: AppEvent,
     ) -> Self {
         Self {
             key_code,
+            alt_key_code,
             name,
             enabled,
             event,
@@ -93,6 +98,12 @@ impl KeyMapItem {
     /// Returns a reference to the mapped keyboard key.
     pub(crate) const fn key_code(&self) -> &KeyCode {
         &self.key_code
+    }
+
+    /// Returns a reference to the alternate key code, if set. This allows
+    /// checking for secondary key bindings associated with this mapping.
+    pub(crate) const fn alt_key_code(&self) -> Option<&KeyCode> {
+        self.alt_key_code.as_ref()
     }
 
     /// Returns the display name of this key mapping.
@@ -174,7 +185,17 @@ fn repr_key_code(key_code: &KeyCode) -> String {
 /// ```
 impl fmt::Display for KeyMapItem {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}: {}", self.name, repr_key_code(&self.key_code))
+        if let Some(alt) = self.alt_key_code {
+            write!(
+                f,
+                "{}: {}/{}",
+                self.name,
+                repr_key_code(&self.key_code),
+                repr_key_code(&alt)
+            )
+        } else {
+            write!(f, "{}: {}", self.name, repr_key_code(&self.key_code))
+        }
     }
 }
 
@@ -192,7 +213,12 @@ impl KeyMap {
         self.0
             .iter()
             .filter(|key_map| key_map.is_enabled())
-            .find(|key_map| key_map.key_code() == key_code)
+            .find(|key_map| {
+                key_map.key_code() == key_code
+                    || key_map
+                        .alt_key_code()
+                        .is_some_and(|alt| alt == key_code)
+            })
             .map(|key_map| key_map.event())
     }
 }
@@ -244,19 +270,55 @@ mod tests {
     /// Default set of key map items used across multiple tests.
     ///
     /// Includes:
-    /// - Enter: OpenView (enabled)
-    /// - q: Quit (enabled)
-    /// - c: Copy (enabled)
-    /// - m: Move (enabled)
-    /// - d: Delete (enabled)
-    /// - r: Rename (disabled - for testing disabled filtering)
+    /// - Enter: OpenView (enabled, alt: o)
+    /// - q: Quit (enabled, alt: None)
+    /// - c: Copy (enabled, alt: None)
+    /// - m: Move (enabled, alt: None)
+    /// - d: Delete (enabled, alt: None)
+    /// - r: Rename (disabled, alt: None - for testing disabled filtering)
     const KEYMAP_ITEMS: [KeyMapItem; 6] = [
-        KeyMapItem::new(KeyCode::Enter, "Open", true, AppEvent::OpenView),
-        KeyMapItem::new(KeyCode::Char('q'), "Quit", true, AppEvent::Quit),
-        KeyMapItem::new(KeyCode::Char('c'), "Copy", true, AppEvent::Copy),
-        KeyMapItem::new(KeyCode::Char('m'), "Move", true, AppEvent::Move),
-        KeyMapItem::new(KeyCode::Char('d'), "Delete", true, AppEvent::Delete),
-        KeyMapItem::new(KeyCode::Char('r'), "Rename", false, AppEvent::Rename),
+        KeyMapItem::new(
+            KeyCode::Enter,
+            Some(KeyCode::Char('o')),
+            "Open",
+            true,
+            AppEvent::OpenView,
+        ),
+        KeyMapItem::new(
+            KeyCode::Char('q'),
+            None,
+            "Quit",
+            true,
+            AppEvent::Quit,
+        ),
+        KeyMapItem::new(
+            KeyCode::Char('c'),
+            None,
+            "Copy",
+            true,
+            AppEvent::Copy,
+        ),
+        KeyMapItem::new(
+            KeyCode::Char('m'),
+            None,
+            "Move",
+            true,
+            AppEvent::Move,
+        ),
+        KeyMapItem::new(
+            KeyCode::Char('d'),
+            None,
+            "Delete",
+            true,
+            AppEvent::Delete,
+        ),
+        KeyMapItem::new(
+            KeyCode::Char('r'),
+            None,
+            "Rename",
+            false,
+            AppEvent::Rename,
+        ),
     ];
 
     /// Pre-built key mapper instance for testing.
@@ -269,13 +331,16 @@ mod tests {
     #[test]
     fn test_keymap_new_and_getters() {
         let key_code = KeyCode::Char('c');
+        let alt_key_code = None;
         let name = "Copy";
         let enabled = true;
         let event = AppEvent::Copy;
 
-        let key_map = KeyMapItem::new(key_code, name, enabled, event);
+        let key_map =
+            KeyMapItem::new(key_code, alt_key_code, name, enabled, event);
 
         assert_eq!(*key_map.key_code(), key_code);
+        assert!(key_map.alt_key_code().is_none());
         assert_eq!(key_map.name(), name);
         assert_eq!(key_map.event(), event);
         assert!(key_map.is_enabled());
@@ -285,7 +350,14 @@ mod tests {
     #[test]
     fn test_keymap_disabled() {
         let key_code = KeyCode::Char('x');
-        let key_map = KeyMapItem::new(key_code, "Test", false, AppEvent::Copy);
+        let alt_key_code = None;
+        let key_map = KeyMapItem::new(
+            key_code,
+            alt_key_code,
+            "Test",
+            false,
+            AppEvent::Copy,
+        );
 
         assert!(!key_map.is_enabled());
     }
@@ -293,8 +365,13 @@ mod tests {
     /// Tests toggling the enabled state of a key map.
     #[test]
     fn test_set_enabled() {
-        let mut key_map =
-            KeyMapItem::new(KeyCode::Char('a'), "Test", false, AppEvent::Copy);
+        let mut key_map = KeyMapItem::new(
+            KeyCode::Char('a'),
+            None,
+            "Test",
+            false,
+            AppEvent::Copy,
+        );
         assert!(!key_map.is_enabled());
         key_map.set_enabled(true);
         assert!(key_map.is_enabled());
@@ -335,8 +412,13 @@ mod tests {
     /// Tests the `Display` implementation for a single `KeyMapItem`.
     #[test]
     fn test_keymap_display_format() {
-        let key_map =
-            KeyMapItem::new(KeyCode::Char('c'), "Copy", true, AppEvent::Copy);
+        let key_map = KeyMapItem::new(
+            KeyCode::Char('c'),
+            None,
+            "Copy",
+            true,
+            AppEvent::Copy,
+        );
 
         assert_eq!(format!("{}", key_map), "Copy: c");
     }
@@ -344,15 +426,21 @@ mod tests {
     /// Tests display formatting with special keys (arrows, etc.).
     #[test]
     fn test_keymap_display_with_special_key() {
-        let key_map =
-            KeyMapItem::new(KeyCode::Enter, "Open", true, AppEvent::OpenView);
+        let key_map = KeyMapItem::new(
+            KeyCode::Enter,
+            Some(KeyCode::F(10)),
+            "Open",
+            true,
+            AppEvent::OpenView,
+        );
 
-        assert_eq!(format!("{}", key_map), "Open: ↵");
+        assert_eq!(format!("{}", key_map), "Open: ↵/F10");
     }
 
     /// Tests successful key mapping lookups for enabled keys.
     #[test]
     fn test_keymapper_map_key_code_found() {
+        // Test primary key code
         assert_eq!(
             KEY_MAPPER.map_key_code(&KeyCode::Char('c')),
             Some(AppEvent::Copy)
@@ -368,10 +456,6 @@ mod tests {
     }
 
     /// Tests key mapping lookups that should return `None`.
-    ///
-    /// Covers two cases:
-    /// 1. Keys not present in the mapping
-    /// 2. Enabled keys (tests that disabled keys are filtered out)
     #[test]
     fn test_keymapper_map_key_code_not_found() {
         // Not in map
@@ -380,12 +464,45 @@ mod tests {
         assert_eq!(KEY_MAPPER.map_key_code(&KeyCode::Char('r')), None);
     }
 
+    /// Tests mapping using alt_key_code.
+    #[test]
+    fn test_alt_key_code_mapping() {
+        // Test primary key code
+        assert_eq!(
+            KEY_MAPPER.map_key_code(&KeyCode::Enter),
+            Some(AppEvent::OpenView)
+        );
+        // Test alternate key code
+        assert_eq!(
+            KEY_MAPPER.map_key_code(&KeyCode::Char('o')),
+            Some(AppEvent::OpenView)
+        );
+    }
+
+    /// Tests that alt_key_code respects enabled state.
+    #[test]
+    fn test_alt_key_code_respects_enabled() {
+        let key_maps = vec![KeyMapItem::new(
+            KeyCode::Char('c'),
+            Some(KeyCode::Char('C')),
+            "Copy",
+            false, // disabled
+            AppEvent::Copy,
+        )];
+
+        let key_mapper = KeyMap(key_maps);
+
+        // Both primary and alt should not map when disabled
+        assert_eq!(key_mapper.map_key_code(&KeyCode::Char('c')), None);
+        assert_eq!(key_mapper.map_key_code(&KeyCode::Char('C')), None);
+    }
+
     /// Tests the `Display` implementation for `KeyMap` with multiple keys.
     #[test]
     fn test_keymapper_display_multiple_keys() {
         let display = format!("{}", &*KEY_MAPPER);
         // Check that all keys are in the display
-        assert!(display.contains("Open: ↵"));
+        assert!(display.contains("Open: ↵/o"));
         assert!(display.contains("Quit: q"));
         assert!(display.contains("Copy: c"));
         assert!(display.contains("Move: m"));
@@ -406,18 +523,27 @@ mod tests {
     /// Tests mapping when multiple keys exist for the same code but only one
     /// is enabled.
     #[test]
-    fn test_multiple_keymaps_same_key_different_sections() {
+    fn test_duplicate_key() {
         let key_maps = vec![
             KeyMapItem::new(
                 KeyCode::Enter,
+                None,
+                "Rename",
+                false,
+                AppEvent::Rename,
+            ),
+            KeyMapItem::new(
+                KeyCode::Enter,
+                None,
                 "Open in Dir",
                 true,
                 AppEvent::OpenView,
             ),
             KeyMapItem::new(
                 KeyCode::Enter,
+                None,
                 "Select in File",
-                false,
+                true,
                 AppEvent::NavigateNext,
             ),
         ];
@@ -431,69 +557,19 @@ mod tests {
         );
     }
 
-    /// Tests that when multiple keys are enabled for the same code,
-    /// the first one is returned (order matters).
-    #[test]
-    fn test_multiple_active_keys_same_section() {
-        let key_maps = vec![
-            KeyMapItem::new(
-                KeyCode::Enter,
-                "Open in Dir",
-                true,
-                AppEvent::OpenView,
-            ),
-            KeyMapItem::new(
-                KeyCode::Enter,
-                "Select in File",
-                true,
-                AppEvent::NavigateNext,
-            ),
-        ];
-
-        let key_mapper = KeyMap(key_maps);
-
-        // First active key should be found (order matters)
-        assert_eq!(
-            key_mapper.map_key_code(&KeyCode::Enter),
-            Some(AppEvent::OpenView)
-        );
-    }
-
-    /// Tests that disabled keys are properly filtered during lookup.
-    #[test]
-    fn test_inactive_keys_filtered() {
-        let key_maps = vec![
-            KeyMapItem::new(
-                KeyCode::Enter,
-                "Open in Dir",
-                true,
-                AppEvent::OpenView,
-            ),
-            KeyMapItem::new(
-                KeyCode::Enter,
-                "Select in File",
-                false,
-                AppEvent::NavigateNext,
-            ),
-        ];
-
-        let key_mapper = KeyMap(key_maps);
-
-        // Only active key should be found
-        assert_eq!(
-            key_mapper.map_key_code(&KeyCode::Enter),
-            Some(AppEvent::OpenView)
-        );
-    }
-
-    /// Tests that changing a key's active state affects lookup results.
+    /// Tests that changing a key's enabled state affects lookup results.
     ///
     /// Verifies that a key can be dynamically enabled and then successfully
     /// mapped to its event.
     #[test]
     fn test_set_enabled_then_map() {
-        let key_map =
-            KeyMapItem::new(KeyCode::Char('x'), "Test", false, AppEvent::Copy);
+        let key_map = KeyMapItem::new(
+            KeyCode::Char('x'),
+            None,
+            "Test",
+            false,
+            AppEvent::Copy,
+        );
 
         let key_mapper = KeyMap(vec![key_map]);
 
