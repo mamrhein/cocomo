@@ -18,7 +18,7 @@
 //! The module consists of two main components:
 //!
 //! - **`KeyMapItem`**: Represents a single key binding, associating a
-//!   `KeyCode` with an `AppEvent`, name, and active state.
+//!   `KeyCode` with an `AppEvent`, name, and enabled state.
 //! - **`KeyMap`**: A collection of `KeyMapItem`s that provides mapping
 //!   functionality to look up events based on keyboard input.
 //!
@@ -53,7 +53,7 @@ use crate::appevent::AppEvent;
 /// A `KeyMapItem` associates:
 /// - A specific `KeyCode` (the physical key pressed)
 /// - A display name for the action
-/// - An active state (whether the binding is currently enabled)
+/// - An enabled state (whether the binding is currently enabled)
 /// - An `AppEvent` that should be triggered when the key is pressed
 #[derive(Debug, Clone)]
 pub(crate) struct KeyMapItem {
@@ -61,8 +61,8 @@ pub(crate) struct KeyMapItem {
     key_code: KeyCode,
     /// Human-readable name of the action for display purposes.
     name: &'static str,
-    /// Whether this key mapping is currently active/enabled.
-    active: bool,
+    /// Whether this key mapping is currently enabled.
+    enabled: bool,
     /// The application event to emit when this key is pressed.
     event: AppEvent,
 }
@@ -74,18 +74,18 @@ impl KeyMapItem {
     ///
     /// - `key_code`: The keyboard key to bind
     /// - `name`: A descriptive name for display purposes
-    /// - `active`: Whether the mapping should be active initially
+    /// - `enabled`: Whether the mapping should be enabled initially
     /// - `event`: The event that will be triggered when this key is pressed
     pub(crate) const fn new(
         key_code: KeyCode,
         name: &'static str,
-        active: bool,
+        enabled: bool,
         event: AppEvent,
     ) -> Self {
         Self {
             key_code,
             name,
-            active,
+            enabled,
             event,
         }
     }
@@ -108,16 +108,16 @@ impl KeyMapItem {
         self.event
     }
 
-    /// Returns whether this key mapping is currently active.
-    pub(crate) const fn is_active(&self) -> bool {
-        self.active
+    /// Returns whether this key mapping is currently enabled.
+    pub(crate) const fn is_enabled(&self) -> bool {
+        self.enabled
     }
 
-    /// Sets whether this key mapping should be active.
+    /// Sets whether this key mapping should be enabled.
     ///
-    /// Inactive mappings are ignored when looking up events via `KeyMap`.
-    pub(crate) const fn set_active(&mut self, active: bool) {
-        self.active = active;
+    /// Disabled mappings are ignored when looking up events via `KeyMap`.
+    pub(crate) const fn set_enabled(&mut self, enabled: bool) {
+        self.enabled = enabled;
     }
 }
 
@@ -125,14 +125,20 @@ impl KeyMapItem {
 ///
 /// This function converts special keys to their symbolic representations:
 ///
-/// | Input Key | Output |
-/// |-----------|--------|
-/// | Enter | ↵ |
-/// | Left/Right/Up/Down | ← → ↑ ↓ |
-/// | Home/End | ⤒ ⤓ |
-/// | PageUp/PageDown | ⇞ ⇟ |
-/// | Tab/BackTab | ⇥ ⇤ |
-/// | Escape | Esc |
+/// | Input Key  | Output   |
+/// |------------|----------|
+/// | Enter      | ↵        |
+/// | Left       | ←        |
+/// | Right      | →        |
+/// | Up         | ↑        |
+/// | Down       | ↓        |
+/// | Home       | ⤒        |
+/// | End        | ⤓        |
+/// | PageUp     | ⇞        |
+/// | PageDown   | ⇟        |
+/// | Tab        | ⇥        |
+/// | BackTab    | ⇤        |
+/// | Escape     | Esc      |
 ///
 /// Regular character keys are returned as their string representation.
 fn repr_key_code(key_code: &KeyCode) -> String {
@@ -176,16 +182,16 @@ impl fmt::Display for KeyMapItem {
 ///
 /// `KeyMap` stores a vector of `KeyMapItem`s and provides functionality to:
 /// - Look up which event should be triggered for a given key code
-/// - Format all active mappings as a display string
+/// - Format all enabled mappings as a display string
 ///
-/// When looking up keys, only **active** mappings are considered.
+/// When looking up keys, only **enabled** mappings are considered.
 pub(crate) struct KeyMap(Vec<KeyMapItem>);
 
 impl KeyMap {
     pub(crate) fn map_key_code(&self, key_code: &KeyCode) -> Option<AppEvent> {
         self.0
             .iter()
-            .filter(|key_map| key_map.is_active())
+            .filter(|key_map| key_map.is_enabled())
             .find(|key_map| key_map.key_code() == key_code)
             .map(|key_map| key_map.event())
     }
@@ -203,7 +209,7 @@ impl From<&[KeyMapItem]> for KeyMap {
 /// Formats all key mappings as a display string.
 ///
 /// The output format is: `| Key1: val1 | Key2: val2 | ... |`
-/// Only active mappings are included in the output.
+/// Only enabled mappings are included in the output.
 impl fmt::Display for KeyMap {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let delim = " | ";
@@ -212,7 +218,7 @@ impl fmt::Display for KeyMap {
             "| {} |",
             self.0
                 .iter()
-                .filter(|km| km.is_active())
+                .filter(|km| km.is_enabled())
                 .map(|key_map| format!("{}", key_map))
                 .collect::<Vec<_>>()
                 .join(delim)
@@ -224,10 +230,10 @@ impl fmt::Display for KeyMap {
 ///
 /// Tests cover:
 /// - Key map item creation and getter methods
-/// - Active/inactive state management
+/// - Enabled/disabled state management
 /// - Key code representation (special keys, characters)
 /// - Display formatting for both single items and collections
-/// - Event mapping lookups (found, not found, inactive filtering)
+/// - Event mapping lookups (found, not found, disabled filtering)
 /// - Case sensitivity of key matching
 #[cfg(test)]
 mod tests {
@@ -238,12 +244,12 @@ mod tests {
     /// Default set of key map items used across multiple tests.
     ///
     /// Includes:
-    /// - Enter: OpenView (active)
-    /// - q: Quit (active)
-    /// - c: Copy (active)
-    /// - m: Move (active)
-    /// - d: Delete (active)
-    /// - r: Rename (inactive - for testing inactive filtering)
+    /// - Enter: OpenView (enabled)
+    /// - q: Quit (enabled)
+    /// - c: Copy (enabled)
+    /// - m: Move (enabled)
+    /// - d: Delete (enabled)
+    /// - r: Rename (disabled - for testing disabled filtering)
     const KEYMAP_ITEMS: [KeyMapItem; 6] = [
         KeyMapItem::new(KeyCode::Enter, "Open", true, AppEvent::OpenView),
         KeyMapItem::new(KeyCode::Char('q'), "Quit", true, AppEvent::Quit),
@@ -264,36 +270,36 @@ mod tests {
     fn test_keymap_new_and_getters() {
         let key_code = KeyCode::Char('c');
         let name = "Copy";
-        let active = true;
+        let enabled = true;
         let event = AppEvent::Copy;
 
-        let key_map = KeyMapItem::new(key_code, name, active, event);
+        let key_map = KeyMapItem::new(key_code, name, enabled, event);
 
         assert_eq!(*key_map.key_code(), key_code);
         assert_eq!(key_map.name(), name);
         assert_eq!(key_map.event(), event);
-        assert!(key_map.is_active());
+        assert!(key_map.is_enabled());
     }
 
-    /// Tests creating a key map with inactive state.
+    /// Tests creating a key map with disabled state.
     #[test]
-    fn test_keymap_inactive() {
+    fn test_keymap_disabled() {
         let key_code = KeyCode::Char('x');
         let key_map = KeyMapItem::new(key_code, "Test", false, AppEvent::Copy);
 
-        assert!(!key_map.is_active());
+        assert!(!key_map.is_enabled());
     }
 
-    /// Tests toggling the active state of a key map.
+    /// Tests toggling the enabled state of a key map.
     #[test]
-    fn test_set_active() {
+    fn test_set_enabled() {
         let mut key_map =
             KeyMapItem::new(KeyCode::Char('a'), "Test", false, AppEvent::Copy);
-        assert!(!key_map.is_active());
-        key_map.set_active(true);
-        assert!(key_map.is_active());
-        key_map.set_active(false);
-        assert!(!key_map.is_active());
+        assert!(!key_map.is_enabled());
+        key_map.set_enabled(true);
+        assert!(key_map.is_enabled());
+        key_map.set_enabled(false);
+        assert!(!key_map.is_enabled());
     }
 
     /// Tests the `repr_key_code` function for various key types.
@@ -344,7 +350,7 @@ mod tests {
         assert_eq!(format!("{}", key_map), "Open: ↵");
     }
 
-    /// Tests successful key mapping lookups for active keys.
+    /// Tests successful key mapping lookups for enabled keys.
     #[test]
     fn test_keymapper_map_key_code_found() {
         assert_eq!(
@@ -365,12 +371,12 @@ mod tests {
     ///
     /// Covers two cases:
     /// 1. Keys not present in the mapping
-    /// 2. Active keys (tests that inactive keys are filtered out)
+    /// 2. Enabled keys (tests that disabled keys are filtered out)
     #[test]
     fn test_keymapper_map_key_code_not_found() {
         // Not in map
         assert_eq!(KEY_MAPPER.map_key_code(&KeyCode::Char('y')), None);
-        // Not active (key 'r' exists but is marked as inactive)
+        // Disabled (key 'r' exists but is marked as disabled)
         assert_eq!(KEY_MAPPER.map_key_code(&KeyCode::Char('r')), None);
     }
 
@@ -398,7 +404,7 @@ mod tests {
     }
 
     /// Tests mapping when multiple keys exist for the same code but only one
-    /// is active.
+    /// is enabled.
     #[test]
     fn test_multiple_keymaps_same_key_different_sections() {
         let key_maps = vec![
@@ -418,14 +424,14 @@ mod tests {
 
         let key_mapper = KeyMap(key_maps);
 
-        // Only first active key should be found
+        // Only first enabled key should be found
         assert_eq!(
             key_mapper.map_key_code(&KeyCode::Enter),
             Some(AppEvent::OpenView)
         );
     }
 
-    /// Tests that when multiple keys are active for the same code,
+    /// Tests that when multiple keys are enabled for the same code,
     /// the first one is returned (order matters).
     #[test]
     fn test_multiple_active_keys_same_section() {
@@ -453,7 +459,7 @@ mod tests {
         );
     }
 
-    /// Tests that inactive keys are properly filtered during lookup.
+    /// Tests that disabled keys are properly filtered during lookup.
     #[test]
     fn test_inactive_keys_filtered() {
         let key_maps = vec![
@@ -482,21 +488,21 @@ mod tests {
 
     /// Tests that changing a key's active state affects lookup results.
     ///
-    /// Verifies that a key can be dynamically activated and then successfully
+    /// Verifies that a key can be dynamically enabled and then successfully
     /// mapped to its event.
     #[test]
-    fn test_set_active_then_map() {
+    fn test_set_enabled_then_map() {
         let key_map =
             KeyMapItem::new(KeyCode::Char('x'), "Test", false, AppEvent::Copy);
 
         let key_mapper = KeyMap(vec![key_map]);
 
-        // Initially inactive
+        // Initially disabled
         assert_eq!(key_mapper.map_key_code(&KeyCode::Char('x')), None);
 
-        // Activate and try again
+        // Enable and try again
         let mut key_map = key_mapper.0.into_iter().next().unwrap();
-        key_map.set_active(true);
+        key_map.set_enabled(true);
 
         let key_mapper = KeyMap(vec![key_map]);
         assert_eq!(
