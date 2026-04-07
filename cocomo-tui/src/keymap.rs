@@ -19,7 +19,6 @@ use crate::appevent::AppEvent;
 #[derive(Debug, Clone)]
 pub(crate) struct KeyMap {
     key_code: KeyCode,
-    section: u32,
     name: &'static str,
     active: bool,
     event: AppEvent,
@@ -28,14 +27,12 @@ pub(crate) struct KeyMap {
 impl KeyMap {
     pub(crate) const fn new(
         key_code: KeyCode,
-        section: u32,
         name: &'static str,
         active: bool,
         event: AppEvent,
     ) -> Self {
         Self {
             key_code,
-            section,
             name,
             active,
             event,
@@ -44,10 +41,6 @@ impl KeyMap {
 
     pub(crate) const fn key_code(&self) -> &KeyCode {
         &self.key_code
-    }
-
-    pub(crate) const fn section(&self) -> u32 {
-        self.section
     }
 
     pub(crate) const fn name(&self) -> &'static str {
@@ -131,12 +124,12 @@ mod tests {
     use super::*;
 
     const KEYMAPS: [KeyMap; 6] = [
-        KeyMap::new(KeyCode::Enter, 1, "Open", true, AppEvent::OpenView),
-        KeyMap::new(KeyCode::Char('q'), 1, "Quit", true, AppEvent::Quit),
-        KeyMap::new(KeyCode::Char('c'), 2, "Copy", true, AppEvent::Copy),
-        KeyMap::new(KeyCode::Char('m'), 2, "Move", true, AppEvent::Move),
-        KeyMap::new(KeyCode::Char('d'), 2, "Delete", true, AppEvent::Delete),
-        KeyMap::new(KeyCode::Char('r'), 2, "Rename", false, AppEvent::Rename),
+        KeyMap::new(KeyCode::Enter, "Open", true, AppEvent::OpenView),
+        KeyMap::new(KeyCode::Char('q'), "Quit", true, AppEvent::Quit),
+        KeyMap::new(KeyCode::Char('c'), "Copy", true, AppEvent::Copy),
+        KeyMap::new(KeyCode::Char('m'), "Move", true, AppEvent::Move),
+        KeyMap::new(KeyCode::Char('d'), "Delete", true, AppEvent::Delete),
+        KeyMap::new(KeyCode::Char('r'), "Rename", false, AppEvent::Rename),
     ];
 
     static KEY_MAPPER: sync::LazyLock<KeyMapper> =
@@ -145,15 +138,13 @@ mod tests {
     #[test]
     fn test_keymap_new_and_getters() {
         let key_code = KeyCode::Char('c');
-        let section = 1;
         let name = "Copy";
         let active = true;
         let event = AppEvent::Copy;
 
-        let key_map = KeyMap::new(key_code, section, name, active, event);
+        let key_map = KeyMap::new(key_code, name, active, event);
 
         assert_eq!(*key_map.key_code(), key_code);
-        assert_eq!(key_map.section(), section);
         assert_eq!(key_map.name(), name);
         assert_eq!(key_map.event(), event);
         assert!(key_map.is_active());
@@ -162,7 +153,7 @@ mod tests {
     #[test]
     fn test_keymap_inactive() {
         let key_code = KeyCode::Char('x');
-        let key_map = KeyMap::new(key_code, 1, "Test", false, AppEvent::Copy);
+        let key_map = KeyMap::new(key_code, "Test", false, AppEvent::Copy);
 
         assert!(!key_map.is_active());
     }
@@ -170,7 +161,7 @@ mod tests {
     #[test]
     fn test_set_active() {
         let mut key_map =
-            KeyMap::new(KeyCode::Char('a'), 1, "Test", false, AppEvent::Copy);
+            KeyMap::new(KeyCode::Char('a'), "Test", false, AppEvent::Copy);
         assert!(!key_map.is_active());
         key_map.set_active(true);
         assert!(key_map.is_active());
@@ -207,7 +198,7 @@ mod tests {
     #[test]
     fn test_keymap_display_format() {
         let key_map =
-            KeyMap::new(KeyCode::Char('c'), 1, "Copy", true, AppEvent::Copy);
+            KeyMap::new(KeyCode::Char('c'), "Copy", true, AppEvent::Copy);
 
         assert_eq!(format!("{}", key_map), "Copy: c");
     }
@@ -215,7 +206,7 @@ mod tests {
     #[test]
     fn test_keymap_display_with_special_key() {
         let key_map =
-            KeyMap::new(KeyCode::Enter, 1, "Open", true, AppEvent::OpenView);
+            KeyMap::new(KeyCode::Enter, "Open", true, AppEvent::OpenView);
 
         assert_eq!(format!("{}", key_map), "Open: ↵");
     }
@@ -270,14 +261,12 @@ mod tests {
         let key_maps = vec![
             KeyMap::new(
                 KeyCode::Enter,
-                1,
                 "Open in Dir",
                 true,
                 AppEvent::OpenView,
             ),
             KeyMap::new(
                 KeyCode::Enter,
-                2,
                 "Select in File",
                 false,
                 AppEvent::NavigateNext,
@@ -296,10 +285,9 @@ mod tests {
     #[test]
     fn test_keymapper_map_key_code_multiple_sections() {
         let key_maps = vec![
-            KeyMap::new(KeyCode::Enter, 1, "Open", true, AppEvent::OpenView),
+            KeyMap::new(KeyCode::Enter, "Open", true, AppEvent::OpenView),
             KeyMap::new(
                 KeyCode::Enter,
-                2,
                 "Select",
                 false,
                 AppEvent::NavigateNext,
@@ -320,14 +308,12 @@ mod tests {
         let key_maps = vec![
             KeyMap::new(
                 KeyCode::Enter,
-                1,
                 "Open in Dir",
                 true,
                 AppEvent::OpenView,
             ),
             KeyMap::new(
                 KeyCode::Enter,
-                2,
                 "Select in File",
                 true,
                 AppEvent::NavigateNext,
@@ -346,7 +332,7 @@ mod tests {
     #[test]
     fn test_set_active_then_map() {
         let key_map =
-            KeyMap::new(KeyCode::Char('x'), 1, "Test", false, AppEvent::Copy);
+            KeyMap::new(KeyCode::Char('x'), "Test", false, AppEvent::Copy);
 
         let key_mapper = KeyMapper(vec![key_map]);
 
