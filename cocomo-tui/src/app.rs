@@ -12,7 +12,7 @@
 //! This module contains the main application state and logic. It handles
 //! events, manages views (tabs), and drives the main loop.
 
-use std::io;
+use std::{io, sync::LazyLock};
 
 use cocomo_core::FSItem;
 use ratatui::{
@@ -23,6 +23,7 @@ use ratatui::{
     style::{Color, Style},
     widgets::{Paragraph, Tabs, Widget, WidgetRef},
 };
+use tokio::sync::RwLock;
 
 use crate::{
     appevent::AppEvent,
@@ -45,13 +46,27 @@ pub(crate) struct CmpItems {
 /// Views available in the application.
 pub(crate) type AppView = Box<dyn NavigableView>;
 
+/// Global event handler
+static EVENTS: LazyLock<RwLock<EventHandler>> =
+    LazyLock::new(|| RwLock::new(EventHandler::default()));
+
+/// Sends an app event to the global event handler.
+#[inline]
+pub(crate) async fn send_event(event: AppEvent) {
+    EVENTS.write().await.send(event);
+}
+
+/// Gets the next event from the global event handler.
+#[inline(always)]
+async fn get_next_event() -> color_eyre::Result<Event> {
+    EVENTS.write().await.next().await
+}
+
 /// Main application state.
 #[derive(Debug)]
 pub(crate) struct App {
     /// Flag indicating if the application is running.
     running: bool,
-    /// Handler for terminal and application events.
-    events: EventHandler,
     /// Open views (tabs).
     views: Vec<AppView>,
     /// Index of the currently active view.
@@ -67,7 +82,6 @@ impl App {
     pub(crate) fn new() -> Self {
         Self {
             running: false,
-            events: EventHandler::new(),
             views: vec![],
             active_view: 0,
             show_key_hints: false,
@@ -127,14 +141,14 @@ impl App {
         while self.running {
             terminal
                 .draw(|frame| frame.render_widget(&*self, frame.area()))?;
-            match self.events.next().await? {
+            match get_next_event().await? {
                 Event::Tick => self.tick(),
                 Event::Crossterm(event) => match event {
                     crossterm::event::Event::Key(key_event)
                         if key_event.kind
                             == crossterm::event::KeyEventKind::Press =>
                     {
-                        self.handle_key_event(key_event)?;
+                        self.handle_key_event(key_event).await?;
                     }
                     _ => {}
                 },
@@ -151,7 +165,7 @@ impl App {
     /// # Errors
     ///
     /// Returns an error if an application event cannot be sent.
-    fn handle_key_event(
+    async fn handle_key_event(
         &mut self,
         key_event: KeyEvent,
     ) -> color_eyre::Result<()> {
@@ -172,25 +186,25 @@ impl App {
                 self.show_key_hints = !self.show_key_hints;
             }
             (KeyCode::Char('q'), KeyModifiers::NONE) => {
-                self.events.send(AppEvent::Quit);
+                send_event(AppEvent::Quit).await;
             }
             (KeyCode::Char('x'), KeyModifiers::NONE) => {
-                self.events.send(AppEvent::CloseTab);
+                send_event(AppEvent::CloseTab).await;
             }
             (KeyCode::Up, KeyModifiers::NONE) => {
-                self.events.send(AppEvent::NavigatePrev);
+                send_event(AppEvent::NavigatePrev).await;
             }
             (KeyCode::Down, KeyModifiers::NONE) => {
-                self.events.send(AppEvent::NavigateNext);
+                send_event(AppEvent::NavigateNext).await;
             }
             (KeyCode::Home, KeyModifiers::NONE) => {
-                self.events.send(AppEvent::NavigateFirst);
+                send_event(AppEvent::NavigateFirst).await;
             }
             (KeyCode::End, KeyModifiers::NONE) => {
-                self.events.send(AppEvent::NavigateLast);
+                send_event(AppEvent::NavigateLast).await;
             }
             (KeyCode::Enter, KeyModifiers::NONE) => {
-                self.events.send(AppEvent::OpenView);
+                send_event(AppEvent::OpenView).await;
             }
             (KeyCode::Tab, KeyModifiers::NONE) => {
                 if !self.views.is_empty() {
@@ -208,13 +222,13 @@ impl App {
                 }
             }
             (KeyCode::Char('c'), KeyModifiers::NONE) => {
-                self.events.send(AppEvent::Copy);
+                send_event(AppEvent::Copy).await;
             }
             (KeyCode::Char('m'), KeyModifiers::NONE) => {
-                self.events.send(AppEvent::Move);
+                send_event(AppEvent::Move).await;
             }
             (KeyCode::Char('d'), KeyModifiers::NONE) => {
-                self.events.send(AppEvent::Delete);
+                send_event(AppEvent::Delete).await;
             }
             _ => {}
         }
