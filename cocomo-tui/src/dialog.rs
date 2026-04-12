@@ -8,11 +8,12 @@
 // $Revision$
 // ---------------------------------------------------------------------------
 
+use core::fmt::Debug;
 use std::sync;
 
 use ratatui::{
     buffer::Buffer,
-    crossterm::event::KeyCode,
+    crossterm::event::{KeyCode, KeyEvent},
     layout::Rect,
     style::Stylize,
     text::{Span, Text},
@@ -20,10 +21,25 @@ use ratatui::{
 };
 
 use crate::{
+    app::send_event,
     appevent::AppEvent,
     keymap::{KeyMap, KeyMapItem},
 };
 
+pub(crate) trait Dialog: Debug + WidgetRef {
+    fn keymap(&self) -> &KeyMap;
+    async fn handle_key_event(
+        &mut self,
+        key_event: KeyEvent,
+    ) -> color_eyre::Result<()> {
+        if let Some(event) = self.keymap().map_key_code(&key_event.code) {
+            send_event(event).await;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
 pub(crate) struct SimpleConfirm {
     pub title: String,
     pub message: String,
@@ -59,6 +75,12 @@ static SIMPLE_CONFIRM_KEYMAP: sync::LazyLock<KeyMap> =
     sync::LazyLock::new(|| {
         KeyMap::from(SIMPLE_CONFIRM_KEYMAP_ITEMS.as_slice())
     });
+
+impl Dialog for SimpleConfirm {
+    fn keymap(&self) -> &KeyMap {
+        &SIMPLE_CONFIRM_KEYMAP
+    }
+}
 
 impl WidgetRef for SimpleConfirm {
     #[allow(clippy::cast_possible_truncation)]
