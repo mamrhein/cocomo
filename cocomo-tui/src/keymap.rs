@@ -238,10 +238,10 @@ impl From<&[KeyMapItem]> for KeyMap {
 /// Only enabled mappings are included in the output.
 impl fmt::Display for KeyMap {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let delim = " | ";
+        let delim = " ";
         write!(
             f,
-            "| {} |",
+            "{}",
             self.0
                 .iter()
                 .filter(|km| km.is_enabled())
@@ -507,9 +507,6 @@ mod tests {
         assert!(display.contains("Copy: [c]"));
         assert!(display.contains("Move: [m]"));
         assert!(display.contains("Delete: [d]"));
-
-        // Check delimiter
-        assert!(display.contains("|"));
     }
 
     /// Tests that key matching is case-sensitive.
