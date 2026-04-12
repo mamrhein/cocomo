@@ -11,6 +11,7 @@
 use core::fmt::Debug;
 use std::sync;
 
+use futures::executor::block_on;
 use ratatui::{
     buffer::Buffer,
     crossterm::event::{KeyCode, KeyEvent},
@@ -28,12 +29,9 @@ use crate::{
 
 pub(crate) trait Dialog: Debug + WidgetRef {
     fn keymap(&self) -> &KeyMap;
-    async fn handle_key_event(
-        &mut self,
-        key_event: KeyEvent,
-    ) -> color_eyre::Result<()> {
+    fn handle_key_event(&self, key_event: KeyEvent) -> color_eyre::Result<()> {
         if let Some(event) = self.keymap().map_key_code(&key_event.code) {
-            send_event(event).await;
+            block_on(send_event(event));
         }
         Ok(())
     }
