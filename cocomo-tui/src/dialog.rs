@@ -63,6 +63,7 @@ static SIMPLE_CONFIRM_KEYMAP: sync::LazyLock<KeyMap> =
 
 impl WidgetRef for SimpleConfirm {
     fn render_ref(&self, area: Rect, buf: &mut Buffer) {
+        let area = centered_rect(40, 10, area);
         Clear.render(area, buf);
         let block = Block::default()
             .title(self.title.clone())
@@ -91,4 +92,23 @@ impl WidgetRef for SimpleConfirm {
             .centered()
             .render(key_bar, buf);
     }
+}
+
+/// helper function to create a centered rect using up certain % of the
+/// available rect `r`
+#[allow(clippy::integer_division)]
+fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
+    let popup_layout = Layout::vertical([
+        Constraint::Percentage((100 - percent_y) / 2),
+        Constraint::Percentage(percent_y),
+        Constraint::Percentage((100 - percent_y) / 2),
+    ])
+    .split(r);
+
+    Layout::horizontal([
+        Constraint::Percentage((100 - percent_x) / 2),
+        Constraint::Percentage(percent_x),
+        Constraint::Percentage((100 - percent_x) / 2),
+    ])
+    .split(popup_layout[1])[1]
 }

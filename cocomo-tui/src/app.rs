@@ -336,28 +336,8 @@ impl Widget for &App {
         self.current_view().render_ref(main_view, buf);
 
         if self.show_quit_confirm {
-            let area = centered_rect(40, 10, area);
             let msg = "Close last tab and quit?";
             SimpleConfirm::new("", msg).render_ref(area, buf);
         }
     }
-}
-
-/// helper function to create a centered rect using up certain % of the
-/// available rect `r`
-#[allow(clippy::integer_division)]
-fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
-    let popup_layout = Layout::vertical([
-        Constraint::Percentage((100 - percent_y) / 2),
-        Constraint::Percentage(percent_y),
-        Constraint::Percentage((100 - percent_y) / 2),
-    ])
-    .split(r);
-
-    Layout::horizontal([
-        Constraint::Percentage((100 - percent_x) / 2),
-        Constraint::Percentage(percent_x),
-        Constraint::Percentage((100 - percent_x) / 2),
-    ])
-    .split(popup_layout[1])[1]
 }
