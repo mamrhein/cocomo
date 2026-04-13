@@ -12,7 +12,7 @@
 //! This module contains the main application state and logic. It handles
 //! events, manages views (tabs), and drives the main loop.
 
-use std::{io, sync::LazyLock};
+use std::{convert::From, io, sync::LazyLock};
 
 use cocomo_core::FSItem;
 use ratatui::{
@@ -30,6 +30,7 @@ use crate::{
     dialog::SimpleConfirm,
     dirview::DirView,
     event::{Event, EventHandler},
+    keymap::{KeyMap, KeyMapItem},
     pending_op::{Op, PendingOp},
     textview::TextView,
     view::NavigableView,
@@ -63,11 +64,93 @@ async fn get_next_event() -> color_eyre::Result<Event> {
     EVENTS.write().await.next().await
 }
 
+/// Pre-built key map items for the `App`.
+#[rustfmt::skip]
+const APP_KEYMAP_ITEMS: [KeyMapItem; 6] = [
+    KeyMapItem::new(
+        KeyCode::Char('?'),
+        None,
+        "Show/hide hints",
+        true,
+        AppEvent::ToggleHints,
+    ),
+    KeyMapItem::new(
+        KeyCode::Char('q'),
+        None,
+        "Quit",
+        true,
+        AppEvent::Quit,
+    ),
+    KeyMapItem::new(
+        KeyCode::Char('o'),
+        None,
+        "Open view",
+        true,
+        AppEvent::OpenView,
+    ),
+    KeyMapItem::new(
+        KeyCode::Char('x'),
+        None,
+        "Close tab",
+        true,
+        AppEvent::CloseTab,
+    ),
+    KeyMapItem::new(
+        KeyCode::Tab,
+        None,
+        "Next tab",
+        true,
+        AppEvent::NextTab,
+    ),
+    KeyMapItem::new(
+        KeyCode::BackTab,
+        None,
+        "Prev tab",
+        true,
+        AppEvent::PrevTab,
+    ),
+];
+
+/// Pre-built key map items for the `App`.
+#[rustfmt::skip]
+const NAV_KEYMAP_ITEMS: [KeyMapItem; 4] = [
+    KeyMapItem::new(
+        KeyCode::Up,
+        None,
+        "Up",
+        true,
+        AppEvent::NavigatePrev,
+    ),
+    KeyMapItem::new(
+        KeyCode::Down,
+        None,
+        "Down",
+        true,
+        AppEvent::NavigateNext,
+    ),
+    KeyMapItem::new(
+        KeyCode::Home,
+        None,
+        "Top",
+        true,
+        AppEvent::NavigateFirst,
+    ),
+    KeyMapItem::new(
+        KeyCode::End,
+        None,
+        "Bottom",
+        true,
+        AppEvent::NavigateLast,
+    ),
+];
+
 /// Main application state.
 #[derive(Debug)]
 pub(crate) struct App {
     /// Flag indicating if the application is running.
     running: bool,
+    /// App level key map
+    keymap: KeyMap,
     /// Open views (tabs).
     views: Vec<AppView>,
     /// Index of the currently active view.
@@ -83,6 +166,7 @@ impl App {
     pub(crate) fn new() -> Self {
         Self {
             running: false,
+            keymap: KeyMap::from(APP_KEYMAP_ITEMS.as_slice()),
             views: vec![],
             active_view: 0,
             show_key_hints: false,
@@ -173,16 +257,12 @@ impl App {
         if let Some(pending_op) = self.pending_op.as_mut() {
             return pending_op.dialog().handle_key_event(key_event);
         };
+        if let Some(event) = self.keymap.map_key_code(&key_event.code) {
+            send_event(event).await;
+        }
+        // TODO: forward key events that are not handled by the keymap to the
+        // current view
         match (key_event.code, key_event.modifiers) {
-            (KeyCode::Char('?'), KeyModifiers::NONE) => {
-                self.show_key_hints = !self.show_key_hints;
-            }
-            (KeyCode::Char('q'), KeyModifiers::NONE) => {
-                send_event(AppEvent::Quit).await;
-            }
-            (KeyCode::Char('x'), KeyModifiers::NONE) => {
-                send_event(AppEvent::CloseTab).await;
-            }
             (KeyCode::Up, KeyModifiers::NONE) => {
                 send_event(AppEvent::NavigatePrev).await;
             }
@@ -197,21 +277,6 @@ impl App {
             }
             (KeyCode::Enter, KeyModifiers::NONE) => {
                 send_event(AppEvent::OpenView).await;
-            }
-            (KeyCode::Tab, KeyModifiers::NONE) => {
-                if !self.views.is_empty() {
-                    self.active_view =
-                        (self.active_view + 1) % self.views.len();
-                }
-            }
-            (KeyCode::BackTab, KeyModifiers::SHIFT) => {
-                if !self.views.is_empty() {
-                    self.active_view = if self.active_view == 0 {
-                        self.views.len() - 1
-                    } else {
-                        self.active_view - 1
-                    };
-                }
             }
             (KeyCode::Char('c'), KeyModifiers::NONE) => {
                 send_event(AppEvent::Copy).await;
@@ -260,7 +325,6 @@ impl App {
         app_event: AppEvent,
     ) -> color_eyre::Result<()> {
         match app_event {
-            AppEvent::Quit => self.quit(),
             AppEvent::NavigatePrev => {
                 let view = self.current_view_mut();
                 view.prev();
@@ -277,13 +341,23 @@ impl App {
                 let view = self.current_view_mut();
                 view.end();
             }
-            AppEvent::CloseTab => self.close_tab(),
             AppEvent::OpenView => {
                 if let Some(item) = self.current_view().current_diff_item() {
                     let left_item = item.left_item.clone();
                     let right_item = item.right_item.clone();
                     self.new_view(&left_item, &right_item).await?;
                 };
+            }
+            AppEvent::CloseTab => self.close_tab(),
+            AppEvent::NextTab => {
+                if self.active_view < self.views.len() - 1 {
+                    self.active_view += 1;
+                }
+            }
+            AppEvent::PrevTab => {
+                if self.active_view > 0 {
+                    self.active_view -= 1;
+                }
             }
             AppEvent::Confirmed => {
                 if let Some(pending_op) = &self.pending_op {
@@ -296,6 +370,10 @@ impl App {
             AppEvent::NotConfirmed => {
                 self.pending_op = None;
             }
+            AppEvent::ToggleHints => {
+                self.show_key_hints = !self.show_key_hints;
+            }
+            AppEvent::Quit => self.quit(),
             _ => {
                 // forward to current app view
                 return self.current_view_mut().handle_app_event(app_event);
