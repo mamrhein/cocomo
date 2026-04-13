@@ -43,7 +43,11 @@
 
 use std::fmt;
 
-use ratatui::crossterm::event::KeyCode;
+use ratatui::{
+    crossterm::event::KeyCode,
+    style::Style,
+    text::{Line, Span, Text},
+};
 
 use crate::appevent::AppEvent;
 
@@ -199,6 +203,20 @@ impl fmt::Display for KeyMapItem {
     }
 }
 
+/// A convenience implementation for converting a `KeyMapItem` into a `Span`.
+impl<'a> From<&'a KeyMapItem> for Span<'a> {
+    fn from(item: &'a KeyMapItem) -> Self {
+        Span::styled(
+            format!("{}", item),
+            if item.enabled {
+                Style::default()
+            } else {
+                Style::default().dim()
+            },
+        )
+    }
+}
+
 /// A collection of key mappings that can look up events by key code.
 ///
 /// `KeyMap` stores a vector of `KeyMapItem`s and provides functionality to:
@@ -252,6 +270,13 @@ impl fmt::Display for KeyMap {
     }
 }
 
+/// Converts a `KeyMap` into a `Text` for display purposes.
+impl<'a> From<&'a KeyMap> for Text<'a> {
+    fn from(key_map: &'a KeyMap) -> Self {
+        Text::from(Line::from_iter(key_map.0.iter()))
+    }
+}
+
 /// Test suite for the keymap module.
 ///
 /// Tests cover:
@@ -263,7 +288,7 @@ impl fmt::Display for KeyMap {
 /// - Case sensitivity of key matching
 #[cfg(test)]
 mod tests {
-    use std::sync;
+    use std::sync::LazyLock;
 
     use super::*;
 
@@ -322,10 +347,8 @@ mod tests {
     ];
 
     /// Pre-built key mapper instance for testing.
-    ///
-    /// Uses lazy initialization to share the same instance across tests.
-    static KEY_MAPPER: sync::LazyLock<KeyMap> =
-        sync::LazyLock::new(|| KeyMap::from(KEYMAP_ITEMS.as_slice()));
+    static KEY_MAPPER: LazyLock<KeyMap> =
+        LazyLock::new(|| KeyMap::from(KEYMAP_ITEMS.as_slice()));
 
     /// Tests `KeyMapItem::new()` constructor and all getter methods.
     #[test]
@@ -582,5 +605,36 @@ mod tests {
             key_mapper.map_key_code(&KeyCode::Char('x')),
             Some(AppEvent::Copy)
         );
+    }
+
+    /// Tests the `Span` conversion from a single `KeyMapItem`.
+    #[test]
+    fn test_span_from_keymapitem() {
+        let key_map_item = &KEYMAP_ITEMS[0];
+        assert!(key_map_item.is_enabled());
+        let span: Span<'_> = Span::from(key_map_item);
+        assert_eq!(span.content.to_string(), format!("{}", key_map_item));
+        // Enabled items should not be dimmed
+        assert_eq!(span.style, Style::default());
+
+        let key_map_item = &KEYMAP_ITEMS[5];
+        assert!(!key_map_item.is_enabled());
+        let span: Span<'_> = Span::from(key_map_item);
+        assert_eq!(span.content.to_string(), format!("{}", key_map_item));
+        // Disabled items should be dimmed
+        assert_eq!(span.style, Style::default().dim());
+    }
+
+    /// Tests the `Text` conversion from a `KeyMap`.
+    #[test]
+    fn test_text_from_keymap() {
+        let key_map = &*KEY_MAPPER;
+        let text: Text<'_> = Text::from(key_map);
+        assert_eq!(text.lines.len(), 1);
+        // Check that all items are in the text
+        let line = text.lines.first().unwrap();
+        for (span, item) in line.spans.iter().zip(key_map.0.iter()) {
+            assert_eq!(span.content.to_string(), format!("{}", item));
+        }
     }
 }
