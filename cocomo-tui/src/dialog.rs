@@ -27,8 +27,12 @@ use crate::{
     keymap::{KeyMap, KeyMapItem},
 };
 
+/// A trait for dialog widgets that handle key events and have a keymap.
 pub(crate) trait Dialog: Debug + WidgetRef {
+    /// Returns a reference to the dialog's keymap.
     fn keymap(&self) -> &KeyMap;
+    /// Handles a key event by mapping it to an `AppEvent` and sending that to
+    /// the app.
     fn handle_key_event(&self, key_event: KeyEvent) -> color_eyre::Result<()> {
         if let Some(event) = self.keymap().map_key_code(&key_event.code) {
             block_on(send_event(event));
@@ -37,6 +41,8 @@ pub(crate) trait Dialog: Debug + WidgetRef {
     }
 }
 
+/// A simple confirmation dialog widget that displays a title and message and
+/// waits for the user to confirm or cancel.
 #[derive(Debug)]
 pub(crate) struct SimpleConfirm {
     pub title: String,
@@ -44,6 +50,7 @@ pub(crate) struct SimpleConfirm {
 }
 
 impl SimpleConfirm {
+    /// Creates a new `SimpleConfirm` dialog with the given title and message.
     #[inline(always)]
     pub fn new(title: &str, message: &str) -> Self {
         Self {
@@ -53,6 +60,7 @@ impl SimpleConfirm {
     }
 }
 
+/// Pre-built key map items for the `SimpleConfirm` dialog.
 const SIMPLE_CONFIRM_KEYMAP_ITEMS: [KeyMapItem; 2] = [
     KeyMapItem::new(
         KeyCode::Enter,
@@ -70,6 +78,7 @@ const SIMPLE_CONFIRM_KEYMAP_ITEMS: [KeyMapItem; 2] = [
     ),
 ];
 
+/// Pre-built key map instance for the `SimpleConfirm` dialog.
 static SIMPLE_CONFIRM_KEYMAP: sync::LazyLock<KeyMap> =
     sync::LazyLock::new(|| {
         KeyMap::from(SIMPLE_CONFIRM_KEYMAP_ITEMS.as_slice())
