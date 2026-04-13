@@ -11,8 +11,18 @@
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 #[allow(clippy::large_enum_variant)]
 pub(crate) enum AppEvent {
+    /// Toggle the visibility of the key hints.
+    ToggleHints,
     /// Quit the application.
     Quit,
+    /// Open a new comparison view.
+    OpenView,
+    /// Close the current tab.
+    CloseTab,
+    /// Switch to the next tab.
+    NextTab,
+    /// Switch to the previous tab.
+    PrevTab,
     /// Navigate the current item of the current view to the previous item.
     NavigatePrev,
     /// Navigate the current item of the current view to the next item.
@@ -21,10 +31,6 @@ pub(crate) enum AppEvent {
     NavigateFirst,
     /// Navigate the current item of the current view to the last item.
     NavigateLast,
-    /// Close the current tab.
-    CloseTab,
-    /// Open a new comparison view.
-    OpenView,
     /// Copy the current item to the other side.
     Copy,
     /// Move the current item to the other side.
