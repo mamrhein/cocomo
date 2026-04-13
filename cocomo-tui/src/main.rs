@@ -73,6 +73,8 @@ pub(crate) mod dirview;
 pub(crate) mod event;
 /// Key mappings for the terminal events.
 pub(crate) mod keymap;
+// Operations waiting for confirmation.
+pub(crate) mod pending_op;
 /// Renders the text comparison view.
 pub(crate) mod textview;
 /// Shared behavior for interactive views.
