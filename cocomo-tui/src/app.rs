@@ -27,9 +27,10 @@ use tokio::sync::RwLock;
 
 use crate::{
     appevent::AppEvent,
-    dialog::{Dialog, SimpleConfirm},
+    dialog::SimpleConfirm,
     dirview::DirView,
     event::{Event, EventHandler},
+    pending_op::{Op, PendingOp},
     textview::TextView,
     view::NavigableView,
 };
@@ -73,8 +74,8 @@ pub(crate) struct App {
     active_view: usize,
     /// Flag to show key hints.
     show_key_hints: bool,
-    /// Flag to show a confirmation dialog before quitting.
-    modal_dialog: Option<Box<dyn Dialog>>,
+    /// Operation waiting for confirmation.
+    pending_op: Option<PendingOp>,
 }
 
 impl App {
@@ -85,7 +86,7 @@ impl App {
             views: vec![],
             active_view: 0,
             show_key_hints: false,
-            modal_dialog: None,
+            pending_op: None,
         }
     }
 
@@ -169,8 +170,8 @@ impl App {
         &mut self,
         key_event: KeyEvent,
     ) -> color_eyre::Result<()> {
-        if let Some(dialog) = self.modal_dialog.as_mut() {
-            return dialog.handle_key_event(key_event);
+        if let Some(pending_op) = self.pending_op.as_mut() {
+            return pending_op.dialog().handle_key_event(key_event);
         };
         match (key_event.code, key_event.modifiers) {
             (KeyCode::Char('?'), KeyModifiers::NONE) => {
@@ -243,7 +244,8 @@ impl App {
     pub fn close_tab(&mut self) {
         if self.views.len() == 1 {
             let msg = "Close last tab and quit?";
-            self.modal_dialog = Some(Box::new(SimpleConfirm::new("", msg)));
+            let confirm = Box::new(SimpleConfirm::new("", msg));
+            self.pending_op = Some(PendingOp::new(Op::Quit, confirm));
             return;
         }
         self.views.remove(self.active_view);
@@ -284,10 +286,15 @@ impl App {
                 };
             }
             AppEvent::Confirmed => {
-                self.quit();
+                if let Some(pending_op) = &self.pending_op {
+                    match pending_op.op() {
+                        Op::Quit => self.quit(),
+                    }
+                    self.pending_op = None;
+                }
             }
             AppEvent::NotConfirmed => {
-                self.modal_dialog = None;
+                self.pending_op = None;
             }
             _ => {
                 // forward to current app view
@@ -333,8 +340,8 @@ impl Widget for &App {
         // Render current view
         self.current_view().render_ref(main_view, buf);
 
-        if let Some(dialog) = &self.modal_dialog {
-            dialog.render_ref(area, buf);
+        if let Some(pending_op) = &self.pending_op {
+            pending_op.dialog().render_ref(area, buf);
         }
     }
 }
