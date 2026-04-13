@@ -224,7 +224,7 @@ impl<'a> From<&'a KeyMapItem> for Span<'a> {
 /// - Format all enabled mappings as a display string
 ///
 /// When looking up keys, only **enabled** mappings are considered.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct KeyMap(Vec<KeyMapItem>);
 
 impl KeyMap {
