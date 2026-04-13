@@ -44,6 +44,7 @@ pub(crate) struct SimpleConfirm {
 }
 
 impl SimpleConfirm {
+    #[inline(always)]
     pub fn new(title: &str, message: &str) -> Self {
         Self {
             title: title.to_owned(),
@@ -75,6 +76,7 @@ static SIMPLE_CONFIRM_KEYMAP: sync::LazyLock<KeyMap> =
     });
 
 impl Dialog for SimpleConfirm {
+    #[inline(always)]
     fn keymap(&self) -> &KeyMap {
         &SIMPLE_CONFIRM_KEYMAP
     }
@@ -116,6 +118,7 @@ impl WidgetRef for SimpleConfirm {
 /// Helper function to create a Rect sized `width`x`height` centered within
 /// `rect`
 #[allow(clippy::integer_division)]
+#[inline(always)]
 const fn centered_rect(width: u16, height: u16, rect: Rect) -> Rect {
     Rect {
         x: rect.x + (rect.width - width) / 2,
