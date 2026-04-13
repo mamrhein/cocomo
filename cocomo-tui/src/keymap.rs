@@ -224,6 +224,7 @@ impl<'a> From<&'a KeyMapItem> for Span<'a> {
 /// - Format all enabled mappings as a display string
 ///
 /// When looking up keys, only **enabled** mappings are considered.
+#[derive(Debug)]
 pub(crate) struct KeyMap(Vec<KeyMapItem>);
 
 impl KeyMap {
@@ -284,15 +285,37 @@ impl<'a> From<&'a KeyMap> for Text<'a> {
     }
 }
 
-/// Test suite for the keymap module.
-///
-/// Tests cover:
-/// - Key map item creation and getter methods
-/// - Enabled/disabled state management
-/// - Key code representation (special keys, characters)
-/// - Display formatting for both single items and collections
-/// - Event mapping lookups (found, not found, disabled filtering)
-/// - Case sensitivity of key matching
+/// Collection of `KeyMap`s that maps keys to `AppEvent`s.
+#[derive(Debug)]
+pub(crate) struct AggregatedKeyMap<'a> {
+    maps: Vec<&'a mut KeyMap>,
+}
+
+impl<'a> AggregatedKeyMap<'a> {
+    /// Creates a new `AggregatedKeyMap` from a list of `KeyMap`s.
+    #[inline(always)]
+    #[must_use]
+    pub(crate) const fn new(maps: Vec<&'a mut KeyMap>) -> Self {
+        Self { maps }
+    }
+
+    /// Returns an iterator over the `KeyMap`s in this collection.
+    #[inline(always)]
+    fn iter(&self) -> impl Iterator<Item = &&mut KeyMap> {
+        self.maps.iter()
+    }
+
+    /// Maps a `KeyCode` to an `AppEvent`, if one exists.
+    pub(crate) fn map_key_code(&self, key_code: &KeyCode) -> Option<AppEvent> {
+        for map in &self.maps {
+            if let Some(event) = map.map_key_code(key_code) {
+                return Some(event);
+            }
+        }
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::LazyLock;
@@ -643,5 +666,22 @@ mod tests {
         for (span, item) in line.spans.iter().zip(key_map.0.iter()) {
             assert_eq!(span.content.to_string(), format!("{}", item));
         }
+    }
+
+    #[test]
+    fn test_aggregated_keymap() {
+        let mut key_map_1 = KeyMap::from(&KEYMAP_ITEMS[..3]);
+        let mut key_map_2 = KeyMap::from(&KEYMAP_ITEMS[3..]);
+        let key_mapper =
+            AggregatedKeyMap::new(vec![&mut key_map_1, &mut key_map_2]);
+        assert_eq!(
+            key_mapper.map_key_code(&KeyCode::Char('q')),
+            Some(AppEvent::Quit)
+        );
+        assert_eq!(
+            key_mapper.map_key_code(&KeyCode::Char('c')),
+            Some(AppEvent::Copy)
+        );
+        assert!(key_mapper.map_key_code(&KeyCode::Char('r')).is_none());
     }
 }
