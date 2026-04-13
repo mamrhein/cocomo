@@ -100,7 +100,7 @@ impl WidgetRef for SimpleConfirm {
             txt.push_span(Span::from(self.message.clone()).bold());
             txt.push_line("");
         };
-        txt.push_line(format!("{}", &*SIMPLE_CONFIRM_KEYMAP));
+        txt += Text::from(&*SIMPLE_CONFIRM_KEYMAP);
         let padding = Padding {
             left: 2,
             right: 2,

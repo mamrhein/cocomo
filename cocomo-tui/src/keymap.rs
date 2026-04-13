@@ -246,6 +246,7 @@ impl KeyMap {
 /// The provided slice is cloned into the internal vector.
 impl From<&[KeyMapItem]> for KeyMap {
     fn from(key_maps: &[KeyMapItem]) -> Self {
+        debug_assert!(!key_maps.is_empty());
         Self(key_maps.to_vec())
     }
 }
@@ -271,9 +272,15 @@ impl fmt::Display for KeyMap {
 }
 
 /// Converts a `KeyMap` into a `Text` for display purposes.
+#[allow(clippy::fallible_impl_from)]
 impl<'a> From<&'a KeyMap> for Text<'a> {
     fn from(key_map: &'a KeyMap) -> Self {
-        Text::from(Line::from_iter(key_map.0.iter()))
+        let mut spans = vec![Span::from(key_map.0.first().unwrap())];
+        for item in key_map.0.iter().skip(1) {
+            spans.push(Span::raw(" "));
+            spans.push(Span::from(item));
+        }
+        Text::from(Line::from_iter(spans))
     }
 }
 
