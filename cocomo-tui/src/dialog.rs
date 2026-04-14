@@ -24,7 +24,7 @@ use ratatui::{
 use crate::{
     app::send_event,
     appevent::AppEvent,
-    keymap::{KeyMap, KeyMapItem},
+    keymap::{KeyMap, KeyMapItem, KeyMapper},
 };
 
 /// A trait for dialog widgets that handle key events and have a keymap.

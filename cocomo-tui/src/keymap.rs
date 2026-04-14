@@ -227,21 +227,6 @@ impl<'a> From<&'a KeyMapItem> for Span<'a> {
 #[derive(Debug, Clone)]
 pub(crate) struct KeyMap(Vec<KeyMapItem>);
 
-impl KeyMap {
-    pub(crate) fn map_key_code(&self, key_code: &KeyCode) -> Option<AppEvent> {
-        self.0
-            .iter()
-            .filter(|key_map| key_map.is_enabled())
-            .find(|key_map| {
-                key_map.key_code() == key_code
-                    || key_map
-                        .alt_key_code()
-                        .is_some_and(|alt| alt == key_code)
-            })
-            .map(|key_map| key_map.event())
-    }
-}
-
 /// Creates a `KeyMap` from a slice of key map items.
 ///
 /// The provided slice is cloned into the internal vector.
@@ -304,9 +289,30 @@ impl<'a> AggregatedKeyMap<'a> {
     fn iter(&self) -> impl Iterator<Item = &&mut KeyMap> {
         self.maps.iter()
     }
+}
 
+pub(crate) trait KeyMapper {
     /// Maps a `KeyCode` to an `AppEvent`, if one exists.
-    pub(crate) fn map_key_code(&self, key_code: &KeyCode) -> Option<AppEvent> {
+    fn map_key_code(&self, key_code: &KeyCode) -> Option<AppEvent>;
+}
+
+impl KeyMapper for KeyMap {
+    fn map_key_code(&self, key_code: &KeyCode) -> Option<AppEvent> {
+        self.0
+            .iter()
+            .filter(|key_map| key_map.is_enabled())
+            .find(|key_map| {
+                key_map.key_code() == key_code
+                    || key_map
+                        .alt_key_code()
+                        .is_some_and(|alt| alt == key_code)
+            })
+            .map(|key_map| key_map.event())
+    }
+}
+
+impl<'a> KeyMapper for AggregatedKeyMap<'a> {
+    fn map_key_code(&self, key_code: &KeyCode) -> Option<AppEvent> {
         for map in &self.maps {
             if let Some(event) = map.map_key_code(key_code) {
                 return Some(event);

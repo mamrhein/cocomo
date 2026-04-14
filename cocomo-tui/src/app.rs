@@ -30,7 +30,7 @@ use crate::{
     dialog::SimpleConfirm,
     dirview::DirView,
     event::{Event, EventHandler},
-    keymap::{KeyMap, KeyMapItem},
+    keymap::{KeyMap, KeyMapItem, KeyMapper},
     pending_op::{Op, PendingOp},
     textview::TextView,
     view::NavigableView,
