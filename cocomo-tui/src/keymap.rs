@@ -217,11 +217,7 @@ impl<'a> From<&'a KeyMapItem> for Span<'a> {
     }
 }
 
-/// A collection of key mappings that can look up events by key code.
-///
-/// `KeyMap` stores a vector of `KeyMapItem`s and provides functionality to:
-/// - Look up which event should be triggered for a given key code
-/// - Format all enabled mappings as a display string
+/// A collection of key mappings that can act as a `KeyMapper`.
 ///
 /// When looking up keys, only **enabled** mappings are considered.
 #[derive(Debug, Clone)]
@@ -257,20 +253,30 @@ impl fmt::Display for KeyMap {
     }
 }
 
-/// Converts a `KeyMap` into a `Text` for display purposes.
+/// Converts a `KeyMap` into a `Line` for display purposes.
 #[allow(clippy::fallible_impl_from)]
-impl<'a> From<&'a KeyMap> for Text<'a> {
+impl<'a> From<&'a KeyMap> for Line<'a> {
     fn from(key_map: &'a KeyMap) -> Self {
         let mut spans = vec![Span::from(key_map.0.first().unwrap())];
         for item in key_map.0.iter().skip(1) {
             spans.push(Span::raw(" "));
             spans.push(Span::from(item));
         }
-        Text::from(Line::from_iter(spans))
+        Line::from_iter(spans)
     }
 }
 
-/// Collection of `KeyMap`s that maps keys to `AppEvent`s.
+/// Converts a `KeyMap` into a `Text` for display purposes.
+#[allow(clippy::fallible_impl_from)]
+impl<'a> From<&'a KeyMap> for Text<'a> {
+    fn from(key_map: &'a KeyMap) -> Self {
+        Text::from(Line::from(key_map))
+    }
+}
+
+/// A collection of `KeyMap`s that can act as a `KeyMapper`.
+///
+/// When looking up keys, only **enabled** mappings are considered.
 #[derive(Debug)]
 pub(crate) struct AggregatedKeyMap<'a> {
     maps: Vec<&'a KeyMap>,
@@ -286,13 +292,27 @@ impl<'a> AggregatedKeyMap<'a> {
 
     /// Returns an iterator over the `KeyMap`s in this collection.
     #[inline(always)]
-    fn iter(&self) -> impl Iterator<Item = &&KeyMap> {
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &&KeyMap> {
         self.maps.iter()
+    }
+}
+
+/// Converts an `AggregatedKeyMap` into a `Text` for display purposes.
+#[allow(clippy::fallible_impl_from)]
+impl<'a> From<&'a AggregatedKeyMap<'a>> for Text<'a> {
+    fn from(agg_map: &'a AggregatedKeyMap<'a>) -> Self {
+        let lines: Vec<Line<'a>> = agg_map
+            .iter()
+            .map(|map| Line::from(*map))
+            .collect::<Vec<_>>();
+        Text::from(lines)
     }
 }
 
 pub(crate) trait KeyMapper {
     /// Maps a `KeyCode` to an `AppEvent`, if one exists.
+    ///
+    /// When looking up keys, only **enabled** mappings are considered.
     fn map_key_code(&self, key_code: &KeyCode) -> Option<AppEvent>;
 }
 
