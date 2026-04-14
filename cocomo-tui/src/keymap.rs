@@ -689,7 +689,8 @@ mod tests {
         assert_eq!(text.lines.len(), 1);
         // Check that all items are in the text
         let line = text.lines.first().unwrap();
-        for (span, item) in line.spans.iter().zip(key_map.0.iter()) {
+        let spans = line.spans.iter().filter(|span| span.to_string() != " ");
+        for (span, item) in spans.zip(key_map.0.iter()) {
             assert_eq!(span.content.to_string(), format!("{}", item));
         }
     }
