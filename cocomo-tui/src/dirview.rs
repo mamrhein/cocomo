@@ -72,7 +72,8 @@ pub(crate) const OP_KEYMAP_ITEMS: [KeyMapItem; 4] = [
         KeyCode::Char('r'),
         None,
         "Rename",
-        true,
+        // TODO: enable when op rename is implemented
+        false,
         AppEvent::Rename,
     ),
 ];

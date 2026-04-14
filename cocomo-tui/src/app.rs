@@ -21,7 +21,8 @@ use ratatui::{
     crossterm::event::{KeyCode, KeyEvent},
     layout::{Constraint, Layout, Rect},
     style::{Color, Style},
-    widgets::{Paragraph, Tabs, Widget},
+    text::Text,
+    widgets::{Tabs, Widget},
 };
 use tokio::sync::RwLock;
 
@@ -30,7 +31,7 @@ use crate::{
     dialog::SimpleConfirm,
     dirview::DirView,
     event::{Event, EventHandler},
-    keymap::{KeyMap, KeyMapItem, KeyMapper},
+    keymap::{AggregatedKeyMap, KeyMap, KeyMapItem, KeyMapper},
     pending_op::{Op, PendingOp},
     textview::TextView,
     view::NavigableView,
@@ -310,24 +311,24 @@ impl App {
 impl Widget for &App {
     /// Renders the user interface widgets.
     fn render(self, area: Rect, buf: &mut Buffer) {
+        let current_view = self.current_view();
         // Create layout
         let vert_constraints = [
             Constraint::Length(1),
             Constraint::Min(0),
-            Constraint::Length(if self.show_key_hints { 2 } else { 0 }),
+            Constraint::Length(if self.show_key_hints { 3 } else { 0 }),
         ];
         let [tab_bar, main_view, key_bar] =
             Layout::vertical(vert_constraints).areas(area);
 
         // Render key hints
         if self.show_key_hints {
-            Paragraph::new(
-                "? hide key hints | q: quit | x: close tab | Enter: open | \
-                 Tab: switch | ↑/↓: navigate | Home/End: top/bottom | c: \
-                 copy | m: move | d: delete",
-            )
-            .left_aligned()
-            .render(key_bar, buf);
+            let mut maps: Vec<&KeyMap> = vec![&self.keymap];
+            let view_keymap = current_view.keymap();
+            maps.extend(view_keymap.iter());
+            let aggr_keymap = AggregatedKeyMap::new(maps);
+            let txt = Text::from(&aggr_keymap);
+            txt.centered().render(key_bar, buf);
         }
 
         let titles: Vec<String> =
@@ -340,7 +341,7 @@ impl Widget for &App {
             .render(tab_bar, buf);
 
         // Render current view
-        self.current_view().render_ref(main_view, buf);
+        current_view.render_ref(main_view, buf);
 
         if let Some(pending_op) = &self.pending_op {
             pending_op.dialog().render_ref(area, buf);
