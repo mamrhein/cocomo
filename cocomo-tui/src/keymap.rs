@@ -273,20 +273,20 @@ impl<'a> From<&'a KeyMap> for Text<'a> {
 /// Collection of `KeyMap`s that maps keys to `AppEvent`s.
 #[derive(Debug)]
 pub(crate) struct AggregatedKeyMap<'a> {
-    maps: Vec<&'a mut KeyMap>,
+    maps: Vec<&'a KeyMap>,
 }
 
 impl<'a> AggregatedKeyMap<'a> {
     /// Creates a new `AggregatedKeyMap` from a list of `KeyMap`s.
     #[inline(always)]
     #[must_use]
-    pub(crate) const fn new(maps: Vec<&'a mut KeyMap>) -> Self {
+    pub(crate) const fn new(maps: Vec<&'a KeyMap>) -> Self {
         Self { maps }
     }
 
     /// Returns an iterator over the `KeyMap`s in this collection.
     #[inline(always)]
-    fn iter(&self) -> impl Iterator<Item = &&mut KeyMap> {
+    fn iter(&self) -> impl Iterator<Item = &&KeyMap> {
         self.maps.iter()
     }
 }

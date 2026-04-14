@@ -18,7 +18,7 @@ use cocomo_core::FSItem;
 use ratatui::{
     DefaultTerminal,
     buffer::Buffer,
-    crossterm::event::{KeyCode, KeyEvent, KeyModifiers},
+    crossterm::event::{KeyCode, KeyEvent},
     layout::{Constraint, Layout, Rect},
     style::{Color, Style},
     widgets::{Paragraph, Tabs, Widget},
@@ -82,8 +82,8 @@ const APP_KEYMAP_ITEMS: [KeyMapItem; 6] = [
         AppEvent::Quit,
     ),
     KeyMapItem::new(
-        KeyCode::Char('o'),
-        None,
+        KeyCode::Enter,
+        Some(KeyCode::Char('o')),
         "Open view",
         true,
         AppEvent::OpenView,
@@ -108,39 +108,6 @@ const APP_KEYMAP_ITEMS: [KeyMapItem; 6] = [
         "Prev tab",
         true,
         AppEvent::PrevTab,
-    ),
-];
-
-/// Pre-built key map items for the `App`.
-#[rustfmt::skip]
-const NAV_KEYMAP_ITEMS: [KeyMapItem; 4] = [
-    KeyMapItem::new(
-        KeyCode::Up,
-        None,
-        "Up",
-        true,
-        AppEvent::NavigatePrev,
-    ),
-    KeyMapItem::new(
-        KeyCode::Down,
-        None,
-        "Down",
-        true,
-        AppEvent::NavigateNext,
-    ),
-    KeyMapItem::new(
-        KeyCode::Home,
-        None,
-        "Top",
-        true,
-        AppEvent::NavigateFirst,
-    ),
-    KeyMapItem::new(
-        KeyCode::End,
-        None,
-        "Bottom",
-        true,
-        AppEvent::NavigateLast,
     ),
 ];
 
@@ -260,36 +227,9 @@ impl App {
         if let Some(event) = self.keymap.map_key_code(&key_event.code) {
             send_event(event).await;
         }
-        // TODO: forward key events that are not handled by the keymap to the
+        // Forward key events that are not handled by the keymap to the
         // current view
-        match (key_event.code, key_event.modifiers) {
-            (KeyCode::Up, KeyModifiers::NONE) => {
-                send_event(AppEvent::NavigatePrev).await;
-            }
-            (KeyCode::Down, KeyModifiers::NONE) => {
-                send_event(AppEvent::NavigateNext).await;
-            }
-            (KeyCode::Home, KeyModifiers::NONE) => {
-                send_event(AppEvent::NavigateFirst).await;
-            }
-            (KeyCode::End, KeyModifiers::NONE) => {
-                send_event(AppEvent::NavigateLast).await;
-            }
-            (KeyCode::Enter, KeyModifiers::NONE) => {
-                send_event(AppEvent::OpenView).await;
-            }
-            (KeyCode::Char('c'), KeyModifiers::NONE) => {
-                send_event(AppEvent::Copy).await;
-            }
-            (KeyCode::Char('m'), KeyModifiers::NONE) => {
-                send_event(AppEvent::Move).await;
-            }
-            (KeyCode::Char('d'), KeyModifiers::NONE) => {
-                send_event(AppEvent::Delete).await;
-            }
-            _ => {}
-        }
-        Ok(())
+        self.current_view_mut().handle_key_event(key_event)
     }
 
     /// Handles the tick event of the terminal.
@@ -325,22 +265,6 @@ impl App {
         app_event: AppEvent,
     ) -> color_eyre::Result<()> {
         match app_event {
-            AppEvent::NavigatePrev => {
-                let view = self.current_view_mut();
-                view.prev();
-            }
-            AppEvent::NavigateNext => {
-                let view = self.current_view_mut();
-                view.next();
-            }
-            AppEvent::NavigateFirst => {
-                let view = self.current_view_mut();
-                view.home();
-            }
-            AppEvent::NavigateLast => {
-                let view = self.current_view_mut();
-                view.end();
-            }
             AppEvent::OpenView => {
                 if let Some(item) = self.current_view().current_diff_item() {
                     let left_item = item.left_item.clone();

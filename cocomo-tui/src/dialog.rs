@@ -31,6 +31,7 @@ use crate::{
 pub(crate) trait Dialog: Debug + WidgetRef {
     /// Returns a reference to the dialog's keymap.
     fn keymap(&self) -> &KeyMap;
+
     /// Handles a key event by mapping it to an `AppEvent` and sending that to
     /// the app.
     fn handle_key_event(&self, key_event: KeyEvent) -> color_eyre::Result<()> {

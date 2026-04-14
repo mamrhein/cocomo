@@ -13,9 +13,10 @@
 //! for side-by-side comparison of text files.
 
 use core::cell;
-use std::io;
+use std::{convert::From, io};
 
 use cocomo_core::{FSItem, LineDiffType, TextDiff};
+use crossterm::event::KeyCode;
 use futures::executor::block_on;
 use ratatui::{
     buffer::Buffer,
@@ -29,12 +30,16 @@ use ratatui::{
 
 use crate::{
     appevent::AppEvent,
-    view::{NavigableView, View},
+    keymap::{AggregatedKeyMap, KeyMap, KeyMapper},
+    view::{NAV_KEYMAP_ITEMS, NavigableView, View},
 };
 
 /// View for displaying side-by-side text file contents.
 #[derive(Debug)]
 pub struct TextView {
+    /// View level key maps
+    nav_keymap: KeyMap,
+    // TODO: op_keymap: KeyMap,
     /// The diff data between the two files.
     file_diff: TextDiff,
     /// The state of the table.
@@ -55,6 +60,7 @@ impl TextView {
             table_state.select(Some(0));
         }
         Ok(Self {
+            nav_keymap: KeyMap::from(NAV_KEYMAP_ITEMS.as_slice()),
             file_diff,
             table_state: cell::RefCell::new(table_state),
             current_chunk: 0,
@@ -75,6 +81,18 @@ impl TextView {
         app_event: AppEvent,
     ) -> color_eyre::Result<()> {
         match app_event {
+            AppEvent::NavigatePrev => {
+                self.prev();
+            }
+            AppEvent::NavigateNext => {
+                self.next();
+            }
+            AppEvent::NavigateFirst => {
+                self.home();
+            }
+            AppEvent::NavigateLast => {
+                self.end();
+            }
             // TODO: handle copy, move, delete events
             AppEvent::Copy => {
                 todo!()
@@ -85,8 +103,18 @@ impl TextView {
             AppEvent::Delete => {
                 todo!()
             }
-            _ => Ok(()),
+            _ => {} // ignore it (TODO: handle it)
         }
+        Ok(())
+    }
+}
+
+impl KeyMapper for TextView {
+    fn map_key_code(&self, code: &KeyCode) -> Option<AppEvent> {
+        AggregatedKeyMap::new(vec![&self.nav_keymap])
+            // TODO: AggregatedKeyMap::new(vec![&self.nav_keymap,
+            // &self.op_keymap])
+            .map_key_code(code)
     }
 }
 

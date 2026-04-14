@@ -12,12 +12,18 @@
 use core::fmt::Debug;
 
 use cocomo_core::DiffItem;
-use ratatui::widgets::WidgetRef;
+use ratatui::{
+    crossterm::event::{KeyCode, KeyEvent},
+    widgets::WidgetRef,
+};
 
-use crate::appevent::AppEvent;
+use crate::{
+    appevent::AppEvent,
+    keymap::{KeyMapItem, KeyMapper},
+};
 
 /// Common trait for all views
-pub(crate) trait View: Debug + WidgetRef {
+pub(crate) trait View: Debug + KeyMapper + WidgetRef {
     /// Returns the title of the view.
     fn title(&self) -> String;
 
@@ -38,12 +44,57 @@ pub(crate) trait View: Debug + WidgetRef {
         None
     }
 
+    /// Handles a key event by mapping it to an app event and then handling
+    /// that.
+    fn handle_key_event(
+        &mut self,
+        key_event: KeyEvent,
+    ) -> color_eyre::Result<()> {
+        if let Some(event) = self.map_key_code(&key_event.code) {
+            return self.handle_app_event(event);
+        }
+        Ok(())
+    }
+
     /// Handles an application event.
     fn handle_app_event(
         &mut self,
         app_event: AppEvent,
     ) -> color_eyre::Result<()>;
 }
+
+/// Pre-built key map items for navigable views.
+#[rustfmt::skip]
+pub(crate) const NAV_KEYMAP_ITEMS: [KeyMapItem; 4] = [
+    KeyMapItem::new(
+        KeyCode::Up,
+        None,
+        "Up",
+        true,
+        AppEvent::NavigatePrev,
+    ),
+    KeyMapItem::new(
+        KeyCode::Down,
+        None,
+        "Down",
+        true,
+        AppEvent::NavigateNext,
+    ),
+    KeyMapItem::new(
+        KeyCode::Home,
+        None,
+        "Top",
+        true,
+        AppEvent::NavigateFirst,
+    ),
+    KeyMapItem::new(
+        KeyCode::End,
+        None,
+        "Bottom",
+        true,
+        AppEvent::NavigateLast,
+    ),
+];
 
 /// Trait for views that support cursor-style navigation.
 pub(crate) trait NavigableView: View {

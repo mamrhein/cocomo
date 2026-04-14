@@ -28,6 +28,7 @@ use cocomo_core::{
 use futures::executor::block_on;
 use ratatui::{
     buffer::Buffer,
+    crossterm::event::KeyCode,
     layout::{Constraint, Layout, Rect},
     style::{Color, Style},
     text::Text,
@@ -39,8 +40,42 @@ use ratatui::{
 
 use crate::{
     appevent::AppEvent,
-    view::{NavigableView, View},
+    keymap::{AggregatedKeyMap, KeyMap, KeyMapItem, KeyMapper},
+    view::{NAV_KEYMAP_ITEMS, NavigableView, View},
 };
+
+/// Key map items for ops keymap.
+#[rustfmt::skip]
+pub(crate) const OP_KEYMAP_ITEMS: [KeyMapItem; 4] = [
+    KeyMapItem::new(
+        KeyCode::Char('c'),
+        None,
+        "Copy",
+        true,
+        AppEvent::Copy,
+    ),
+    KeyMapItem::new(
+        KeyCode::Char('m'),
+        None,
+        "Move",
+        true,
+        AppEvent::Move,
+    ),
+    KeyMapItem::new(
+        KeyCode::Char('d'),
+        None,
+        "Delete",
+        true,
+        AppEvent::Delete,
+    ),
+    KeyMapItem::new(
+        KeyCode::Char('r'),
+        None,
+        "Rename",
+        true,
+        AppEvent::Rename,
+    ),
+];
 
 /// Map DirDiffType to indicator text
 fn indicator<'a>(t: DiffItemType) -> Text<'a> {
@@ -65,6 +100,9 @@ fn indicator<'a>(t: DiffItemType) -> Text<'a> {
 /// View for displaying directory comparison results.
 #[derive(Debug)]
 pub struct DirView {
+    /// View level key maps
+    nav_keymap: KeyMap,
+    op_keymap: KeyMap,
     /// The comparison results.
     diff: DirDiff,
     /// The state of the table.
@@ -83,6 +121,8 @@ impl DirView {
             table_state.select(Some(0));
         }
         Ok(Self {
+            nav_keymap: KeyMap::from(NAV_KEYMAP_ITEMS.as_slice()),
+            op_keymap: KeyMap::from(OP_KEYMAP_ITEMS.as_slice()),
             diff,
             table_state: cell::RefCell::new(table_state),
         })
@@ -95,6 +135,18 @@ impl DirView {
         let left_dir = &self.diff.left_dir;
         let right_dir = &self.diff.right_dir;
         match app_event {
+            AppEvent::NavigatePrev => {
+                self.prev();
+            }
+            AppEvent::NavigateNext => {
+                self.next();
+            }
+            AppEvent::NavigateFirst => {
+                self.home();
+            }
+            AppEvent::NavigateLast => {
+                self.end();
+            }
             AppEvent::Copy => {
                 if let Some(item) = self.current_diff_item()
                     && left_dir.is_some()
@@ -196,6 +248,13 @@ impl DirView {
             _ => {} // ignore it (TODO: handle it)
         }
         Ok(())
+    }
+}
+
+impl KeyMapper for DirView {
+    fn map_key_code(&self, code: &KeyCode) -> Option<AppEvent> {
+        AggregatedKeyMap::new(vec![&self.nav_keymap, &self.op_keymap])
+            .map_key_code(code)
     }
 }
 
