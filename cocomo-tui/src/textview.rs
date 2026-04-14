@@ -16,7 +16,6 @@ use core::cell;
 use std::{convert::From, io};
 
 use cocomo_core::{FSItem, LineDiffType, TextDiff};
-use crossterm::event::KeyCode;
 use futures::executor::block_on;
 use ratatui::{
     buffer::Buffer,
@@ -30,7 +29,7 @@ use ratatui::{
 
 use crate::{
     appevent::AppEvent,
-    keymap::{AggregatedKeyMap, KeyMap, KeyMapper},
+    keymap::{AggregatedKeyMap, KeyMap},
     view::{NAV_KEYMAP_ITEMS, NavigableView, View},
 };
 
@@ -109,18 +108,14 @@ impl TextView {
     }
 }
 
-impl KeyMapper for TextView {
-    fn map_key_code(&self, code: &KeyCode) -> Option<AppEvent> {
-        AggregatedKeyMap::new(vec![&self.nav_keymap])
-            // TODO: AggregatedKeyMap::new(vec![&self.nav_keymap,
-            // &self.op_keymap])
-            .map_key_code(code)
-    }
-}
-
 impl View for TextView {
     fn title(&self) -> String {
         self.file_diff.name().to_string_lossy().into_owned()
+    }
+
+    fn keymap<'a>(&'a self) -> AggregatedKeyMap<'a> {
+        AggregatedKeyMap::new(vec![&self.nav_keymap])
+        // TODO: AggregatedKeyMap::new(vec![&self.nav_keymap, &self.op_keymap])
     }
 
     fn handle_app_event(

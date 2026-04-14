@@ -40,7 +40,7 @@ use ratatui::{
 
 use crate::{
     appevent::AppEvent,
-    keymap::{AggregatedKeyMap, KeyMap, KeyMapItem, KeyMapper},
+    keymap::{AggregatedKeyMap, KeyMap, KeyMapItem},
     view::{NAV_KEYMAP_ITEMS, NavigableView, View},
 };
 
@@ -251,13 +251,6 @@ impl DirView {
     }
 }
 
-impl KeyMapper for DirView {
-    fn map_key_code(&self, code: &KeyCode) -> Option<AppEvent> {
-        AggregatedKeyMap::new(vec![&self.nav_keymap, &self.op_keymap])
-            .map_key_code(code)
-    }
-}
-
 impl View for DirView {
     fn title(&self) -> String {
         self.diff.name().to_string_lossy().into_owned()
@@ -267,18 +260,22 @@ impl View for DirView {
         true
     }
 
+    fn current_diff_item(&self) -> Option<&DiffItem> {
+        let table_state = self.table_state.borrow();
+        let i = table_state.selected()?;
+        Some(&self.diff.items[i])
+    }
+
+    fn keymap<'a>(&'a self) -> AggregatedKeyMap<'a> {
+        AggregatedKeyMap::new(vec![&self.nav_keymap, &self.op_keymap])
+    }
+
     fn handle_app_event(
         &mut self,
         app_event: AppEvent,
     ) -> color_eyre::Result<()> {
         block_on(self.handle_app_event(app_event))?;
         Ok(())
-    }
-
-    fn current_diff_item(&self) -> Option<&DiffItem> {
-        let table_state = self.table_state.borrow();
-        let i = table_state.selected()?;
-        Some(&self.diff.items[i])
     }
 }
 

@@ -19,11 +19,11 @@ use ratatui::{
 
 use crate::{
     appevent::AppEvent,
-    keymap::{KeyMapItem, KeyMapper},
+    keymap::{AggregatedKeyMap, KeyMapItem, KeyMapper},
 };
 
 /// Common trait for all views
-pub(crate) trait View: Debug + KeyMapper + WidgetRef {
+pub(crate) trait View: Debug + WidgetRef {
     /// Returns the title of the view.
     fn title(&self) -> String;
 
@@ -44,13 +44,16 @@ pub(crate) trait View: Debug + KeyMapper + WidgetRef {
         None
     }
 
+    /// Returns the aggregated key map for this view.
+    fn keymap<'a>(&'a self) -> AggregatedKeyMap<'a>;
+
     /// Handles a key event by mapping it to an app event and then handling
     /// that.
     fn handle_key_event(
         &mut self,
         key_event: KeyEvent,
     ) -> color_eyre::Result<()> {
-        if let Some(event) = self.map_key_code(&key_event.code) {
+        if let Some(event) = self.keymap().map_key_code(&key_event.code) {
             return self.handle_app_event(event);
         }
         Ok(())
