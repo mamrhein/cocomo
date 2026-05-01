@@ -481,7 +481,10 @@ mod tests {
         assert_eq!(repr_key_code(&KeyCode::Char('1')), "1");
         // Some special keys
         assert_eq!(repr_key_code(&KeyCode::Esc), "Esc");
+        #[cfg(not(target_os = "macos"))]
         assert_eq!(repr_key_code(&KeyCode::Backspace), "Backspace");
+        #[cfg(target_os = "macos")]
+        assert_eq!(repr_key_code(&KeyCode::Backspace), "Delete");
         assert_eq!(repr_key_code(&KeyCode::CapsLock), "Caps Lock");
         assert_eq!(repr_key_code(&KeyCode::Pause), "Pause");
         assert_eq!(repr_key_code(&KeyCode::Menu), "Menu");
