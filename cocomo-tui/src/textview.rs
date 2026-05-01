@@ -16,7 +16,6 @@ use core::cell;
 use std::{convert::From, io};
 
 use cocomo_core::{FSItem, LineDiffType, TextDiff};
-use futures::executor::block_on;
 use ratatui::{
     buffer::Buffer,
     layout::{Constraint, Layout, Rect},
@@ -28,7 +27,7 @@ use ratatui::{
 };
 
 use crate::{
-    appevent::AppEvent,
+    event::{NavEvent, OpEvent},
     keymap::{AggregatedKeyMap, KeyMap},
     view::{NAV_KEYMAP_ITEMS, NavigableView, View},
 };
@@ -74,38 +73,6 @@ impl TextView {
             .map(|c| c.left_lines.len())
             .sum()
     }
-
-    pub(crate) async fn handle_app_event(
-        &mut self,
-        app_event: AppEvent,
-    ) -> color_eyre::Result<()> {
-        match app_event {
-            AppEvent::NavigatePrev => {
-                self.prev();
-            }
-            AppEvent::NavigateNext => {
-                self.next();
-            }
-            AppEvent::NavigateFirst => {
-                self.home();
-            }
-            AppEvent::NavigateLast => {
-                self.end();
-            }
-            // TODO: handle copy, move, delete events
-            AppEvent::Copy => {
-                todo!()
-            }
-            AppEvent::Move => {
-                todo!()
-            }
-            AppEvent::Delete => {
-                todo!()
-            }
-            _ => {} // ignore it (TODO: handle it)
-        }
-        Ok(())
-    }
 }
 
 impl View for TextView {
@@ -118,11 +85,32 @@ impl View for TextView {
         // TODO: AggregatedKeyMap::new(vec![&self.nav_keymap, &self.op_keymap])
     }
 
-    fn handle_app_event(
+    /// Handles a navigation event.
+    fn handle_nav_event(
         &mut self,
-        app_event: AppEvent,
+        nav_event: crate::event::NavEvent,
     ) -> color_eyre::Result<()> {
-        block_on(self.handle_app_event(app_event))?;
+        match nav_event {
+            NavEvent::Prev => {
+                self.prev();
+            }
+            NavEvent::Next => {
+                self.next();
+            }
+            NavEvent::First => {
+                self.home();
+            }
+            NavEvent::Last => {
+                self.end();
+            }
+        }
+        Ok(())
+    }
+
+    fn handle_op_event(
+        &mut self,
+        _op_event: OpEvent,
+    ) -> color_eyre::Result<()> {
         Ok(())
     }
 }
@@ -158,7 +146,8 @@ impl NavigableView for TextView {
     /// Makes the last chunk the current chunk.
     fn end(&mut self) {
         if !self.file_diff.chunks.is_empty() {
-            self.current_chunk = self.file_diff.chunks.len().saturating_sub(1);
+            self.current_chunk =
+                self.file_diff.chunks.len().saturating_sub(1);
             let row_idx = self.first_row_of_chunk(self.current_chunk);
             self.table_state.borrow_mut().select(Some(row_idx));
         }

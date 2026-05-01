@@ -47,7 +47,7 @@ pub enum Event {
     ///
     /// Use this to emit events that are to be handled by the app's current view's
     /// navigation system.
-    Nav(NavigationEvent),
+    Nav(NavEvent),
     /// Operation triggers.
     ///
     /// Use this to emit events that are to be handled by the app's current view
@@ -80,7 +80,7 @@ pub(crate) enum AppEvent {
 
 /// Navigation events.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub(crate) enum NavigationEvent {
+pub(crate) enum NavEvent {
     /// Navigate the current item of the current view to the previous item.
     Prev,
     /// Navigate the current item of the current view to the next item.

@@ -49,7 +49,7 @@ use ratatui::{
     text::{Line, Span, Text},
 };
 
-use crate::appevent::AppEvent;
+use crate::event::Event;
 
 /// Represents a single key mapping binding a keyboard key to an application
 /// event.
@@ -69,8 +69,8 @@ pub(crate) struct KeyMapItem {
     name: &'static str,
     /// Whether this key mapping is currently enabled.
     enabled: bool,
-    /// The application event to emit when this key is pressed.
-    event: AppEvent,
+    /// The event to emit when this key is pressed.
+    event: Event,
 }
 
 impl KeyMapItem {
@@ -83,12 +83,13 @@ impl KeyMapItem {
     /// - `name`: A descriptive name for display purposes
     /// - `enabled`: Whether the mapping should be enabled initially
     /// - `event`: The event that will be triggered when this key is pressed
+    #[inline(always)]
     pub(crate) const fn new(
         key_code: KeyCode,
         alt_key_code: Option<KeyCode>,
         name: &'static str,
         enabled: bool,
-        event: AppEvent,
+        event: Event,
     ) -> Self {
         Self {
             key_code,
@@ -99,31 +100,33 @@ impl KeyMapItem {
         }
     }
 
-    /// Returns a reference to the mapped keyboard key.
-    pub(crate) const fn key_code(&self) -> &KeyCode {
-        &self.key_code
+    /// Returns the mapped keyboard key.
+    #[inline(always)]
+    pub(crate) const fn key_code(&self) -> KeyCode {
+        self.key_code
     }
 
-    /// Returns a reference to the alternate key code, if set. This allows
-    /// checking for secondary key bindings associated with this mapping.
-    pub(crate) const fn alt_key_code(&self) -> Option<&KeyCode> {
-        self.alt_key_code.as_ref()
+    /// Returns the alternate key code, if set. This allows checking
+    /// for secondary key bindings associated with this mapping.
+    #[inline(always)]
+    pub(crate) const fn alt_key_code(&self) -> Option<KeyCode> {
+        self.alt_key_code
     }
 
     /// Returns the display name of this key mapping.
+    #[inline(always)]
     pub(crate) const fn name(&self) -> &'static str {
         self.name
     }
 
     /// Returns the event that will be triggered when this key is pressed.
-    ///
-    /// Note: This consumes and returns the event value, as events are not
-    /// cloned.
-    pub(crate) const fn event(&self) -> AppEvent {
-        self.event
+    #[inline(always)]
+    pub(crate) fn event(&self) -> Event {
+        self.event.clone()
     }
 
     /// Returns whether this key mapping is currently enabled.
+    #[inline(always)]
     pub(crate) const fn is_enabled(&self) -> bool {
         self.enabled
     }
@@ -131,6 +134,7 @@ impl KeyMapItem {
     /// Sets whether this key mapping should be enabled.
     ///
     /// Disabled mappings are ignored when looking up events via `KeyMap`.
+    #[inline(always)]
     pub(crate) const fn set_enabled(&mut self, enabled: bool) {
         self.enabled = enabled;
     }
@@ -175,18 +179,6 @@ fn repr_key_code(key_code: &KeyCode) -> String {
 }
 
 /// Displays the key mapping in format "Name: Key".
-///
-/// # Example
-///
-/// ```
-/// use crossterm::event::KeyCode;
-///
-/// use crate::{appevent::AppEvent, keymap::KeyMapItem};
-///
-/// let map =
-///     KeyMapItem::new(KeyCode::Char('c'), "Copy", true, AppEvent::Copy);
-/// assert_eq!(format!("{}", map), "Copy: c");
-/// ```
 impl fmt::Display for KeyMapItem {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if let Some(alt) = self.alt_key_code {
@@ -310,14 +302,14 @@ impl<'a> From<&'a AggregatedKeyMap<'a>> for Text<'a> {
 }
 
 pub(crate) trait KeyMapper {
-    /// Maps a `KeyCode` to an `AppEvent`, if one exists.
+    /// Maps a `KeyCode` to an `Event`, if one exists.
     ///
     /// When looking up keys, only **enabled** mappings are considered.
-    fn map_key_code(&self, key_code: &KeyCode) -> Option<AppEvent>;
+    fn map_key_code(&self, key_code: KeyCode) -> Option<Event>;
 }
 
 impl KeyMapper for KeyMap {
-    fn map_key_code(&self, key_code: &KeyCode) -> Option<AppEvent> {
+    fn map_key_code(&self, key_code: KeyCode) -> Option<Event> {
         self.0
             .iter()
             .filter(|key_map| key_map.is_enabled())
@@ -332,7 +324,7 @@ impl KeyMapper for KeyMap {
 }
 
 impl<'a> KeyMapper for AggregatedKeyMap<'a> {
-    fn map_key_code(&self, key_code: &KeyCode) -> Option<AppEvent> {
+    fn map_key_code(&self, key_code: KeyCode) -> Option<Event> {
         for map in &self.maps {
             if let Some(event) = map.map_key_code(key_code) {
                 return Some(event);
@@ -345,6 +337,8 @@ impl<'a> KeyMapper for AggregatedKeyMap<'a> {
 #[cfg(test)]
 mod tests {
     use std::sync::LazyLock;
+
+    use crate::event::{AppEvent, NavEvent, OpEvent};
 
     use super::*;
 
@@ -363,42 +357,42 @@ mod tests {
             Some(KeyCode::Char('o')),
             "Open",
             true,
-            AppEvent::OpenView,
+            Event::App(AppEvent::OpenView),
         ),
         KeyMapItem::new(
             KeyCode::Char('q'),
             None,
             "Quit",
             true,
-            AppEvent::Quit,
+            Event::App(AppEvent::Quit),
         ),
         KeyMapItem::new(
             KeyCode::Char('c'),
             None,
             "Copy",
             true,
-            AppEvent::Copy,
+            Event::Op(OpEvent::Copy),
         ),
         KeyMapItem::new(
             KeyCode::Char('m'),
             None,
             "Move",
             true,
-            AppEvent::Move,
+            Event::Op(OpEvent::Move),
         ),
         KeyMapItem::new(
             KeyCode::Char('d'),
             None,
             "Delete",
             true,
-            AppEvent::Delete,
+            Event::Op(OpEvent::Delete),
         ),
         KeyMapItem::new(
             KeyCode::Char('r'),
             None,
             "Rename",
             false,
-            AppEvent::Rename,
+            Event::Op(OpEvent::Rename),
         ),
     ];
 
@@ -413,12 +407,17 @@ mod tests {
         let alt_key_code = None;
         let name = "Copy";
         let enabled = true;
-        let event = AppEvent::Copy;
+        let event = Event::Op(OpEvent::Copy);
 
-        let key_map =
-            KeyMapItem::new(key_code, alt_key_code, name, enabled, event);
+        let key_map = KeyMapItem::new(
+            key_code,
+            alt_key_code,
+            name,
+            enabled,
+            event.clone(),
+        );
 
-        assert_eq!(*key_map.key_code(), key_code);
+        assert_eq!(key_map.key_code(), key_code);
         assert!(key_map.alt_key_code().is_none());
         assert_eq!(key_map.name(), name);
         assert_eq!(key_map.event(), event);
@@ -435,7 +434,7 @@ mod tests {
             alt_key_code,
             "Test",
             false,
-            AppEvent::Copy,
+            Event::Op(OpEvent::Copy),
         );
 
         assert!(!key_map.is_enabled());
@@ -449,7 +448,7 @@ mod tests {
             None,
             "Test",
             false,
-            AppEvent::Copy,
+            Event::Op(OpEvent::Copy),
         );
         assert!(!key_map.is_enabled());
         key_map.set_enabled(true);
@@ -496,7 +495,7 @@ mod tests {
             None,
             "Copy",
             true,
-            AppEvent::Copy,
+            Event::Op(OpEvent::Copy),
         );
 
         assert_eq!(format!("{}", key_map), "Copy: [c]");
@@ -510,7 +509,7 @@ mod tests {
             Some(KeyCode::F(10)),
             "Open",
             true,
-            AppEvent::OpenView,
+            Event::App(AppEvent::OpenView),
         );
 
         assert_eq!(format!("{}", key_map), "Open: [↵]/[F10]");
@@ -521,16 +520,16 @@ mod tests {
     fn test_keymapper_map_key_code_found() {
         // Test primary key code
         assert_eq!(
-            KEY_MAPPER.map_key_code(&KeyCode::Char('c')),
-            Some(AppEvent::Copy)
+            KEY_MAPPER.map_key_code(KeyCode::Char('c')),
+            Some(Event::Op(OpEvent::Copy))
         );
         assert_eq!(
-            KEY_MAPPER.map_key_code(&KeyCode::Char('m')),
-            Some(AppEvent::Move)
+            KEY_MAPPER.map_key_code(KeyCode::Char('m')),
+            Some(Event::Op(OpEvent::Move))
         );
         assert_eq!(
-            KEY_MAPPER.map_key_code(&KeyCode::Char('d')),
-            Some(AppEvent::Delete)
+            KEY_MAPPER.map_key_code(KeyCode::Char('d')),
+            Some(Event::Op(OpEvent::Delete))
         );
     }
 
@@ -538,9 +537,9 @@ mod tests {
     #[test]
     fn test_keymapper_map_key_code_not_found() {
         // Not in map
-        assert_eq!(KEY_MAPPER.map_key_code(&KeyCode::Char('y')), None);
+        assert_eq!(KEY_MAPPER.map_key_code(KeyCode::Char('y')), None);
         // Disabled (key 'r' exists but is marked as disabled)
-        assert_eq!(KEY_MAPPER.map_key_code(&KeyCode::Char('r')), None);
+        assert_eq!(KEY_MAPPER.map_key_code(KeyCode::Char('r')), None);
     }
 
     /// Tests mapping using alt_key_code.
@@ -548,13 +547,13 @@ mod tests {
     fn test_alt_key_code_mapping() {
         // Test primary key code
         assert_eq!(
-            KEY_MAPPER.map_key_code(&KeyCode::Enter),
-            Some(AppEvent::OpenView)
+            KEY_MAPPER.map_key_code(KeyCode::Enter),
+            Some(Event::App(AppEvent::OpenView))
         );
         // Test alternate key code
         assert_eq!(
-            KEY_MAPPER.map_key_code(&KeyCode::Char('o')),
-            Some(AppEvent::OpenView)
+            KEY_MAPPER.map_key_code(KeyCode::Char('o')),
+            Some(Event::App(AppEvent::OpenView))
         );
     }
 
@@ -566,14 +565,14 @@ mod tests {
             Some(KeyCode::Char('C')),
             "Copy",
             false, // disabled
-            AppEvent::Copy,
+            Event::Op(OpEvent::Copy),
         )];
 
         let key_mapper = KeyMap(key_maps);
 
         // Both primary and alt should not map when disabled
-        assert_eq!(key_mapper.map_key_code(&KeyCode::Char('c')), None);
-        assert_eq!(key_mapper.map_key_code(&KeyCode::Char('C')), None);
+        assert_eq!(key_mapper.map_key_code(KeyCode::Char('c')), None);
+        assert_eq!(key_mapper.map_key_code(KeyCode::Char('C')), None);
     }
 
     /// Tests the `Display` implementation for `KeyMap` with multiple keys.
@@ -591,9 +590,9 @@ mod tests {
     /// Tests that key matching is case-sensitive.
     #[test]
     fn test_keymapper_map_key_code_case_sensitivity() {
-        assert!(KEY_MAPPER.map_key_code(&KeyCode::Char('c')).is_some());
+        assert!(KEY_MAPPER.map_key_code(KeyCode::Char('c')).is_some());
         // Uppercase should not match lowercase
-        assert_eq!(KEY_MAPPER.map_key_code(&KeyCode::Char('C')), None);
+        assert_eq!(KEY_MAPPER.map_key_code(KeyCode::Char('C')), None);
     }
 
     /// Tests mapping when multiple keys exist for the same code but only one
@@ -606,21 +605,21 @@ mod tests {
                 None,
                 "Rename",
                 false,
-                AppEvent::Rename,
+                Event::Op(OpEvent::Rename),
             ),
             KeyMapItem::new(
                 KeyCode::Enter,
                 None,
                 "Open in Dir",
                 true,
-                AppEvent::OpenView,
+                Event::App(AppEvent::OpenView),
             ),
             KeyMapItem::new(
                 KeyCode::Enter,
                 None,
                 "Select in File",
                 true,
-                AppEvent::NavigateNext,
+                Event::Nav(NavEvent::Next),
             ),
         ];
 
@@ -628,8 +627,8 @@ mod tests {
 
         // Only first enabled key should be found
         assert_eq!(
-            key_mapper.map_key_code(&KeyCode::Enter),
-            Some(AppEvent::OpenView)
+            key_mapper.map_key_code(KeyCode::Enter),
+            Some(Event::App(AppEvent::OpenView))
         );
     }
 
@@ -644,13 +643,13 @@ mod tests {
             None,
             "Test",
             false,
-            AppEvent::Copy,
+            Event::Op(OpEvent::Copy),
         );
 
         let key_mapper = KeyMap(vec![key_map]);
 
         // Initially disabled
-        assert_eq!(key_mapper.map_key_code(&KeyCode::Char('x')), None);
+        assert_eq!(key_mapper.map_key_code(KeyCode::Char('x')), None);
 
         // Enable and try again
         let mut key_map = key_mapper.0.into_iter().next().unwrap();
@@ -658,8 +657,8 @@ mod tests {
 
         let key_mapper = KeyMap(vec![key_map]);
         assert_eq!(
-            key_mapper.map_key_code(&KeyCode::Char('x')),
-            Some(AppEvent::Copy)
+            key_mapper.map_key_code(KeyCode::Char('x')),
+            Some(Event::Op(OpEvent::Copy))
         );
     }
 
@@ -702,13 +701,13 @@ mod tests {
         let key_mapper =
             AggregatedKeyMap::new(vec![&mut key_map_1, &mut key_map_2]);
         assert_eq!(
-            key_mapper.map_key_code(&KeyCode::Char('q')),
-            Some(AppEvent::Quit)
+            key_mapper.map_key_code(KeyCode::Char('q')),
+            Some(Event::App(AppEvent::Quit))
         );
         assert_eq!(
-            key_mapper.map_key_code(&KeyCode::Char('c')),
-            Some(AppEvent::Copy)
+            key_mapper.map_key_code(KeyCode::Char('c')),
+            Some(Event::Op(OpEvent::Copy))
         );
-        assert!(key_mapper.map_key_code(&KeyCode::Char('r')).is_none());
+        assert!(key_mapper.map_key_code(KeyCode::Char('r')).is_none());
     }
 }

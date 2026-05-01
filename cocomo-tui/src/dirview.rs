@@ -39,7 +39,7 @@ use ratatui::{
 };
 
 use crate::{
-    appevent::AppEvent,
+    event::{Event, NavEvent, OpEvent},
     keymap::{AggregatedKeyMap, KeyMap, KeyMapItem},
     view::{NAV_KEYMAP_ITEMS, NavigableView, View},
 };
@@ -52,21 +52,21 @@ pub(crate) const OP_KEYMAP_ITEMS: [KeyMapItem; 4] = [
         None,
         "Copy",
         true,
-        AppEvent::Copy,
+        Event::Op(OpEvent::Copy),
     ),
     KeyMapItem::new(
         KeyCode::Char('m'),
         None,
         "Move",
         true,
-        AppEvent::Move,
+        Event::Op(OpEvent::Move),
     ),
     KeyMapItem::new(
         KeyCode::Char('d'),
         None,
         "Delete",
         true,
-        AppEvent::Delete,
+        Event::Op(OpEvent::Delete),
     ),
     KeyMapItem::new(
         KeyCode::Char('r'),
@@ -74,7 +74,7 @@ pub(crate) const OP_KEYMAP_ITEMS: [KeyMapItem; 4] = [
         "Rename",
         // TODO: enable when op rename is implemented
         false,
-        AppEvent::Rename,
+        Event::Op(OpEvent::Rename),
     ),
 ];
 
@@ -129,26 +129,14 @@ impl DirView {
         })
     }
 
-    pub(crate) async fn handle_app_event(
+    pub(crate) async fn handle_op_event(
         &mut self,
-        app_event: AppEvent,
+        op_event: OpEvent,
     ) -> color_eyre::Result<()> {
         let left_dir = &self.diff.left_dir;
         let right_dir = &self.diff.right_dir;
-        match app_event {
-            AppEvent::NavigatePrev => {
-                self.prev();
-            }
-            AppEvent::NavigateNext => {
-                self.next();
-            }
-            AppEvent::NavigateFirst => {
-                self.home();
-            }
-            AppEvent::NavigateLast => {
-                self.end();
-            }
-            AppEvent::Copy => {
+        match op_event {
+            OpEvent::Copy => {
                 if let Some(item) = self.current_diff_item()
                     && left_dir.is_some()
                     && right_dir.is_some()
@@ -183,7 +171,7 @@ impl DirView {
                     self.diff.refresh().await?;
                 }
             }
-            AppEvent::Move => {
+            OpEvent::Move => {
                 if let Some(item) = self.current_diff_item()
                     && left_dir.is_some()
                     && right_dir.is_some()
@@ -220,7 +208,7 @@ impl DirView {
                     self.diff.refresh().await?;
                 }
             }
-            AppEvent::Delete => {
+            OpEvent::Delete => {
                 if let Some(item) = self.current_diff_item() {
                     let target = match item.diff_item_type {
                         DiffItemType::LeftOnly
@@ -240,10 +228,10 @@ impl DirView {
                     self.diff.refresh().await?;
                 }
             }
-            // AppEvent::Rename => {
+            // OpEvent::Rename => {
             // let _ = rename_item(&item, &new_name).await;
             // }
-            AppEvent::Refresh => {
+            OpEvent::Refresh => {
                 self.diff.refresh().await?;
             }
             _ => {} // ignore it (TODO: handle it)
@@ -271,12 +259,33 @@ impl View for DirView {
         AggregatedKeyMap::new(vec![&self.nav_keymap, &self.op_keymap])
     }
 
-    fn handle_app_event(
+    /// Handles a navigation event.
+    fn handle_nav_event(
         &mut self,
-        app_event: AppEvent,
+        nav_event: crate::event::NavEvent,
     ) -> color_eyre::Result<()> {
-        block_on(self.handle_app_event(app_event))?;
+        match nav_event {
+            NavEvent::Prev => {
+                self.prev();
+            }
+            NavEvent::Next => {
+                self.next();
+            }
+            NavEvent::First => {
+                self.home();
+            }
+            NavEvent::Last => {
+                self.end();
+            }
+        }
         Ok(())
+    }
+
+    fn handle_op_event(
+        &mut self,
+        op_event: OpEvent,
+    ) -> color_eyre::Result<()> {
+        block_on(self.handle_op_event(op_event))
     }
 }
 
@@ -328,6 +337,7 @@ impl NavigableView for DirView {
         }
     }
 }
+
 impl WidgetRef for DirView {
     fn render_ref(&self, area: Rect, buf: &mut Buffer) {
         let vert_constraints = [

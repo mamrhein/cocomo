@@ -63,8 +63,6 @@ mod cmdargs;
 
 /// Holds the state and application logic.
 pub(crate) mod app;
-/// Application events.
-pub(crate) mod appevent;
 /// Dialog pop-ups
 pub(crate) mod dialog;
 /// Renders the directory comparison view.

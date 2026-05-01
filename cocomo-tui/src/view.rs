@@ -18,7 +18,7 @@ use ratatui::{
 };
 
 use crate::{
-    appevent::AppEvent,
+    event::{Event, NavEvent, OpEvent},
     keymap::{AggregatedKeyMap, KeyMapItem, KeyMapper},
 };
 
@@ -53,16 +53,26 @@ pub(crate) trait View: Debug + WidgetRef {
         &mut self,
         key_event: KeyEvent,
     ) -> color_eyre::Result<()> {
-        if let Some(event) = self.keymap().map_key_code(&key_event.code) {
-            return self.handle_app_event(event);
+        if let Some(event) = self.keymap().map_key_code(key_event.code) {
+            return match event {
+                Event::Nav(nav_event) => self.handle_nav_event(nav_event),
+                Event::Op(op_event) => self.handle_op_event(op_event),
+                _ => unreachable!(), // should not happen!
+            };
         }
         Ok(())
     }
 
-    /// Handles an application event.
-    fn handle_app_event(
+    /// Handles a navigation event.
+    fn handle_nav_event(
         &mut self,
-        app_event: AppEvent,
+        nav_event: crate::event::NavEvent,
+    ) -> color_eyre::Result<()>;
+
+    /// Handles an event triggering an operation.
+    fn handle_op_event(
+        &mut self,
+        op_event: OpEvent,
     ) -> color_eyre::Result<()>;
 }
 
@@ -74,28 +84,28 @@ pub(crate) const NAV_KEYMAP_ITEMS: [KeyMapItem; 4] = [
         None,
         "Up",
         true,
-        AppEvent::NavigatePrev,
+        Event::Nav(NavEvent::Prev),
     ),
     KeyMapItem::new(
         KeyCode::Down,
         None,
         "Down",
         true,
-        AppEvent::NavigateNext,
+        Event::Nav(NavEvent::Next),
     ),
     KeyMapItem::new(
         KeyCode::Home,
         None,
         "Top",
         true,
-        AppEvent::NavigateFirst,
+        Event::Nav(NavEvent::First),
     ),
     KeyMapItem::new(
         KeyCode::End,
         None,
         "Bottom",
         true,
-        AppEvent::NavigateLast,
+        Event::Nav(NavEvent::Last),
     ),
 ];
 

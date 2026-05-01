@@ -27,7 +27,6 @@ use ratatui::{
 use tokio::sync::RwLock;
 
 use crate::{
-    appevent::AppEvent,
     dialog::SimpleConfirm,
     dirview::DirView,
     event::{Event, EventHandler},
@@ -73,42 +72,42 @@ const APP_KEYMAP_ITEMS: [KeyMapItem; 6] = [
         None,
         "Show/hide hints",
         true,
-        AppEvent::ToggleHints,
+        Event::App(AppEvent::ToggleHints),
     ),
     KeyMapItem::new(
         KeyCode::Char('q'),
         None,
         "Quit",
         true,
-        AppEvent::Quit,
+        Event::App(AppEvent::Quit),
     ),
     KeyMapItem::new(
         KeyCode::Enter,
         Some(KeyCode::Char('o')),
         "Open view",
         true,
-        AppEvent::OpenView,
+        Event::App(AppEvent::OpenView),
     ),
     KeyMapItem::new(
         KeyCode::Char('x'),
         None,
         "Close tab",
         true,
-        AppEvent::CloseTab,
+        Event::App(AppEvent::CloseTab),
     ),
     KeyMapItem::new(
         KeyCode::Tab,
         None,
         "Next tab",
         true,
-        AppEvent::NextTab,
+        Event::App(AppEvent::NextTab),
     ),
     KeyMapItem::new(
         KeyCode::BackTab,
         None,
         "Prev tab",
         true,
-        AppEvent::PrevTab,
+        Event::App(AppEvent::PrevTab),
     ),
 ];
 
@@ -208,7 +207,13 @@ impl App {
                 Event::App(app_event) => {
                     self.handle_app_event(app_event).await?;
                 }
-            }
+                Event::Nav(nav_event) => {
+                    self.current_view_mut().handle_nav_event(nav_event)?;
+                }
+                Event::Op(op_event) => {
+                    self.current_view_mut().handle_op_event(op_event)?;
+                }
+            };
         }
         Ok(())
     }
@@ -225,7 +230,7 @@ impl App {
         if let Some(pending_op) = self.pending_op.as_mut() {
             return pending_op.dialog().handle_key_event(key_event);
         };
-        if let Some(event) = self.keymap.map_key_code(&key_event.code) {
+        if let Some(event) = self.keymap.map_key_code(key_event.code) {
             send_event(event).await;
         }
         // Forward key events that are not handled by the keymap to the
@@ -299,10 +304,7 @@ impl App {
                 self.show_key_hints = !self.show_key_hints;
             }
             AppEvent::Quit => self.quit(),
-            _ => {
-                // forward to current app view
-                return self.current_view_mut().handle_app_event(app_event);
-            }
+            _ => unreachable!(), // should never happen!
         }
         Ok(())
     }

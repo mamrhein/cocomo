@@ -18,12 +18,14 @@ use ratatui::{
     layout::Rect,
     style::Stylize,
     text::{Span, Text},
-    widgets::{Block, BorderType, Borders, Clear, Padding, Widget, WidgetRef},
+    widgets::{
+        Block, BorderType, Borders, Clear, Padding, Widget, WidgetRef,
+    },
 };
 
 use crate::{
     app::send_event,
-    appevent::AppEvent,
+    event::{AppEvent, Event},
     keymap::{KeyMap, KeyMapItem, KeyMapper},
 };
 
@@ -32,10 +34,13 @@ pub(crate) trait Dialog: Debug + WidgetRef {
     /// Returns a reference to the dialog's keymap.
     fn keymap(&self) -> &KeyMap;
 
-    /// Handles a key event by mapping it to an `AppEvent` and sending that to
+    /// Handles a key event by mapping it to an `Event` and sending that to
     /// the app.
-    fn handle_key_event(&self, key_event: KeyEvent) -> color_eyre::Result<()> {
-        if let Some(event) = self.keymap().map_key_code(&key_event.code) {
+    fn handle_key_event(
+        &self,
+        key_event: KeyEvent,
+    ) -> color_eyre::Result<()> {
+        if let Some(event) = self.keymap().map_key_code(key_event.code) {
             block_on(send_event(event));
         }
         Ok(())
@@ -68,14 +73,14 @@ const SIMPLE_CONFIRM_KEYMAP_ITEMS: [KeyMapItem; 2] = [
         Some(KeyCode::Char('y')),
         "Yes",
         true,
-        AppEvent::Confirmed,
+        Event::App(AppEvent::Confirmed),
     ),
     KeyMapItem::new(
         KeyCode::Esc,
         Some(KeyCode::Char('n')),
         "No",
         true,
-        AppEvent::NotConfirmed,
+        Event::App(AppEvent::NotConfirmed),
     ),
 ];
 
