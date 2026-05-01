@@ -40,7 +40,7 @@ use ratatui::{
 
 use crate::{
     event::{Event, NavEvent, OpEvent},
-    keymap::{AggregatedKeyMap, KeyMap, KeyMapItem},
+    keymap::{KeyMap, KeyMapArray, KeyMapItem, KeyMapper},
     view::{NAV_KEYMAP_ITEMS, NavigableView, View},
 };
 
@@ -102,8 +102,7 @@ fn indicator<'a>(t: DiffItemType) -> Text<'a> {
 #[derive(Debug)]
 pub struct DirView {
     /// View level key maps
-    nav_keymap: KeyMap,
-    op_keymap: KeyMap,
+    keymap: KeyMapArray<2>,
     /// The comparison results.
     diff: DirDiff,
     /// The state of the table.
@@ -122,8 +121,10 @@ impl DirView {
             table_state.select(Some(0));
         }
         Ok(Self {
-            nav_keymap: KeyMap::from(NAV_KEYMAP_ITEMS.as_slice()),
-            op_keymap: KeyMap::from(OP_KEYMAP_ITEMS.as_slice()),
+            keymap: KeyMapArray::new([
+                KeyMap::from(NAV_KEYMAP_ITEMS.as_slice()),
+                KeyMap::from(OP_KEYMAP_ITEMS.as_slice()),
+            ]),
             diff,
             table_state: cell::RefCell::new(table_state),
         })
@@ -255,8 +256,12 @@ impl View for DirView {
         Some(&self.diff.items[i])
     }
 
-    fn keymap<'a>(&'a self) -> AggregatedKeyMap<'a> {
-        AggregatedKeyMap::new(vec![&self.nav_keymap, &self.op_keymap])
+    fn keymap_text(&self) -> Text<'_> {
+        Text::from(&self.keymap)
+    }
+
+    fn keymapper(&self) -> &dyn KeyMapper {
+        &self.keymap
     }
 
     /// Handles a navigation event.
@@ -286,6 +291,25 @@ impl View for DirView {
         op_event: OpEvent,
     ) -> color_eyre::Result<()> {
         block_on(self.handle_op_event(op_event))
+    }
+
+    fn is_file_view(&self) -> bool {
+        // There will only be one directory view but several file views.
+        true
+    }
+
+    fn handle_key_event(
+        &mut self,
+        key_event: crossterm::event::KeyEvent,
+    ) -> color_eyre::Result<()> {
+        if let Some(event) = self.keymapper().map_key_code(key_event.code) {
+            return match event {
+                Event::Nav(nav_event) => self.handle_nav_event(nav_event),
+                Event::Op(op_event) => View::handle_op_event(self, op_event),
+                _ => unreachable!(), // should not happen!
+            };
+        }
+        Ok(())
     }
 }
 

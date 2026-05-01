@@ -30,7 +30,7 @@ use crate::{
     dialog::SimpleConfirm,
     dirview::DirView,
     event::{AppEvent, Event, EventQueue},
-    keymap::{AggregatedKeyMap, KeyMap, KeyMapItem, KeyMapper},
+    keymap::{KeyMap, KeyMapItem, KeyMapper},
     pending_op::{Op, PendingOp},
     textview::TextView,
     view::NavigableView,
@@ -325,11 +325,8 @@ impl Widget for &App {
 
         // Render key hints
         if self.show_key_hints {
-            let mut maps: Vec<&KeyMap> = vec![&self.keymap];
-            let view_keymap = current_view.keymap();
-            maps.extend(view_keymap.iter());
-            let aggr_keymap = AggregatedKeyMap::new(maps);
-            let txt = Text::from(&aggr_keymap);
+            let mut txt = Text::from(&self.keymap);
+            txt.extend(current_view.keymap_text());
             txt.centered().render(key_bar, buf);
         }
 

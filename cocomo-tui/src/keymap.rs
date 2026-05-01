@@ -269,7 +269,18 @@ impl<'a> From<&'a KeyMap> for Text<'a> {
 /// A fixed-size array of `KeyMap`s that can act as a `KeyMapper`.
 ///
 /// When looking up keys, only **enabled** mappings are considered.
+#[derive(Debug)]
 pub(crate) struct KeyMapArray<const N: usize>([KeyMap; N]);
+
+impl<const N: usize> KeyMapArray<N> {
+    pub(crate) const fn new(items: [KeyMap; N]) -> Self {
+        Self(items)
+    }
+
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &KeyMap> + '_ {
+        self.0.iter()
+    }
+}
 
 impl<const N: usize> KeyMapper for KeyMapArray<N> {
     fn keymap(&self) -> &dyn KeyMapper {

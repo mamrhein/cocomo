@@ -28,7 +28,7 @@ use ratatui::{
 
 use crate::{
     event::{NavEvent, OpEvent},
-    keymap::{AggregatedKeyMap, KeyMap},
+    keymap::{KeyMap, KeyMapArray, KeyMapper},
     view::{NAV_KEYMAP_ITEMS, NavigableView, View},
 };
 
@@ -36,8 +36,7 @@ use crate::{
 #[derive(Debug)]
 pub struct TextView {
     /// View level key maps
-    nav_keymap: KeyMap,
-    // TODO: op_keymap: KeyMap,
+    keymap: KeyMapArray<1>,
     /// The diff data between the two files.
     file_diff: TextDiff,
     /// The state of the table.
@@ -58,7 +57,9 @@ impl TextView {
             table_state.select(Some(0));
         }
         Ok(Self {
-            nav_keymap: KeyMap::from(NAV_KEYMAP_ITEMS.as_slice()),
+            keymap: KeyMapArray::new([KeyMap::from(
+                NAV_KEYMAP_ITEMS.as_slice(),
+            )]),
             file_diff,
             table_state: cell::RefCell::new(table_state),
             current_chunk: 0,
@@ -80,9 +81,12 @@ impl View for TextView {
         self.file_diff.name().to_string_lossy().into_owned()
     }
 
-    fn keymap<'a>(&'a self) -> AggregatedKeyMap<'a> {
-        AggregatedKeyMap::new(vec![&self.nav_keymap])
-        // TODO: AggregatedKeyMap::new(vec![&self.nav_keymap, &self.op_keymap])
+    fn keymap_text(&self) -> Text<'_> {
+        Text::from(&self.keymap)
+    }
+
+    fn keymapper(&self) -> &dyn KeyMapper {
+        &self.keymap
     }
 
     /// Handles a navigation event.
