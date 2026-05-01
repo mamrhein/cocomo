@@ -302,13 +302,23 @@ impl<'a> From<&'a AggregatedKeyMap<'a>> for Text<'a> {
 }
 
 pub(crate) trait KeyMapper {
+    /// Returns a reference to the underlying `KeyMap`.
+    fn keymap(&self) -> &dyn KeyMapper;
+
     /// Maps a `KeyCode` to an `Event`, if one exists.
     ///
     /// When looking up keys, only **enabled** mappings are considered.
-    fn map_key_code(&self, key_code: KeyCode) -> Option<Event>;
+    fn map_key_code(&self, key_code: KeyCode) -> Option<Event> {
+        self.keymap().map_key_code(key_code)
+    }
 }
 
 impl KeyMapper for KeyMap {
+    #[inline(always)]
+    fn keymap(&self) -> &dyn KeyMapper {
+        self
+    }
+
     fn map_key_code(&self, key_code: KeyCode) -> Option<Event> {
         self.0
             .iter()
@@ -324,6 +334,10 @@ impl KeyMapper for KeyMap {
 }
 
 impl<'a> KeyMapper for AggregatedKeyMap<'a> {
+    #[inline(always)]
+    fn keymap(&self) -> &dyn KeyMapper {
+        self
+    }
     fn map_key_code(&self, key_code: KeyCode) -> Option<Event> {
         for map in &self.maps {
             if let Some(event) = map.map_key_code(key_code) {
