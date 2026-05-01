@@ -8,10 +8,6 @@
 // $Revision$
 // ---------------------------------------------------------------------------
 
-use core::fmt::Debug;
-use std::sync;
-
-use futures::executor::block_on;
 use ratatui::{
     buffer::Buffer,
     crossterm::event::{KeyCode, KeyEvent},
@@ -22,10 +18,11 @@ use ratatui::{
         Block, BorderType, Borders, Clear, Padding, Widget, WidgetRef,
     },
 };
+use std::fmt::Debug;
+use std::sync;
 
 use crate::{
-    app::send_event,
-    event::{AppEvent, Event},
+    event::{AppEvent, Event, EventThread},
     keymap::{KeyMap, KeyMapItem, KeyMapper},
 };
 
@@ -34,6 +31,8 @@ pub(crate) trait Dialog: Debug + WidgetRef {
     /// Returns a reference to the dialog's keymap.
     fn keymap(&self) -> &KeyMap;
 
+    fn send_event(&self, event: Event);
+
     /// Handles a key event by mapping it to an `Event` and sending that to
     /// the app.
     fn handle_key_event(
@@ -41,7 +40,7 @@ pub(crate) trait Dialog: Debug + WidgetRef {
         key_event: KeyEvent,
     ) -> color_eyre::Result<()> {
         if let Some(event) = self.keymap().map_key_code(key_event.code) {
-            block_on(send_event(event));
+            self.send_event(event);
         }
         Ok(())
     }
@@ -51,17 +50,19 @@ pub(crate) trait Dialog: Debug + WidgetRef {
 /// waits for the user to confirm or cancel.
 #[derive(Debug)]
 pub(crate) struct SimpleConfirm {
-    pub title: String,
-    pub message: String,
+    title: String,
+    message: String,
+    sender: EventThread,
 }
 
 impl SimpleConfirm {
     /// Creates a new `SimpleConfirm` dialog with the given title and message.
     #[inline(always)]
-    pub fn new(title: &str, message: &str) -> Self {
+    pub fn new(title: &str, message: &str, sender: EventThread) -> Self {
         Self {
             title: title.to_owned(),
             message: message.to_owned(),
+            sender,
         }
     }
 }
@@ -94,6 +95,10 @@ impl Dialog for SimpleConfirm {
     #[inline(always)]
     fn keymap(&self) -> &KeyMap {
         &SIMPLE_CONFIRM_KEYMAP
+    }
+
+    fn send_event(&self, event: Event) {
+        self.sender.send(event);
     }
 }
 

@@ -12,7 +12,7 @@
 //! This module contains the main application state and logic. It handles
 //! events, manages views (tabs), and drives the main loop.
 
-use std::{convert::From, sync::LazyLock};
+use std::convert::From;
 
 use cocomo_core::FSItem;
 use ratatui::{
@@ -24,12 +24,11 @@ use ratatui::{
     text::Text,
     widgets::{Tabs, Widget},
 };
-use tokio::sync::RwLock;
 
 use crate::{
     dialog::SimpleConfirm,
     dirview::DirView,
-    event::{AppEvent, Event, EventQueue},
+    event::{AppEvent, Event, EventQueue, EventThread},
     keymap::{KeyHint, KeyMap, KeyMapItem, KeyMapper},
     pending_op::{Op, PendingOp},
     textview::TextView,
@@ -47,22 +46,6 @@ pub(crate) struct CmpItems {
 
 /// Views available in the application.
 pub(crate) type AppView = Box<dyn NavigableView>;
-
-/// Global event handler
-static EVENTS: LazyLock<RwLock<EventQueue>> =
-    LazyLock::new(|| RwLock::new(EventQueue::default()));
-
-/// Sends an app event to the global event handler.
-#[inline]
-pub(crate) async fn send_event(event: Event) {
-    EVENTS.write().await.enqueue(event);
-}
-
-/// Gets the next event from the global event handler.
-#[inline(always)]
-async fn get_next_event() -> color_eyre::Result<Event> {
-    EVENTS.write().await.dequeue().await
-}
 
 /// Pre-built key map items for the `App`.
 #[rustfmt::skip]
@@ -116,6 +99,8 @@ const APP_KEYMAP_ITEMS: [KeyMapItem; 6] = [
 pub(crate) struct App {
     /// Flag indicating if the application is running.
     running: bool,
+    /// Event queue for the application.
+    events: EventQueue,
     /// App level key map
     keymap: KeyMap,
     /// Open views (tabs).
@@ -136,6 +121,7 @@ impl App {
     ) -> color_eyre::Result<Self> {
         let mut app = Self {
             running: false,
+            events: EventQueue::default(),
             keymap: KeyMap::from(APP_KEYMAP_ITEMS.as_slice()),
             views: vec![],
             active_view: 0,
@@ -198,7 +184,7 @@ impl App {
         while self.running {
             terminal
                 .draw(|frame| frame.render_widget(&*self, frame.area()))?;
-            match get_next_event().await? {
+            match self.events.dequeue().await? {
                 Event::Tick => self.tick(),
                 Event::Crossterm(event) => match event {
                     crossterm::event::Event::Key(key_event)
@@ -236,7 +222,8 @@ impl App {
             return pending_op.dialog().handle_key_event(key_event);
         };
         if let Some(event) = self.keymap.map_key_code(key_event.code) {
-            send_event(event).await;
+            self.events.enqueue(event);
+            return Ok(());
         }
         // Forward key events that are not handled by the keymap to the
         // current view
@@ -260,7 +247,11 @@ impl App {
     pub fn close_tab(&mut self) {
         if self.views.len() == 1 {
             let msg = "Close last tab and quit?";
-            let confirm = Box::new(SimpleConfirm::new("", msg));
+            let confirm = Box::new(SimpleConfirm::new(
+                "",
+                msg,
+                EventThread::from(&self.events),
+            ));
             self.pending_op = Some(PendingOp::new(Op::Quit, confirm));
             return;
         }

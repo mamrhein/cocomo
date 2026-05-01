@@ -208,3 +208,9 @@ impl EventThread {
         let _ = self.sender.send(event);
     }
 }
+
+impl From<&EventQueue> for EventThread {
+    fn from(queue: &EventQueue) -> Self {
+        Self::new(queue.sender.clone())
+    }
+}
