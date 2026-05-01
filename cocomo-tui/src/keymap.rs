@@ -261,6 +261,7 @@ impl<'a> From<&'a KeyMap> for Line<'a> {
 /// Converts a `KeyMap` into a `Text` for display purposes.
 #[allow(clippy::fallible_impl_from)]
 impl<'a> From<&'a KeyMap> for Text<'a> {
+    #[inline(always)]
     fn from(key_map: &'a KeyMap) -> Self {
         Text::from(Line::from(key_map))
     }
@@ -273,10 +274,12 @@ impl<'a> From<&'a KeyMap> for Text<'a> {
 pub(crate) struct KeyMapArray<const N: usize>([KeyMap; N]);
 
 impl<const N: usize> KeyMapArray<N> {
+    #[inline(always)]
     pub(crate) const fn new(items: [KeyMap; N]) -> Self {
         Self(items)
     }
 
+    #[inline(always)]
     pub(crate) fn iter(&self) -> impl Iterator<Item = &KeyMap> + '_ {
         self.0.iter()
     }
@@ -331,6 +334,24 @@ impl<const N: usize> KeyMapper for KeyMapArray<N> {
 
     fn map_key_code(&self, key_code: KeyCode) -> Option<Event> {
         self.0.iter().find_map(|map| map.map_key_code(key_code))
+    }
+}
+
+pub(crate) trait KeyHint {
+    fn key_hint(&self) -> Text<'_>;
+}
+
+impl KeyHint for KeyMap {
+    #[inline(always)]
+    fn key_hint(&self) -> Text<'_> {
+        Text::from(self)
+    }
+}
+
+impl<const N: usize> KeyHint for KeyMapArray<N> {
+    #[inline(always)]
+    fn key_hint(&self) -> Text<'_> {
+        Text::from(self)
     }
 }
 
