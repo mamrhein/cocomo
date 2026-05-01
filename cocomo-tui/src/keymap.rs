@@ -269,15 +269,16 @@ impl<'a> From<&'a KeyMap> for Text<'a> {
 /// A fixed-size array of `KeyMap`s that can act as a `KeyMapper`.
 ///
 /// When looking up keys, only **enabled** mappings are considered.
+#[derive(Debug)]
 pub(crate) struct KeyMapArray<const N: usize>([KeyMap; N]);
 
-impl<const N: usize> KeyMapper for KeyMapArray<N> {
-    fn keymap(&self) -> &dyn KeyMapper {
-        self
+impl<const N: usize> KeyMapArray<N> {
+    pub(crate) const fn new(items: [KeyMap; N]) -> Self {
+        Self(items)
     }
 
-    fn map_key_code(&self, key_code: KeyCode) -> Option<Event> {
-        self.0.iter().find_map(|map| map.map_key_code(key_code))
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &KeyMap> + '_ {
+        self.0.iter()
     }
 }
 
@@ -287,41 +288,6 @@ impl<'a, const N: usize> From<&'a KeyMapArray<N>> for Text<'a> {
     fn from(key_maps: &'a KeyMapArray<N>) -> Self {
         let lines: Vec<Line<'a>> =
             key_maps.0.iter().map(Line::from).collect::<Vec<_>>();
-        Text::from(lines)
-    }
-}
-
-/// A collection of `KeyMap`s that can act as a `KeyMapper`.
-///
-/// When looking up keys, only **enabled** mappings are considered.
-#[derive(Debug)]
-pub(crate) struct AggregatedKeyMap<'a> {
-    maps: Vec<&'a KeyMap>,
-}
-
-impl<'a> AggregatedKeyMap<'a> {
-    /// Creates a new `AggregatedKeyMap` from a list of `KeyMap`s.
-    #[inline(always)]
-    #[must_use]
-    pub(crate) const fn new(maps: Vec<&'a KeyMap>) -> Self {
-        Self { maps }
-    }
-
-    /// Returns an iterator over the `KeyMap`s in this collection.
-    #[inline(always)]
-    pub(crate) fn iter(&self) -> impl Iterator<Item = &&KeyMap> {
-        self.maps.iter()
-    }
-}
-
-/// Converts an `AggregatedKeyMap` into a `Text` for display purposes.
-#[allow(clippy::fallible_impl_from)]
-impl<'a> From<&'a AggregatedKeyMap<'a>> for Text<'a> {
-    fn from(agg_map: &'a AggregatedKeyMap<'a>) -> Self {
-        let lines: Vec<Line<'a>> = agg_map
-            .iter()
-            .map(|map| Line::from(*map))
-            .collect::<Vec<_>>();
         Text::from(lines)
     }
 }
@@ -358,18 +324,13 @@ impl KeyMapper for KeyMap {
     }
 }
 
-impl<'a> KeyMapper for AggregatedKeyMap<'a> {
-    #[inline(always)]
+impl<const N: usize> KeyMapper for KeyMapArray<N> {
     fn keymap(&self) -> &dyn KeyMapper {
         self
     }
+
     fn map_key_code(&self, key_code: KeyCode) -> Option<Event> {
-        for map in &self.maps {
-            if let Some(event) = map.map_key_code(key_code) {
-                return Some(event);
-            }
-        }
-        None
+        self.0.iter().find_map(|map| map.map_key_code(key_code))
     }
 }
 
@@ -750,22 +711,5 @@ mod tests {
             Some(Event::Op(OpEvent::Copy))
         );
         assert!(key_maps.map_key_code(KeyCode::Char('r')).is_none());
-    }
-
-    #[test]
-    fn test_aggregated_keymap() {
-        let mut key_map_1 = KeyMap::from(&KEYMAP_ITEMS[..3]);
-        let mut key_map_2 = KeyMap::from(&KEYMAP_ITEMS[3..]);
-        let key_mapper =
-            AggregatedKeyMap::new(vec![&mut key_map_1, &mut key_map_2]);
-        assert_eq!(
-            key_mapper.map_key_code(KeyCode::Char('q')),
-            Some(Event::App(AppEvent::Quit))
-        );
-        assert_eq!(
-            key_mapper.map_key_code(KeyCode::Char('c')),
-            Some(Event::Op(OpEvent::Copy))
-        );
-        assert!(key_mapper.map_key_code(KeyCode::Char('r')).is_none());
     }
 }

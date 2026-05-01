@@ -14,12 +14,13 @@ use core::fmt::Debug;
 use cocomo_core::DiffItem;
 use ratatui::{
     crossterm::event::{KeyCode, KeyEvent},
+    text::Text,
     widgets::WidgetRef,
 };
 
 use crate::{
     event::{Event, NavEvent, OpEvent},
-    keymap::{AggregatedKeyMap, KeyMapItem, KeyMapper},
+    keymap::{KeyMapItem, KeyMapper},
 };
 
 /// Common trait for all views
@@ -44,8 +45,10 @@ pub(crate) trait View: Debug + WidgetRef {
         None
     }
 
-    /// Returns the aggregated key map for this view.
-    fn keymap<'a>(&'a self) -> AggregatedKeyMap<'a>;
+    fn keymap_text(&self) -> Text<'_>;
+
+    /// Returns a reference to the key mapper for this view.
+    fn keymapper(&self) -> &dyn KeyMapper;
 
     /// Handles a key event by mapping it to an app event and then handling
     /// that.
@@ -53,7 +56,7 @@ pub(crate) trait View: Debug + WidgetRef {
         &mut self,
         key_event: KeyEvent,
     ) -> color_eyre::Result<()> {
-        if let Some(event) = self.keymap().map_key_code(key_event.code) {
+        if let Some(event) = self.keymapper().map_key_code(key_event.code) {
             return match event {
                 Event::Nav(nav_event) => self.handle_nav_event(nav_event),
                 Event::Op(op_event) => self.handle_op_event(op_event),
