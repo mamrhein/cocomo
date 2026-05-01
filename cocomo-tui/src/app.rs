@@ -12,7 +12,7 @@
 //! This module contains the main application state and logic. It handles
 //! events, manages views (tabs), and drives the main loop.
 
-use std::{convert::From, io, sync::LazyLock};
+use std::{convert::From, sync::LazyLock};
 
 use cocomo_core::FSItem;
 use ratatui::{
@@ -130,15 +130,20 @@ pub(crate) struct App {
 
 impl App {
     /// Constructs a new instance of [`App`].
-    pub(crate) fn new() -> Self {
-        Self {
+    pub(crate) async fn new(
+        left_item: &Option<FSItem>,
+        right_item: &Option<FSItem>,
+    ) -> color_eyre::Result<Self> {
+        let mut app = Self {
             running: false,
             keymap: KeyMap::from(APP_KEYMAP_ITEMS.as_slice()),
             views: vec![],
             active_view: 0,
             show_key_hints: false,
             pending_op: None,
-        }
+        };
+        app.new_view(left_item, right_item).await?;
+        Ok(app)
     }
 
     /// Returns the active view.
@@ -152,11 +157,11 @@ impl App {
     }
 
     /// Creates a new app view.
-    pub(crate) async fn new_view(
+    async fn new_view(
         &mut self,
         left_item: &Option<FSItem>,
         right_item: &Option<FSItem>,
-    ) -> io::Result<()> {
+    ) -> color_eyre::Result<()> {
         debug_assert!(left_item.is_some() || right_item.is_some());
         let view: AppView = match (left_item, right_item) {
             (Some(left), _) => {
