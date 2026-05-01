@@ -40,7 +40,7 @@ use ratatui::{
 
 use crate::{
     event::{Event, NavEvent, OpEvent},
-    keymap::{KeyMap, KeyMapArray, KeyMapItem, KeyMapper},
+    keymap::{KeyHint, KeyMap, KeyMapArray, KeyMapItem, KeyMapper},
     view::{NAV_KEYMAP_ITEMS, NavigableView, View},
 };
 
@@ -241,6 +241,20 @@ impl DirView {
     }
 }
 
+impl KeyHint for DirView {
+    #[inline(always)]
+    fn key_hint(&self) -> Text<'_> {
+        Text::from(&self.keymap)
+    }
+}
+
+impl KeyMapper for DirView {
+    #[inline(always)]
+    fn keymap(&self) -> &dyn KeyMapper {
+        &self.keymap
+    }
+}
+
 impl View for DirView {
     fn title(&self) -> String {
         self.diff.name().to_string_lossy().into_owned()
@@ -254,14 +268,6 @@ impl View for DirView {
         let table_state = self.table_state.borrow();
         let i = table_state.selected()?;
         Some(&self.diff.items[i])
-    }
-
-    fn keymap_text(&self) -> Text<'_> {
-        Text::from(&self.keymap)
-    }
-
-    fn keymapper(&self) -> &dyn KeyMapper {
-        &self.keymap
     }
 
     /// Handles a navigation event.
@@ -302,7 +308,7 @@ impl View for DirView {
         &mut self,
         key_event: crossterm::event::KeyEvent,
     ) -> color_eyre::Result<()> {
-        if let Some(event) = self.keymapper().map_key_code(key_event.code) {
+        if let Some(event) = self.map_key_code(key_event.code) {
             return match event {
                 Event::Nav(nav_event) => self.handle_nav_event(nav_event),
                 Event::Op(op_event) => View::handle_op_event(self, op_event),

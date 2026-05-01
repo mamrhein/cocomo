@@ -28,7 +28,7 @@ use ratatui::{
 
 use crate::{
     event::{NavEvent, OpEvent},
-    keymap::{KeyMap, KeyMapArray, KeyMapper},
+    keymap::{KeyHint, KeyMap, KeyMapArray, KeyMapper},
     view::{NAV_KEYMAP_ITEMS, NavigableView, View},
 };
 
@@ -76,17 +76,23 @@ impl TextView {
     }
 }
 
+impl KeyHint for TextView {
+    #[inline(always)]
+    fn key_hint(&self) -> Text<'_> {
+        Text::from(&self.keymap)
+    }
+}
+
+impl KeyMapper for TextView {
+    #[inline(always)]
+    fn keymap(&self) -> &dyn KeyMapper {
+        &self.keymap
+    }
+}
+
 impl View for TextView {
     fn title(&self) -> String {
         self.file_diff.name().to_string_lossy().into_owned()
-    }
-
-    fn keymap_text(&self) -> Text<'_> {
-        Text::from(&self.keymap)
-    }
-
-    fn keymapper(&self) -> &dyn KeyMapper {
-        &self.keymap
     }
 
     /// Handles a navigation event.

@@ -30,7 +30,7 @@ use crate::{
     dialog::SimpleConfirm,
     dirview::DirView,
     event::{AppEvent, Event, EventQueue},
-    keymap::{KeyMap, KeyMapItem, KeyMapper},
+    keymap::{KeyHint, KeyMap, KeyMapItem, KeyMapper},
     pending_op::{Op, PendingOp},
     textview::TextView,
     view::NavigableView,
@@ -310,6 +310,20 @@ impl App {
     }
 }
 
+impl KeyHint for App {
+    #[inline(always)]
+    fn key_hint(&self) -> Text<'_> {
+        Text::from(&self.keymap)
+    }
+}
+
+impl KeyMapper for App {
+    #[inline(always)]
+    fn keymap(&self) -> &dyn KeyMapper {
+        &self.keymap
+    }
+}
+
 impl Widget for &App {
     /// Renders the user interface widgets.
     fn render(self, area: Rect, buf: &mut Buffer) {
@@ -325,8 +339,8 @@ impl Widget for &App {
 
         // Render key hints
         if self.show_key_hints {
-            let mut txt = Text::from(&self.keymap);
-            txt.extend(current_view.keymap_text());
+            let mut txt = self.key_hint();
+            txt.extend(current_view.key_hint());
             txt.centered().render(key_bar, buf);
         }
 
