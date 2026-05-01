@@ -29,7 +29,7 @@ use tokio::sync::RwLock;
 use crate::{
     dialog::SimpleConfirm,
     dirview::DirView,
-    event::{Event, EventHandler},
+    event::{AppEvent, Event, EventQueue},
     keymap::{AggregatedKeyMap, KeyMap, KeyMapItem, KeyMapper},
     pending_op::{Op, PendingOp},
     textview::TextView,
@@ -49,19 +49,19 @@ pub(crate) struct CmpItems {
 pub(crate) type AppView = Box<dyn NavigableView>;
 
 /// Global event handler
-static EVENTS: LazyLock<RwLock<EventHandler>> =
-    LazyLock::new(|| RwLock::new(EventHandler::default()));
+static EVENTS: LazyLock<RwLock<EventQueue>> =
+    LazyLock::new(|| RwLock::new(EventQueue::default()));
 
 /// Sends an app event to the global event handler.
 #[inline]
-pub(crate) async fn send_event(event: AppEvent) {
-    EVENTS.write().await.send(event);
+pub(crate) async fn send_event(event: Event) {
+    EVENTS.write().await.enqueue(event);
 }
 
 /// Gets the next event from the global event handler.
 #[inline(always)]
 async fn get_next_event() -> color_eyre::Result<Event> {
-    EVENTS.write().await.next().await
+    EVENTS.write().await.dequeue().await
 }
 
 /// Pre-built key map items for the `App`.

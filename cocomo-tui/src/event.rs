@@ -108,16 +108,16 @@ pub(crate) enum OpEvent {
 
 /// Terminal event handler.
 #[derive(Debug)]
-pub struct EventHandler {
+pub struct EventQueue {
     /// Event sender channel.
     sender: mpsc::UnboundedSender<Event>,
     /// Event receiver channel.
     receiver: mpsc::UnboundedReceiver<Event>,
 }
 
-impl EventHandler {
-    /// Constructs a new instance of [`EventHandler`] and spawns a new thread
-    /// to handle events.
+impl EventQueue {
+    /// Constructs a new instance of [`EventQueue`] and spawns a new thread
+    /// to handle the queued events.
     #[must_use]
     pub(crate) fn new() -> Self {
         let (sender, receiver) = mpsc::unbounded_channel();
@@ -126,9 +126,9 @@ impl EventHandler {
         Self { sender, receiver }
     }
 
-    /// Receives an event from the sender.
+    /// Dequeues an event from the queue.
     ///
-    /// This function blocks until an event is received.
+    /// This function blocks until an event is available.
     ///
     /// # Errors
     ///
@@ -136,29 +136,25 @@ impl EventHandler {
     /// This can happen if an error occurs in the event thread. In
     /// practice, this should not happen unless there is a problem with the
     /// underlying terminal.
-    pub(crate) async fn next(&mut self) -> color_eyre::Result<Event> {
+    pub(crate) async fn dequeue(&mut self) -> color_eyre::Result<Event> {
         self.receiver
             .recv()
             .await
             .ok_or_eyre("Failed to receive event")
     }
 
-    /// Queue an event to be sent to the event receiver.
+    /// Enqueues an event to the queue.
     ///
     /// This is useful for sending events to the event handler which will be
     /// processed by the next iteration of the application's event loop.
-    pub(crate) fn send(&mut self, event: Event) {
+    pub(crate) fn enqueue(&mut self, event: Event) {
         // Ignore the result as the reciever cannot be dropped while this
         // struct still has a reference to it
         let _ = self.sender.send(event);
     }
-
-    pub(crate) const fn sender(&self) -> &mpsc::UnboundedSender<Event> {
-        &self.sender
-    }
 }
 
-impl Default for EventHandler {
+impl Default for EventQueue {
     fn default() -> Self {
         Self::new()
     }
