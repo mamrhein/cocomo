@@ -315,7 +315,7 @@ impl KeyHint for App {
 
 impl KeyMapper for App {
     #[inline(always)]
-    fn keymap(&self) -> &dyn KeyMapper {
+    fn keymapper(&self) -> &dyn KeyMapper {
         &self.keymap
     }
 }

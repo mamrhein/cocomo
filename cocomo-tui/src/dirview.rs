@@ -250,7 +250,7 @@ impl KeyHint for DirView {
 
 impl KeyMapper for DirView {
     #[inline(always)]
-    fn keymap(&self) -> &dyn KeyMapper {
+    fn keymapper(&self) -> &dyn KeyMapper {
         &self.keymap
     }
 }

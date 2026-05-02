@@ -85,7 +85,7 @@ impl KeyHint for TextView {
 
 impl KeyMapper for TextView {
     #[inline(always)]
-    fn keymap(&self) -> &dyn KeyMapper {
+    fn keymapper(&self) -> &dyn KeyMapper {
         &self.keymap
     }
 }

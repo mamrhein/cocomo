@@ -297,19 +297,19 @@ impl<'a, const N: usize> From<&'a KeyMapArray<N>> for Text<'a> {
 
 pub(crate) trait KeyMapper {
     /// Returns a reference to the underlying `KeyMap`.
-    fn keymap(&self) -> &dyn KeyMapper;
+    fn keymapper(&self) -> &dyn KeyMapper;
 
     /// Maps a `KeyCode` to an `Event`, if one exists.
     ///
     /// When looking up keys, only **enabled** mappings are considered.
     fn map_key_code(&self, key_code: KeyCode) -> Option<Event> {
-        self.keymap().map_key_code(key_code)
+        self.keymapper().map_key_code(key_code)
     }
 }
 
 impl KeyMapper for KeyMap {
     #[inline(always)]
-    fn keymap(&self) -> &dyn KeyMapper {
+    fn keymapper(&self) -> &dyn KeyMapper {
         self
     }
 
@@ -328,7 +328,7 @@ impl KeyMapper for KeyMap {
 }
 
 impl<const N: usize> KeyMapper for KeyMapArray<N> {
-    fn keymap(&self) -> &dyn KeyMapper {
+    fn keymapper(&self) -> &dyn KeyMapper {
         self
     }
 
