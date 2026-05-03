@@ -362,15 +362,13 @@ pub(crate) trait KeyMapper {
     }
 }
 
-impl KeyMapper for SingleKeyMap {
-    #[inline(always)]
+impl<T: KeyMap> KeyMapper for T {
     fn keymapper(&self) -> &dyn KeyMapper {
         self
     }
 
     fn map_key_code(&self, key_code: KeyCode) -> Option<Event> {
-        self.items
-            .iter()
+        self.iter()
             .filter(|key_map| key_map.is_enabled())
             .find(|key_map| {
                 key_map.key_code() == key_code
@@ -379,16 +377,6 @@ impl KeyMapper for SingleKeyMap {
                         .is_some_and(|alt| alt == key_code)
             })
             .map(|key_map| key_map.event())
-    }
-}
-
-impl<const N: usize> KeyMapper for GroupedKeyMap<N> {
-    fn keymapper(&self) -> &dyn KeyMapper {
-        self
-    }
-
-    fn map_key_code(&self, key_code: KeyCode) -> Option<Event> {
-        self.maps.iter().find_map(|map| map.map_key_code(key_code))
     }
 }
 
