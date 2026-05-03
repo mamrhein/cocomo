@@ -71,7 +71,7 @@ pub(crate) enum AppEvent {
     /// Switch to the previous tab.
     PrevTab,
     /// Refresh the current view.
-    Refresh,
+    StateChanged,
     /// Confirm an action.
     Confirmed,
     /// Cancel an action.
