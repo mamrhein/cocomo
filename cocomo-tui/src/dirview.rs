@@ -41,7 +41,7 @@ use ratatui::{
 use crate::{
     event::{Event, NavEvent, OpEvent},
     keymap::{GroupedKeyMap, KeyHint, KeyMapItem, KeyMapper, SingleKeyMap},
-    view::{NAV_KEYMAP_ITEMS, NavigableView, View},
+    view::{NAV_KEYMAP_ITEMS, TableView, View},
 };
 
 /// Key map items for ops keymap.
@@ -319,7 +319,7 @@ impl View for DirView {
     }
 }
 
-impl NavigableView for DirView {
+impl TableView for DirView {
     /// Makes the previous item the current item.
     fn prev(&mut self) {
         let mut table_state = self.table_state.borrow_mut();

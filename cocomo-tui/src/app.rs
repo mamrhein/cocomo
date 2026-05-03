@@ -32,7 +32,7 @@ use crate::{
     keymap::{GroupedKeyMap, KeyHint, KeyMapItem, KeyMapper, SingleKeyMap},
     pending_op::{Op, PendingOp},
     textview::TextView,
-    view::NavigableView,
+    view::TableView,
 };
 
 /// Container for items currently being compared.
@@ -45,7 +45,7 @@ pub(crate) struct CmpItems {
 }
 
 /// Views available in the application.
-pub(crate) type AppView = Box<dyn NavigableView>;
+pub(crate) type AppView = Box<dyn TableView>;
 
 /// Pre-built key map items for the `App`.
 #[rustfmt::skip]

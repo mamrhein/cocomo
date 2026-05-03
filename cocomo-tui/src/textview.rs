@@ -29,7 +29,7 @@ use ratatui::{
 use crate::{
     event::{NavEvent, OpEvent},
     keymap::{GroupedKeyMap, KeyHint, KeyMapper, SingleKeyMap},
-    view::{NAV_KEYMAP_ITEMS, NavigableView, View},
+    view::{NAV_KEYMAP_ITEMS, TableView, View},
 };
 
 /// View for displaying side-by-side text file contents.
@@ -125,7 +125,7 @@ impl View for TextView {
     }
 }
 
-impl NavigableView for TextView {
+impl TableView for TextView {
     /// Makes the previous chunk the current chunk.
     fn prev(&mut self) {
         if self.current_chunk > 0 {

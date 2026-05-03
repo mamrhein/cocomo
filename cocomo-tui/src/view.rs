@@ -108,8 +108,9 @@ pub(crate) const NAV_KEYMAP_ITEMS: [KeyMapItem; 4] = [
     ),
 ];
 
-/// Trait for views that support cursor-style navigation.
-pub(crate) trait NavigableView: View {
+/// Trait for views that show a table of items and support cursor-style
+/// navigation.
+pub(crate) trait TableView: View {
     /// Makes the previous logical item the current item.
     fn prev(&mut self);
 
