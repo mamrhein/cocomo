@@ -40,7 +40,7 @@ use ratatui::{
 
 use crate::{
     event::{Event, NavEvent, OpEvent},
-    keymap::{KeyHint, KeyMap, KeyMapArray, KeyMapItem, KeyMapper},
+    keymap::{GroupedKeyMap, KeyHint, KeyMapItem, KeyMapper, SingleKeyMap},
     view::{NAV_KEYMAP_ITEMS, NavigableView, View},
 };
 
@@ -102,7 +102,7 @@ fn indicator<'a>(t: DiffItemType) -> Text<'a> {
 #[derive(Debug)]
 pub struct DirView {
     /// View level key maps
-    keymap: KeyMapArray<2>,
+    keymap: GroupedKeyMap<2>,
     /// The comparison results.
     diff: DirDiff,
     /// The state of the table.
@@ -121,9 +121,9 @@ impl DirView {
             table_state.select(Some(0));
         }
         Ok(Self {
-            keymap: KeyMapArray::new([
-                KeyMap::from(NAV_KEYMAP_ITEMS.as_slice()),
-                KeyMap::from(OP_KEYMAP_ITEMS.as_slice()),
+            keymap: GroupedKeyMap::new([
+                SingleKeyMap::from(NAV_KEYMAP_ITEMS.as_slice()),
+                SingleKeyMap::from(OP_KEYMAP_ITEMS.as_slice()),
             ]),
             diff,
             table_state: cell::RefCell::new(table_state),

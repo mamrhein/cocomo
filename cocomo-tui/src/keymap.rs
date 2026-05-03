@@ -213,12 +213,12 @@ impl<'a> From<&'a KeyMapItem> for Span<'a> {
 ///
 /// When looking up keys, only **enabled** mappings are considered.
 #[derive(Debug, Clone)]
-pub(crate) struct KeyMap(Vec<KeyMapItem>);
+pub(crate) struct SingleKeyMap(Vec<KeyMapItem>);
 
-/// Creates a `KeyMap` from a slice of key map items.
+/// Creates a `SingleKeyMap` from a slice of key map items.
 ///
 /// The provided slice is cloned into the internal vector.
-impl From<&[KeyMapItem]> for KeyMap {
+impl From<&[KeyMapItem]> for SingleKeyMap {
     fn from(key_maps: &[KeyMapItem]) -> Self {
         debug_assert!(!key_maps.is_empty());
         Self(key_maps.to_vec())
@@ -229,7 +229,7 @@ impl From<&[KeyMapItem]> for KeyMap {
 ///
 /// The output format is: `| Key1: val1 | Key2: val2 | ... |`
 /// Only enabled mappings are included in the output.
-impl fmt::Display for KeyMap {
+impl fmt::Display for SingleKeyMap {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let delim = " ";
         write!(
@@ -247,8 +247,8 @@ impl fmt::Display for KeyMap {
 
 /// Converts a `KeyMap` into a `Line` for display purposes.
 #[allow(clippy::fallible_impl_from)]
-impl<'a> From<&'a KeyMap> for Line<'a> {
-    fn from(key_map: &'a KeyMap) -> Self {
+impl<'a> From<&'a SingleKeyMap> for Line<'a> {
+    fn from(key_map: &'a SingleKeyMap) -> Self {
         let mut spans = vec![Span::from(key_map.0.first().unwrap())];
         for item in key_map.0.iter().skip(1) {
             spans.push(Span::raw(" "));
@@ -260,9 +260,9 @@ impl<'a> From<&'a KeyMap> for Line<'a> {
 
 /// Converts a `KeyMap` into a `Text` for display purposes.
 #[allow(clippy::fallible_impl_from)]
-impl<'a> From<&'a KeyMap> for Text<'a> {
+impl<'a> From<&'a SingleKeyMap> for Text<'a> {
     #[inline(always)]
-    fn from(key_map: &'a KeyMap) -> Self {
+    fn from(key_map: &'a SingleKeyMap) -> Self {
         Text::from(Line::from(key_map))
     }
 }
@@ -271,24 +271,24 @@ impl<'a> From<&'a KeyMap> for Text<'a> {
 ///
 /// When looking up keys, only **enabled** mappings are considered.
 #[derive(Debug)]
-pub(crate) struct KeyMapArray<const N: usize>([KeyMap; N]);
+pub(crate) struct GroupedKeyMap<const N: usize>([SingleKeyMap; N]);
 
-impl<const N: usize> KeyMapArray<N> {
+impl<const N: usize> GroupedKeyMap<N> {
     #[inline(always)]
-    pub(crate) const fn new(items: [KeyMap; N]) -> Self {
+    pub(crate) const fn new(items: [SingleKeyMap; N]) -> Self {
         Self(items)
     }
 
     #[inline(always)]
-    pub(crate) fn iter(&self) -> impl Iterator<Item = &KeyMap> + '_ {
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &SingleKeyMap> + '_ {
         self.0.iter()
     }
 }
 
 /// Converts a `KeyMapArray` into a `Text` for display purposes.
 #[allow(clippy::fallible_impl_from)]
-impl<'a, const N: usize> From<&'a KeyMapArray<N>> for Text<'a> {
-    fn from(key_maps: &'a KeyMapArray<N>) -> Self {
+impl<'a, const N: usize> From<&'a GroupedKeyMap<N>> for Text<'a> {
+    fn from(key_maps: &'a GroupedKeyMap<N>) -> Self {
         let lines: Vec<Line<'a>> =
             key_maps.0.iter().map(Line::from).collect::<Vec<_>>();
         Text::from(lines)
@@ -307,7 +307,7 @@ pub(crate) trait KeyMapper {
     }
 }
 
-impl KeyMapper for KeyMap {
+impl KeyMapper for SingleKeyMap {
     #[inline(always)]
     fn keymapper(&self) -> &dyn KeyMapper {
         self
@@ -327,7 +327,7 @@ impl KeyMapper for KeyMap {
     }
 }
 
-impl<const N: usize> KeyMapper for KeyMapArray<N> {
+impl<const N: usize> KeyMapper for GroupedKeyMap<N> {
     fn keymapper(&self) -> &dyn KeyMapper {
         self
     }
@@ -337,18 +337,19 @@ impl<const N: usize> KeyMapper for KeyMapArray<N> {
     }
 }
 
+/// `KeyHint` provides a way to display key hints for a given key map.
 pub(crate) trait KeyHint {
     fn key_hint(&self) -> Text<'_>;
 }
 
-impl KeyHint for KeyMap {
+impl KeyHint for SingleKeyMap {
     #[inline(always)]
     fn key_hint(&self) -> Text<'_> {
         Text::from(self)
     }
 }
 
-impl<const N: usize> KeyHint for KeyMapArray<N> {
+impl<const N: usize> KeyHint for GroupedKeyMap<N> {
     #[inline(always)]
     fn key_hint(&self) -> Text<'_> {
         Text::from(self)
@@ -418,8 +419,8 @@ mod tests {
     ];
 
     /// Pre-built key mapper instance for testing.
-    static KEY_MAPPER: LazyLock<KeyMap> =
-        LazyLock::new(|| KeyMap::from(KEYMAP_ITEMS.as_slice()));
+    static KEY_MAPPER: LazyLock<SingleKeyMap> =
+        LazyLock::new(|| SingleKeyMap::from(KEYMAP_ITEMS.as_slice()));
 
     /// Tests `KeyMapItem::new()` constructor and all getter methods.
     #[test]
@@ -592,7 +593,7 @@ mod tests {
             Event::Op(OpEvent::Copy),
         )];
 
-        let key_mapper = KeyMap(key_maps);
+        let key_mapper = SingleKeyMap(key_maps);
 
         // Both primary and alt should not map when disabled
         assert_eq!(key_mapper.map_key_code(KeyCode::Char('c')), None);
@@ -647,7 +648,7 @@ mod tests {
             ),
         ];
 
-        let key_mapper = KeyMap(key_maps);
+        let key_mapper = SingleKeyMap(key_maps);
 
         // Only first enabled key should be found
         assert_eq!(
@@ -670,7 +671,7 @@ mod tests {
             Event::Op(OpEvent::Copy),
         );
 
-        let key_mapper = KeyMap(vec![key_map]);
+        let key_mapper = SingleKeyMap(vec![key_map]);
 
         // Initially disabled
         assert_eq!(key_mapper.map_key_code(KeyCode::Char('x')), None);
@@ -679,7 +680,7 @@ mod tests {
         let mut key_map = key_mapper.0.into_iter().next().unwrap();
         key_map.set_enabled(true);
 
-        let key_mapper = KeyMap(vec![key_map]);
+        let key_mapper = SingleKeyMap(vec![key_map]);
         assert_eq!(
             key_mapper.map_key_code(KeyCode::Char('x')),
             Some(Event::Op(OpEvent::Copy))
@@ -720,9 +721,9 @@ mod tests {
 
     #[test]
     fn test_keymap_array() {
-        let key_map_1 = KeyMap::from(&KEYMAP_ITEMS[..3]);
-        let key_map_2 = KeyMap::from(&KEYMAP_ITEMS[3..]);
-        let key_maps = KeyMapArray([key_map_1, key_map_2]);
+        let key_map_1 = SingleKeyMap::from(&KEYMAP_ITEMS[..3]);
+        let key_map_2 = SingleKeyMap::from(&KEYMAP_ITEMS[3..]);
+        let key_maps = GroupedKeyMap([key_map_1, key_map_2]);
         assert_eq!(
             key_maps.map_key_code(KeyCode::Char('q')),
             Some(Event::App(AppEvent::Quit))

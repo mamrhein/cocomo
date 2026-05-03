@@ -29,7 +29,7 @@ use crate::{
     dialog::SimpleConfirm,
     dirview::DirView,
     event::{AppEvent, Event, EventQueue, EventThread},
-    keymap::{KeyHint, KeyMap, KeyMapItem, KeyMapper},
+    keymap::{GroupedKeyMap, KeyHint, KeyMapItem, KeyMapper, SingleKeyMap},
     pending_op::{Op, PendingOp},
     textview::TextView,
     view::NavigableView,
@@ -102,7 +102,7 @@ pub(crate) struct App {
     /// Event queue for the application.
     events: EventQueue,
     /// App level key map
-    keymap: KeyMap,
+    keymap: GroupedKeyMap<1>,
     /// Open views (tabs).
     views: Vec<AppView>,
     /// Index of the currently active view.
@@ -122,7 +122,9 @@ impl App {
         let mut app = Self {
             running: false,
             events: EventQueue::default(),
-            keymap: KeyMap::from(APP_KEYMAP_ITEMS.as_slice()),
+            keymap: GroupedKeyMap::new([SingleKeyMap::from(
+                APP_KEYMAP_ITEMS.as_slice(),
+            )]),
             views: vec![],
             active_view: 0,
             show_key_hints: false,

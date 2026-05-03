@@ -23,13 +23,13 @@ use std::sync;
 
 use crate::{
     event::{AppEvent, Event, EventThread},
-    keymap::{KeyMap, KeyMapItem, KeyMapper},
+    keymap::{KeyMapItem, KeyMapper, SingleKeyMap},
 };
 
 /// A trait for dialog widgets that handle key events and have a keymap.
 pub(crate) trait Dialog: Debug + WidgetRef {
     /// Returns a reference to the dialog's keymap.
-    fn keymap(&self) -> &KeyMap;
+    fn keymap(&self) -> &SingleKeyMap;
 
     fn send_event(&self, event: Event);
 
@@ -86,14 +86,14 @@ const SIMPLE_CONFIRM_KEYMAP_ITEMS: [KeyMapItem; 2] = [
 ];
 
 /// Pre-built key map instance for the `SimpleConfirm` dialog.
-static SIMPLE_CONFIRM_KEYMAP: sync::LazyLock<KeyMap> =
+static SIMPLE_CONFIRM_KEYMAP: sync::LazyLock<SingleKeyMap> =
     sync::LazyLock::new(|| {
-        KeyMap::from(SIMPLE_CONFIRM_KEYMAP_ITEMS.as_slice())
+        SingleKeyMap::from(SIMPLE_CONFIRM_KEYMAP_ITEMS.as_slice())
     });
 
 impl Dialog for SimpleConfirm {
     #[inline(always)]
-    fn keymap(&self) -> &KeyMap {
+    fn keymap(&self) -> &SingleKeyMap {
         &SIMPLE_CONFIRM_KEYMAP
     }
 

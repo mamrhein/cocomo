@@ -28,7 +28,7 @@ use ratatui::{
 
 use crate::{
     event::{NavEvent, OpEvent},
-    keymap::{KeyHint, KeyMap, KeyMapArray, KeyMapper},
+    keymap::{GroupedKeyMap, KeyHint, KeyMapper, SingleKeyMap},
     view::{NAV_KEYMAP_ITEMS, NavigableView, View},
 };
 
@@ -36,7 +36,7 @@ use crate::{
 #[derive(Debug)]
 pub struct TextView {
     /// View level key maps
-    keymap: KeyMapArray<1>,
+    keymap: GroupedKeyMap<1>,
     /// The diff data between the two files.
     file_diff: TextDiff,
     /// The state of the table.
@@ -57,7 +57,7 @@ impl TextView {
             table_state.select(Some(0));
         }
         Ok(Self {
-            keymap: KeyMapArray::new([KeyMap::from(
+            keymap: GroupedKeyMap::new([SingleKeyMap::from(
                 NAV_KEYMAP_ITEMS.as_slice(),
             )]),
             file_diff,
