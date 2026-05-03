@@ -285,6 +285,20 @@ impl<const N: usize> GroupedKeyMap<N> {
     }
 }
 
+/// `GroupedKeyMap` displays each contained `SingleKeyMap` on a
+/// separate line.
+///
+/// Each line's format is: `| Key1: val1 | Key2: val2 | ... |`
+/// Only enabled mappings are included in the output.
+impl<const N: usize> fmt::Display for GroupedKeyMap<N> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for key_map in self.0.iter() {
+            writeln!(f, "{}", key_map)?;
+        }
+        Ok(())
+    }
+}
+
 /// Converts a `KeyMapArray` into a `Text` for display purposes.
 #[allow(clippy::fallible_impl_from)]
 impl<'a, const N: usize> From<&'a GroupedKeyMap<N>> for Text<'a> {
