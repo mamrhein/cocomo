@@ -315,6 +315,28 @@ impl<'a, const N: usize> From<&'a GroupedKeyMap<N>> for Text<'a> {
     }
 }
 
+/// A collection of key mappings
+pub(crate) trait KeyMap: fmt::Display {
+    /// Return an iterator over the keymaps items
+    fn iter(&self) -> impl Iterator<Item = &KeyMapItem> + '_;
+
+    fn find_item_by_name(&self, name: &str) -> Option<&KeyMapItem> {
+        self.iter().find(|item| item.name == name)
+    }
+}
+
+impl KeyMap for SingleKeyMap {
+    fn iter(&self) -> impl Iterator<Item = &KeyMapItem> + '_ {
+        self.items.iter()
+    }
+}
+
+impl<const N: usize> KeyMap for GroupedKeyMap<N> {
+    fn iter(&self) -> impl Iterator<Item = &KeyMapItem> + '_ {
+        self.maps.iter().flat_map(|map| &map.items)
+    }
+}
+
 /// `KeyMapper` provides a way to map `KeyCode` values to `Event`s.
 pub(crate) trait KeyMapper {
     /// Returns a reference to the underlying `KeyMap`.
