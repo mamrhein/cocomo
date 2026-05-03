@@ -11,7 +11,8 @@
 //!
 //! This module provides key mapping functionality for translating terminal
 //! keyboard events into application-level actions. It defines structures for
-//! managing key bindings and converting between different key representations.
+//! managing key bindings and converting between different key
+//! representations.
 //!
 //! ## Overview
 //!
@@ -363,6 +364,7 @@ pub(crate) trait KeyMapper {
 }
 
 impl<T: KeyMap> KeyMapper for T {
+    #[inline(always)]
     fn keymapper(&self) -> &dyn KeyMapper {
         self
     }
@@ -403,9 +405,8 @@ impl<const N: usize> KeyHint for GroupedKeyMap<N> {
 mod tests {
     use std::sync::LazyLock;
 
-    use crate::event::{AppEvent, NavEvent, OpEvent};
-
     use super::*;
+    use crate::event::{AppEvent, NavEvent, OpEvent};
 
     /// Default set of key map items used across multiple tests.
     ///
