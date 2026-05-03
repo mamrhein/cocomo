@@ -213,15 +213,19 @@ impl<'a> From<&'a KeyMapItem> for Span<'a> {
 ///
 /// When looking up keys, only **enabled** mappings are considered.
 #[derive(Debug, Clone)]
-pub(crate) struct SingleKeyMap(Vec<KeyMapItem>);
+pub(crate) struct SingleKeyMap {
+    items: Vec<KeyMapItem>,
+}
 
 /// Creates a `SingleKeyMap` from a slice of key map items.
 ///
 /// The provided slice is cloned into the internal vector.
 impl From<&[KeyMapItem]> for SingleKeyMap {
-    fn from(key_maps: &[KeyMapItem]) -> Self {
-        debug_assert!(!key_maps.is_empty());
-        Self(key_maps.to_vec())
+    fn from(items: &[KeyMapItem]) -> Self {
+        debug_assert!(!items.is_empty());
+        Self {
+            items: items.to_vec(),
+        }
     }
 }
 
@@ -235,7 +239,7 @@ impl fmt::Display for SingleKeyMap {
         write!(
             f,
             "{}",
-            self.0
+            self.items
                 .iter()
                 .filter(|km| km.is_enabled())
                 .map(|key_map| format!("{}", key_map))
@@ -249,8 +253,8 @@ impl fmt::Display for SingleKeyMap {
 #[allow(clippy::fallible_impl_from)]
 impl<'a> From<&'a SingleKeyMap> for Line<'a> {
     fn from(key_map: &'a SingleKeyMap) -> Self {
-        let mut spans = vec![Span::from(key_map.0.first().unwrap())];
-        for item in key_map.0.iter().skip(1) {
+        let mut spans = vec![Span::from(key_map.items.first().unwrap())];
+        for item in key_map.items.iter().skip(1) {
             spans.push(Span::raw(" "));
             spans.push(Span::from(item));
         }
@@ -271,12 +275,14 @@ impl<'a> From<&'a SingleKeyMap> for Text<'a> {
 ///
 /// When looking up keys, only **enabled** mappings are considered.
 #[derive(Debug)]
-pub(crate) struct GroupedKeyMap<const N: usize>([SingleKeyMap; N]);
+pub(crate) struct GroupedKeyMap<const N: usize> {
+    maps: [SingleKeyMap; N],
+}
 
 impl<const N: usize> GroupedKeyMap<N> {
     #[inline(always)]
-    pub(crate) const fn new(items: [SingleKeyMap; N]) -> Self {
-        Self(items)
+    pub(crate) const fn new(maps: [SingleKeyMap; N]) -> Self {
+        Self { maps }
     }
 
     #[inline(always)]
@@ -292,7 +298,7 @@ impl<const N: usize> GroupedKeyMap<N> {
 /// Only enabled mappings are included in the output.
 impl<const N: usize> fmt::Display for GroupedKeyMap<N> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for key_map in self.0.iter() {
+        for key_map in self.maps.iter() {
             writeln!(f, "{}", key_map)?;
         }
         Ok(())
@@ -304,7 +310,7 @@ impl<const N: usize> fmt::Display for GroupedKeyMap<N> {
 impl<'a, const N: usize> From<&'a GroupedKeyMap<N>> for Text<'a> {
     fn from(key_maps: &'a GroupedKeyMap<N>) -> Self {
         let lines: Vec<Line<'a>> =
-            key_maps.0.iter().map(Line::from).collect::<Vec<_>>();
+            key_maps.maps.iter().map(Line::from).collect::<Vec<_>>();
         Text::from(lines)
     }
 }
@@ -329,7 +335,7 @@ impl KeyMapper for SingleKeyMap {
     }
 
     fn map_key_code(&self, key_code: KeyCode) -> Option<Event> {
-        self.0
+        self.items
             .iter()
             .filter(|key_map| key_map.is_enabled())
             .find(|key_map| {
@@ -348,7 +354,7 @@ impl<const N: usize> KeyMapper for GroupedKeyMap<N> {
     }
 
     fn map_key_code(&self, key_code: KeyCode) -> Option<Event> {
-        self.0.iter().find_map(|map| map.map_key_code(key_code))
+        self.maps.iter().find_map(|map| map.map_key_code(key_code))
     }
 }
 
@@ -608,7 +614,7 @@ mod tests {
             Event::Op(OpEvent::Copy),
         )];
 
-        let key_mapper = SingleKeyMap(key_maps);
+        let key_mapper = SingleKeyMap { items: key_maps };
 
         // Both primary and alt should not map when disabled
         assert_eq!(key_mapper.map_key_code(KeyCode::Char('c')), None);
@@ -663,7 +669,7 @@ mod tests {
             ),
         ];
 
-        let key_mapper = SingleKeyMap(key_maps);
+        let key_mapper = SingleKeyMap { items: key_maps };
 
         // Only first enabled key should be found
         assert_eq!(
@@ -686,16 +692,20 @@ mod tests {
             Event::Op(OpEvent::Copy),
         );
 
-        let key_mapper = SingleKeyMap(vec![key_map]);
+        let key_mapper = SingleKeyMap {
+            items: vec![key_map],
+        };
 
         // Initially disabled
         assert_eq!(key_mapper.map_key_code(KeyCode::Char('x')), None);
 
         // Enable and try again
-        let mut key_map = key_mapper.0.into_iter().next().unwrap();
+        let mut key_map = key_mapper.items.into_iter().next().unwrap();
         key_map.set_enabled(true);
 
-        let key_mapper = SingleKeyMap(vec![key_map]);
+        let key_mapper = SingleKeyMap {
+            items: vec![key_map],
+        };
         assert_eq!(
             key_mapper.map_key_code(KeyCode::Char('x')),
             Some(Event::Op(OpEvent::Copy))
@@ -729,7 +739,7 @@ mod tests {
         // Check that all items are in the text
         let line = text.lines.first().unwrap();
         let spans = line.spans.iter().filter(|span| span.to_string() != " ");
-        for (span, item) in spans.zip(key_map.0.iter()) {
+        for (span, item) in spans.zip(key_map.items.iter()) {
             assert_eq!(span.content.to_string(), format!("{}", item));
         }
     }
@@ -738,7 +748,9 @@ mod tests {
     fn test_keymap_array() {
         let key_map_1 = SingleKeyMap::from(&KEYMAP_ITEMS[..3]);
         let key_map_2 = SingleKeyMap::from(&KEYMAP_ITEMS[3..]);
-        let key_maps = GroupedKeyMap([key_map_1, key_map_2]);
+        let key_maps = GroupedKeyMap {
+            maps: [key_map_1, key_map_2],
+        };
         assert_eq!(
             key_maps.map_key_code(KeyCode::Char('q')),
             Some(Event::App(AppEvent::Quit))
