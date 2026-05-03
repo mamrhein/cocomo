@@ -299,7 +299,7 @@ impl<const N: usize> fmt::Display for GroupedKeyMap<N> {
     }
 }
 
-/// Converts a `KeyMapArray` into a `Text` for display purposes.
+/// Converts a `GroupedKeyMap` into a `Text` for display purposes.
 #[allow(clippy::fallible_impl_from)]
 impl<'a, const N: usize> From<&'a GroupedKeyMap<N>> for Text<'a> {
     fn from(key_maps: &'a GroupedKeyMap<N>) -> Self {
