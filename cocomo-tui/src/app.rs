@@ -294,10 +294,16 @@ impl App {
             AppEvent::ToggleHints => {
                 self.show_key_hints = !self.show_key_hints;
             }
+            AppEvent::StateChanged => {
+                self.handle_state_changed();
+            }
             AppEvent::Quit => self.quit(),
-            _ => unreachable!(), // should never happen!
         }
         Ok(())
+    }
+
+    fn handle_state_changed(&self) {
+        todo!()
     }
 }
 
