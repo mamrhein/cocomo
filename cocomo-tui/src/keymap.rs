@@ -350,6 +350,13 @@ impl<const N: usize> KeyMap for GroupedKeyMap<N> {
     }
 }
 
+pub(crate) trait HasKeyMap {
+    /// The type of the key map associated with this trait.
+    type T: KeyMap;
+    /// Returns a reference to the key map associated with this trait.
+    fn keymap(&self) -> &Self::T;
+}
+
 /// `KeyMapper` provides a way to map `KeyCode` values to `Event`s.
 pub(crate) trait KeyMapper {
     /// Returns a reference to the underlying `KeyMap`.
