@@ -309,6 +309,7 @@ impl<'a, const N: usize> From<&'a GroupedKeyMap<N>> for Text<'a> {
     }
 }
 
+/// `KeyMapper` provides a way to map `KeyCode` values to `Event`s.
 pub(crate) trait KeyMapper {
     /// Returns a reference to the underlying `KeyMap`.
     fn keymapper(&self) -> &dyn KeyMapper;
