@@ -12,10 +12,7 @@
 use core::fmt::Debug;
 
 use cocomo_core::DiffItem;
-use ratatui::{
-    crossterm::event::{KeyCode, KeyEvent},
-    widgets::WidgetRef,
-};
+use ratatui::{crossterm::event::KeyCode, widgets::WidgetRef};
 
 use crate::{
     event::{Event, NavEvent, OpEvent},
@@ -44,22 +41,6 @@ pub(crate) trait View:
     /// Returns the current diff item, if any.
     fn current_diff_item(&self) -> Option<&DiffItem> {
         None
-    }
-
-    /// Handles a key event by mapping it to an app event and then handling
-    /// that.
-    fn handle_key_event(
-        &mut self,
-        key_event: KeyEvent,
-    ) -> color_eyre::Result<()> {
-        if let Some(event) = self.map_key_code(key_event.code) {
-            return match event {
-                Event::Nav(nav_event) => self.handle_nav_event(nav_event),
-                Event::Op(op_event) => self.handle_op_event(op_event),
-                _ => unreachable!(), // should not happen!
-            };
-        }
-        Ok(())
     }
 
     /// Handles a navigation event.

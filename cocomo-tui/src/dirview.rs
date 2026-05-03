@@ -303,20 +303,6 @@ impl View for DirView {
         // There will only be one directory view but several file views.
         true
     }
-
-    fn handle_key_event(
-        &mut self,
-        key_event: crossterm::event::KeyEvent,
-    ) -> color_eyre::Result<()> {
-        if let Some(event) = self.map_key_code(key_event.code) {
-            return match event {
-                Event::Nav(nav_event) => self.handle_nav_event(nav_event),
-                Event::Op(op_event) => View::handle_op_event(self, op_event),
-                _ => unreachable!(), // should not happen!
-            };
-        }
-        Ok(())
-    }
 }
 
 impl TableView for DirView {

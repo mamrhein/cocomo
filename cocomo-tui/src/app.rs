@@ -193,7 +193,7 @@ impl App {
                         if key_event.kind
                             == crossterm::event::KeyEventKind::Press =>
                     {
-                        self.handle_key_event(key_event).await?;
+                        self.handle_key_event(key_event);
                     }
                     _ => {}
                 },
@@ -211,25 +211,18 @@ impl App {
         Ok(())
     }
 
-    /// Handles the key events and updates the state of [`App`].
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if an application event cannot be sent.
-    async fn handle_key_event(
-        &mut self,
-        key_event: KeyEvent,
-    ) -> color_eyre::Result<()> {
+    /// Handles a key events by mapping it to another `Event` and enqueuing
+    /// that.
+    fn handle_key_event(&mut self, key_event: KeyEvent) {
         if let Some(pending_op) = self.pending_op.as_mut() {
             return pending_op.dialog().handle_key_event(key_event);
         };
-        if let Some(event) = self.keymap.map_key_code(key_event.code) {
+        if let Some(event) = self
+            .map_key_code(key_event.code)
+            .or(self.current_view().map_key_code(key_event.code))
+        {
             self.events.enqueue(event);
-            return Ok(());
         }
-        // Forward key events that are not handled by the keymap to the
-        // current view
-        self.current_view_mut().handle_key_event(key_event)
     }
 
     /// Handles the tick event of the terminal.

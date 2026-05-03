@@ -8,6 +8,8 @@
 // $Revision$
 // ---------------------------------------------------------------------------
 
+use std::{fmt::Debug, sync};
+
 use ratatui::{
     buffer::Buffer,
     crossterm::event::{KeyCode, KeyEvent},
@@ -18,8 +20,6 @@ use ratatui::{
         Block, BorderType, Borders, Clear, Padding, Widget, WidgetRef,
     },
 };
-use std::fmt::Debug;
-use std::sync;
 
 use crate::{
     event::{AppEvent, Event, EventThread},
@@ -35,14 +35,10 @@ pub(crate) trait Dialog: Debug + WidgetRef {
 
     /// Handles a key event by mapping it to an `Event` and sending that to
     /// the app.
-    fn handle_key_event(
-        &self,
-        key_event: KeyEvent,
-    ) -> color_eyre::Result<()> {
+    fn handle_key_event(&self, key_event: KeyEvent) {
         if let Some(event) = self.keymap().map_key_code(key_event.code) {
             self.send_event(event);
         }
-        Ok(())
     }
 }
 
