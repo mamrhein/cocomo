@@ -232,7 +232,7 @@ impl DirView {
             // OpEvent::Rename => {
             // let _ = rename_item(&item, &new_name).await;
             // }
-            OpEvent::Refresh => {
+            OpEvent::Reload => {
                 self.diff.refresh().await?;
             }
             _ => {} // ignore it (TODO: handle it)

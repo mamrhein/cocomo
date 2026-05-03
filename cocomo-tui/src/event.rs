@@ -45,13 +45,13 @@ pub enum Event {
     App(AppEvent),
     /// Navigation events.
     ///
-    /// Use this to emit events that are to be handled by the app's current view's
-    /// navigation system.
+    /// Use this to emit events that are to be handled by the app's current
+    /// view's navigation system.
     Nav(NavEvent),
     /// Operation triggers.
     ///
-    /// Use this to emit events that are to be handled by the app's current view
-    /// to trigger operations.
+    /// Use this to emit events that are to be handled by the app's current
+    /// view to trigger operations.
     Op(OpEvent),
 }
 
@@ -102,8 +102,8 @@ pub(crate) enum OpEvent {
     Delete,
     /// Rename the current item.
     Rename,
-    /// Refresh the view.
-    Refresh,
+    /// Reload the content of the view.
+    Reload,
 }
 
 /// Terminal event handler.
@@ -176,8 +176,8 @@ impl EventThread {
 
     /// Runs the event thread.
     ///
-    /// This function emits tick events at a fixed rate and polls for crossterm
-    /// events in between.
+    /// This function emits tick events at a fixed rate and polls for
+    /// crossterm events in between.
     pub(crate) async fn run(self) -> color_eyre::Result<()> {
         let tick_rate = Duration::from_secs_f64(1.0 / TICK_FPS);
         let mut reader = crossterm::event::EventStream::new();
@@ -202,9 +202,9 @@ impl EventThread {
 
     /// Sends an event to the receiver.
     pub(crate) fn send(&self, event: Event) {
-        // Ignores the result because shutting down the app drops the receiver,
-        // which causes the send operation to fail. This is expected
-        // behavior and should not panic.
+        // Ignores the result because shutting down the app drops the
+        // receiver, which causes the send operation to fail. This is
+        // expected behavior and should not panic.
         let _ = self.sender.send(event);
     }
 }
