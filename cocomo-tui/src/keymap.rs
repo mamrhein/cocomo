@@ -286,8 +286,8 @@ impl<const N: usize> GroupedKeyMap<N> {
     }
 
     #[inline(always)]
-    pub(crate) fn iter(&self) -> impl Iterator<Item = &SingleKeyMap> + '_ {
-        self.0.iter()
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &KeyMapItem> + '_ {
+        self.maps.iter().flat_map(|map| &map.items)
     }
 }
 
