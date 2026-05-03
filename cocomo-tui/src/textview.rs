@@ -27,7 +27,7 @@ use ratatui::{
 };
 
 use crate::{
-    event::{NavEvent, OpEvent},
+    event::OpEvent,
     keymap::{GroupedKeyMap, KeyHint, KeyMapper, SingleKeyMap},
     view::{NAV_KEYMAP_ITEMS, TableView, View},
 };
@@ -93,28 +93,6 @@ impl KeyMapper for TextView {
 impl View for TextView {
     fn title(&self) -> String {
         self.file_diff.name().to_string_lossy().into_owned()
-    }
-
-    /// Handles a navigation event.
-    fn handle_nav_event(
-        &mut self,
-        nav_event: crate::event::NavEvent,
-    ) -> color_eyre::Result<()> {
-        match nav_event {
-            NavEvent::Prev => {
-                self.prev();
-            }
-            NavEvent::Next => {
-                self.next();
-            }
-            NavEvent::First => {
-                self.home();
-            }
-            NavEvent::Last => {
-                self.end();
-            }
-        }
-        Ok(())
     }
 
     fn handle_op_event(

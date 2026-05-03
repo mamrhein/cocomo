@@ -39,7 +39,7 @@ use ratatui::{
 };
 
 use crate::{
-    event::{Event, NavEvent, OpEvent},
+    event::{Event, OpEvent},
     keymap::{GroupedKeyMap, KeyHint, KeyMapItem, KeyMapper, SingleKeyMap},
     view::{NAV_KEYMAP_ITEMS, TableView, View},
 };
@@ -268,28 +268,6 @@ impl View for DirView {
         let table_state = self.table_state.borrow();
         let i = table_state.selected()?;
         Some(&self.diff.items[i])
-    }
-
-    /// Handles a navigation event.
-    fn handle_nav_event(
-        &mut self,
-        nav_event: crate::event::NavEvent,
-    ) -> color_eyre::Result<()> {
-        match nav_event {
-            NavEvent::Prev => {
-                self.prev();
-            }
-            NavEvent::Next => {
-                self.next();
-            }
-            NavEvent::First => {
-                self.home();
-            }
-            NavEvent::Last => {
-                self.end();
-            }
-        }
-        Ok(())
     }
 
     fn handle_op_event(

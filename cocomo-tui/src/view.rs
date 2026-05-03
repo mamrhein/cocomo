@@ -43,12 +43,6 @@ pub(crate) trait View:
         None
     }
 
-    /// Handles a navigation event.
-    fn handle_nav_event(
-        &mut self,
-        nav_event: crate::event::NavEvent,
-    ) -> color_eyre::Result<()>;
-
     /// Handles an event triggering an operation.
     fn handle_op_event(
         &mut self,
@@ -103,4 +97,26 @@ pub(crate) trait TableView: View {
 
     /// Makes the last logical item the current item.
     fn end(&mut self);
+
+    /// Handles a navigation event.
+    fn handle_nav_event(
+        &mut self,
+        nav_event: crate::event::NavEvent,
+    ) -> color_eyre::Result<()> {
+        match nav_event {
+            NavEvent::Prev => {
+                self.prev();
+            }
+            NavEvent::Next => {
+                self.next();
+            }
+            NavEvent::First => {
+                self.home();
+            }
+            NavEvent::Last => {
+                self.end();
+            }
+        }
+        Ok(())
+    }
 }
