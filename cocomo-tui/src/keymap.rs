@@ -41,6 +41,7 @@
 //! | Back Tab | ⇤ |
 //! | Escape | Esc |
 
+use core::slice::Iter;
 use std::fmt;
 
 use ratatui::{
@@ -317,8 +318,13 @@ impl<'a, const N: usize> From<&'a GroupedKeyMap<N>> for Text<'a> {
 
 /// A collection of key mappings
 pub(crate) trait KeyMap: fmt::Display {
+    /// The type of iterator returned by `iter`.
+    type Iter<'a>: Iterator<Item = &'a KeyMapItem>
+    where
+        Self: 'a;
+
     /// Return an iterator over the keymaps items
-    fn iter(&self) -> impl Iterator<Item = &KeyMapItem> + '_;
+    fn iter(&self) -> Self::Iter<'_>;
 
     fn find_item_by_name(&self, name: &str) -> Option<&KeyMapItem> {
         self.iter().find(|item| item.name == name)
@@ -326,14 +332,20 @@ pub(crate) trait KeyMap: fmt::Display {
 }
 
 impl KeyMap for SingleKeyMap {
-    fn iter(&self) -> impl Iterator<Item = &KeyMapItem> + '_ {
+    type Iter<'a> = Iter<'a, KeyMapItem>;
+    fn iter(&self) -> Self::Iter<'_> {
         self.items.iter()
     }
 }
 
 impl<const N: usize> KeyMap for GroupedKeyMap<N> {
-    fn iter(&self) -> impl Iterator<Item = &KeyMapItem> + '_ {
-        self.maps.iter().flat_map(|map| &map.items)
+    type Iter<'a> = std::iter::FlatMap<
+        std::slice::Iter<'a, SingleKeyMap>,
+        std::slice::Iter<'a, KeyMapItem>,
+        fn(&'a SingleKeyMap) -> std::slice::Iter<'a, KeyMapItem>,
+    >;
+    fn iter(&self) -> Self::Iter<'_> {
+        self.maps.iter().flat_map(|map| map.items.iter())
     }
 }
 
