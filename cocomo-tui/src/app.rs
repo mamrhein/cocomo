@@ -262,6 +262,7 @@ impl App {
         app_event: AppEvent,
     ) -> color_eyre::Result<()> {
         match app_event {
+            // TODO: should be handled by dirview
             AppEvent::OpenView => {
                 if let Some(item) = self.current_view().current_diff_item() {
                     let left_item = item.left_item.clone();
