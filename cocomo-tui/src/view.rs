@@ -9,10 +9,16 @@
 
 //! Shared behavior for interactive views.
 
-use core::fmt::Debug;
+use core::{
+    cell::{Ref, RefMut},
+    fmt::Debug,
+};
 
 use cocomo_core::DiffItem;
-use ratatui::{crossterm::event::KeyCode, widgets::WidgetRef};
+use ratatui::{
+    crossterm::event::KeyCode,
+    widgets::{TableState, WidgetRef},
+};
 
 use crate::{
     event::{Event, NavEvent, OpEvent},
@@ -85,7 +91,7 @@ pub(crate) const NAV_KEYMAP_ITEMS: [KeyMapItem; 4] = [
 
 /// Trait for views that show a table of items and support cursor-style
 /// navigation.
-pub(crate) trait TableView: View {
+pub(crate) trait TableView: View + TableViewState {
     /// Makes the previous logical item the current item.
     fn prev(&mut self);
 
@@ -118,5 +124,42 @@ pub(crate) trait TableView: View {
             }
         }
         Ok(())
+    }
+}
+
+/// Trait for managing the state of a table view, including the number of
+/// items and the cursor position.
+///
+/// Implementors typically hold a [`TableState`] from `ratatui` to track the
+/// currently selected row.
+pub(crate) trait TableViewState {
+    /// Returns the total number of items in the table.
+    fn n_items(&self) -> usize;
+
+    /// Returns a reference to the underlying [`TableState`].
+    fn table_state(&self) -> Ref<'_, TableState>;
+
+    /// Returns a mutable reference to the underlying [`TableState`].
+    fn table_state_mut(&mut self) -> RefMut<'_, TableState>;
+
+    /// Returns the index of the first item, if the table is non-empty.
+    fn first(&self) -> Option<usize> {
+        (self.n_items() > 0).then_some(0)
+    }
+
+    /// Returns the index of the last item, if the table is non-empty.
+    fn last(&self) -> Option<usize> {
+        let n_items = self.n_items();
+        (n_items > 0).then_some(n_items - 1)
+    }
+
+    /// Returns the index of the currently selected item, if any.
+    fn selected(&self) -> Option<usize> {
+        self.table_state().selected()
+    }
+
+    /// Selects the item at the given index.
+    fn select(&mut self, index: usize) {
+        self.table_state_mut().select(Some(index));
     }
 }

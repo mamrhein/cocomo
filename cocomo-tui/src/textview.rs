@@ -12,7 +12,7 @@
 //! This module provides the `TextView` struct and its `Widget` implementation
 //! for side-by-side comparison of text files.
 
-use core::cell;
+use core::cell::{self, Ref, RefMut};
 use std::{convert::From, io};
 
 use cocomo_core::{FSItem, LineDiffType, TextDiff};
@@ -29,7 +29,7 @@ use ratatui::{
 use crate::{
     event::OpEvent,
     keymap::{GroupedKeyMap, KeyHint, KeyMapper, SingleKeyMap},
-    view::{NAV_KEYMAP_ITEMS, TableView, View},
+    view::{NAV_KEYMAP_ITEMS, TableView, TableViewState, View},
 };
 
 /// View for displaying side-by-side text file contents.
@@ -100,6 +100,23 @@ impl View for TextView {
         _op_event: OpEvent,
     ) -> color_eyre::Result<()> {
         Ok(())
+    }
+}
+
+impl TableViewState for TextView {
+    #[inline(always)]
+    fn n_items(&self) -> usize {
+        self.file_diff.chunks.len()
+    }
+
+    #[inline(always)]
+    fn table_state(&self) -> Ref<'_, TableState> {
+        self.table_state.borrow()
+    }
+
+    #[inline(always)]
+    fn table_state_mut(&mut self) -> RefMut<'_, TableState> {
+        self.table_state.borrow_mut()
     }
 }
 

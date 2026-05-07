@@ -12,6 +12,7 @@
 //! This module provides the `DirView` struct and its `Widget` implementation
 //! for rendering directory comparison results in a table.
 
+use core::cell::{Ref, RefMut};
 use std::{cell, io, path};
 
 use cocomo_core::{
@@ -41,7 +42,7 @@ use ratatui::{
 use crate::{
     event::{Event, OpEvent},
     keymap::{GroupedKeyMap, KeyHint, KeyMapItem, KeyMapper, SingleKeyMap},
-    view::{NAV_KEYMAP_ITEMS, TableView, View},
+    view::{NAV_KEYMAP_ITEMS, TableView, TableViewState, View},
 };
 
 /// Key map items for ops keymap.
@@ -280,6 +281,23 @@ impl View for DirView {
     fn is_file_view(&self) -> bool {
         // There will only be one directory view but several file views.
         true
+    }
+}
+
+impl TableViewState for DirView {
+    #[inline(always)]
+    fn n_items(&self) -> usize {
+        self.diff.items.len()
+    }
+
+    #[inline(always)]
+    fn table_state(&self) -> Ref<'_, TableState> {
+        self.table_state.borrow()
+    }
+
+    #[inline(always)]
+    fn table_state_mut(&mut self) -> RefMut<'_, TableState> {
+        self.table_state.borrow_mut()
     }
 }
 
