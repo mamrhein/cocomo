@@ -42,7 +42,7 @@
 //! | Back Tab | ⇤ |
 //! | Escape | Esc |
 
-use core::slice::Iter;
+use core::slice::{Iter, IterMut};
 use std::fmt;
 
 use ratatui::{
@@ -324,18 +324,47 @@ pub(crate) trait KeyMap: fmt::Display {
     where
         Self: 'a;
 
+    /// The type of iterator returned by `iter_mut`.
+    type IterMut<'a>: Iterator<Item = &'a mut KeyMapItem>
+    where
+        Self: 'a;
+
     /// Return an iterator over the keymaps items
     fn iter(&self) -> Self::Iter<'_>;
 
-    fn find_item_by_name(&self, name: &str) -> Option<&KeyMapItem> {
-        self.iter().find(|item| item.name == name)
+    /// Return an iterator over the keymaps items
+    fn iter_mut(&mut self) -> Self::IterMut<'_>;
+
+    /// Find keymap item by its name and return mutable reference
+    fn find_item_by_name(&mut self, name: &str) -> Option<&mut KeyMapItem> {
+        self.iter_mut().find(|item| item.name == name)
+    }
+
+    /// Enable a keymap item by its name
+    fn enable_key(&mut self, name: &str) {
+        if let Some(item) = self.find_item_by_name(name) {
+            item.enabled = true;
+        }
+    }
+
+    /// Disable a keymap item by its name
+    fn disable_key(&mut self, name: &str) {
+        if let Some(item) = self.find_item_by_name(name) {
+            item.enabled = false;
+        }
     }
 }
 
 impl KeyMap for SingleKeyMap {
     type Iter<'a> = Iter<'a, KeyMapItem>;
+    type IterMut<'a> = IterMut<'a, KeyMapItem>;
+
     fn iter(&self) -> Self::Iter<'_> {
         self.items.iter()
+    }
+
+    fn iter_mut(&mut self) -> Self::IterMut<'_> {
+        self.items.iter_mut()
     }
 }
 
@@ -345,8 +374,18 @@ impl<const N: usize> KeyMap for GroupedKeyMap<N> {
         std::slice::Iter<'a, KeyMapItem>,
         fn(&'a SingleKeyMap) -> std::slice::Iter<'a, KeyMapItem>,
     >;
+    type IterMut<'a> = std::iter::FlatMap<
+        std::slice::IterMut<'a, SingleKeyMap>,
+        std::slice::IterMut<'a, KeyMapItem>,
+        fn(&'a mut SingleKeyMap) -> std::slice::IterMut<'a, KeyMapItem>,
+    >;
+
     fn iter(&self) -> Self::Iter<'_> {
         self.maps.iter().flat_map(|map| map.items.iter())
+    }
+
+    fn iter_mut(&mut self) -> Self::IterMut<'_> {
+        todo!()
     }
 }
 
