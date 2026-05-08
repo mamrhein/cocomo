@@ -340,16 +340,24 @@ pub(crate) trait KeyMap: fmt::Display {
         self.iter_mut().find(|item| item.name == name)
     }
 
-    /// Enable a keymap item by its name
-    fn enable_key(&mut self, name: &str) {
-        if let Some(item) = self.find_item_by_name(name) {
+    /// Find keymap item by its event and return mutable reference
+    fn find_item_by_event(
+        &mut self,
+        event: &Event,
+    ) -> Option<&mut KeyMapItem> {
+        self.iter_mut().find(|item| item.event == *event)
+    }
+
+    /// Enable the keymap item associated with given event
+    fn enable_key(&mut self, event: &Event) {
+        if let Some(item) = self.find_item_by_event(event) {
             item.enabled = true;
         }
     }
 
-    /// Disable a keymap item by its name
-    fn disable_key(&mut self, name: &str) {
-        if let Some(item) = self.find_item_by_name(name) {
+    /// Disable the keymap item associated with given event
+    fn disable_key(&mut self, event: &Event) {
+        if let Some(item) = self.find_item_by_event(event) {
             item.enabled = false;
         }
     }
