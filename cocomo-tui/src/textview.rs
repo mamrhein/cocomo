@@ -28,7 +28,7 @@ use ratatui::{
 
 use crate::{
     event::OpEvent,
-    keymap::{GroupedKeyMap, KeyHint, KeyMapper, SingleKeyMap},
+    keymap::{GroupedKeyMap, HasKeyMap, KeyHint, KeyMapper, SingleKeyMap},
     view::{NAV_KEYMAP_ITEMS, TableView, TableViewState, View},
 };
 
@@ -73,6 +73,13 @@ impl TextView {
             .take(chunk_idx)
             .map(|c| c.left_lines.len())
             .sum()
+    }
+}
+
+impl HasKeyMap for TextView {
+    type T = GroupedKeyMap<1>;
+    fn keymap(&self) -> &Self::T {
+        &self.keymap
     }
 }
 

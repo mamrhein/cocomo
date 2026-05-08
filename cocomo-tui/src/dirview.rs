@@ -41,7 +41,10 @@ use ratatui::{
 
 use crate::{
     event::{Event, OpEvent},
-    keymap::{GroupedKeyMap, KeyHint, KeyMapItem, KeyMapper, SingleKeyMap},
+    keymap::{
+        GroupedKeyMap, HasKeyMap, KeyHint, KeyMapItem, KeyMapper,
+        SingleKeyMap,
+    },
     view::{NAV_KEYMAP_ITEMS, TableView, TableViewState, View},
 };
 
@@ -239,6 +242,13 @@ impl DirView {
             _ => {} // ignore it (TODO: handle it)
         }
         Ok(())
+    }
+}
+
+impl HasKeyMap for DirView {
+    type T = GroupedKeyMap<2>;
+    fn keymap(&self) -> &Self::T {
+        &self.keymap
     }
 }
 

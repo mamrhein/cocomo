@@ -29,7 +29,7 @@ use crate::{
     dialog::SimpleConfirm,
     dirview::DirView,
     event::{AppEvent, Event, EventQueue, EventThread},
-    keymap::{GroupedKeyMap, KeyHint, KeyMapItem, KeyMapper, SingleKeyMap},
+    keymap::{HasKeyMap, KeyHint, KeyMapItem, KeyMapper, SingleKeyMap},
     pending_op::{Op, PendingOp},
     textview::TextView,
     view::TableView,
@@ -102,7 +102,7 @@ pub(crate) struct App {
     /// Event queue for the application.
     events: EventQueue,
     /// App level key map
-    keymap: GroupedKeyMap<1>,
+    keymap: SingleKeyMap,
     /// Open views (tabs).
     views: Vec<AppView>,
     /// Index of the currently active view.
@@ -122,9 +122,7 @@ impl App {
         let mut app = Self {
             running: false,
             events: EventQueue::default(),
-            keymap: GroupedKeyMap::new([SingleKeyMap::from(
-                APP_KEYMAP_ITEMS.as_slice(),
-            )]),
+            keymap: SingleKeyMap::from(APP_KEYMAP_ITEMS.as_slice()),
             views: vec![],
             active_view: 0,
             show_key_hints: false,
@@ -305,6 +303,14 @@ impl App {
 
     fn handle_state_changed(&self) {
         todo!()
+    }
+}
+
+impl HasKeyMap for App {
+    type T = SingleKeyMap;
+
+    fn keymap(&self) -> &Self::T {
+        &self.keymap
     }
 }
 
