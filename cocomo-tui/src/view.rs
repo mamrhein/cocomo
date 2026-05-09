@@ -9,16 +9,10 @@
 
 //! Shared behavior for interactive views.
 
-use core::{
-    cell::{Ref, RefMut},
-    fmt::Debug,
-};
+use core::fmt::Debug;
 
 use cocomo_core::DiffItem;
-use ratatui::{
-    crossterm::event::KeyCode,
-    widgets::{TableState, WidgetRef},
-};
+use ratatui::{crossterm::event::KeyCode, widgets::WidgetRef};
 
 use crate::{
     event::{Event, NavEvent, OpEvent},
@@ -93,16 +87,33 @@ pub(crate) const NAV_KEYMAP_ITEMS: [KeyMapItem; 4] = [
 /// navigation.
 pub(crate) trait TableView: View + TableViewState {
     /// Makes the previous logical item the current item.
-    fn prev(&mut self);
+    fn prev(&mut self) {
+        if let Some(i) = self.selected() {
+            self.select(i.saturating_sub(1));
+        }
+    }
 
     /// Makes the next logical item the current item.
-    fn next(&mut self);
+    fn next(&mut self) {
+        if let Some(i) = self.selected() {
+            // If selected is Some, last is also Some, so unwrap is safe
+            self.select(i.saturating_add(1).min(self.last().unwrap()));
+        }
+    }
 
     /// Makes the first logical item the current item.
-    fn home(&mut self);
+    fn home(&mut self) {
+        if let Some(i) = self.first() {
+            self.select(i);
+        }
+    }
 
     /// Makes the last logical item the current item.
-    fn end(&mut self);
+    fn end(&mut self) {
+        if let Some(i) = self.last() {
+            self.select(i);
+        }
+    }
 
     /// Handles a navigation event.
     fn handle_nav_event(
@@ -136,12 +147,6 @@ pub(crate) trait TableViewState {
     /// Returns the total number of items in the table.
     fn n_items(&self) -> usize;
 
-    /// Returns a reference to the underlying [`TableState`].
-    fn table_state(&self) -> Ref<'_, TableState>;
-
-    /// Returns a mutable reference to the underlying [`TableState`].
-    fn table_state_mut(&mut self) -> RefMut<'_, TableState>;
-
     /// Returns the index of the first item, if the table is non-empty.
     fn first(&self) -> Option<usize> {
         (self.n_items() > 0).then_some(0)
@@ -154,12 +159,8 @@ pub(crate) trait TableViewState {
     }
 
     /// Returns the index of the currently selected item, if any.
-    fn selected(&self) -> Option<usize> {
-        self.table_state().selected()
-    }
+    fn selected(&self) -> Option<usize>;
 
     /// Selects the item at the given index.
-    fn select(&mut self, index: usize) {
-        self.table_state_mut().select(Some(index));
-    }
+    fn select(&mut self, index: usize);
 }

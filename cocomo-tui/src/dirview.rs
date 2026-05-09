@@ -12,7 +12,6 @@
 //! This module provides the `DirView` struct and its `Widget` implementation
 //! for rendering directory comparison results in a table.
 
-use core::cell::{Ref, RefMut};
 use std::{cell, io, path};
 
 use cocomo_core::{
@@ -300,65 +299,16 @@ impl TableViewState for DirView {
         self.diff.items.len()
     }
 
-    #[inline(always)]
-    fn table_state(&self) -> Ref<'_, TableState> {
-        self.table_state.borrow()
+    fn selected(&self) -> Option<usize> {
+        self.table_state.borrow().selected()
     }
 
-    #[inline(always)]
-    fn table_state_mut(&mut self) -> RefMut<'_, TableState> {
-        self.table_state.borrow_mut()
+    fn select(&mut self, index: usize) {
+        self.table_state.borrow_mut().select(Some(index));
     }
 }
 
-impl TableView for DirView {
-    /// Makes the previous item the current item.
-    fn prev(&mut self) {
-        let mut table_state = self.table_state.borrow_mut();
-        let i = match table_state.selected() {
-            Some(i) => {
-                if i == 0 {
-                    0
-                } else {
-                    i - 1
-                }
-            }
-            None => 0,
-        };
-        table_state.select(Some(i));
-    }
-
-    /// Makes the next item the current item.
-    fn next(&mut self) {
-        let mut table_state = self.table_state.borrow_mut();
-        let i = match table_state.selected() {
-            Some(i) => {
-                if i >= self.diff.items.len().saturating_sub(1) {
-                    i
-                } else {
-                    i + 1
-                }
-            }
-            None => 0,
-        };
-        table_state.select(Some(i));
-    }
-
-    /// Makes the first item the current item.
-    fn home(&mut self) {
-        if !self.diff.items.is_empty() {
-            self.table_state.borrow_mut().select(Some(0));
-        }
-    }
-
-    /// Makes the last item the current item.
-    fn end(&mut self) {
-        if !self.diff.items.is_empty() {
-            let last = self.diff.items.len().saturating_sub(1);
-            self.table_state.borrow_mut().select(Some(last));
-        }
-    }
-}
+impl TableView for DirView {}
 
 impl WidgetRef for DirView {
     fn render_ref(&self, area: Rect, buf: &mut Buffer) {

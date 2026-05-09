@@ -12,7 +12,7 @@
 //! This module provides the `TextView` struct and its `Widget` implementation
 //! for side-by-side comparison of text files.
 
-use core::cell::{self, Ref, RefMut};
+use core::cell;
 use std::{convert::From, io};
 
 use cocomo_core::{FSItem, LineDiffType, TextDiff};
@@ -116,55 +116,18 @@ impl TableViewState for TextView {
         self.file_diff.chunks.len()
     }
 
-    #[inline(always)]
-    fn table_state(&self) -> Ref<'_, TableState> {
-        self.table_state.borrow()
+    fn selected(&self) -> Option<usize> {
+        (self.n_items() > 0).then_some(self.current_chunk)
     }
 
-    #[inline(always)]
-    fn table_state_mut(&mut self) -> RefMut<'_, TableState> {
-        self.table_state.borrow_mut()
-    }
-}
-
-impl TableView for TextView {
-    /// Makes the previous chunk the current chunk.
-    fn prev(&mut self) {
-        if self.current_chunk > 0 {
-            self.current_chunk -= 1;
-        }
+    fn select(&mut self, index: usize) {
+        self.current_chunk = index.clamp(0, self.n_items().saturating_sub(1));
         let row_idx = self.first_row_of_chunk(self.current_chunk);
         self.table_state.borrow_mut().select(Some(row_idx));
     }
-
-    /// Makes the next chunk the current chunk.
-    fn next(&mut self) {
-        if !self.file_diff.chunks.is_empty()
-            && self.current_chunk
-                < self.file_diff.chunks.len().saturating_sub(1)
-        {
-            self.current_chunk += 1;
-        }
-        let row_idx = self.first_row_of_chunk(self.current_chunk);
-        self.table_state.borrow_mut().select(Some(row_idx));
-    }
-
-    /// Makes the first chunk the current chunk.
-    fn home(&mut self) {
-        self.current_chunk = 0;
-        self.table_state.borrow_mut().select(Some(0));
-    }
-
-    /// Makes the last chunk the current chunk.
-    fn end(&mut self) {
-        if !self.file_diff.chunks.is_empty() {
-            self.current_chunk =
-                self.file_diff.chunks.len().saturating_sub(1);
-            let row_idx = self.first_row_of_chunk(self.current_chunk);
-            self.table_state.borrow_mut().select(Some(row_idx));
-        }
-    }
 }
+
+impl TableView for TextView {}
 
 fn indicator<'a>(dt: LineDiffType) -> Text<'a> {
     let (char, color) = match dt {
