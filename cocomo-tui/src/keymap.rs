@@ -397,15 +397,6 @@ impl<const N: usize> KeyMap for GroupedKeyMap<N> {
     }
 }
 
-pub(crate) trait HasKeyMap {
-    /// The type of the key map associated with this trait.
-    type T: KeyMap;
-    /// Returns a reference to the key map associated with this trait.
-    fn keymap(&self) -> &Self::T;
-    /// Returns a mutable reference to the key map associated with this trait.
-    fn keymap_mut(&mut self) -> &mut Self::T;
-}
-
 pub(crate) trait HasNavKeyMap {
     /// Returns a mutable reference to the navigation key map of this trait.
     fn keymap_mut(&mut self) -> &mut SingleKeyMap;

@@ -29,9 +29,7 @@ use crate::{
     dialog::SimpleConfirm,
     dirview::DirView,
     event::{AppEvent, Event, EventQueue, EventThread},
-    keymap::{
-        HasKeyMap, KeyHint, KeyMap, KeyMapItem, KeyMapper, SingleKeyMap,
-    },
+    keymap::{KeyHint, KeyMap, KeyMapItem, KeyMapper, SingleKeyMap},
     keystate::KeyState,
     pending_op::{Op, PendingOp},
     textview::TextView,
@@ -310,18 +308,6 @@ impl App {
 
     fn handle_state_changed(&mut self) {
         self.update_key_state();
-    }
-}
-
-impl HasKeyMap for App {
-    type T = SingleKeyMap;
-
-    fn keymap(&self) -> &Self::T {
-        &self.keymap
-    }
-
-    fn keymap_mut(&mut self) -> &mut Self::T {
-        &mut self.keymap
     }
 }
 
