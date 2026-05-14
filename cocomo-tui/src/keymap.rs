@@ -402,6 +402,11 @@ pub(crate) trait HasNavKeyMap {
     fn keymap_mut(&mut self) -> &mut SingleKeyMap;
 }
 
+pub(crate) trait HasOpKeyMap {
+    /// Returns a mutable reference to the operation key map of this trait.
+    fn keymap_mut(&mut self) -> &mut SingleKeyMap;
+}
+
 /// `KeyMapper` provides a way to map `KeyCode` values to `Event`s.
 pub(crate) trait KeyMapper {
     /// Returns a reference to the underlying `KeyMap`.
