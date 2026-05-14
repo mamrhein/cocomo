@@ -44,6 +44,7 @@ use crate::{
         GroupedKeyMap, HasNavKeyMap, KeyHint, KeyMapItem, KeyMapper,
         SingleKeyMap,
     },
+    keystate::KeyState,
     view::{NAV_KEYMAP_ITEMS, TableView, TableViewState, View},
 };
 
@@ -119,18 +120,19 @@ impl DirView {
         right_item: &Option<FSItem>,
     ) -> io::Result<Self> {
         let diff = DirDiff::new(left_item, right_item).await?;
-        let mut table_state = TableState::default();
-        if !diff.items.is_empty() {
-            table_state.select(Some(0));
-        }
-        Ok(Self {
+        let empty = diff.items.is_empty();
+        let mut view = Self {
             keymap: GroupedKeyMap::new([
                 SingleKeyMap::from(NAV_KEYMAP_ITEMS.as_slice()),
                 SingleKeyMap::from(OP_KEYMAP_ITEMS.as_slice()),
             ]),
             diff,
-            table_state: cell::RefCell::new(table_state),
-        })
+            table_state: cell::RefCell::new(TableState::default()),
+        };
+        if !empty {
+            view.select(0);
+        }
+        Ok(view)
     }
 
     pub(crate) async fn handle_op_event(
@@ -304,6 +306,7 @@ impl TableViewState for DirView {
 
     fn select(&mut self, index: usize) {
         self.table_state.borrow_mut().select(Some(index));
+        self.update_key_state();
     }
 }
 

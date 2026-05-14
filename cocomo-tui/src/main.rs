@@ -71,7 +71,9 @@ pub(crate) mod dirview;
 pub(crate) mod event;
 /// Key mappings for the terminal events.
 pub(crate) mod keymap;
-// Operations waiting for confirmation.
+/// Manages state of key mappings.
+pub(crate) mod keystate;
+/// Operations waiting for confirmation.
 pub(crate) mod pending_op;
 /// Renders the text comparison view.
 pub(crate) mod textview;

@@ -29,7 +29,10 @@ use crate::{
     dialog::SimpleConfirm,
     dirview::DirView,
     event::{AppEvent, Event, EventQueue, EventThread},
-    keymap::{HasKeyMap, KeyHint, KeyMapItem, KeyMapper, SingleKeyMap},
+    keymap::{
+        HasKeyMap, KeyHint, KeyMap, KeyMapItem, KeyMapper, SingleKeyMap,
+    },
+    keystate::KeyState,
     pending_op::{Op, PendingOp},
     textview::TextView,
     view::TableView,
@@ -252,6 +255,7 @@ impl App {
         if self.active_view >= self.views.len() {
             self.active_view = self.views.len().saturating_sub(1);
         }
+        self.handle_state_changed();
     }
 
     /// Handles application events from the event channel.
@@ -267,16 +271,19 @@ impl App {
                     let right_item = item.right_item.clone();
                     self.new_view(&left_item, &right_item).await?;
                 };
+                self.handle_state_changed();
             }
             AppEvent::CloseTab => self.close_tab(),
             AppEvent::NextTab => {
                 if self.active_view < self.views.len() - 1 {
                     self.active_view += 1;
+                    self.handle_state_changed();
                 }
             }
             AppEvent::PrevTab => {
                 if self.active_view > 0 {
                     self.active_view -= 1;
+                    self.handle_state_changed();
                 }
             }
             AppEvent::Confirmed => {
@@ -301,8 +308,8 @@ impl App {
         Ok(())
     }
 
-    fn handle_state_changed(&self) {
-        todo!()
+    fn handle_state_changed(&mut self) {
+        self.update_key_state();
     }
 }
 
@@ -311,6 +318,10 @@ impl HasKeyMap for App {
 
     fn keymap(&self) -> &Self::T {
         &self.keymap
+    }
+
+    fn keymap_mut(&mut self) -> &mut Self::T {
+        &mut self.keymap
     }
 }
 
@@ -325,6 +336,29 @@ impl KeyMapper for App {
     #[inline(always)]
     fn keymapper(&self) -> &dyn KeyMapper {
         &self.keymap
+    }
+}
+
+impl KeyState for App {
+    fn update_key_state(&mut self) {
+        if self.views.len() == 1 {
+            self.keymap.disable_key(&Event::App(AppEvent::NextTab));
+            self.keymap.disable_key(&Event::App(AppEvent::PrevTab));
+        } else if self.active_view == 0 {
+            self.keymap.enable_key(&Event::App(AppEvent::NextTab));
+            self.keymap.disable_key(&Event::App(AppEvent::PrevTab));
+        } else if self.active_view == self.views.len() - 1 {
+            self.keymap.disable_key(&Event::App(AppEvent::NextTab));
+            self.keymap.enable_key(&Event::App(AppEvent::PrevTab));
+        } else {
+            self.keymap.enable_key(&Event::App(AppEvent::NextTab));
+            self.keymap.enable_key(&Event::App(AppEvent::PrevTab));
+        }
+        if self.current_view_mut().is_dir_view() {
+            self.keymap.enable_key(&Event::App(AppEvent::OpenView));
+        } else {
+            self.keymap.disable_key(&Event::App(AppEvent::OpenView));
+        }
     }
 }
 

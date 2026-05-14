@@ -29,6 +29,7 @@ use ratatui::{
 use crate::{
     event::OpEvent,
     keymap::{GroupedKeyMap, HasNavKeyMap, KeyHint, KeyMapper, SingleKeyMap},
+    keystate::KeyState,
     view::{NAV_KEYMAP_ITEMS, TableView, TableViewState, View},
 };
 
@@ -52,18 +53,19 @@ impl TextView {
         right_item: &Option<FSItem>,
     ) -> io::Result<Self> {
         let file_diff = TextDiff::new(left_item, right_item).await?;
-        let mut table_state = TableState::default();
-        if !file_diff.chunks.is_empty() {
-            table_state.select(Some(0));
-        }
-        Ok(Self {
+        let empty = file_diff.chunks.is_empty();
+        let mut view = Self {
             keymap: GroupedKeyMap::new([SingleKeyMap::from(
                 NAV_KEYMAP_ITEMS.as_slice(),
             )]),
             file_diff,
-            table_state: cell::RefCell::new(table_state),
+            table_state: cell::RefCell::new(TableState::default()),
             current_chunk: 0,
-        })
+        };
+        if !empty {
+            view.select(0);
+        }
+        Ok(view)
     }
 
     fn first_row_of_chunk(&self, chunk_idx: usize) -> usize {
@@ -123,6 +125,7 @@ impl TableViewState for TextView {
         self.current_chunk = index.clamp(0, self.n_items().saturating_sub(1));
         let row_idx = self.first_row_of_chunk(self.current_chunk);
         self.table_state.borrow_mut().select(Some(row_idx));
+        self.update_key_state();
     }
 }
 
