@@ -28,7 +28,7 @@ use ratatui::{
 
 use crate::{
     event::OpEvent,
-    keymap::{GroupedKeyMap, HasKeyMap, KeyHint, KeyMapper, SingleKeyMap},
+    keymap::{GroupedKeyMap, HasNavKeyMap, KeyHint, KeyMapper, SingleKeyMap},
     view::{NAV_KEYMAP_ITEMS, TableView, TableViewState, View},
 };
 
@@ -76,10 +76,9 @@ impl TextView {
     }
 }
 
-impl HasKeyMap for TextView {
-    type T = GroupedKeyMap<1>;
-    fn keymap(&self) -> &Self::T {
-        &self.keymap
+impl HasNavKeyMap for TextView {
+    fn keymap_mut(&mut self) -> &mut SingleKeyMap {
+        &mut self.keymap.maps[0]
     }
 }
 

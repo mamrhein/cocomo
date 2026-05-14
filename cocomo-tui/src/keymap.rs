@@ -278,7 +278,7 @@ impl<'a> From<&'a SingleKeyMap> for Text<'a> {
 /// When looking up keys, only **enabled** mappings are considered.
 #[derive(Debug)]
 pub(crate) struct GroupedKeyMap<const N: usize> {
-    maps: [SingleKeyMap; N],
+    pub(crate) maps: [SingleKeyMap; N],
 }
 
 impl<const N: usize> GroupedKeyMap<N> {
@@ -402,6 +402,13 @@ pub(crate) trait HasKeyMap {
     type T: KeyMap;
     /// Returns a reference to the key map associated with this trait.
     fn keymap(&self) -> &Self::T;
+    /// Returns a mutable reference to the key map associated with this trait.
+    fn keymap_mut(&mut self) -> &mut Self::T;
+}
+
+pub(crate) trait HasNavKeyMap {
+    /// Returns a mutable reference to the navigation key map of this trait.
+    fn keymap_mut(&mut self) -> &mut SingleKeyMap;
 }
 
 /// `KeyMapper` provides a way to map `KeyCode` values to `Event`s.
