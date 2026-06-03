@@ -15,20 +15,15 @@ use std::{ffi, io, path};
 
 use mimetype_detector::MimeKind;
 
+use crate::backends::{DirEntry, DirEntryKind, Metadata};
+use crate::vfs::fsitem::{FSItem, FSItemKind};
 use crate::vfs::error::VfsError;
-use crate::vfs::items::{
-    DirItem, FileItem, FSItem, InvalidItem, SpecialItem, SymlinkItem,
-};
-use crate::vfs::types::{DirEntry, DirEntryKind, FSItemKind, Metadata};
 
 // ===========================================================================
 // VfsItem — base trait for every filesystem item
 // ===========================================================================
 
 /// Common interface for all filesystem items.
-///
-/// Every concrete item struct (`DirItem`, `FileItem`, …) implements this
-/// trait, as does the [`FSItem`] enum that wraps them.
 pub trait VfsItem: std::fmt::Debug + Send + Sync {
     /// The basename of this entry.
     fn name(&self) -> &ffi::OsString;
@@ -56,41 +51,6 @@ pub trait VfsItem: std::fmt::Debug + Send + Sync {
     /// Returns `true` if this item is a symbolic link.
     fn is_link(&self) -> bool;
 }
-
-// ===========================================================================
-// VfsItem subtraits
-// ===========================================================================
-
-/// A directory with the ability to list its contents.
-pub trait VfsDirectory: VfsItem {
-    /// Reads the contents of this directory, returning fully typed
-    /// [`FSItem`] values.
-    async fn entries<V: Vfs + ?Sized>(&self, vfs: &V) -> Result<Vec<FSItem>, VfsError>;
-}
-
-/// A regular file.
-pub trait VfsFile: VfsItem {
-    /// The detected MIME type of this file.
-    fn file_type(&self) -> MimeKind;
-
-    /// Reads the full contents of this file as a string.
-    async fn contents<V: Vfs + ?Sized>(&self, vfs: &V) -> Result<String, VfsError>;
-}
-
-/// A symbolic link.
-pub trait VfsSymlink: VfsItem {
-    /// The target path of this symlink (may be relative or absolute).
-    fn target(&self) -> Option<&path::Path>;
-
-    /// Resolves the symlink chain transitively (up to 32 hops) and returns
-    /// the final target as an [`FSItem`].
-    async fn resolve<V: Vfs + ?Sized>(&self, vfs: &V) -> Result<FSItem, VfsError>;
-}
-
-/// A special filesystem entry (socket, pipe, device, etc.).
-///
-/// This is a marker trait — no additional methods beyond [`VfsItem`].
-pub trait VfsSpecial: VfsItem {}
 
 // ===========================================================================
 // VfsBackend — low-level, path-based backend interface
@@ -161,32 +121,22 @@ pub trait Vfs: VfsBackend {
             Ok(meta) => {
                 let name = path.file_name().unwrap_or(path.as_os_str()).into();
                 let p = path.to_path_buf();
-                match meta.kind {
-                    DirEntryKind::Directory => FSItem::Dir(DirItem {
-                        name,
-                        path: p,
-                        metadata: meta,
-                    }),
-                    DirEntryKind::File => FSItem::File(FileItem {
-                        name,
-                        path: p,
-                        metadata: meta,
+                let kind = match meta.kind {
+                    DirEntryKind::Directory => FSItemKind::Directory,
+                    DirEntryKind::File => FSItemKind::File {
                         file_type: MimeKind::UNKNOWN,
-                    }),
+                    },
                     DirEntryKind::Symlink => {
-                        let target = self.read_link(path).await.unwrap_or_default();
-                        FSItem::Symlink(SymlinkItem {
-                            name,
-                            path: p,
-                            metadata: meta,
-                            target,
-                        })
+                        let target = self.read_link(path).await.ok();
+                        FSItemKind::Symlink { target }
                     }
-                    DirEntryKind::Special => FSItem::Special(SpecialItem {
-                        name,
-                        path: p,
-                        metadata: meta,
-                    }),
+                    DirEntryKind::Special => FSItemKind::Special,
+                };
+                FSItem {
+                    name,
+                    path: p,
+                    metadata: meta,
+                    kind,
                 }
             }
             Err(e) => {
@@ -194,73 +144,71 @@ pub trait Vfs: VfsBackend {
                     VfsError::Io(ioe) => ioe.kind(),
                     _ => io::ErrorKind::Other,
                 };
-                FSItem::Invalid(InvalidItem {
+                FSItem {
                     name: path.file_name().unwrap_or(path.as_os_str()).into(),
                     path: path.to_path_buf(),
-                    cause,
-                })
+                    metadata: Metadata {
+                        kind: DirEntryKind::Special,
+                        len: 0,
+                        modified: None,
+                        readonly: false,
+                    },
+                    kind: FSItemKind::Invalid { cause },
+                }
             }
         }
     }
 
-    /// Reads the contents of a directory returned by [`VfsBackend::read_dir_raw`]
-    /// and wraps them into fully typed [`FSItem`] values.
-    async fn read_dir(&self, dir: &DirItem) -> Result<Vec<FSItem>, VfsError> {
-        let entries = self.read_dir_raw(dir.path()).await?;
+    /// Reads the contents of a directory and returns fully typed [`FSItem`]
+    /// values.
+    async fn read_dir(&self, item: &FSItem) -> Result<Vec<FSItem>, VfsError> {
+        if !item.is_dir() {
+            return Err(VfsError::NotADirectory(item.path().clone()));
+        }
+        let entries = self.read_dir_raw(item.path()).await?;
         let mut result = Vec::with_capacity(entries.len());
         for entry in entries {
             let name = entry.name;
             let p = entry.path;
             let meta = entry.metadata;
-            match meta.kind {
-                DirEntryKind::Directory => {
-                    result.push(FSItem::Dir(DirItem {
-                        name,
-                        path: p,
-                        metadata: meta,
-                    }));
-                }
-                DirEntryKind::File => {
-                    let file_type = entry.mime_type.unwrap_or(MimeKind::UNKNOWN);
-                    result.push(FSItem::File(FileItem {
-                        name,
-                        path: p,
-                        metadata: meta,
-                        file_type,
-                    }));
-                }
+            let kind = match meta.kind {
+                DirEntryKind::Directory => FSItemKind::Directory,
+                DirEntryKind::File => FSItemKind::File {
+                    file_type: entry.mime_type.unwrap_or(MimeKind::UNKNOWN),
+                },
                 DirEntryKind::Symlink => {
-                    let target = self.read_link(&p).await.unwrap_or_default();
-                    result.push(FSItem::Symlink(SymlinkItem {
-                        name,
-                        path: p,
-                        metadata: meta,
-                        target,
-                    }));
+                    let target = self.read_link(&p).await.ok();
+                    FSItemKind::Symlink { target }
                 }
-                DirEntryKind::Special => {
-                    result.push(FSItem::Special(SpecialItem {
-                        name,
-                        path: p,
-                        metadata: meta,
-                    }));
-                }
-            }
+                DirEntryKind::Special => FSItemKind::Special,
+            };
+            result.push(FSItem {
+                name,
+                path: p,
+                metadata: meta,
+                kind,
+            });
         }
         Ok(result)
     }
 
     /// Reads the full contents of a file as a string.
-    async fn read_file(&self, file: &FileItem) -> Result<String, VfsError> {
-        self.read_to_string(file.path()).await
+    async fn read_file(&self, item: &FSItem) -> Result<String, VfsError> {
+        if !item.is_file() {
+            return Err(VfsError::Unsupported(format!(
+                "not a file: {}",
+                item.path().display()
+            )));
+        }
+        self.read_to_string(item.path()).await
     }
 
     /// Resolves a symlink chain transitively (up to 32 hops) and returns
     /// the final target as an [`FSItem`].
-    async fn resolve(&self, symlink: &SymlinkItem) -> Result<FSItem, VfsError> {
-        let mut current = if let Some(target) = symlink.target() {
+    async fn resolve(&self, item: &FSItem) -> Result<FSItem, VfsError> {
+        let mut current = if let Some(target) = item.link_target() {
             if target.is_relative() {
-                if let Some(parent) = symlink.path().parent() {
+                if let Some(parent) = item.path().parent() {
                     parent.join(target)
                 } else {
                     target.to_path_buf()
@@ -269,7 +217,7 @@ pub trait Vfs: VfsBackend {
                 target.to_path_buf()
             }
         } else {
-            return Ok(self.new_item(symlink.path()).await);
+            return Ok(item.clone());
         };
 
         let mut hops = 0;
@@ -292,54 +240,59 @@ pub trait Vfs: VfsBackend {
 
     /// Returns `true` if two items have compatible types for comparison.
     async fn comparable(&self, a: &FSItem, b: &FSItem) -> bool {
-        match (a, b) {
-            (FSItem::Dir(_), FSItem::Dir(_)) => true,
-            (FSItem::File(fa), FSItem::File(fb)) => fa.file_type == fb.file_type,
+        match (&a.kind, &b.kind) {
+            (FSItemKind::Directory, FSItemKind::Directory) => true,
+            (
+                FSItemKind::File { file_type: fa },
+                FSItemKind::File { file_type: fb },
+            ) => fa == fb,
             _ => false,
         }
     }
 
     /// Copies a directory into another directory.
-    async fn copy(&self, src: &DirItem, dst: &DirItem) -> Result<(), VfsError> {
-        self.copy_raw(src.path(), dst.path()).await
+    async fn copy(&self, src: &FSItem, dst: &FSItem) -> Result<(), VfsError> {
+        match &src.kind {
+            FSItemKind::Directory => self.copy_raw(src.path(), dst.path()).await,
+            FSItemKind::File { .. } => {
+                let dst = if dst.is_dir() {
+                    dst.path().join(src.name())
+                } else {
+                    dst.path().to_path_buf()
+                };
+                self.copy_raw(src.path(), &dst).await
+            }
+            _ => Err(VfsError::Unsupported(format!(
+                "cannot copy {}",
+                src.kind
+            ))),
+        }
     }
 
-    /// Copies a file into a directory.
-    async fn copy_file(&self, src: &FileItem, dst: &DirItem) -> Result<(), VfsError> {
-        let dst = dst.path().join(src.name());
-        self.copy_raw(src.path(), &dst).await
-    }
-
-    /// Moves a directory into another directory.
-    async fn move_item(&self, src: &DirItem, dst: &DirItem) -> Result<(), VfsError> {
-        self.rename_raw(src.path(), dst.path()).await
-    }
-
-    /// Moves a file into a directory.
-    async fn move_file(&self, src: &FileItem, dst: &DirItem) -> Result<(), VfsError> {
-        let dst = dst.path().join(src.name());
+    /// Moves (renames) an item into another directory.
+    async fn move_item(&self, src: &FSItem, dst: &FSItem) -> Result<(), VfsError> {
+        let dst = if dst.is_dir() {
+            dst.path().join(src.name())
+        } else {
+            dst.path().to_path_buf()
+        };
         self.rename_raw(src.path(), &dst).await
     }
 
-    /// Deletes a directory.
-    async fn delete(&self, item: &DirItem) -> Result<(), VfsError> {
-        self.remove_dir_all(item.path()).await
+    /// Deletes a file or directory.
+    async fn delete(&self, item: &FSItem) -> Result<(), VfsError> {
+        match &item.kind {
+            FSItemKind::Directory => self.remove_dir_all(item.path()).await,
+            FSItemKind::File { .. } => self.remove_file(item.path()).await,
+            _ => Err(VfsError::Unsupported(format!(
+                "cannot delete {}",
+                item.kind
+            ))),
+        }
     }
 
-    /// Deletes a file.
-    async fn delete_file(&self, item: &FileItem) -> Result<(), VfsError> {
-        self.remove_file(item.path()).await
-    }
-
-    /// Renames a directory in-place.
-    async fn rename(&self, item: &DirItem, new_name: &str) -> Result<(), VfsError> {
-        let mut dst = item.path().to_path_buf();
-        dst.set_file_name(new_name);
-        self.rename_raw(item.path(), &dst).await
-    }
-
-    /// Renames a file in-place.
-    async fn rename_file(&self, item: &FileItem, new_name: &str) -> Result<(), VfsError> {
+    /// Renames an item in-place.
+    async fn rename(&self, item: &FSItem, new_name: &str) -> Result<(), VfsError> {
         let mut dst = item.path().to_path_buf();
         dst.set_file_name(new_name);
         self.rename_raw(item.path(), &dst).await

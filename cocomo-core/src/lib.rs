@@ -23,12 +23,9 @@ pub mod textdiff;
 pub mod vfs;
 pub mod backends;
 
+pub use backends::{DirEntry, DirEntryKind, Metadata};
 pub use dirdiff::{By, DiffItem, DiffItemType, DiffSide, DirDiff};
 pub use fsitem::{FSItem, FSItemType};
 pub use fsops::{FsError, copy_item, delete_item, move_item, rename_item};
 pub use textdiff::{DiffLine, LineDiffType, TextDiff};
-pub use vfs::{
-    DirEntry, DirEntryKind, DirItem, FileItem, FSItem as VfsFSItem, FSItemKind, InvalidItem, LocalFs,
-    Metadata, SpecialItem, SymlinkItem, Vfs, VfsBackend, VfsDirectory, VfsFile, VfsItem,
-    VfsSpecial, VfsSymlink, VfsError,
-};
+pub use vfs::{FSItemKind, LocalFs, Vfs, VfsBackend, VfsError, VfsItem};

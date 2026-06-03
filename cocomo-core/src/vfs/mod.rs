@@ -8,12 +8,10 @@
 // $Revision$
 
 pub(crate) mod error;
-pub(crate) mod items;
+pub(crate) mod fsitem;
 pub(crate) mod traits;
-pub(crate) mod types;
 
 pub use crate::backends::localfs::LocalFs;
 pub use error::VfsError;
-pub use items::{DirItem, FileItem, FSItem, InvalidItem, SpecialItem, SymlinkItem};
-pub use traits::{Vfs, VfsBackend, VfsDirectory, VfsFile, VfsItem, VfsSpecial, VfsSymlink};
-pub use types::{DirEntry, DirEntryKind, FSItemKind, Metadata};
+pub use fsitem::{FSItem, FSItemKind};
+pub use traits::{Vfs, VfsBackend, VfsItem};
