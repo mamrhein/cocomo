@@ -13,7 +13,7 @@ use mimetype_detector::MimeKind;
 use tokio::fs;
 use tokio::io::AsyncReadExt;
 
-use crate::vfs::{DirEntry, FileKind, Metadata, VfsBackend, VfsError};
+use crate::vfs::{DirEntry, DirEntryKind, Metadata, VfsBackend, VfsError};
 
 /// Virtual file system implementation backed by the local OS filesystem.
 #[derive(Debug)]
@@ -72,11 +72,11 @@ impl VfsBackend for LocalFs {
     async fn copy_raw(&self, from: &Path, to: &Path) -> Result<(), VfsError> {
         let src_meta = self.symlink_metadata(from).await?;
         match src_meta.kind {
-            FileKind::Directory => {
+            DirEntryKind::Directory => {
                 let dst = if self
                     .symlink_metadata(to)
                     .await
-                    .is_ok_and(|m| m.kind == FileKind::Directory)
+                    .is_ok_and(|m| m.kind == DirEntryKind::Directory)
                 {
                     to.join(from.file_name().unwrap_or_default())
                 } else {
@@ -96,7 +96,7 @@ impl VfsBackend for LocalFs {
         let dst = if self
             .metadata(to)
             .await
-            .is_ok_and(|m| m.kind == FileKind::Directory)
+            .is_ok_and(|m| m.kind == DirEntryKind::Directory)
         {
             to.join(from.file_name().unwrap_or_default())
         } else {
@@ -122,13 +122,13 @@ impl VfsBackend for LocalFs {
 fn metadata_from_std(meta: &std::fs::Metadata) -> Metadata {
     Metadata {
         kind: if meta.is_dir() {
-            FileKind::Directory
+            DirEntryKind::Directory
         } else if meta.is_file() {
-            FileKind::File
+            DirEntryKind::File
         } else if meta.is_symlink() {
-            FileKind::Symlink
+            DirEntryKind::Symlink
         } else {
-            FileKind::Other
+            DirEntryKind::Special
         },
         len: meta.len(),
         modified: meta.modified().ok(),

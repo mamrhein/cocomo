@@ -11,7 +11,7 @@ use std::{ffi, io, path};
 
 use mimetype_detector::MimeKind;
 
-use crate::vfs::types::{FSItemKind, FileKind, Metadata};
+use crate::vfs::types::{DirEntryKind, FSItemKind, Metadata};
 use crate::vfs::{Vfs, VfsDirectory, VfsFile, VfsItem, VfsSpecial, VfsSymlink, VfsError};
 
 // ---------------------------------------------------------------------------
@@ -188,7 +188,7 @@ impl VfsItem for InvalidItem {
     }
     fn metadata(&self) -> &Metadata {
         const INVALID_META: &Metadata = &Metadata {
-            kind: FileKind::Other,
+            kind: DirEntryKind::Special,
             len: 0,
             modified: None,
             readonly: false,

@@ -28,7 +28,7 @@ pub use fsitem::{FSItem, FSItemType};
 pub use fsops::{FsError, copy_item, delete_item, move_item, rename_item};
 pub use textdiff::{DiffLine, LineDiffType, TextDiff};
 pub use vfs::{
-    DirEntry, DirItem, FileItem, FileKind, FSItem as VfsFSItem, FSItemKind, InvalidItem, LocalFs,
+    DirEntry, DirEntryKind, DirItem, FileItem, FSItem as VfsFSItem, FSItemKind, InvalidItem, LocalFs,
     Metadata, SpecialItem, SymlinkItem, Vfs, VfsBackend, VfsDirectory, VfsFile, VfsItem,
     VfsSpecial, VfsSymlink, VfsError,
 };

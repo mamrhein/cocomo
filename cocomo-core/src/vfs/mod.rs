@@ -16,4 +16,4 @@ pub use crate::backends::localfs::LocalFs;
 pub use error::VfsError;
 pub use items::{DirItem, FileItem, FSItem, InvalidItem, SpecialItem, SymlinkItem};
 pub use traits::{Vfs, VfsBackend, VfsDirectory, VfsFile, VfsItem, VfsSpecial, VfsSymlink};
-pub use types::{DirEntry, FileKind, FSItemKind, Metadata};
+pub use types::{DirEntry, DirEntryKind, FSItemKind, Metadata};

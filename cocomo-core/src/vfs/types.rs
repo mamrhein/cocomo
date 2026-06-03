@@ -13,15 +13,15 @@ use mimetype_detector::MimeKind;
 
 /// Kind of a file system entry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FileKind {
+pub enum DirEntryKind {
     /// A regular file.
     File,
     /// A directory.
     Directory,
     /// A symbolic link.
     Symlink,
-    /// Other (socket, pipe, device, etc.).
-    Other,
+    /// Special (socket, pipe, device, etc.).
+    Special,
 }
 
 /// Lightweight discriminator for an [`FSItem`](crate::vfs::FSItem).
@@ -58,7 +58,7 @@ impl fmt::Display for FSItemKind {
 #[derive(Clone, Debug)]
 pub struct Metadata {
     /// The kind of entry.
-    pub kind: FileKind,
+    pub kind: DirEntryKind,
     /// Size of the entry in bytes.
     pub len: u64,
     /// Last modification time, if available.

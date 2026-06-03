@@ -19,7 +19,7 @@ use crate::vfs::error::VfsError;
 use crate::vfs::items::{
     DirItem, FileItem, FSItem, InvalidItem, SpecialItem, SymlinkItem,
 };
-use crate::vfs::types::{DirEntry, FSItemKind, FileKind, Metadata};
+use crate::vfs::types::{DirEntry, DirEntryKind, FSItemKind, Metadata};
 
 // ===========================================================================
 // VfsItem — base trait for every filesystem item
@@ -162,18 +162,18 @@ pub trait Vfs: VfsBackend {
                 let name = path.file_name().unwrap_or(path.as_os_str()).into();
                 let p = path.to_path_buf();
                 match meta.kind {
-                    FileKind::Directory => FSItem::Dir(DirItem {
+                    DirEntryKind::Directory => FSItem::Dir(DirItem {
                         name,
                         path: p,
                         metadata: meta,
                     }),
-                    FileKind::File => FSItem::File(FileItem {
+                    DirEntryKind::File => FSItem::File(FileItem {
                         name,
                         path: p,
                         metadata: meta,
                         file_type: MimeKind::UNKNOWN,
                     }),
-                    FileKind::Symlink => {
+                    DirEntryKind::Symlink => {
                         let target = self.read_link(path).await.unwrap_or_default();
                         FSItem::Symlink(SymlinkItem {
                             name,
@@ -182,7 +182,7 @@ pub trait Vfs: VfsBackend {
                             target,
                         })
                     }
-                    FileKind::Other => FSItem::Special(SpecialItem {
+                    DirEntryKind::Special => FSItem::Special(SpecialItem {
                         name,
                         path: p,
                         metadata: meta,
@@ -213,14 +213,14 @@ pub trait Vfs: VfsBackend {
             let p = entry.path;
             let meta = entry.metadata;
             match meta.kind {
-                FileKind::Directory => {
+                DirEntryKind::Directory => {
                     result.push(FSItem::Dir(DirItem {
                         name,
                         path: p,
                         metadata: meta,
                     }));
                 }
-                FileKind::File => {
+                DirEntryKind::File => {
                     let file_type = entry.mime_type.unwrap_or(MimeKind::UNKNOWN);
                     result.push(FSItem::File(FileItem {
                         name,
@@ -229,7 +229,7 @@ pub trait Vfs: VfsBackend {
                         file_type,
                     }));
                 }
-                FileKind::Symlink => {
+                DirEntryKind::Symlink => {
                     let target = self.read_link(&p).await.unwrap_or_default();
                     result.push(FSItem::Symlink(SymlinkItem {
                         name,
@@ -238,7 +238,7 @@ pub trait Vfs: VfsBackend {
                         target,
                     }));
                 }
-                FileKind::Other => {
+                DirEntryKind::Special => {
                     result.push(FSItem::Special(SpecialItem {
                         name,
                         path: p,
@@ -275,7 +275,7 @@ pub trait Vfs: VfsBackend {
         let mut hops = 0;
         while hops < 32 {
             if let Ok(meta) = self.symlink_metadata(&current).await
-                && meta.kind == FileKind::Symlink
+                && meta.kind == DirEntryKind::Symlink
                 && let Ok(next) = self.read_link(&current).await
             {
                 current = current
