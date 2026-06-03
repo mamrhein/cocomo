@@ -39,7 +39,7 @@ pub struct Metadata {
     pub readonly: bool,
 }
 
-/// A raw directory entry returned by [`VfsBackend::read_dir_raw`](crate::vfs::VfsBackend).
+/// A raw directory entry returned by [`VfsBackend::read_dir`](crate::vfs::VfsBackend).
 ///
 /// Backends may set [`mime_type`] to [`Some`] if they can cheaply detect it;
 /// otherwise the frontend [`Vfs::read_dir`](crate::vfs::Vfs) fills it in.

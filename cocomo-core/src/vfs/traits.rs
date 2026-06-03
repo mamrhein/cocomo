@@ -70,7 +70,7 @@ pub trait VfsBackend: std::fmt::Debug + Send + Sync {
     async fn read_link(&self, path: &path::Path) -> Result<path::PathBuf, VfsError>;
 
     /// Reads the raw entries of a directory (one level, no recursion).
-    async fn read_dir_raw(&self, path: &path::Path) -> Result<Vec<DirEntry>, VfsError>;
+    async fn read_dir(&self, path: &path::Path) -> Result<Vec<DirEntry>, VfsError>;
 
     /// Reads the contents of a file as a string.
     async fn read_to_string(&self, path: &path::Path) -> Result<String, VfsError>;
@@ -82,10 +82,10 @@ pub trait VfsBackend: std::fmt::Debug + Send + Sync {
     async fn canonicalize(&self, path: &path::Path) -> Result<path::PathBuf, VfsError>;
 
     /// Copies a file or directory from `from` to `to`.
-    async fn copy_raw(&self, from: &path::Path, to: &path::Path) -> Result<(), VfsError>;
+    async fn copy(&self, from: &path::Path, to: &path::Path) -> Result<(), VfsError>;
 
     /// Renames (moves) a file or directory from `from` to `to`.
-    async fn rename_raw(&self, from: &path::Path, to: &path::Path) -> Result<(), VfsError>;
+    async fn rename(&self, from: &path::Path, to: &path::Path) -> Result<(), VfsError>;
 
     /// Deletes a file.
     async fn remove_file(&self, path: &path::Path) -> Result<(), VfsError>;

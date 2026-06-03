@@ -35,7 +35,7 @@ impl VfsBackend for LocalFs {
         Ok(fs::read_link(path).await?)
     }
 
-    async fn read_dir_raw(&self, path: &Path) -> Result<Vec<DirEntry>, VfsError> {
+    async fn read_dir(&self, path: &Path) -> Result<Vec<DirEntry>, VfsError> {
         let mut entries = fs::read_dir(path).await?;
         let mut result = Vec::new();
         while let Some(entry) = entries.next_entry().await? {
@@ -70,7 +70,7 @@ impl VfsBackend for LocalFs {
         Ok(fs::canonicalize(path).await?)
     }
 
-    async fn copy_raw(&self, from: &Path, to: &Path) -> Result<(), VfsError> {
+    async fn copy(&self, from: &Path, to: &Path) -> Result<(), VfsError> {
         let src_meta = self.symlink_metadata(from).await?;
         match src_meta.kind {
             DirEntryKind::Directory => {
@@ -93,7 +93,7 @@ impl VfsBackend for LocalFs {
         }
     }
 
-    async fn rename_raw(&self, from: &Path, to: &Path) -> Result<(), VfsError> {
+    async fn rename(&self, from: &Path, to: &Path) -> Result<(), VfsError> {
         let dst = if self
             .metadata(to)
             .await

@@ -98,7 +98,7 @@ impl<FS: VfsBackend> Vfs for VfsImpl<FS> {
         if !Self::is_dir(item) {
             return Err(VfsError::NotADirectory(item.path.clone()));
         }
-        let entries = self.backend.read_dir_raw(&item.path).await?;
+        let entries = self.backend.read_dir(&item.path).await?;
         let mut result = Vec::with_capacity(entries.len());
         for entry in entries {
             let name = entry.name;
@@ -181,14 +181,14 @@ impl<FS: VfsBackend> Vfs for VfsImpl<FS> {
 
     async fn copy(&self, src: &FSItem, dst: &FSItem) -> Result<(), VfsError> {
         match &src.kind {
-            FSItemKind::Directory => self.backend.copy_raw(&src.path, &dst.path).await,
+            FSItemKind::Directory => self.backend.copy(&src.path, &dst.path).await,
             FSItemKind::File { .. } => {
                 let dst = if Self::is_dir(dst) {
                     dst.path.join(&src.name)
                 } else {
                     dst.path.to_path_buf()
                 };
-                self.backend.copy_raw(&src.path, &dst).await
+                self.backend.copy(&src.path, &dst).await
             }
             _ => Err(VfsError::Unsupported(format!(
                 "cannot copy {}",
@@ -203,7 +203,7 @@ impl<FS: VfsBackend> Vfs for VfsImpl<FS> {
         } else {
             dst.path.to_path_buf()
         };
-        self.backend.rename_raw(&src.path, &dst).await
+        self.backend.rename(&src.path, &dst).await
     }
 
     async fn delete(&self, item: &FSItem) -> Result<(), VfsError> {
@@ -220,6 +220,6 @@ impl<FS: VfsBackend> Vfs for VfsImpl<FS> {
     async fn rename(&self, item: &FSItem, new_name: &str) -> Result<(), VfsError> {
         let mut dst = item.path.to_path_buf();
         dst.set_file_name(new_name);
-        self.backend.rename_raw(&item.path, &dst).await
+        self.backend.rename(&item.path, &dst).await
     }
 }
