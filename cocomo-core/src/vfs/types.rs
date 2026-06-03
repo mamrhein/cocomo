@@ -7,22 +7,11 @@
 // $Source$
 // $Revision$
 
-use std::{ffi, fmt, io, path, time};
+use std::{fmt, io};
 
 use mimetype_detector::MimeKind;
 
-/// Kind of a file system entry.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DirEntryKind {
-    /// A regular file.
-    File,
-    /// A directory.
-    Directory,
-    /// A symbolic link.
-    Symlink,
-    /// Special (socket, pipe, device, etc.).
-    Special,
-}
+pub use crate::backends::{DirEntry, DirEntryKind, Metadata};
 
 /// Lightweight discriminator for an [`FSItem`](crate::vfs::FSItem).
 ///
@@ -52,33 +41,4 @@ impl fmt::Display for FSItemKind {
             Self::Invalid { cause } => write!(f, "Invalid({})", cause),
         }
     }
-}
-
-/// Metadata of a file system entry.
-#[derive(Clone, Debug)]
-pub struct Metadata {
-    /// The kind of entry.
-    pub kind: DirEntryKind,
-    /// Size of the entry in bytes.
-    pub len: u64,
-    /// Last modification time, if available.
-    pub modified: Option<time::SystemTime>,
-    /// Whether the entry is read-only.
-    pub readonly: bool,
-}
-
-/// A raw directory entry returned by [`VfsBackend::read_dir_raw`](crate::vfs::VfsBackend).
-///
-/// Backends may set [`mime_type`] to [`Some`] if they can cheaply detect it;
-/// otherwise the frontend [`Vfs::read_dir`](crate::vfs::Vfs) fills it in.
-#[derive(Clone, Debug)]
-pub struct DirEntry {
-    /// The name of the entry.
-    pub name: ffi::OsString,
-    /// The full path of the entry.
-    pub path: path::PathBuf,
-    /// Metadata of the entry.
-    pub metadata: Metadata,
-    /// Detected MIME type, if available.
-    pub mime_type: Option<MimeKind>,
 }

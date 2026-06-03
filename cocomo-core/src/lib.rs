@@ -21,7 +21,7 @@ pub mod fsops;
 mod readdir;
 pub mod textdiff;
 pub mod vfs;
-pub(crate) mod backends;
+pub mod backends;
 
 pub use dirdiff::{By, DiffItem, DiffItemType, DiffSide, DirDiff};
 pub use fsitem::{FSItem, FSItemType};
