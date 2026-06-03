@@ -8,10 +8,12 @@
 // $Revision$
 
 pub(crate) mod error;
+pub(crate) mod fs;
 pub(crate) mod fsitem;
 pub(crate) mod traits;
 
 pub use crate::backends::localfs::LocalFs;
 pub use error::VfsError;
+pub use fs::VfsImpl;
 pub use fsitem::{FSItem, FSItemKind};
 pub use traits::{Vfs, VfsBackend, VfsItem};
