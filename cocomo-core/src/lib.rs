@@ -20,8 +20,15 @@ mod fsitem;
 pub mod fsops;
 mod readdir;
 pub mod textdiff;
+pub mod vfs;
+pub(crate) mod backends;
 
 pub use dirdiff::{By, DiffItem, DiffItemType, DiffSide, DirDiff};
 pub use fsitem::{FSItem, FSItemType};
 pub use fsops::{FsError, copy_item, delete_item, move_item, rename_item};
 pub use textdiff::{DiffLine, LineDiffType, TextDiff};
+pub use vfs::{
+    DirEntry, DirItem, FileItem, FileKind, FSItem as VfsFSItem, FSItemKind, InvalidItem, LocalFs,
+    Metadata, SpecialItem, SymlinkItem, Vfs, VfsBackend, VfsDirectory, VfsFile, VfsItem,
+    VfsSpecial, VfsSymlink, VfsError,
+};
