@@ -309,7 +309,7 @@ mod tests {
         assert_eq!(file.file_type().unwrap(), FileType::TEXT);
     }
 
-    #[cfg(target_family = "unix")]
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn test_symlink() {
         let link = FSItem::new("/usr/lib/libzstd.so").await;
