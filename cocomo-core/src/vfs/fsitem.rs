@@ -11,8 +11,10 @@ use std::{ffi, fmt, io, path};
 
 use mimetype_detector::MimeKind;
 
-use crate::backends::{DirEntryKind, Metadata};
-use crate::vfs::VfsItem;
+use crate::{
+    backends::{DirEntryKind, Metadata},
+    vfs::VfsItem,
+};
 
 // ---------------------------------------------------------------------------
 // FSItemKind — lightweight discriminator
@@ -41,7 +43,10 @@ impl fmt::Display for FSItemKind {
         match self {
             Self::Directory => write!(f, "Directory"),
             Self::File { file_type } => write!(f, "File({})", file_type),
-            Self::Symlink { .. } => write!(f, "Symlink"),
+            Self::Symlink { target } => match target {
+                Some(path) => write!(f, "Symlink({})", path.display()),
+                None => write!(f, "broken Symlink"),
+            },
             Self::Special => write!(f, "Special"),
             Self::Invalid { cause } => write!(f, "Invalid({})", cause),
         }
