@@ -73,6 +73,38 @@ impl InMemoryFS {
         }
     }
 
+    /// Creates a file at the given path with the given content.
+    ///
+    /// The parent directory is not automatically created; call
+    /// [`create_dir_all`](Self::create_dir_all) first.
+    pub fn create_file(&self, path: &Path, content: &[u8]) {
+        let mut inodes = self.inodes.write().unwrap();
+        inodes.insert(
+            path.to_path_buf(),
+            Inode {
+                kind: InodeKind::File(content.to_vec()),
+                modified: SystemTime::now(),
+                readonly: false,
+            },
+        );
+    }
+
+    /// Creates a symbolic link at the given path pointing to `target`.
+    ///
+    /// The parent directory is not automatically created; call
+    /// [`create_dir_all`](Self::create_dir_all) first.
+    pub fn create_symlink(&self, path: &Path, target: &Path) {
+        let mut inodes = self.inodes.write().unwrap();
+        inodes.insert(
+            path.to_path_buf(),
+            Inode {
+                kind: InodeKind::Symlink(target.to_path_buf()),
+                modified: SystemTime::now(),
+                readonly: false,
+            },
+        );
+    }
+
     fn inode_meta(inode: &Inode) -> Metadata {
         let kind = match &inode.kind {
             InodeKind::File(_) => DirEntryKind::File,
