@@ -19,7 +19,7 @@ use crate::{
 };
 
 /// Virtual file system implementation backed by the local OS filesystem.
-#[derive(Debug)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LocalFs;
 
 impl VfsBackend for LocalFs {
