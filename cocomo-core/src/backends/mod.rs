@@ -12,6 +12,9 @@ use std::{ffi, path, time};
 use mimetype_detector::MimeKind;
 
 pub(crate) mod localfs;
+pub(crate) mod traits;
+
+pub use traits::VfsBackend;
 
 /// Kind of a directory entry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -39,7 +42,7 @@ pub struct Metadata {
     pub readonly: bool,
 }
 
-/// A raw directory entry returned by [`VfsBackend::read_dir`](crate::vfs::VfsBackend).
+/// A raw directory entry returned by [`VfsBackend::read_dir`](VfsBackend::read_dir).
 ///
 /// Backends may set [`mime_type`] to [`Some`] if they can cheaply detect it;
 /// otherwise the frontend [`Vfs::read_dir`](crate::vfs::Vfs) fills it in.

@@ -13,7 +13,8 @@ pub(crate) mod fsitem;
 pub(crate) mod traits;
 
 pub use crate::backends::localfs::LocalFs;
+pub use crate::backends::VfsBackend;
 pub use error::VfsError;
 pub use fs::VfsImpl;
 pub use fsitem::{FSItem, FSItemKind};
-pub use traits::{Vfs, VfsBackend, VfsItem};
+pub use traits::{Vfs, VfsItem};

@@ -11,8 +11,8 @@ use std::io;
 
 use mimetype_detector::MimeKind;
 
-use crate::backends::{DirEntryKind, Metadata};
-use crate::vfs::{FSItem, FSItemKind, Vfs, VfsBackend, VfsError};
+use crate::backends::{DirEntryKind, Metadata, VfsBackend};
+use crate::vfs::{FSItem, FSItemKind, Vfs, VfsError};
 
 /// High-level filesystem frontend wrapping a [`VfsBackend`].
 ///

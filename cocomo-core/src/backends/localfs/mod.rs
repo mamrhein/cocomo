@@ -13,8 +13,8 @@ use mimetype_detector::MimeKind;
 use fs_err::tokio as fs;
 use tokio::io::AsyncReadExt;
 
-use crate::backends::{DirEntry, DirEntryKind, Metadata};
-use crate::vfs::{VfsBackend, VfsError};
+use crate::backends::{DirEntry, DirEntryKind, Metadata, VfsBackend};
+use crate::vfs::VfsError;
 
 /// Virtual file system implementation backed by the local OS filesystem.
 #[derive(Debug)]
