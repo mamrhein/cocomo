@@ -15,7 +15,7 @@
 use std::path::{Path, PathBuf};
 
 use thiserror::Error;
-use tokio::fs;
+use fs_err::tokio as fs;
 
 use crate::fsitem::FSItem;
 

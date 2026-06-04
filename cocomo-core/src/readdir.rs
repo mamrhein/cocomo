@@ -12,7 +12,8 @@
 //! This internal module provides a helper for asynchronously reading the
 //! contents of a directory and wrapping them into [`FSItem`] objects.
 
-use tokio::{fs, io};
+use fs_err::tokio as fs;
+use tokio::io;
 
 use crate::fsitem::FSItem;
 

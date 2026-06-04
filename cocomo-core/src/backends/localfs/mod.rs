@@ -10,7 +10,7 @@
 use std::path::Path;
 
 use mimetype_detector::MimeKind;
-use tokio::fs;
+use fs_err::tokio as fs;
 use tokio::io::AsyncReadExt;
 
 use crate::backends::{DirEntry, DirEntryKind, Metadata};
