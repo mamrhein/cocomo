@@ -9,19 +9,24 @@
 
 use std::path::Path;
 
-use mimetype_detector::MimeKind;
 use fs_err::tokio as fs;
+use mimetype_detector::MimeKind;
 use tokio::io::AsyncReadExt;
 
-use crate::backends::{DirEntry, DirEntryKind, Metadata, VfsBackend};
-use crate::vfs::VfsError;
+use crate::{
+    backends::{DirEntry, DirEntryKind, Metadata, VfsBackend},
+    vfs::VfsError,
+};
 
 /// Virtual file system implementation backed by the local OS filesystem.
 #[derive(Debug)]
 pub struct LocalFs;
 
 impl VfsBackend for LocalFs {
-    async fn symlink_metadata(&self, path: &Path) -> Result<Metadata, VfsError> {
+    async fn symlink_metadata(
+        &self,
+        path: &Path,
+    ) -> Result<Metadata, VfsError> {
         let meta = fs::symlink_metadata(path).await?;
         Ok(metadata_from_std(&meta))
     }
@@ -31,7 +36,10 @@ impl VfsBackend for LocalFs {
         Ok(metadata_from_std(&meta))
     }
 
-    async fn read_link(&self, path: &Path) -> Result<std::path::PathBuf, VfsError> {
+    async fn read_link(
+        &self,
+        path: &Path,
+    ) -> Result<std::path::PathBuf, VfsError> {
         Ok(fs::read_link(path).await?)
     }
 
@@ -59,14 +67,21 @@ impl VfsBackend for LocalFs {
         Ok(fs::read_to_string(path).await?)
     }
 
-    async fn read_head(&self, path: &Path, n: usize) -> Result<Vec<u8>, VfsError> {
+    async fn read_head(
+        &self,
+        path: &Path,
+        n: usize,
+    ) -> Result<Vec<u8>, VfsError> {
         let file = fs::File::open(path).await?;
         let mut buf = Vec::with_capacity(n);
         file.take(n as u64).read_to_end(&mut buf).await?;
         Ok(buf)
     }
 
-    async fn canonicalize(&self, path: &Path) -> Result<std::path::PathBuf, VfsError> {
+    async fn canonicalize(
+        &self,
+        path: &Path,
+    ) -> Result<std::path::PathBuf, VfsError> {
         Ok(fs::canonicalize(path).await?)
     }
 
@@ -118,6 +133,30 @@ impl VfsBackend for LocalFs {
     async fn create_dir_all(&self, path: &Path) -> Result<(), VfsError> {
         Ok(fs::create_dir_all(path).await?)
     }
+
+    #[cfg(unix)]
+    async fn is_mountpoint(&self, path: &Path) -> Result<bool, VfsError> {
+        use std::os::unix::fs::MetadataExt;
+        let target_meta = fs::metadata(path).await?;
+        if let Some(parent) = path.parent() {
+            let parent_meta = fs::metadata(parent).await?;
+            Ok(target_meta.dev() != parent_meta.dev())
+        } else {
+            Ok(true) // Root "/" is a mountpoint
+        }
+    }
+
+    #[cfg(windows)]
+    async fn is_mountpoint(&self, path: &Path) -> Result<bool, VfsError> {
+        use std::os::windows::fs::MetadataExt;
+
+        // Windows folders use Reparse Points for volume mounts / junctions
+        let meta = fs::symlink_metadata(path).await?;
+        let file_attributes = meta.file_attributes();
+
+        // Check if the FILE_ATTRIBUTE_REPARSE_POINT (0x400) flag is present
+        Ok((file_attributes & 0x400) != 0)
+    }
 }
 
 fn metadata_from_std(meta: &std::fs::Metadata) -> Metadata {
@@ -137,12 +176,12 @@ fn metadata_from_std(meta: &std::fs::Metadata) -> Metadata {
     }
 }
 
-async fn resolve_dst(from: &Path, to: &Path) -> Result<std::path::PathBuf, VfsError> {
+async fn resolve_dst(
+    from: &Path,
+    to: &Path,
+) -> Result<std::path::PathBuf, VfsError> {
     let mut dst = to.to_path_buf();
-    if fs::symlink_metadata(to)
-        .await
-        .is_ok_and(|m| m.is_symlink())
-    {
+    if fs::symlink_metadata(to).await.is_ok_and(|m| m.is_symlink()) {
         dst = fs::canonicalize(to).await?;
     }
     if fs::metadata(&dst).await.is_ok_and(|m| m.is_dir()) {

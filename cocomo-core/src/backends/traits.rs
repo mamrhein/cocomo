@@ -11,8 +11,10 @@
 
 use std::path;
 
-use crate::backends::{DirEntry, Metadata};
-use crate::vfs::VfsError;
+use crate::{
+    backends::{DirEntry, Metadata},
+    vfs::VfsError,
+};
 
 /// Low-level, path-based filesystem operations.
 ///
@@ -21,31 +23,58 @@ use crate::vfs::VfsError;
 /// [`Vfs`](crate::vfs::Vfs) frontend.
 pub trait VfsBackend: std::fmt::Debug + Send + Sync {
     /// Returns metadata for the given path, without following symlinks.
-    async fn symlink_metadata(&self, path: &path::Path) -> Result<Metadata, VfsError>;
+    async fn symlink_metadata(
+        &self,
+        path: &path::Path,
+    ) -> Result<Metadata, VfsError>;
 
     /// Returns metadata for the given path, following symlinks.
     async fn metadata(&self, path: &path::Path) -> Result<Metadata, VfsError>;
 
     /// Reads the target of a symbolic link.
-    async fn read_link(&self, path: &path::Path) -> Result<path::PathBuf, VfsError>;
+    async fn read_link(
+        &self,
+        path: &path::Path,
+    ) -> Result<path::PathBuf, VfsError>;
 
     /// Reads the raw entries of a directory (one level, no recursion).
-    async fn read_dir(&self, path: &path::Path) -> Result<Vec<DirEntry>, VfsError>;
+    async fn read_dir(
+        &self,
+        path: &path::Path,
+    ) -> Result<Vec<DirEntry>, VfsError>;
 
     /// Reads the contents of a file as a string.
-    async fn read_to_string(&self, path: &path::Path) -> Result<String, VfsError>;
+    async fn read_to_string(
+        &self,
+        path: &path::Path,
+    ) -> Result<String, VfsError>;
 
     /// Reads up to `n` bytes from the beginning of a file.
-    async fn read_head(&self, path: &path::Path, n: usize) -> Result<Vec<u8>, VfsError>;
+    async fn read_head(
+        &self,
+        path: &path::Path,
+        n: usize,
+    ) -> Result<Vec<u8>, VfsError>;
 
     /// Resolves a path to its canonical absolute form.
-    async fn canonicalize(&self, path: &path::Path) -> Result<path::PathBuf, VfsError>;
+    async fn canonicalize(
+        &self,
+        path: &path::Path,
+    ) -> Result<path::PathBuf, VfsError>;
 
     /// Copies a file or directory from `from` to `to`.
-    async fn copy(&self, from: &path::Path, to: &path::Path) -> Result<(), VfsError>;
+    async fn copy(
+        &self,
+        from: &path::Path,
+        to: &path::Path,
+    ) -> Result<(), VfsError>;
 
     /// Renames (moves) a file or directory from `from` to `to`.
-    async fn rename(&self, from: &path::Path, to: &path::Path) -> Result<(), VfsError>;
+    async fn rename(
+        &self,
+        from: &path::Path,
+        to: &path::Path,
+    ) -> Result<(), VfsError>;
 
     /// Deletes a file.
     async fn remove_file(&self, path: &path::Path) -> Result<(), VfsError>;
@@ -55,4 +84,15 @@ pub trait VfsBackend: std::fmt::Debug + Send + Sync {
 
     /// Creates a directory and all parent directories.
     async fn create_dir_all(&self, path: &path::Path) -> Result<(), VfsError>;
+
+    /// Returns `true` if the given path is a mount point.
+    ///
+    /// The default implementation always returns `false`. Backends that can
+    /// detect mount points (e.g. `LocalFs`) should override this.
+    async fn is_mountpoint(
+        &self,
+        _path: &path::Path,
+    ) -> Result<bool, VfsError> {
+        Ok(false)
+    }
 }
