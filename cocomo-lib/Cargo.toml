@@ -1,13 +1,13 @@
 [package]
-name = "cocomo-tui"
+name = "cocomo-lib"
 version = "0.0.1"
 edition = "2024"
 authors = ["Michael Amrhein <michael@adrhinum.de>"]
-description = "TUI-App: COmpare, COpy & MOve directories and files."
+description = "COmpare, COpy & MOve directories and files [core library]."
 readme = "../README.md"
 homepage = "https://github.com/mamrhein/cocomo"
 repository = "https://github.com/mamrhein/cocomo"
-documentation = "https://docs.rs/cocomo-tui/"
+documentation = "https://docs.rs/cocomo-lib/"
 license-file = "../LICENSE.TXT"
 keywords = ["directory", "file", "compare", "copy", "move"]
 categories = ["command-line-utilities", "filesystem"]

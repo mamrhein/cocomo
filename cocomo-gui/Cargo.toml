@@ -1,9 +1,9 @@
 [package]
-name = "cocomo-tui"
+name = "cocomo-gui"
 version = "0.0.1"
 edition = "2024"
 authors = ["Michael Amrhein <michael@adrhinum.de>"]
-description = "TUI-App: COmpare, COpy & MOve directories and files."
+description = "GUI-App: COmpare, COpy & MOve directories and files."
 readme = "../README.md"
 homepage = "https://github.com/mamrhein/cocomo"
 repository = "https://github.com/mamrhein/cocomo"

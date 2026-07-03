@@ -2,13 +2,13 @@
 # .gitignore documentation: https://git-scm.com/docs/gitignore
 
 # you can ignore files
-.DS_Store
+.*
 *.log
 *.tmp
 
 # or folders
-.idea/
 .git/
+.zed/
 dist/
 build/
 out/

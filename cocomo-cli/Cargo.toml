@@ -1,29 +1,15 @@
 [package]
-name = "cocomo-core"
+name = "cocomo-cli"
 version = "0.0.1"
 edition = "2024"
 authors = ["Michael Amrhein <michael@adrhinum.de>"]
-description = "COmpare, COpy & MOve directories and files [core library]."
+description = "CLI-App: COmpare, COpy & MOve directories and files."
 readme = "../README.md"
 homepage = "https://github.com/mamrhein/cocomo"
 repository = "https://github.com/mamrhein/cocomo"
-documentation = "https://docs.rs/cocomo-core/"
+documentation = "https://docs.rs/cocomo-tui/"
 license-file = "../LICENSE.TXT"
 keywords = ["directory", "file", "compare", "copy", "move"]
 categories = ["command-line-utilities", "filesystem"]
 
 [dependencies]
-chrono = "0.4"
-mimetype-detector = "0.3"
-similar = "3"
-thiserror = "2"
-tokio = { version = "1", features = [
-    "fs",
-    "io-util",
-    "macros",
-    "rt-multi-thread",
-] }
-
-[dev-dependencies]
-tempfile = "3"
-filetime = "0.2"
