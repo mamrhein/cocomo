@@ -11,9 +11,12 @@
 //! and `tokio` for async I/O.
 
 use std::{
+    fs, io,
     ops::Range,
     path::{Path, PathBuf},
     pin::Pin,
+    task::{Context, Poll},
+    time::SystemTime,
 };
 
 use async_trait::async_trait;
@@ -55,35 +58,35 @@ impl FsFile for LocalFile {
 
 impl AsyncRead for LocalFile {
     fn poll_read(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
-        std::pin::Pin::new(&mut self.get_mut().inner).poll_read(cx, buf)
+    ) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_read(cx, buf)
     }
 }
 
 impl AsyncWrite for LocalFile {
     fn poll_write(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
         buf: &[u8],
-    ) -> std::task::Poll<std::io::Result<usize>> {
-        std::pin::Pin::new(&mut self.get_mut().inner).poll_write(cx, buf)
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.get_mut().inner).poll_write(cx, buf)
     }
 
     fn poll_flush(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
-        std::pin::Pin::new(&mut self.get_mut().inner).poll_flush(cx)
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_flush(cx)
     }
 
     fn poll_shutdown(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
-        std::pin::Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
     }
 }
 
@@ -142,18 +145,18 @@ impl LocalFs {
 // ---------------------------------------------------------------------------
 
 #[cfg(unix)]
-fn platform_ids(meta: &std::fs::Metadata) -> (u64, u64) {
+fn platform_ids(meta: &fs::Metadata) -> (u64, u64) {
     use std::os::unix::fs::MetadataExt;
     (meta.ino(), meta.dev())
 }
 
 #[cfg(not(unix))]
-fn platform_ids(_meta: &std::fs::Metadata) -> (u64, u64) {
+fn platform_ids(_meta: &fs::Metadata) -> (u64, u64) {
     // Windows does not expose inodes via std. Return sentinel values.
     (0, 0)
 }
 
-fn to_utc(opt: Option<std::time::SystemTime>) -> DateTime<Utc> {
+fn to_utc(opt: Option<SystemTime>) -> DateTime<Utc> {
     opt.map(DateTime::<Utc>::from).unwrap_or_default()
 }
 
@@ -268,15 +271,9 @@ impl FileSystem for LocalFs {
                 wrap(e, crate::error::FsOperation::Read, path.to_path_buf())
             })?;
             use tokio::io::AsyncSeekExt;
-            file.seek(std::io::SeekFrom::Start(r.start)).await.map_err(
-                |e| {
-                    wrap(
-                        e,
-                        crate::error::FsOperation::Read,
-                        path.to_path_buf(),
-                    )
-                },
-            )?;
+            file.seek(io::SeekFrom::Start(r.start)).await.map_err(|e| {
+                wrap(e, crate::error::FsOperation::Read, path.to_path_buf())
+            })?;
             let len = (r.end - r.start) as usize;
             let mut reader = tokio::io::BufReader::new(file);
             use tokio::io::AsyncReadExt;
@@ -317,7 +314,7 @@ impl FileSystem for LocalFs {
         let adapted = stream.map(move |item| {
             item.map(|bm| bm.freeze()).map_err(|e| {
                 wrap(
-                    std::io::Error::other(format!("stream read error: {e}")),
+                    io::Error::other(format!("stream read error: {e}")),
                     crate::error::FsOperation::Read,
                     path_owned.clone(),
                 )
@@ -345,7 +342,7 @@ impl FileSystem for LocalFs {
         match fs_err::tokio::remove_file(path).await {
             Ok(()) => Ok(()),
             Err(e) => {
-                if e.kind() == std::io::ErrorKind::IsADirectory {
+                if e.kind() == io::ErrorKind::IsADirectory {
                     fs_err::tokio::remove_dir(path).await.map_err(|e| {
                         wrap(
                             e,
@@ -424,11 +421,12 @@ impl FileSystem for LocalFs {
 
 #[cfg(test)]
 mod tests {
+    use std::{env, process};
+
     use super::*;
 
     fn temp_dir() -> PathBuf {
-        std::env::temp_dir()
-            .join(format!("cocomo_test_{}", std::process::id()))
+        env::temp_dir().join(format!("cocomo_test_{}", process::id()))
     }
 
     #[tokio::test]

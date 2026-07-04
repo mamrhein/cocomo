@@ -14,7 +14,12 @@
 //! to detect hard-link and symlink cycles and to scope inode uniqueness per
 //! mount point.
 
-use std::{collections::HashMap, path::Path, sync::Arc};
+use std::{
+    collections::HashMap,
+    mem,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use crate::{error::Result, fs::FileSystem, meta::Metadata};
 
@@ -104,7 +109,7 @@ pub async fn scan_directory(
     }
 
     // BFS work queue: (absolute_path, relative_path, depth)
-    let mut queue: Vec<(std::path::PathBuf, String, usize)> = Vec::new();
+    let mut queue: Vec<(PathBuf, String, usize)> = Vec::new();
     queue.push((path.to_path_buf(), String::new(), 0));
 
     while let Some((dir_path, rel_prefix, depth)) = queue.pop() {
@@ -199,7 +204,7 @@ pub async fn scan_directory(
     // Because we used BFS, children of a directory appear after the directory
     // in the flat list. We rebuild the tree by matching paths.
     if !result.entries.is_empty() {
-        let flat = std::mem::take(&mut result.entries);
+        let flat = mem::take(&mut result.entries);
         let tree = build_tree(flat);
         result.entries = tree;
     }
@@ -255,12 +260,14 @@ fn build_tree(flat: Vec<ScanEntry>) -> Vec<ScanEntry> {
 
 #[cfg(test)]
 mod tests {
+    use std::{env, process};
+
     use super::*;
     use crate::local::LocalFs;
 
-    async fn setup_test_dir() -> std::path::PathBuf {
-        let base = std::env::temp_dir()
-            .join(format!("cocomo_scan_{}", std::process::id()));
+    async fn setup_test_dir() -> PathBuf {
+        let base =
+            env::temp_dir().join(format!("cocomo_scan_{}", process::id()));
         let _ = fs_err::remove_dir_all(&base);
         fs_err::create_dir_all(base.join("sub/nested")).unwrap();
         fs_err::write(base.join("a.txt"), "alpha").unwrap();
@@ -337,7 +344,7 @@ mod tests {
     #[tokio::test]
     async fn scan_nonexistent_path() {
         let fs: Arc<dyn FileSystem> = Arc::new(LocalFs::new("test"));
-        let path = std::path::Path::new("/nonexistent/cocomo_scan_xyz");
+        let path = Path::new("/nonexistent/cocomo_scan_xyz");
         let result = scan_directory(&fs, path, &ScanConfig::default()).await;
         assert!(result.is_err());
     }
@@ -361,8 +368,8 @@ mod tests {
 
     #[tokio::test]
     async fn scan_empty_directory() {
-        let base = std::env::temp_dir()
-            .join(format!("cocomo_scan_empty_{}", std::process::id()));
+        let base = env::temp_dir()
+            .join(format!("cocomo_scan_empty_{}", process::id()));
         let _ = fs_err::remove_dir_all(&base);
         fs_err::create_dir_all(&base).unwrap();
 

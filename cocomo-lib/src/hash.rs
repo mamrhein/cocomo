@@ -22,7 +22,7 @@ use std::{
     collections::HashMap,
     hash::{Hash, Hasher as StdHasher},
     path::Path,
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use blake3::Hash as Blake3Hash;
@@ -162,7 +162,7 @@ impl ContentCache {
     pub fn get(&self, label: &str, path: &Path) -> Option<ContentId> {
         let key = Self::cache_key(label, path);
         let now = Instant::now();
-        let ttl = std::time::Duration::from_secs(self.config.ttl_secs);
+        let ttl = Duration::from_secs(self.config.ttl_secs);
 
         let mut inner = self.inner.lock();
 
@@ -199,7 +199,7 @@ impl ContentCache {
         let mut inner = self.inner.lock();
 
         // Evict expired entries first.
-        let ttl = std::time::Duration::from_secs(self.config.ttl_secs);
+        let ttl = Duration::from_secs(self.config.ttl_secs);
         let expired_keys: Vec<String> = inner
             .entries
             .iter()
@@ -265,6 +265,8 @@ unsafe impl Sync for ContentCache {}
 
 #[cfg(test)]
 mod tests {
+    use std::collections::hash_map::DefaultHasher;
+
     use super::*;
 
     #[test]
@@ -297,8 +299,8 @@ mod tests {
         assert_eq!(hash_for(&a), hash_for(&b));
     }
 
-    fn hash_for<T: std::hash::Hash>(t: &T) -> u64 {
-        let mut h = std::collections::hash_map::DefaultHasher::new();
+    fn hash_for<T: Hash>(t: &T) -> u64 {
+        let mut h = DefaultHasher::new();
         t.hash(&mut h);
         h.finish()
     }

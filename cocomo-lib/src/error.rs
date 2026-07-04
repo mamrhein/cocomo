@@ -10,7 +10,7 @@
 //! Structured filesystem errors that carry operation context, paths, and
 //! underlying causes so callers can produce actionable diagnostics.
 
-use std::path::PathBuf;
+use std::{fmt, io, path::PathBuf, result};
 
 use thiserror::Error;
 
@@ -39,8 +39,8 @@ pub enum FsOperation {
     Symlink,
 }
 
-impl std::fmt::Display for FsOperation {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for FsOperation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             FsOperation::Open => write!(f, "open"),
             FsOperation::Read => write!(f, "read"),
@@ -83,18 +83,18 @@ pub enum FsError {
 // Helpers to convert io errors into FsError with operation context
 // ---------------------------------------------------------------------------
 
-/// Wrap an `std::io::Error` into an `FsError::Io`, classifying known
+/// Wrap an `io::Error` into an `FsError::Io`, classifying known
 /// permission and not-found cases into their dedicated variants.
 pub fn wrap(
-    io_error: std::io::Error,
+    io_error: io::Error,
     operation: FsOperation,
     path: PathBuf,
 ) -> FsError {
     match io_error.kind() {
-        std::io::ErrorKind::PermissionDenied => {
+        io::ErrorKind::PermissionDenied => {
             FsError::PermissionDenied { operation, path }
         }
-        std::io::ErrorKind::NotFound => FsError::NotFound { path },
+        io::ErrorKind::NotFound => FsError::NotFound { path },
         _ => FsError::Io {
             operation,
             path,
@@ -104,7 +104,7 @@ pub fn wrap(
 }
 
 /// Alias for the `Result` type used throughout the library.
-pub type Result<T> = std::result::Result<T, FsError>;
+pub type Result<T> = result::Result<T, FsError>;
 
 #[cfg(test)]
 mod tests {
@@ -112,10 +112,8 @@ mod tests {
 
     #[test]
     fn wraps_permission_denied() {
-        let io = std::io::Error::new(
-            std::io::ErrorKind::PermissionDenied,
-            "access denied",
-        );
+        let io =
+            io::Error::new(io::ErrorKind::PermissionDenied, "access denied");
         let err = wrap(io, FsOperation::Open, PathBuf::from("/secret"));
         assert!(matches!(err, FsError::PermissionDenied { .. }));
         let FsError::PermissionDenied { operation, path } = err else {
@@ -127,15 +125,14 @@ mod tests {
 
     #[test]
     fn wraps_not_found() {
-        let io =
-            std::io::Error::new(std::io::ErrorKind::NotFound, "no such file");
+        let io = io::Error::new(io::ErrorKind::NotFound, "no such file");
         let err = wrap(io, FsOperation::Read, PathBuf::from("/missing"));
         assert!(matches!(err, FsError::NotFound { .. }));
     }
 
     #[test]
     fn wraps_general_io() {
-        let io = std::io::Error::other("disk full");
+        let io = io::Error::other("disk full");
         let err = wrap(io, FsOperation::Write, PathBuf::from("/full/file"));
         assert!(matches!(err, FsError::Io { .. }));
     }
