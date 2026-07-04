@@ -32,20 +32,21 @@ cocomo/
 
 ### 1.3 Key Dependencies
 
-| Layer         | Crate                   | Purpose                                  |
-| ------------- | ----------------------- | ---------------------------------------- |
-| Async runtime | `tokio`                 | I/O event loop                           |
-| Parallelism   | `rayon`                 | CPU-bound diffing                        |
-| TUI           | `ratatui` + `crossterm` | Terminal rendering                       |
-| GUI           | `gpui`                  | Desktop windowing (via Zed's toolkit)    |
-| CLI           | `clap`                  | Argument parsing                         |
-| Compression   | `flate2`, `zip`, `tar`  | Archive support                          |
-| Crypto        | `sha2`, `blake3`        | Content hashing for fast equality checks |
-| Image         | `image`                 | Picture comparison                       |
-| CSV/TSV       | `csv`, `serde`          | Table comparison                         |
-| Regex         | `regex`                 | Filters, grammars                        |
-| Config        | `serde_json` / `toml`   | Settings and sessions                    |
-| HTML report   | `askama`                | Templated output                         |
+| Layer          | Crate                   | Purpose                                               |
+| -------------- | ----------------------- | ----------------------------------------------------- |
+| Async runtime  | `tokio`                 | I/O event loop                                        |
+| Parallelism    | `rayon`                 | CPU-bound diffing                                     |
+| Filesystem I/O | `fs_err` + `walkdir`    | Rich error context; battle-tested directory traversal |
+| TUI            | `ratatui` + `crossterm` | Terminal rendering                                    |
+| GUI            | `gpui`                  | Desktop windowing (via Zed's toolkit)                 |
+| CLI            | `clap`                  | Argument parsing                                      |
+| Compression    | `flate2`, `zip`, `tar`  | Archive support                                       |
+| Crypto         | `sha2`, `blake3`        | Content hashing for fast equality checks              |
+| Image          | `image`                 | Picture comparison                                    |
+| CSV/TSV        | `csv`, `serde`          | Table comparison                                      |
+| Regex          | `regex`                 | Filters, grammars                                     |
+| Config         | `serde_json` / `toml`   | Settings and sessions                                 |
+| HTML report    | `askama`                | Templated output                                      |
 
 ---
 
@@ -53,19 +54,55 @@ cocomo/
 
 ### 2.1 Core Trait: `FsProvider`
 
-Every filesystem backend implements this single trait:
+Every filesystem backend implements this single trait. The design follows two principles derived from robust filesystem practices: paths are resolved exactly once at `open()` time, and all subsequent I/O operates on owned file handles rather than paths. This avoids TOCTOU races.
 
 ```rust
+/// Metadata returned by stat-like operations. For local filesystems this
+/// includes inode and device information for hard-link detection and
+/// cycle-safe traversal.
+pub struct Metadata {
+    pub size: u64,
+    pub modified: DateTime,
+    pub is_dir: bool,
+    pub is_symlink: bool,
+    pub inode: Option<u64>,   // platform-specific, None for remote providers
+    pub device_id: Option<u64>, // platform-specific, tracks filesystem boundaries
+}
+
+/// A handle to an opened file. The path is resolved at construction time;
+/// all subsequent operations go through this handle to avoid TOCTOU races.
+#[async_trait]
+pub trait FsFile: Send + AsyncRead + AsyncWrite {
+    /// Cached metadata captured at open time.
+    fn metadata(&self) -> &Metadata;
+
+    /// Flush any buffered writes.
+    async fn flush(&mut self) -> Result<()>;
+}
+
 #[async_trait]
 pub trait FsProvider: Send + Sync {
-    /// Resolve a path to metadata (size, modified time, is_dir, is_symlink).
+    /// Resolve a path to metadata. Does not open the file.
     async fn metadata(&self, path: &Path) -> Result<Metadata>;
 
     /// List directory entries. Returns a stream for large directories.
     async fn read_dir(&self, path: &Path) -> Result<DirStream>;
 
-    /// Read file content. `range` is optional for sparse reads.
+    /// Open a file for I/O. The returned handle owns the open descriptor;
+    /// the caller should discard `path` after this call.
+    async fn open(&self, path: &Path, mode: OpenMode) -> Result<FsFile>;
+
+    /// Read file content in a single call. `range` is optional for sparse
+    /// reads. For large files prefer `read_stream()` instead.
     async fn read(&self, path: &Path, range: Option<Range<u64>>) -> Result<Bytes>;
+
+    /// Read file content as a stream. Suitable for large files and
+    /// streaming comparison or hashing.
+    async fn read_stream(
+        &self,
+        path: &Path,
+        range: Option<Range<u64>>,
+    ) -> Result<impl Stream<Item = Result<Bytes>>>;
 
     /// Write file content.
     async fn write(&self, path: &Path, data: Bytes) -> Result<()>;
@@ -98,15 +135,15 @@ pub trait FsProvider: Send + Sync {
 
 ### 2.2 Built-in Providers
 
-| Provider    | Scheme                                          | Notes                                                              |
-| ----------- | ----------------------------------------------- | ------------------------------------------------------------------ |
-| `LocalFs`   | `file://` or bare paths                         | Uses `tokio::fs`; supports hardlink detection, extended attributes |
-| `FtpFs`     | `ftp://`, `ftps://`                             | Async FTP via `async-ftp`; profile-based auth                      |
-| `S3Fs`      | `s3://bucket/path`                              | `aws-sdk-s3`; credential profiles                                  |
-| `WebDavFs`  | `davs://`                                       | `webdav` crate                                                     |
-| `ArchiveFs` | `zip://file.zip!/inner/`, `tar://`, `tar.gz://` | Virtual FS over read-only compressed archives                      |
-| `SshFs`     | `sftp://` (future)                              | SFTP over SSH keys/passwords                                       |
-| `GitFs`     | `git://repo@rev/path` (future)                  | Virtual FS over a specific commit                                  |
+| Provider    | Scheme                                          | Notes                                                                                                                    |
+| ----------- | ----------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `LocalFs`   | `file://` or bare paths                         | Uses `fs_err::tokio` for rich error context; `walkdir` for directory traversal; inode-based hardlink and cycle detection |
+| `FtpFs`     | `ftp://`, `ftps://`                             | Async FTP via `async-ftp`; profile-based auth                                                                            |
+| `S3Fs`      | `s3://bucket/path`                              | `aws-sdk-s3`; credential profiles                                                                                        |
+| `WebDavFs`  | `davs://`                                       | `webdav` crate                                                                                                           |
+| `ArchiveFs` | `zip://file.zip!/inner/`, `tar://`, `tar.gz://` | Virtual FS over read-only compressed archives                                                                            |
+| `SshFs`     | `sftp://` (future)                              | SFTP over SSH keys/passwords                                                                                             |
+| `GitFs`     | `git://repo@rev/path` (future)                  | Virtual FS over a specific commit                                                                                        |
 
 ### 2.3 Provider Registry
 
@@ -130,9 +167,28 @@ Secrets are encrypted at rest using the OS keyring (Secret Service / macOS Keych
 ### 2.5 Content Hashing & Caching
 
 - Files are identified for equality by `(size, mtime, hash)` triple.
-- Hash is computed with `blake3` (fast, parallel).
+- Hash is computed with `blake3` (fast, parallel). Streaming `Hasher::update()` is used for large files to avoid loading entire files into memory.
 - An in-memory `ContentCache` stores recent hashes so repeated scans avoid re-reading.
+- Cache uses LRU eviction with a configurable max size and TTL to bound memory and open handles.
 - Cache entries are invalidated on write operations and by a TTL.
+
+### 2.5.1 Structured Errors
+
+All `FsProvider` methods return `Result<T, FsError>` where `FsError` carries
+rich context — the operation that failed, the path that was attempted, and the
+underlying `fs_err::Error` — so that callers can produce actionable diagnostics.
+
+```rust
+pub enum FsOperation {
+    Open, Read, Write, Remove, Rename, Copy, CreateDir, ReadDir, ReadLink, Symlink,
+}
+
+pub enum FsError {
+    Io { operation: FsOperation, path: PathBuf, source: fs_err::Error },
+    PermissionDenied { operation: FsOperation, path: PathBuf },
+    NotFound { path: PathBuf },
+}
+```
 
 ### 2.6 Transfer Operations Between Providers
 
@@ -197,6 +253,17 @@ pub struct DirEntry {
 | Compare files only        | Compare contents of matching names    |
 | Compare structure only    | Compare names and dates, skip content |
 | Compare files & structure | Full comparison                       |
+
+**Recursive traversal**: directory scans delegate to `walkdir` for the local
+filesystem. The walk is configured to:
+
+- skip symlinks by default (configurable opt-in to follow symlinks),
+- track visited inodes per device ID to detect hard-link and symlink cycles,
+- detect filesystem boundary crossings (device ID changes) so inode tracking
+  is scoped correctly per mount.
+
+Per-entry traversal errors (e.g., permission denied) are reported individually
+rather than aborting the entire scan.
 
 **Sorting**: by name, size, modified date, type, status. Multi-column secondary sort.
 
@@ -571,9 +638,16 @@ pub struct ReportConfig {
 Capture a point-in-time view of a directory tree:
 
 ```rust
+/// A serializable identifier that references a provider. Resolved lazily
+/// back to a live `FsProvider` when the snapshot is loaded for comparison.
+pub struct ProviderId {
+    pub scheme: String,  // "file", "s3", "ftp", ...
+    pub profile: Option<String>, // optional named profile
+}
+
 pub struct Snapshot {
     pub id: Uuid,
-    pub provider: Arc<dyn FsProvider>,
+    pub provider_id: ProviderId,  // serializable; resolved on load
     pub path: PathBuf,
     pub entries: Vec<SnapshotEntry>,
     pub created_at: DateTime,
@@ -589,7 +663,7 @@ pub struct SnapshotEntry {
 }
 ```
 
-Snapshots are compared against live filesystems or other snapshots, avoiding re-reading files.
+Snapshots are compared against live filesystems or other snapshots, avoiding re-reading files. The `provider_id` is resolved back to a live `Arc<dyn FsProvider>` via the provider registry when a snapshot is loaded for comparison.
 
 ---
 
@@ -1053,15 +1127,18 @@ pub struct AlignmentInfo {
 
 ### 15.1 Performance
 
-| Metric                     | Target                             |
-| -------------------------- | ---------------------------------- |
-| Directory scan (10K files) | < 2 seconds (hash-based, parallel) |
-| Text diff (100K lines)     | < 500 ms                           |
-| Hex compare (10 MB)        | < 1 second                         |
-| Image compare (4K JPEG)    | < 500 ms                           |
-| TUI render refresh         | < 16 ms (60 FPS)                   |
-| GUI frame render           | < 16 ms (60 FPS)                   |
-| Memory per session         | < 50 MB for typical use            |
+| Metric                       | Target                                             |
+| ---------------------------- | -------------------------------------------------- |
+| Directory scan (10K files)   | < 2 seconds (hash-based, parallel)                 |
+| Concurrent open file handles | Bounded by a semaphore (configurable, default 256) |
+| Text diff (100K lines)       | < 500 ms                                           |
+| Hex compare (10 MB)          | < 1 second                                         |
+| Image compare (4K JPEG)      | < 500 ms                                           |
+| TUI render refresh           | < 16 ms (60 FPS)                                   |
+| GUI frame render             | < 16 ms (60 FPS)                                   |
+| Memory per session           | < 50 MB for typical use                            |
+
+Directory scans use a semaphore to limit the number of concurrently open file handles, preventing exhaustion of the OS file descriptor limit.
 
 ### 15.2 Reliability
 
@@ -1083,6 +1160,7 @@ pub struct AlignmentInfo {
 - No telemetry by default
 - Sandboxed script execution (no arbitrary code execution)
 - File path validation to prevent path traversal in archives
+- Symlinks are not followed outside the scan root by default on the local filesystem. Following symlinks is an explicit opt-in via provider configuration.
 
 ### 15.5 Accessibility
 
