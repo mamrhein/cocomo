@@ -13,3 +13,20 @@ keywords = ["directory", "file", "compare", "copy", "move"]
 categories = ["command-line-utilities", "filesystem"]
 
 [dependencies]
+async-trait = "0.1"
+blake3 = "1"
+bytes = "1"
+chrono = { version = "0.4", features = ["serde"] }
+fs-err = { version = "3", features = ["tokio"] }
+futures = "0.3"
+parking_lot = "0.12"
+thiserror = "2"
+tokio = { version = "1", features = [
+    "fs",
+    "io-util",
+    "sync",
+    "macros",
+    "rt-multi-thread",
+] }
+tokio-util = { version = "0.7", features = ["codec"] }
+walkdir = "2"

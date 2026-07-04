@@ -52,7 +52,7 @@ cocomo/
 
 ## 2. cocomo_lib — Unified Async Filesystem Library
 
-### 2.1 Core Trait: `FsProvider`
+### 2.1 Core Trait: `FileSystem`
 
 Every filesystem backend implements this single trait. The design follows two principles derived from robust filesystem practices: paths are resolved exactly once at `open()` time, and all subsequent I/O operates on owned file handles rather than paths. This avoids TOCTOU races.
 
@@ -81,7 +81,7 @@ pub trait FsFile: Send + AsyncRead + AsyncWrite {
 }
 
 #[async_trait]
-pub trait FsProvider: Send + Sync {
+pub trait FileSystem: Send + Sync {
     /// Resolve a path to metadata. Does not open the file.
     async fn metadata(&self, path: &Path) -> Result<Metadata>;
 
@@ -174,7 +174,7 @@ Secrets are encrypted at rest using the OS keyring (Secret Service / macOS Keych
 
 ### 2.5.1 Structured Errors
 
-All `FsProvider` methods return `Result<T, FsError>` where `FsError` carries
+All `FileSystem` methods return `Result<T, FsError>` where `FsError` carries
 rich context — the operation that failed, the path that was attempted, and the
 underlying `fs_err::Error` — so that callers can produce actionable diagnostics.
 
@@ -196,8 +196,8 @@ A `Transfer` subsystem handles cross-provider copies and moves:
 
 ```rust
 pub struct Transfer {
-    pub source: Arc<dyn FsProvider>,
-    pub destination: Arc<dyn FsProvider>,
+    pub source: Arc<dyn FileSystem>,
+    pub destination: Arc<dyn FileSystem>,
     pub items: Vec<TransferItem>,
 }
 
@@ -521,9 +521,9 @@ pub struct Session {
     pub id: Uuid,
     pub name: String,
     pub session_type: SessionType,
-    pub left_provider: Arc<dyn FsProvider>,
-    pub right_provider: Arc<dyn FsProvider>,
-    pub center_provider: Option<Arc<dyn FsProvider>>,  // 3-way
+    pub left_provider: Arc<dyn FileSystem>,
+    pub right_provider: Arc<dyn FileSystem>,
+    pub center_provider: Option<Arc<dyn FileSystem>>,  // 3-way
     pub left_path: PathBuf,
     pub right_path: PathBuf,
     pub center_path: Option<PathBuf>,
@@ -639,7 +639,7 @@ Capture a point-in-time view of a directory tree:
 
 ```rust
 /// A serializable identifier that references a provider. Resolved lazily
-/// back to a live `FsProvider` when the snapshot is loaded for comparison.
+/// back to a live `FileSystem` when the snapshot is loaded for comparison.
 pub struct ProviderId {
     pub scheme: String,  // "file", "s3", "ftp", ...
     pub profile: Option<String>, // optional named profile
@@ -663,7 +663,7 @@ pub struct SnapshotEntry {
 }
 ```
 
-Snapshots are compared against live filesystems or other snapshots, avoiding re-reading files. The `provider_id` is resolved back to a live `Arc<dyn FsProvider>` via the provider registry when a snapshot is loaded for comparison.
+Snapshots are compared against live filesystems or other snapshots, avoiding re-reading files. The `provider_id` is resolved back to a live `Arc<dyn FileSystem>` via the provider registry when a snapshot is loaded for comparison.
 
 ---
 
@@ -1190,7 +1190,7 @@ The following Beyond Compare features are deferred to later releases:
 
 | Phase  | Deliverable                                                                  |
 | ------ | ---------------------------------------------------------------------------- |
-| **M1** | `cocomo_lib`: `FsProvider` trait, `LocalFs`, content hashing, directory scan |
+| **M1** | `cocomo_lib`: `FileSystem` trait, `LocalFs`, content hashing, directory scan |
 | **M2** | `cocomo_lib`: Text diff engine, `TextCompareSettings`, grammar system        |
 | **M3** | `cocomo_tui`: Folder compare view, navigation, basic filtering               |
 | **M4** | `cocomo_lib`: `FtpFs`, `S3Fs`, profile management                            |

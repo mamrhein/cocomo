@@ -1,0 +1,592 @@
+// ---------------------------------------------------------------------------
+// Copyright:   (c) 2026 ff. Michael Amrhein (michael@adrhinum.de)
+// License:     This program is part of a larger application. For license
+//              details please read the file LICENSE.TXT provided together
+//              with the application.
+// ---------------------------------------------------------------------------
+// $Source$
+// $Revision$
+
+//! Local filesystem provider using `fs_err::tokio` for rich error context
+//! and `tokio` for async I/O.
+
+use std::{
+    ops::Range,
+    path::{Path, PathBuf},
+    pin::Pin,
+};
+
+use async_trait::async_trait;
+use bytes::Bytes;
+use chrono::{DateTime, Utc};
+use futures::{Stream, StreamExt, TryStreamExt, stream};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
+use tokio_util::codec::Decoder;
+
+use crate::{
+    error::{Result, wrap},
+    file::FsFile,
+    fs::{DirEntryMeta, DirStream, FileSystem, OpenMode},
+    meta::Metadata,
+};
+
+/// A file handle backed by a local `tokio::fs::File`.
+pub struct LocalFile {
+    inner: tokio::fs::File,
+    meta: Metadata,
+}
+
+#[async_trait]
+impl FsFile for LocalFile {
+    fn metadata(&self) -> &Metadata {
+        &self.meta
+    }
+
+    async fn flush(&mut self) -> Result<()> {
+        self.inner.flush().await.map_err(|e| {
+            wrap(
+                e,
+                crate::error::FsOperation::Write,
+                PathBuf::from("(local file handle)"),
+            )
+        })
+    }
+}
+
+impl AsyncRead for LocalFile {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.get_mut().inner).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for LocalFile {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        std::pin::Pin::new(&mut self.get_mut().inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.get_mut().inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
+    }
+}
+
+/// Local filesystem provider.
+///
+/// Uses `fs_err::tokio` for filesystem operations to get rich error context,
+/// and `walkdir` for directory traversal with inode-based cycle detection.
+pub struct LocalFs {
+    /// Human-readable label for this provider instance.
+    label: String,
+}
+
+impl LocalFs {
+    /// Create a new `LocalFs` with the given label.
+    pub fn new(label: impl Into<String>) -> Self {
+        Self {
+            label: label.into(),
+        }
+    }
+
+    /// Build metadata from a `fs_err::DirEntry`.
+    fn entry_meta(entry: &fs_err::DirEntry) -> Metadata {
+        let path = entry.path();
+
+        // Use symlink_metadata to detect symlinks without following them.
+        let (size, modified, is_dir, is_symlink, inode, device_id) =
+            fs_err::symlink_metadata(path)
+                .ok()
+                .map(|meta| {
+                    let is_sym = meta.file_type().is_symlink();
+                    let (ino, dev) = platform_ids(&meta);
+                    (
+                        meta.len(),
+                        to_utc(meta.modified().ok()),
+                        meta.is_dir(),
+                        is_sym,
+                        Some(ino),
+                        Some(dev),
+                    )
+                })
+                .unwrap_or((0, DateTime::default(), false, false, None, None));
+
+        Metadata {
+            size,
+            modified,
+            is_dir,
+            is_symlink,
+            inode,
+            device_id,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Platform-specific inode / device extraction
+// ---------------------------------------------------------------------------
+
+#[cfg(unix)]
+fn platform_ids(meta: &std::fs::Metadata) -> (u64, u64) {
+    use std::os::unix::fs::MetadataExt;
+    (meta.ino(), meta.dev())
+}
+
+#[cfg(not(unix))]
+fn platform_ids(_meta: &std::fs::Metadata) -> (u64, u64) {
+    // Windows does not expose inodes via std. Return sentinel values.
+    (0, 0)
+}
+
+fn to_utc(opt: Option<std::time::SystemTime>) -> DateTime<Utc> {
+    opt.map(DateTime::<Utc>::from).unwrap_or_default()
+}
+
+// ---------------------------------------------------------------------------
+// FileSystem implementation
+// ---------------------------------------------------------------------------
+
+#[async_trait]
+impl FileSystem for LocalFs {
+    async fn metadata(&self, path: &Path) -> Result<Metadata> {
+        let meta =
+            fs_err::tokio::symlink_metadata(path).await.map_err(|e| {
+                wrap(e, crate::error::FsOperation::Open, path.to_path_buf())
+            })?;
+        let (ino, dev) = platform_ids(&meta);
+        Ok(Metadata {
+            size: meta.len(),
+            modified: to_utc(meta.modified().ok()),
+            is_dir: meta.is_dir(),
+            is_symlink: meta.file_type().is_symlink(),
+            inode: Some(ino),
+            device_id: Some(dev),
+        })
+    }
+
+    async fn read_dir(&self, path: &Path) -> Result<DirStream<'_>> {
+        let entries = fs_err::read_dir(path).map_err(|e| {
+            wrap(e, crate::error::FsOperation::ReadDir, path.to_path_buf())
+        })?;
+
+        let metas: Vec<DirEntryMeta> = entries
+            .filter_map(|entry| {
+                entry.ok().map(|e| DirEntryMeta {
+                    name: e.file_name().to_string_lossy().into_owned(),
+                    meta: Self::entry_meta(&e),
+                })
+            })
+            .filter(|e| e.name != "." && e.name != "..")
+            .collect();
+
+        let s: DirStream<'_> =
+            Box::pin(stream::iter(metas.into_iter().map(Ok)));
+        Ok(s)
+    }
+
+    async fn open(
+        &self,
+        path: &Path,
+        mode: OpenMode,
+    ) -> Result<Box<dyn FsFile>> {
+        let file = match mode {
+            OpenMode::Read => {
+                tokio::fs::File::open(path).await.map_err(|e| {
+                    wrap(
+                        e,
+                        crate::error::FsOperation::Open,
+                        path.to_path_buf(),
+                    )
+                })?
+            }
+            OpenMode::Write => {
+                tokio::fs::File::create(path).await.map_err(|e| {
+                    wrap(
+                        e,
+                        crate::error::FsOperation::Write,
+                        path.to_path_buf(),
+                    )
+                })?
+            }
+            OpenMode::Append => tokio::fs::OpenOptions::new()
+                .append(true)
+                .create(true)
+                .open(path)
+                .await
+                .map_err(|e| {
+                    wrap(
+                        e,
+                        crate::error::FsOperation::Write,
+                        path.to_path_buf(),
+                    )
+                })?,
+        };
+
+        // Capture metadata at open time.
+        let meta = file.metadata().await.map_err(|e| {
+            wrap(e, crate::error::FsOperation::Open, path.to_path_buf())
+        })?;
+        let (ino, dev) = platform_ids(&meta);
+        let metadata = Metadata {
+            size: meta.len(),
+            modified: to_utc(meta.modified().ok()),
+            is_dir: meta.is_dir(),
+            is_symlink: meta.file_type().is_symlink(),
+            inode: Some(ino),
+            device_id: Some(dev),
+        };
+
+        Ok(Box::new(LocalFile {
+            inner: file,
+            meta: metadata,
+        }))
+    }
+
+    async fn read(
+        &self,
+        path: &Path,
+        range: Option<Range<u64>>,
+    ) -> Result<Bytes> {
+        let data = if let Some(r) = range {
+            // For ranged reads, open the file and seek to the start offset.
+            let mut file = tokio::fs::File::open(path).await.map_err(|e| {
+                wrap(e, crate::error::FsOperation::Read, path.to_path_buf())
+            })?;
+            use tokio::io::AsyncSeekExt;
+            file.seek(std::io::SeekFrom::Start(r.start)).await.map_err(
+                |e| {
+                    wrap(
+                        e,
+                        crate::error::FsOperation::Read,
+                        path.to_path_buf(),
+                    )
+                },
+            )?;
+            let len = (r.end - r.start) as usize;
+            let mut reader = tokio::io::BufReader::new(file);
+            use tokio::io::AsyncReadExt;
+            let mut buf = vec![0u8; len];
+            reader.read_exact(&mut buf).await.map_err(|e| {
+                wrap(e, crate::error::FsOperation::Read, path.to_path_buf())
+            })?;
+            Bytes::from(buf)
+        } else {
+            fs_err::tokio::read(path)
+                .await
+                .map_err(|e| {
+                    wrap(
+                        e,
+                        crate::error::FsOperation::Read,
+                        path.to_path_buf(),
+                    )
+                })?
+                .into()
+        };
+        Ok(data)
+    }
+
+    async fn read_stream(
+        &self,
+        path: &Path,
+        _range: Option<Range<u64>>,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<Bytes>> + Send>>> {
+        let file = fs_err::tokio::File::open(path).await.map_err(|e| {
+            wrap(e, crate::error::FsOperation::Read, path.to_path_buf())
+        })?;
+        let stream = tokio_util::codec::BytesCodec::new()
+            .framed(file)
+            .into_stream();
+        // Owned path for the closure (avoids lifetime issues).
+        let path_owned = path.to_path_buf();
+        // Convert codec errors to our FsError and BytesMut -> Bytes.
+        let adapted = stream.map(move |item| {
+            item.map(|bm| bm.freeze()).map_err(|e| {
+                wrap(
+                    std::io::Error::other(format!("stream read error: {e}")),
+                    crate::error::FsOperation::Read,
+                    path_owned.clone(),
+                )
+            })
+        });
+        Ok(Box::pin(adapted))
+    }
+
+    async fn write(&self, path: &Path, data: Bytes) -> Result<()> {
+        fs_err::tokio::write(path, &data).await.map_err(|e| {
+            wrap(e, crate::error::FsOperation::Write, path.to_path_buf())
+        })?;
+        Ok(())
+    }
+
+    async fn create_dir(&self, path: &Path) -> Result<()> {
+        fs_err::tokio::create_dir_all(path).await.map_err(|e| {
+            wrap(e, crate::error::FsOperation::CreateDir, path.to_path_buf())
+        })?;
+        Ok(())
+    }
+
+    async fn remove(&self, path: &Path) -> Result<()> {
+        // Try removing as a file first, then as a directory.
+        match fs_err::tokio::remove_file(path).await {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                if e.kind() == std::io::ErrorKind::IsADirectory {
+                    fs_err::tokio::remove_dir(path).await.map_err(|e| {
+                        wrap(
+                            e,
+                            crate::error::FsOperation::Remove,
+                            path.to_path_buf(),
+                        )
+                    })?;
+                    Ok(())
+                } else {
+                    Err(wrap(
+                        e,
+                        crate::error::FsOperation::Remove,
+                        path.to_path_buf(),
+                    ))
+                }
+            }
+        }
+    }
+
+    async fn remove_all(&self, path: &Path) -> Result<()> {
+        let meta = fs_err::symlink_metadata(path).map_err(|e| {
+            wrap(e, crate::error::FsOperation::Remove, path.to_path_buf())
+        })?;
+        if meta.is_dir() {
+            fs_err::tokio::remove_dir_all(path).await.map_err(|e| {
+                wrap(e, crate::error::FsOperation::Remove, path.to_path_buf())
+            })?;
+        } else {
+            fs_err::tokio::remove_file(path).await.map_err(|e| {
+                wrap(e, crate::error::FsOperation::Remove, path.to_path_buf())
+            })?;
+        }
+        Ok(())
+    }
+
+    async fn rename(&self, src: &Path, dst: &Path) -> Result<()> {
+        fs_err::tokio::rename(src, dst).await.map_err(|e| {
+            wrap(e, crate::error::FsOperation::Rename, src.to_path_buf())
+        })?;
+        Ok(())
+    }
+
+    async fn copy(&self, src: &Path, dst: &Path) -> Result<()> {
+        fs_err::tokio::copy(src, dst).await.map_err(|e| {
+            wrap(e, crate::error::FsOperation::Copy, src.to_path_buf())
+        })?;
+        Ok(())
+    }
+
+    async fn read_link(&self, path: &Path) -> Result<PathBuf> {
+        fs_err::read_link(path).map_err(|e| {
+            wrap(e, crate::error::FsOperation::ReadLink, path.to_path_buf())
+        })
+    }
+
+    async fn symlink(&self, target: &Path, link: &Path) -> Result<()> {
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(target, link).map_err(|e| {
+                wrap(e, crate::error::FsOperation::Symlink, link.to_path_buf())
+            })?;
+        }
+        #[cfg(not(unix))]
+        {
+            fs_err::symlink_dir(target, link).map_err(|e| {
+                wrap(e, crate::error::FsOperation::Symlink, link.to_path_buf())
+            })?;
+        }
+        Ok(())
+    }
+
+    fn label(&self) -> &str {
+        &self.label
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_dir() -> PathBuf {
+        std::env::temp_dir()
+            .join(format!("cocomo_test_{}", std::process::id()))
+    }
+
+    #[tokio::test]
+    async fn create_and_list_dir() {
+        let base = temp_dir().join("create_list");
+        let _ = fs_err::remove_dir_all(&base);
+        fs_err::create_dir_all(&base).unwrap();
+
+        let fs = LocalFs::new("test");
+        fs.create_dir(&base.join("sub")).await.unwrap();
+
+        let entries: Vec<_> =
+            fs.read_dir(&base).await.unwrap().collect().await;
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].as_ref().unwrap().name, "sub");
+
+        fs_err::remove_dir_all(&base).ok();
+    }
+
+    #[tokio::test]
+    async fn write_and_read_file() {
+        let base = temp_dir().join("write_read");
+        let _ = fs_err::remove_dir_all(&base);
+        fs_err::create_dir_all(&base).unwrap();
+
+        let fs = LocalFs::new("test");
+        let path = base.join("hello.txt");
+        let data = Bytes::from_static(b"hello, cocomo");
+        fs.write(&path, data.clone()).await.unwrap();
+
+        let content = fs.read(&path, None).await.unwrap();
+        assert_eq!(content, data);
+
+        fs_err::remove_dir_all(&base).ok();
+    }
+
+    #[tokio::test]
+    async fn metadata_file() {
+        let base = temp_dir().join("meta_file");
+        let _ = fs_err::remove_dir_all(&base);
+        fs_err::create_dir_all(&base).unwrap();
+
+        let fs = LocalFs::new("test");
+        let path = base.join("data.bin");
+        fs.write(&path, Bytes::from_static(b"12345")).await.unwrap();
+
+        let meta = fs.metadata(&path).await.unwrap();
+        assert!(!meta.is_dir);
+        assert_eq!(meta.size, 5);
+
+        fs_err::remove_dir_all(&base).ok();
+    }
+
+    #[tokio::test]
+    async fn metadata_dir() {
+        let base = temp_dir().join("meta_dir");
+        let _ = fs_err::remove_dir_all(&base);
+        fs_err::create_dir_all(&base).unwrap();
+
+        let fs = LocalFs::new("test");
+        let meta = fs.metadata(&base).await.unwrap();
+        assert!(meta.is_dir);
+
+        fs_err::remove_dir_all(&base).ok();
+    }
+
+    #[tokio::test]
+    async fn remove_file() {
+        let base = temp_dir().join("remove_file");
+        let _ = fs_err::remove_dir_all(&base);
+        fs_err::create_dir_all(&base).unwrap();
+
+        let fs = LocalFs::new("test");
+        let path = base.join("gone.txt");
+        fs.write(&path, Bytes::from_static(b"x")).await.unwrap();
+
+        fs.remove(&path).await.unwrap();
+        assert!(!path.exists());
+
+        fs_err::remove_dir_all(&base).ok();
+    }
+
+    #[tokio::test]
+    async fn remove_all_recursive() {
+        let base = temp_dir().join("remove_all");
+        let _ = fs_err::remove_dir_all(&base);
+        fs_err::create_dir_all(base.join("a/b/c")).unwrap();
+
+        let fs = LocalFs::new("test");
+        fs.remove_all(&base).await.unwrap();
+        assert!(!base.exists());
+    }
+
+    #[tokio::test]
+    async fn rename_file() {
+        let base = temp_dir().join("rename_file");
+        let _ = fs_err::remove_dir_all(&base);
+        fs_err::create_dir_all(&base).unwrap();
+
+        let fs = LocalFs::new("test");
+        let src = base.join("old.txt");
+        let dst = base.join("new.txt");
+        fs.write(&src, Bytes::from_static(b"data")).await.unwrap();
+
+        fs.rename(&src, &dst).await.unwrap();
+        assert!(!src.exists());
+        assert!(dst.exists());
+
+        fs_err::remove_dir_all(&base).ok();
+    }
+
+    #[tokio::test]
+    async fn copy_file() {
+        let base = temp_dir().join("copy_file");
+        let _ = fs_err::remove_dir_all(&base);
+        fs_err::create_dir_all(&base).unwrap();
+
+        let fs = LocalFs::new("test");
+        let src = base.join("src.txt");
+        let dst = base.join("dst.txt");
+        fs.write(&src, Bytes::from_static(b"copy me"))
+            .await
+            .unwrap();
+
+        fs.copy(&src, &dst).await.unwrap();
+        let content = fs.read(&dst, None).await.unwrap();
+        assert_eq!(content, Bytes::from_static(b"copy me"));
+
+        fs_err::remove_dir_all(&base).ok();
+    }
+
+    #[tokio::test]
+    async fn not_found_error() {
+        let fs = LocalFs::new("test");
+        let result = fs
+            .metadata(&PathBuf::from("/nonexistent/cocomo_test_xyz"))
+            .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn label_returns_set_value() {
+        let fs = LocalFs::new("my-label");
+        assert_eq!(fs.label(), "my-label");
+    }
+
+    #[tokio::test]
+    async fn open_and_flush() {
+        let base = temp_dir().join("open_flush");
+        let _ = fs_err::remove_dir_all(&base);
+        fs_err::create_dir_all(&base).unwrap();
+
+        let fs = LocalFs::new("test");
+        let path = base.join("flush.txt");
+        let mut handle = fs.open(&path, OpenMode::Write).await.unwrap();
+        handle.write_all(b"flush test").await.unwrap();
+        handle.flush().await.unwrap();
+
+        fs_err::remove_dir_all(&base).ok();
+    }
+}
