@@ -393,7 +393,7 @@ impl FileSystem for LocalFs {
     }
 
     async fn read_link(&self, path: &Path) -> Result<PathBuf> {
-        fs_err::read_link(path).map_err(|e| {
+        tokio::fs::read_link(path).await.map_err(|e| {
             wrap(e, crate::error::FsOperation::ReadLink, path.to_path_buf())
         })
     }
@@ -401,15 +401,29 @@ impl FileSystem for LocalFs {
     async fn symlink(&self, target: &Path, link: &Path) -> Result<()> {
         #[cfg(unix)]
         {
-            std::os::unix::fs::symlink(target, link).map_err(|e| {
+            tokio::fs::symlink(target, link).await.map_err(|e| {
                 wrap(e, crate::error::FsOperation::Symlink, link.to_path_buf())
             })?;
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
         {
-            fs_err::symlink_dir(target, link).map_err(|e| {
-                wrap(e, crate::error::FsOperation::Symlink, link.to_path_buf())
-            })?;
+            if target.is_dir() {
+                tokio::fs::symlink_dir(target, link).await.map_err(|e| {
+                    wrap(
+                        e,
+                        crate::error::FsOperation::Symlink,
+                        link.to_path_buf(),
+                    )
+                })?;
+            } else {
+                tokio::fs::symlink_file(target, link).await.map_err(|e| {
+                    wrap(
+                        e,
+                        crate::error::FsOperation::Symlink,
+                        link.to_path_buf(),
+                    )
+                })?;
+            }
         }
         Ok(())
     }
