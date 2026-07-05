@@ -260,9 +260,6 @@ impl ContentCache {
     }
 }
 
-unsafe impl Send for ContentCache {}
-unsafe impl Sync for ContentCache {}
-
 #[cfg(test)]
 mod tests {
     use std::collections::hash_map::DefaultHasher;
