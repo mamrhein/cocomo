@@ -24,25 +24,40 @@
 //! - [`hash`] — Content hashing (blake3) and LRU [`ContentCache`].
 //! - [`scan`] — Directory scanning that produces a tree of [`ScanEntry`]
 //!   nodes.
+//! - [`text`] — Line-based text comparison engine.
+//! - [`grammar`] — Syntax-aware grammar rules for smart diffing.
+//! - [`format`] — File format registry and format-specific settings.
 //! - [`error`] — Structured [`FsError`] with operation context.
 //! - [`meta`] — [`Metadata`] for files and directories.
 //! - [`file`] — [`FsFile`] trait for opened file handles.
 
 pub mod error;
 pub mod file;
+pub mod format;
 pub mod fs;
+pub mod grammar;
 pub mod hash;
 pub mod local;
 pub mod meta;
 pub mod scan;
+pub mod text;
 
 // Re-exports for convenience.
 pub use error::{FsError, FsOperation, Result};
 pub use file::FsFile;
+pub use format::{
+    FileFormat, FormatRegistry, FormatSettings, FormatType, LineEnding,
+    TableParser, TextEncoding,
+};
 pub use fs::{DirEntryMeta, FileSystem, OpenMode};
+pub use grammar::{Grammar, GrammarRule, Importance};
 pub use hash::{
     ContentCache, ContentCacheConfig, ContentId, hash_bytes, hash_file,
 };
 pub use local::LocalFs;
 pub use meta::Metadata;
 pub use scan::{ScanConfig, ScanEntry, ScanResult, scan_directory};
+pub use text::{
+    AlignmentMode, LineInfo, TextCompareSettings, TextDiff, TextDifference,
+    Token, WhitespaceMode, compare_texts, lines_equal,
+};
