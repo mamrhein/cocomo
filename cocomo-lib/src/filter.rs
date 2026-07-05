@@ -153,16 +153,35 @@ pub struct FilterSet {
     include_set: Option<GlobSet>,
     /// Compiled exclude glob set. `None` means no exclude filter.
     exclude_set: Option<GlobSet>,
+    /// Compiled include regex patterns.
+    include_regexes: Vec<Regex>,
+    /// Compiled exclude regex patterns.
+    exclude_regexes: Vec<Regex>,
+    /// Whether an include filter was requested (even if all patterns
+    /// failed to compile).
+    has_include: bool,
+    /// Whether an exclude filter was requested (even if all patterns
+    /// failed to compile).
+    has_exclude: bool,
     /// Compiled content regex.
     content_regex: Option<Regex>,
     /// Other filters.
     other: OtherFilters,
     /// Display filters.
     display: DisplayFilters,
+    /// Errors encountered during pattern compilation. Non-empty when at
+    /// least one pattern could not be compiled; callers should inspect
+    /// this to detect misconfigurations.
+    compilation_errors: Vec<String>,
 }
 
 impl FilterSet {
     /// Create a new filter set from the given filter definitions.
+    ///
+    /// Patterns that fail to compile are recorded in the
+    /// [`compilation_errors`](Self::compilation_errors) field rather than
+    /// aborting the entire filter set, so that valid patterns still take
+    /// effect.
     pub fn new(
         name_filters: &[NameFilter],
         other: OtherFilters,
@@ -170,26 +189,31 @@ impl FilterSet {
     ) -> Self {
         let mut include_builder = GlobSetBuilder::new();
         let mut exclude_builder = GlobSetBuilder::new();
+        let mut include_regexes = Vec::new();
+        let mut exclude_regexes = Vec::new();
         let mut has_include = false;
         let mut has_exclude = false;
+        let mut compilation_errors = Vec::new();
 
         for filter in name_filters {
             match filter {
                 NameFilter::Include(pattern) => {
-                    if Self::add_pattern_to_builder(
+                    has_include = true;
+                    Self::add_pattern(
                         pattern,
                         &mut include_builder,
-                    ) {
-                        has_include = true;
-                    }
+                        &mut include_regexes,
+                        &mut compilation_errors,
+                    );
                 }
                 NameFilter::Exclude(pattern) => {
-                    if Self::add_pattern_to_builder(
+                    has_exclude = true;
+                    Self::add_pattern(
                         pattern,
                         &mut exclude_builder,
-                    ) {
-                        has_exclude = true;
-                    }
+                        &mut exclude_regexes,
+                        &mut compilation_errors,
+                    );
                 }
             }
         }
@@ -206,48 +230,72 @@ impl FilterSet {
             None
         };
 
-        let content_regex = other
-            .regular_expression
-            .as_ref()
-            .and_then(|r| Regex::new(r).ok());
+        let content_regex = match other.regular_expression.as_ref() {
+            Some(r) => match Regex::new(r) {
+                Ok(re) => Some(re),
+                Err(e) => {
+                    compilation_errors
+                        .push(format!("invalid content regex {:?}: {e}", r));
+                    None
+                }
+            },
+            None => None,
+        };
 
         Self {
             include_set,
             exclude_set,
+            include_regexes,
+            exclude_regexes,
+            has_include,
+            has_exclude,
             content_regex,
             other,
             display,
+            compilation_errors,
         }
     }
 
-    fn add_pattern_to_builder(
+    /// Try to compile a pattern into either a glob or a regex.
+    ///
+    /// `Pattern::Regex` is compiled as an actual [`Regex`] rather than being
+    /// mangled into a glob. `Pattern::Glob` and `Pattern::Name` are compiled
+    /// as globs. Compilation failures are recorded in `errors`.
+    fn add_pattern(
         pattern: &Pattern,
-        builder: &mut GlobSetBuilder,
-    ) -> bool {
+        glob_builder: &mut GlobSetBuilder,
+        regexes: &mut Vec<Regex>,
+        errors: &mut Vec<String>,
+    ) {
         match pattern {
             Pattern::Glob(g) => {
-                if let Ok(glob) = Glob::new(g) {
-                    builder.add(glob);
-                    return true;
+                if let Err(e) = Glob::new(g) {
+                    errors.push(format!("invalid glob pattern {:?}: {e}", g));
+                } else {
+                    glob_builder.add(Glob::new(g).unwrap());
                 }
             }
             Pattern::Regex(r) => {
-                // Convert regex to a glob-like pattern by wrapping it.
-                // This is a best-effort approach; full regex matching is
-                // done separately.
-                if let Ok(glob) = Glob::new(&format!("*{r}*")) {
-                    builder.add(glob);
-                    return true;
+                // Compile the regex directly; do not convert to a glob
+                // because that would change the matching semantics.
+                match Regex::new(r) {
+                    Ok(re) => regexes.push(re),
+                    Err(e) => {
+                        errors.push(format!(
+                            "invalid regex pattern {:?}: {e}",
+                            r
+                        ));
+                    }
                 }
             }
             Pattern::Name(n) => {
-                if let Ok(glob) = Glob::new(n) {
-                    builder.add(glob);
-                    return true;
+                if let Err(e) = Glob::new(n) {
+                    errors.push(format!("invalid name pattern {:?}: {e}", n));
+                } else {
+                    glob_builder.add(Glob::new(n).unwrap());
                 }
             }
         }
-        false
     }
 
     /// Return `true` if the entry passes all non-content filters.
@@ -266,16 +314,28 @@ impl FilterSet {
             return false;
         }
 
-        // Include filter: entry must match at least one include pattern.
-        if matches!(&self.include_set, Some(include) if !include.is_match(name))
-        {
-            return false;
+        // Include filter: entry must match at least one include glob
+        // or include regex when an include filter is active.
+        if self.has_include {
+            let glob_match =
+                matches!(&self.include_set, Some(s) if s.is_match(name));
+            let regex_match =
+                self.include_regexes.iter().any(|r| r.is_match(name));
+            if !(glob_match || regex_match) {
+                return false;
+            }
         }
 
-        // Exclude filter: entry must not match any exclude pattern.
-        if matches!(&self.exclude_set, Some(exclude) if exclude.is_match(name))
-        {
-            return false;
+        // Exclude filter: entry must not match any exclude glob
+        // or exclude regex when an exclude filter is active.
+        if self.has_exclude {
+            let glob_match =
+                matches!(&self.exclude_set, Some(s) if s.is_match(name));
+            let regex_match =
+                self.exclude_regexes.iter().any(|r| r.is_match(name));
+            if glob_match || regex_match {
+                return false;
+            }
         }
 
         true
@@ -301,6 +361,15 @@ impl FilterSet {
     /// Return the other filters.
     pub fn other(&self) -> &OtherFilters {
         &self.other
+    }
+
+    /// Return errors that occurred during pattern compilation.
+    ///
+    /// Non-empty when at least one pattern could not be compiled.
+    /// Callers should surface these to users so that misconfigured
+    /// filters are detected rather than silently ignored.
+    pub fn compilation_errors(&self) -> &[String] {
+        &self.compilation_errors
     }
 }
 
@@ -418,5 +487,115 @@ mod tests {
         );
 
         assert!(fs.passes_content("anything goes"));
+    }
+
+    #[test]
+    fn regex_include_filter() {
+        let filters =
+            vec![NameFilter::Include(Pattern::Regex(r"^.*\.rs$".into()))];
+        let fs = FilterSet::new(
+            &filters,
+            OtherFilters::default(),
+            DisplayFilters::all(),
+        );
+
+        assert!(fs.passes("main.rs", &DirEntryStatus::Same));
+        assert!(!fs.passes("main.txt", &DirEntryStatus::Same));
+        assert!(fs.compilation_errors().is_empty());
+    }
+
+    #[test]
+    fn regex_exclude_filter() {
+        let filters =
+            vec![NameFilter::Exclude(Pattern::Regex(r"^\..*".into()))];
+        let fs = FilterSet::new(
+            &filters,
+            OtherFilters::default(),
+            DisplayFilters::all(),
+        );
+
+        assert!(fs.passes("visible.txt", &DirEntryStatus::Same));
+        assert!(!fs.passes(".hidden", &DirEntryStatus::Same));
+        assert!(fs.compilation_errors().is_empty());
+    }
+
+    #[test]
+    fn mixed_glob_and_regex_filters() {
+        let filters = vec![
+            NameFilter::Include(Pattern::Glob("*.rs".into())),
+            NameFilter::Include(Pattern::Regex(r"^config\..*$".into())),
+        ];
+        let fs = FilterSet::new(
+            &filters,
+            OtherFilters::default(),
+            DisplayFilters::all(),
+        );
+
+        assert!(fs.passes("main.rs", &DirEntryStatus::Same));
+        assert!(fs.passes("config.yaml", &DirEntryStatus::Same));
+        assert!(!fs.passes("data.csv", &DirEntryStatus::Same));
+        assert!(fs.compilation_errors().is_empty());
+    }
+
+    #[test]
+    fn invalid_regex_records_error() {
+        let filters =
+            vec![NameFilter::Include(Pattern::Regex(r"[invalid".into()))];
+        let fs = FilterSet::new(
+            &filters,
+            OtherFilters::default(),
+            DisplayFilters::all(),
+        );
+
+        assert_eq!(fs.compilation_errors().len(), 1);
+        assert!(fs.compilation_errors()[0].contains("[invalid"));
+        // With no valid patterns, all entries fail the include filter.
+        assert!(!fs.passes("anything.txt", &DirEntryStatus::Same));
+    }
+
+    #[test]
+    fn invalid_glob_records_error() {
+        let filters =
+            vec![NameFilter::Include(Pattern::Glob(r"[[[bad".into()))];
+        let fs = FilterSet::new(
+            &filters,
+            OtherFilters::default(),
+            DisplayFilters::all(),
+        );
+
+        assert_eq!(fs.compilation_errors().len(), 1);
+        assert!(fs.compilation_errors()[0].contains("[[[bad"));
+    }
+
+    #[test]
+    fn valid_pattern_survives_invalid_glob() {
+        // A valid regex should work even when a glob fails to compile.
+        let filters = vec![
+            NameFilter::Include(Pattern::Glob(r"[[[bad".into())),
+            NameFilter::Include(Pattern::Regex(r"^ok\.txt$".into())),
+        ];
+        let fs = FilterSet::new(
+            &filters,
+            OtherFilters::default(),
+            DisplayFilters::all(),
+        );
+
+        assert_eq!(fs.compilation_errors().len(), 1);
+        assert!(fs.passes("ok.txt", &DirEntryStatus::Same));
+        assert!(!fs.passes("bad.txt", &DirEntryStatus::Same));
+    }
+
+    #[test]
+    fn invalid_content_regex_records_error() {
+        let other = OtherFilters {
+            regular_expression: Some(r"[broken".into()),
+            ..Default::default()
+        };
+        let fs = FilterSet::new(&[], other, DisplayFilters::all());
+
+        assert_eq!(fs.compilation_errors().len(), 1);
+        assert!(fs.compilation_errors()[0].contains("content regex"));
+        // With no valid content regex, all content passes.
+        assert!(fs.passes_content("anything"));
     }
 }
