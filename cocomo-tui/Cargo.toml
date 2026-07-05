@@ -12,4 +12,14 @@ license-file = "../LICENSE.TXT"
 keywords = ["directory", "file", "compare", "copy", "move"]
 categories = ["command-line-utilities", "filesystem"]
 
+[[bin]]
+name = "cocomo-tui"
+path = "src/main.rs"
+
 [dependencies]
+cocomo-lib = { path = "../cocomo-lib" }
+crossterm = "0.28"
+ratatui = "0.29"
+tokio = { version = "1", features = ["full"] }
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
