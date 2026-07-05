@@ -163,10 +163,7 @@ pub async fn scan_directory(
             }
 
             // Skip symlink targets unless configured to follow them.
-            if entry_meta.meta.is_symlink
-                && !config.follow_symlinks
-                && !entry_meta.meta.is_dir
-            {
+            if entry_meta.meta.is_symlink && !config.follow_symlinks {
                 root_children.push(ScanEntry {
                     name: entry_meta.name,
                     path: rel_path,
