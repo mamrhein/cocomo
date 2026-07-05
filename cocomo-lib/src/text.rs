@@ -110,12 +110,11 @@ impl TextCompareSettings {
         if self.ignore_blank_lines && line.trim().is_empty() {
             return true;
         }
-        if self.ignore_comments {
-            if let Some(g) = &self.grammar
-                && g.classify_line(line) == Importance::Comment
-            {
-                return true;
-            }
+        if self.ignore_comments
+            && let Some(g) = &self.grammar
+            && g.classify_line(line) == Importance::Comment
+        {
+            return true;
         }
         false
     }
@@ -393,13 +392,12 @@ struct NormLine(String, bool); // (normalized_text, ignore_numeric)
 
 impl PartialEq for NormLine {
     fn eq(&self, other: &Self) -> bool {
-        if self.1 {
-            if let (Ok(x), Ok(y)) =
+        if self.1
+            && let (Ok(x), Ok(y)) =
                 (self.0.trim().parse::<f64>(), other.0.trim().parse::<f64>())
-                && (x - y).abs() < 1e-9
-            {
-                return true;
-            }
+            && (x - y).abs() < 1e-9
+        {
+            return true;
         }
         self.0 == other.0
     }
@@ -442,10 +440,11 @@ fn flush_changes(
         return;
     }
     // Lines changed (both removed and added).
-    if !removed.is_empty() && !added.is_empty() {
-        if let Some(s) = left_start {
-            differences.push(TextDifference::LinesChanged(s, removed, added));
-        }
+    if !removed.is_empty()
+        && !added.is_empty()
+        && let Some(s) = left_start
+    {
+        differences.push(TextDifference::LinesChanged(s, removed, added));
     }
 }
 
@@ -460,13 +459,12 @@ pub fn lines_equal(
     right: &str,
     settings: &TextCompareSettings,
 ) -> bool {
-    if settings.ignore_numeric_changes {
-        if let (Ok(l), Ok(r)) =
+    if settings.ignore_numeric_changes
+        && let (Ok(l), Ok(r)) =
             (left.trim().parse::<f64>(), right.trim().parse::<f64>())
-            && (l - r).abs() < 1e-9
-        {
-            return true;
-        }
+        && (l - r).abs() < 1e-9
+    {
+        return true;
     }
     settings.normalize_line(left) == settings.normalize_line(right)
 }
