@@ -154,7 +154,7 @@ impl ContentCache {
 
     /// Build the cache key from provider label and file path.
     fn cache_key(label: &str, path: &Path) -> String {
-        format!("{label}:{}\n{}", label, path.display())
+        format!("{label}::{}", path.display())
     }
 
     /// Look up a cached `ContentId` for the given provider and path.
