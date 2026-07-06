@@ -33,6 +33,8 @@
 //! - [`meta`] — [`Metadata`] for files and directories.
 //! - [`file`] — [`FsFile`] trait for opened file handles.
 
+#![forbid(unsafe_code)]
+
 pub mod compare;
 pub mod error;
 pub mod file;
