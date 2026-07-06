@@ -558,6 +558,14 @@ fn format_date(date_str: &str) -> String {
 // Main
 // ---------------------------------------------------------------------------
 
+struct TerminalGuard;
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        let _ = teardown_terminal();
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -569,6 +577,7 @@ async fn main() -> Result<()> {
         anyhow::anyhow!("--right is required. Provide a directory path.")
     })?;
 
+    let _terminal_guard = TerminalGuard;
     let mut terminal = setup_terminal()?;
 
     let mut app = App::new();
