@@ -77,6 +77,14 @@ pub enum FsError {
     /// The requested path does not exist.
     #[error("not found: {path}")]
     NotFound { path: PathBuf },
+
+    /// An invalid argument was provided (e.g., an empty or inverted range).
+    #[error("invalid argument during {operation} on {path}: {message}")]
+    InvalidArgument {
+        operation: FsOperation,
+        path: PathBuf,
+        message: String,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -141,5 +149,26 @@ mod tests {
     fn display_operation() {
         assert_eq!(format!("{}", FsOperation::Read), "read");
         assert_eq!(format!("{}", FsOperation::CreateDir), "create_dir");
+    }
+
+    #[test]
+    fn invalid_argument_error() {
+        let err = FsError::InvalidArgument {
+            operation: FsOperation::Read,
+            path: PathBuf::from("/test"),
+            message: "start (100) must be less than end (50)".into(),
+        };
+        assert!(matches!(err, FsError::InvalidArgument { .. }));
+        let FsError::InvalidArgument {
+            operation,
+            path,
+            message,
+        } = err
+        else {
+            unreachable!()
+        };
+        assert_eq!(operation, FsOperation::Read);
+        assert_eq!(path, PathBuf::from("/test"));
+        assert!(message.contains("100"));
     }
 }

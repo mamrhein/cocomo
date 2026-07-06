@@ -266,10 +266,35 @@ impl FileSystem for LocalFs {
         range: Option<Range<usize>>,
     ) -> Result<Bytes> {
         let data = if let Some(r) = range {
+            // Validate the range before allocating or seeking.
+            if r.start >= r.end {
+                return Err(crate::error::FsError::InvalidArgument {
+                    operation: crate::error::FsOperation::Read,
+                    path: path.to_path_buf(),
+                    message: format!(
+                        "invalid range: start ({}) must be less than end ({})",
+                        r.start, r.end
+                    ),
+                });
+            }
+
             // For ranged reads, open the file and seek to the start offset.
             let mut file = tokio::fs::File::open(path).await.map_err(|e| {
                 wrap(e, crate::error::FsOperation::Read, path.to_path_buf())
             })?;
+            let file_meta = file.metadata().await.map_err(|e| {
+                wrap(e, crate::error::FsOperation::Read, path.to_path_buf())
+            })?;
+
+            // Clamp the range to the actual file size to avoid allocating
+            // beyond EOF and then failing on read_exact.
+            let file_size = file_meta.len();
+            if (r.start as u64) >= file_size {
+                return Ok(Bytes::new());
+            }
+            let end = std::cmp::min(r.end as u64, file_size);
+            let len = (end - (r.start as u64)) as usize;
+
             use tokio::io::AsyncSeekExt;
             file.seek(io::SeekFrom::Start(r.start as u64))
                 .await
@@ -280,7 +305,6 @@ impl FileSystem for LocalFs {
                         path.to_path_buf(),
                     )
                 })?;
-            let len = r.end - r.start;
             let mut reader = tokio::io::BufReader::new(file);
             use tokio::io::AsyncReadExt;
             let mut buf = vec![0u8; len];
@@ -604,6 +628,83 @@ mod tests {
         let mut handle = fs.open(&path, OpenMode::Write).await.unwrap();
         handle.write_all(b"flush test").await.unwrap();
         handle.flush().await.unwrap();
+
+        fs_err::remove_dir_all(&base).ok();
+    }
+
+    #[tokio::test]
+    async fn read_range_inverted_returns_error() {
+        let base = temp_dir().join("read_range_inv");
+        let _ = fs_err::remove_dir_all(&base);
+        fs_err::create_dir_all(&base).unwrap();
+
+        let fs = LocalFs::new("test");
+        let path = base.join("data.txt");
+        fs.write(&path, Bytes::from_static(b"hello world"))
+            .await
+            .unwrap();
+
+        let result = fs.read(&path, Some(10..5)).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, crate::error::FsError::InvalidArgument { .. }));
+
+        fs_err::remove_dir_all(&base).ok();
+    }
+
+    #[tokio::test]
+    async fn read_range_equal_returns_error() {
+        let base = temp_dir().join("read_range_eq");
+        let _ = fs_err::remove_dir_all(&base);
+        fs_err::create_dir_all(&base).unwrap();
+
+        let fs = LocalFs::new("test");
+        let path = base.join("data.txt");
+        fs.write(&path, Bytes::from_static(b"hello world"))
+            .await
+            .unwrap();
+
+        let result = fs.read(&path, Some(5..5)).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, crate::error::FsError::InvalidArgument { .. }));
+
+        fs_err::remove_dir_all(&base).ok();
+    }
+
+    #[tokio::test]
+    async fn read_range_clamped_to_file_size() {
+        let base = temp_dir().join("read_range_clamp");
+        let _ = fs_err::remove_dir_all(&base);
+        fs_err::create_dir_all(&base).unwrap();
+
+        let fs = LocalFs::new("test");
+        let path = base.join("data.txt");
+        // File is 11 bytes.
+        fs.write(&path, Bytes::from_static(b"hello world"))
+            .await
+            .unwrap();
+
+        // Request bytes 8..100, should be clamped to 8..11.
+        let content = fs.read(&path, Some(8..100)).await.unwrap();
+        assert_eq!(content, Bytes::from_static(b"rld"));
+
+        fs_err::remove_dir_all(&base).ok();
+    }
+
+    #[tokio::test]
+    async fn read_range_beyond_file_size_returns_empty() {
+        let base = temp_dir().join("read_range_beyond");
+        let _ = fs_err::remove_dir_all(&base);
+        fs_err::create_dir_all(&base).unwrap();
+
+        let fs = LocalFs::new("test");
+        let path = base.join("data.txt");
+        fs.write(&path, Bytes::from_static(b"hi")).await.unwrap();
+
+        // Start is beyond file size.
+        let content = fs.read(&path, Some(100..200)).await.unwrap();
+        assert!(content.is_empty());
 
         fs_err::remove_dir_all(&base).ok();
     }
