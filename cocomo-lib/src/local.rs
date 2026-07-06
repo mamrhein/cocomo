@@ -15,6 +15,7 @@ use std::{
     ops::Range,
     path::{Path, PathBuf},
     pin::Pin,
+    sync::atomic::{AtomicU64, Ordering},
     task::{Context, Poll},
     time::SystemTime,
 };
@@ -33,10 +34,17 @@ use crate::{
     meta::Metadata,
 };
 
+/// Counter for generating unique temporary file names.
+static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
 /// A file handle backed by a local `tokio::fs::File`.
 pub struct LocalFile {
     inner: tokio::fs::File,
     meta: Metadata,
+    /// If writing via a temp file, this is the temp path to rename on Drop.
+    temp_path: Option<PathBuf>,
+    /// If writing via a temp file, this is the final destination path.
+    target_path: Option<PathBuf>,
 }
 
 #[async_trait]
@@ -53,6 +61,18 @@ impl FsFile for LocalFile {
                 PathBuf::from("(local file handle)"),
             )
         })
+    }
+}
+
+impl Drop for LocalFile {
+    fn drop(&mut self) {
+        // Commit the temp file to the target path if we have one.
+        // On Unix, renaming an open file works fine.
+        if let (Some(temp), Some(target)) =
+            (&self.temp_path, &self.target_path)
+        {
+            let _ = fs::rename(temp, target);
+        }
     }
 }
 
@@ -86,7 +106,11 @@ impl AsyncWrite for LocalFile {
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
+        // Flush the underlying file. The atomic rename is handled by
+        // Drop, which is always invoked regardless of whether shutdown
+        // is called explicitly.
+        let this = self.get_mut();
+        Pin::new(&mut this.inner).poll_shutdown(cx)
     }
 }
 
@@ -105,6 +129,36 @@ impl LocalFs {
         Self {
             label: label.into(),
         }
+    }
+
+    /// Create a temporary file in the same directory as the target path.
+    ///
+    /// Returns the temp file path and an open `tokio::fs::File` handle.
+    /// The temp file is guaranteed to be on the same filesystem as the
+    /// target, so a subsequent `rename` is atomic.
+    async fn create_temp_file(
+        target: &Path,
+    ) -> Result<(PathBuf, tokio::fs::File)> {
+        let parent = match target.parent() {
+            Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+            _ => PathBuf::from("."),
+        };
+        let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let temp_path = parent.join(format!(
+            ".cocomo_tmp_{}_{}_{:06}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0),
+            counter,
+        ));
+
+        let file = tokio::fs::File::create(&temp_path).await.map_err(|e| {
+            wrap(e, crate::error::FsOperation::Write, target.to_path_buf())
+        })?;
+
+        Ok((temp_path, file))
     }
 
     /// Build metadata from a `fs_err::DirEntry`.
@@ -207,40 +261,41 @@ impl FileSystem for LocalFs {
         path: &Path,
         mode: OpenMode,
     ) -> Result<Box<dyn FsFile>> {
-        let file = match mode {
+        let (file, temp_path, target_path) = match mode {
             OpenMode::Read => {
-                tokio::fs::File::open(path).await.map_err(|e| {
+                let file = tokio::fs::File::open(path).await.map_err(|e| {
                     wrap(
                         e,
                         crate::error::FsOperation::Open,
                         path.to_path_buf(),
                     )
-                })?
+                })?;
+                (file, None, None)
             }
             OpenMode::Write => {
-                tokio::fs::File::create(path).await.map_err(|e| {
-                    wrap(
-                        e,
-                        crate::error::FsOperation::Write,
-                        path.to_path_buf(),
-                    )
-                })?
+                // Write to a temp file so that the final rename is atomic.
+                let (temp_path, file) = Self::create_temp_file(path).await?;
+                (file, Some(temp_path), Some(path.to_path_buf()))
             }
-            OpenMode::Append => tokio::fs::OpenOptions::new()
-                .append(true)
-                .create(true)
-                .open(path)
-                .await
-                .map_err(|e| {
-                    wrap(
-                        e,
-                        crate::error::FsOperation::Write,
-                        path.to_path_buf(),
-                    )
-                })?,
+            OpenMode::Append => {
+                let file = tokio::fs::OpenOptions::new()
+                    .append(true)
+                    .create(true)
+                    .open(path)
+                    .await
+                    .map_err(|e| {
+                        wrap(
+                            e,
+                            crate::error::FsOperation::Write,
+                            path.to_path_buf(),
+                        )
+                    })?;
+                (file, None, None)
+            }
         };
 
-        // Capture metadata at open time.
+        // Capture metadata at open time. For temp files we fabricate
+        // metadata for a new empty file since the target doesn't exist yet.
         let meta = file.metadata().await.map_err(|e| {
             wrap(e, crate::error::FsOperation::Open, path.to_path_buf())
         })?;
@@ -257,6 +312,8 @@ impl FileSystem for LocalFs {
         Ok(Box::new(LocalFile {
             inner: file,
             meta: metadata,
+            temp_path,
+            target_path,
         }))
     }
 
@@ -354,7 +411,14 @@ impl FileSystem for LocalFs {
     }
 
     async fn write(&self, path: &Path, data: Bytes) -> Result<()> {
-        fs_err::tokio::write(path, &data).await.map_err(|e| {
+        // Write to a temp file first, then atomically rename to the target.
+        let (temp_path, _file) = Self::create_temp_file(path).await?;
+        fs_err::tokio::write(&temp_path, &data).await.map_err(|e| {
+            wrap(e, crate::error::FsOperation::Write, temp_path.clone())
+        })?;
+        fs_err::rename(&temp_path, path).map_err(|e| {
+            // Best-effort cleanup of the temp file on rename failure.
+            let _ = fs::remove_file(&temp_path);
             wrap(e, crate::error::FsOperation::Write, path.to_path_buf())
         })?;
         Ok(())
@@ -705,6 +769,85 @@ mod tests {
         // Start is beyond file size.
         let content = fs.read(&path, Some(100..200)).await.unwrap();
         assert!(content.is_empty());
+
+        fs_err::remove_dir_all(&base).ok();
+    }
+
+    #[tokio::test]
+    async fn atomic_write_no_temp_file_left() {
+        let base = temp_dir().join("atomic_write");
+        let _ = fs_err::remove_dir_all(&base);
+        fs_err::create_dir_all(&base).unwrap();
+
+        let fs = LocalFs::new("test");
+        let path = base.join("output.txt");
+        fs.write(&path, Bytes::from_static(b"atomic data"))
+            .await
+            .unwrap();
+
+        // The file exists and has the correct content.
+        assert!(path.exists());
+        let content = fs.read(&path, None).await.unwrap();
+        assert_eq!(content, Bytes::from_static(b"atomic data"));
+
+        // No temp files remain in the directory.
+        let entries: Vec<_> = fs_err::read_dir(&base).unwrap().collect();
+        assert_eq!(entries.len(), 1);
+
+        fs_err::remove_dir_all(&base).ok();
+    }
+
+    #[tokio::test]
+    async fn atomic_open_write_shutdown() {
+        let base = temp_dir().join("atomic_open");
+        let _ = fs_err::remove_dir_all(&base);
+        fs_err::create_dir_all(&base).unwrap();
+
+        let fs = LocalFs::new("test");
+        let path = base.join("output.txt");
+        {
+            let mut handle = fs.open(&path, OpenMode::Write).await.unwrap();
+            handle.write_all(b"from handle").await.unwrap();
+            handle.shutdown().await.unwrap();
+        }
+
+        // The file exists and has the correct content.
+        assert!(path.exists());
+        let content = fs.read(&path, None).await.unwrap();
+        assert_eq!(content, Bytes::from_static(b"from handle"));
+
+        // No temp files remain in the directory.
+        let entries: Vec<_> = fs_err::read_dir(&base).unwrap().collect();
+        assert_eq!(entries.len(), 1);
+
+        fs_err::remove_dir_all(&base).ok();
+    }
+
+    #[tokio::test]
+    async fn temp_file_committed_on_drop_without_shutdown() {
+        // Drop without explicit shutdown still commits the file via Drop.
+        let base = temp_dir().join("drop_commit");
+        let _ = fs_err::remove_dir_all(&base);
+        fs_err::create_dir_all(&base).unwrap();
+
+        let fs = LocalFs::new("test");
+        let path = base.join("output.txt");
+
+        // Open a write handle and drop it without calling shutdown.
+        {
+            let mut handle = fs.open(&path, OpenMode::Write).await.unwrap();
+            handle.write_all(b"partial write").await.unwrap();
+            // Handle is dropped here without shutdown.
+        }
+
+        // Drop still commits the file via atomic rename.
+        assert!(path.exists());
+        let content = fs.read(&path, None).await.unwrap();
+        assert_eq!(content, Bytes::from_static(b"partial write"));
+
+        // No temp files remain in the directory.
+        let entries: Vec<_> = fs_err::read_dir(&base).unwrap().collect();
+        assert_eq!(entries.len(), 1);
 
         fs_err::remove_dir_all(&base).ok();
     }
