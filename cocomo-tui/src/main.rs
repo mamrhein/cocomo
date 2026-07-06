@@ -571,18 +571,42 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     let left = cli.left.as_ref().ok_or_else(|| {
-        anyhow::anyhow!("--left is required. Provide a directory path.")
+        anyhow::anyhow!("--left is required. Provide a file or directory path.")
     })?;
     let right = cli.right.as_ref().ok_or_else(|| {
-        anyhow::anyhow!("--right is required. Provide a directory path.")
+        anyhow::anyhow!("--right is required. Provide a file or directory path.")
     })?;
+
+    let left = tokio::fs::canonicalize(left).await?;
+    let right = tokio::fs::canonicalize(right).await?;
+
+    // Validate that both paths exist and are of the same type.
+    let left_meta = tokio::fs::metadata(&left).await?;
+    let right_meta = tokio::fs::metadata(&right).await?;
+
+    if left_meta.is_file() && right_meta.is_file() {
+        // Teardown terminal state before exiting.
+        let _terminal_guard = TerminalGuard;
+        teardown_terminal()?;
+        return Err(anyhow::anyhow!(
+            "Comparing individual files is not yet implemented. Please provide directories."
+        ));
+    }
+
+    if !left_meta.is_dir() || !right_meta.is_dir() {
+        let _terminal_guard = TerminalGuard;
+        teardown_terminal()?;
+        return Err(anyhow::anyhow!(
+            "Both --left and --right must be directories, or both must be files."
+        ));
+    }
 
     let _terminal_guard = TerminalGuard;
     let mut terminal = setup_terminal()?;
 
     let mut app = App::new();
-    app.current_path_left = Some(tokio::fs::canonicalize(left).await?);
-    app.current_path_right = Some(tokio::fs::canonicalize(right).await?);
+    app.current_path_left = Some(left.clone());
+    app.current_path_right = Some(right.clone());
     app.compare_files = !cli.structure_only;
 
     if let Err(e) = run_comparison(&mut app, left.clone(), right.clone()).await
