@@ -73,7 +73,7 @@ pub trait FileSystem: Send + Sync {
     async fn read(
         &self,
         path: &Path,
-        range: Option<Range<u64>>,
+        range: Option<Range<usize>>,
     ) -> Result<Bytes>;
 
     /// Read file content as a stream. Suitable for large files and
@@ -81,7 +81,7 @@ pub trait FileSystem: Send + Sync {
     async fn read_stream(
         &self,
         path: &Path,
-        range: Option<Range<u64>>,
+        range: Option<Range<usize>>,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<Bytes>> + Send>>>;
 
     /// Write file content.

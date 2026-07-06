@@ -263,7 +263,7 @@ impl FileSystem for LocalFs {
     async fn read(
         &self,
         path: &Path,
-        range: Option<Range<u64>>,
+        range: Option<Range<usize>>,
     ) -> Result<Bytes> {
         let data = if let Some(r) = range {
             // For ranged reads, open the file and seek to the start offset.
@@ -271,10 +271,16 @@ impl FileSystem for LocalFs {
                 wrap(e, crate::error::FsOperation::Read, path.to_path_buf())
             })?;
             use tokio::io::AsyncSeekExt;
-            file.seek(io::SeekFrom::Start(r.start)).await.map_err(|e| {
-                wrap(e, crate::error::FsOperation::Read, path.to_path_buf())
-            })?;
-            let len = (r.end - r.start) as usize;
+            file.seek(io::SeekFrom::Start(r.start as u64))
+                .await
+                .map_err(|e| {
+                    wrap(
+                        e,
+                        crate::error::FsOperation::Read,
+                        path.to_path_buf(),
+                    )
+                })?;
+            let len = r.end - r.start;
             let mut reader = tokio::io::BufReader::new(file);
             use tokio::io::AsyncReadExt;
             let mut buf = vec![0u8; len];
@@ -300,7 +306,7 @@ impl FileSystem for LocalFs {
     async fn read_stream(
         &self,
         path: &Path,
-        _range: Option<Range<u64>>,
+        _range: Option<Range<usize>>,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<Bytes>> + Send>>> {
         let file = fs_err::tokio::File::open(path).await.map_err(|e| {
             wrap(e, crate::error::FsOperation::Read, path.to_path_buf())
