@@ -20,6 +20,12 @@ use regex::Regex;
 
 use crate::compare::DirEntryStatus;
 
+/// Maximum allowed length for a name-matching pattern string.
+const MAX_NAME_PATTERN_LEN: usize = 1024;
+
+/// Maximum allowed length for a content-matching regex pattern string.
+const MAX_CONTENT_PATTERN_LEN: usize = 4096;
+
 /// A pattern used for name-based filtering.
 #[derive(Clone, Debug)]
 pub enum Pattern {
@@ -231,14 +237,28 @@ impl FilterSet {
         };
 
         let content_regex = match other.regular_expression.as_ref() {
-            Some(r) => match Regex::new(r) {
-                Ok(re) => Some(re),
-                Err(e) => {
-                    compilation_errors
-                        .push(format!("invalid content regex {:?}: {e}", r));
+            Some(r) => {
+                // Reject overly long patterns to prevent compilation DoS.
+                if r.len() > MAX_CONTENT_PATTERN_LEN {
+                    compilation_errors.push(format!(
+                        "content regex too long ({} chars, max {})",
+                        r.len(),
+                        MAX_CONTENT_PATTERN_LEN
+                    ));
                     None
+                } else {
+                    match Regex::new(r) {
+                        Ok(re) => Some(re),
+                        Err(e) => {
+                            compilation_errors.push(format!(
+                                "invalid content regex {:?}: {e}",
+                                r
+                            ));
+                            None
+                        }
+                    }
                 }
-            },
+            }
             None => None,
         };
 
@@ -269,6 +289,16 @@ impl FilterSet {
     ) {
         match pattern {
             Pattern::Glob(g) => {
+                // Reject overly long patterns to prevent compilation DoS.
+                if g.len() > MAX_NAME_PATTERN_LEN {
+                    errors.push(format!(
+                        "glob pattern too long ({} chars, max {}): {:?}",
+                        g.len(),
+                        MAX_NAME_PATTERN_LEN,
+                        &g[..g.len().min(80)]
+                    ));
+                    return;
+                }
                 if let Err(e) = Glob::new(g) {
                     errors.push(format!("invalid glob pattern {:?}: {e}", g));
                 } else {
@@ -276,6 +306,16 @@ impl FilterSet {
                 }
             }
             Pattern::Regex(r) => {
+                // Reject overly long patterns to prevent compilation DoS.
+                if r.len() > MAX_NAME_PATTERN_LEN {
+                    errors.push(format!(
+                        "regex pattern too long ({} chars, max {}): {:?}",
+                        r.len(),
+                        MAX_NAME_PATTERN_LEN,
+                        &r[..r.len().min(80)]
+                    ));
+                    return;
+                }
                 // Compile the regex directly; do not convert to a glob
                 // because that would change the matching semantics.
                 match Regex::new(r) {
@@ -289,6 +329,16 @@ impl FilterSet {
                 }
             }
             Pattern::Name(n) => {
+                // Reject overly long patterns to prevent compilation DoS.
+                if n.len() > MAX_NAME_PATTERN_LEN {
+                    errors.push(format!(
+                        "name pattern too long ({} chars, max {}): {:?}",
+                        n.len(),
+                        MAX_NAME_PATTERN_LEN,
+                        &n[..n.len().min(80)]
+                    ));
+                    return;
+                }
                 if let Err(e) = Glob::new(n) {
                     errors.push(format!("invalid name pattern {:?}: {e}", n));
                 } else {
@@ -595,6 +645,76 @@ mod tests {
 
         assert_eq!(fs.compilation_errors().len(), 1);
         assert!(fs.compilation_errors()[0].contains("content regex"));
+        // With no valid content regex, all content passes.
+        assert!(fs.passes_content("anything"));
+    }
+
+    #[test]
+    fn glob_pattern_too_long_records_error() {
+        let long_glob = "a".repeat(MAX_NAME_PATTERN_LEN + 1);
+        let filters =
+            vec![NameFilter::Include(Pattern::Glob(long_glob.clone()))];
+        let fs = FilterSet::new(
+            &filters,
+            OtherFilters::default(),
+            DisplayFilters::all(),
+        );
+
+        assert_eq!(fs.compilation_errors().len(), 1);
+        assert!(fs.compilation_errors()[0].contains("glob pattern too long"));
+        assert!(
+            fs.compilation_errors()[0]
+                .contains(&MAX_NAME_PATTERN_LEN.to_string())
+        );
+        // With no valid include patterns, nothing passes.
+        assert!(!fs.passes("anything.txt", &DirEntryStatus::Same));
+    }
+
+    #[test]
+    fn regex_pattern_too_long_records_error() {
+        let long_regex = "a".repeat(MAX_NAME_PATTERN_LEN + 1);
+        let filters =
+            vec![NameFilter::Include(Pattern::Regex(long_regex.clone()))];
+        let fs = FilterSet::new(
+            &filters,
+            OtherFilters::default(),
+            DisplayFilters::all(),
+        );
+
+        assert_eq!(fs.compilation_errors().len(), 1);
+        assert!(fs.compilation_errors()[0].contains("regex pattern too long"));
+        // With no valid include patterns, nothing passes.
+        assert!(!fs.passes("anything.txt", &DirEntryStatus::Same));
+    }
+
+    #[test]
+    fn name_pattern_too_long_records_error() {
+        let long_name = "a".repeat(MAX_NAME_PATTERN_LEN + 1);
+        let filters =
+            vec![NameFilter::Include(Pattern::Name(long_name.clone()))];
+        let fs = FilterSet::new(
+            &filters,
+            OtherFilters::default(),
+            DisplayFilters::all(),
+        );
+
+        assert_eq!(fs.compilation_errors().len(), 1);
+        assert!(fs.compilation_errors()[0].contains("name pattern too long"));
+        // With no valid include patterns, nothing passes.
+        assert!(!fs.passes("anything.txt", &DirEntryStatus::Same));
+    }
+
+    #[test]
+    fn content_regex_too_long_records_error() {
+        let long_regex = "a".repeat(MAX_CONTENT_PATTERN_LEN + 1);
+        let other = OtherFilters {
+            regular_expression: Some(long_regex),
+            ..Default::default()
+        };
+        let fs = FilterSet::new(&[], other, DisplayFilters::all());
+
+        assert_eq!(fs.compilation_errors().len(), 1);
+        assert!(fs.compilation_errors()[0].contains("content regex too long"));
         // With no valid content regex, all content passes.
         assert!(fs.passes_content("anything"));
     }
