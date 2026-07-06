@@ -572,8 +572,8 @@ async fn main() -> Result<()> {
     let mut terminal = setup_terminal()?;
 
     let mut app = App::new();
-    app.current_path_left = Some(left.clone());
-    app.current_path_right = Some(right.clone());
+    app.current_path_left = Some(tokio::fs::canonicalize(left).await?);
+    app.current_path_right = Some(tokio::fs::canonicalize(right).await?);
     app.compare_files = !cli.structure_only;
 
     if let Err(e) = run_comparison(&mut app, left.clone(), right.clone()).await
