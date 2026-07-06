@@ -708,6 +708,7 @@ mod tests {
             .await
             .unwrap();
 
+        #[allow(clippy::reversed_empty_ranges)]
         let result = fs.read(&path, Some(10..5)).await;
         assert!(result.is_err());
         let err = result.unwrap_err();
