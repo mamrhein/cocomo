@@ -583,9 +583,9 @@ struct TerminalGuard;
 
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
-        if TERMINAL_ACTIVE.swap(false, Ordering::Relaxed) {
-            let _ = teardown_terminal();
-        }
+        // teardown_terminal() already guards against double-teardown via
+        // TERMINAL_ACTIVE, so we can call it directly.
+        let _ = teardown_terminal();
     }
 }
 
