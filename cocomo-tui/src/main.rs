@@ -12,7 +12,13 @@
 //! Provides a side-by-side folder comparison view with navigation, status
 //! indicators, and basic filtering.
 
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    path::PathBuf,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
 use anyhow::Result;
 use clap::Parser;
@@ -558,16 +564,37 @@ fn format_date(date_str: &str) -> String {
 // Main
 // ---------------------------------------------------------------------------
 
+/// Global flag indicating whether the terminal has been set up.
+/// Used by the panic hook to tear down the terminal on unexpected exits.
+static TERMINAL_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// Creates and installs a panic hook that tears down the terminal before
+/// re-invoking the original panic handler.
+fn install_panic_hook() {
+    let original = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = teardown_terminal();
+        TERMINAL_ACTIVE.store(false, Ordering::Relaxed);
+        original(info);
+    }));
+}
+
 struct TerminalGuard;
 
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
-        let _ = teardown_terminal();
+        if TERMINAL_ACTIVE.swap(false, Ordering::Relaxed) {
+            let _ = teardown_terminal();
+        }
     }
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Install the panic hook before any terminal setup so that panics at
+    // any point still restore the terminal.
+    install_panic_hook();
+
     let cli = Cli::parse();
 
     let left = cli.left.as_ref().ok_or_else(|| {
@@ -585,22 +612,19 @@ async fn main() -> Result<()> {
     let right_meta = tokio::fs::metadata(&right).await?;
 
     if left_meta.is_file() && right_meta.is_file() {
-        // Teardown terminal state before exiting.
-        let _terminal_guard = TerminalGuard;
-        teardown_terminal()?;
         return Err(anyhow::anyhow!(
             "Comparing individual files is not yet implemented. Please provide directories."
         ));
     }
 
     if !left_meta.is_dir() || !right_meta.is_dir() {
-        let _terminal_guard = TerminalGuard;
-        teardown_terminal()?;
         return Err(anyhow::anyhow!(
             "Both --left and --right must be directories, or both must be files."
         ));
     }
 
+    // Create the guard before setup so that a panic during setup still
+    // triggers teardown.
     let _terminal_guard = TerminalGuard;
     let mut terminal = setup_terminal()?;
 
@@ -649,7 +673,8 @@ async fn main() -> Result<()> {
         }
     }
 
-    teardown_terminal()?;
+    // TerminalGuard::Drop handles teardown; this explicit call is a no-op
+    // since TERMINAL_ACTIVE is already cleared by Drop.
     Ok(())
 }
 
@@ -685,10 +710,14 @@ fn setup_terminal() -> Result<Terminal<CrosstermBackend<std::io::Stdout>>> {
     )?;
     let backend = CrosstermBackend::new(std::io::stdout());
     let terminal = Terminal::new(backend)?;
+    TERMINAL_ACTIVE.store(true, Ordering::Relaxed);
     Ok(terminal)
 }
 
 fn teardown_terminal() -> Result<()> {
+    if !TERMINAL_ACTIVE.swap(false, Ordering::Relaxed) {
+        return Ok(());
+    }
     crossterm::terminal::disable_raw_mode()?;
     crossterm::execute!(
         std::io::stdout(),
