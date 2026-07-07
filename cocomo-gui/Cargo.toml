@@ -13,3 +13,5 @@ keywords = ["directory", "file", "compare", "copy", "move"]
 categories = ["command-line-utilities", "filesystem"]
 
 [dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread",] }
+anyhow = "1"
