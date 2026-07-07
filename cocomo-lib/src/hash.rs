@@ -21,7 +21,7 @@
 use std::{
     collections::HashMap,
     hash::{Hash, Hasher as StdHasher},
-    path::Path,
+    path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 
@@ -119,6 +119,25 @@ impl Default for ContentCacheConfig {
     }
 }
 
+/// A unique cache key combining a provider label with a file path.
+///
+/// Uses `(String, PathBuf)` rather than a string concatenation to avoid
+/// collisions from `Path::display()` lossy encoding and separator ambiguity.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct CacheKey {
+    label: String,
+    path: PathBuf,
+}
+
+impl CacheKey {
+    fn new(label: &str, path: &Path) -> Self {
+        Self {
+            label: label.to_string(),
+            path: path.to_path_buf(),
+        }
+    }
+}
+
 /// In-memory LRU cache for file content hashes.
 ///
 /// Stores recent `(size, mtime, hash)` triples keyed by `(path,
@@ -130,9 +149,9 @@ pub struct ContentCache {
 }
 
 struct ContentCacheInner {
-    entries: HashMap<String, CacheEntry>,
+    entries: HashMap<CacheKey, CacheEntry>,
     /// Access order for LRU eviction. Most recent at the end.
-    access_order: Vec<String>,
+    access_order: Vec<CacheKey>,
 }
 
 impl ContentCache {
@@ -153,8 +172,8 @@ impl ContentCache {
     }
 
     /// Build the cache key from provider label and file path.
-    fn cache_key(label: &str, path: &Path) -> String {
-        format!("{label}::{}", path.display())
+    fn cache_key(label: &str, path: &Path) -> CacheKey {
+        CacheKey::new(label, path)
     }
 
     /// Look up a cached `ContentId` for the given provider and path.
@@ -200,7 +219,7 @@ impl ContentCache {
 
         // Evict expired entries first.
         let ttl = Duration::from_secs(self.config.ttl_secs);
-        let expired_keys: Vec<String> = inner
+        let expired_keys: Vec<CacheKey> = inner
             .entries
             .iter()
             .filter(|(_k, v)| now.duration_since(v.last_access) > ttl)
@@ -383,5 +402,19 @@ mod tests {
         let cid = ContentId::from_blake3(&meta, &h);
         assert_eq!(cid.size, 100);
         assert_eq!(cid.modified, meta.modified);
+    }
+
+    #[test]
+    fn cache_key_no_collision_with_separator_in_path() {
+        // A path containing "::" should not collide with the label separator.
+        let cache = ContentCache::default_config();
+        let cid_a = ContentId::new(1, Utc::now(), "a".to_string());
+        let cid_b = ContentId::new(2, Utc::now(), "b".to_string());
+
+        cache.insert("local", Path::new("a/b::c"), cid_a.clone());
+        cache.insert("local", Path::new("a/b::c/d"), cid_b.clone());
+
+        assert_eq!(cache.get("local", Path::new("a/b::c")), Some(cid_a));
+        assert_eq!(cache.get("local", Path::new("a/b::c/d")), Some(cid_b));
     }
 }
