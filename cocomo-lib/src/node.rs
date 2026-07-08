@@ -161,6 +161,11 @@ impl NodeKind {
 /// implements a tombstone: tombstoned nodes are still addressable but return
 /// `NotFound` on access.
 ///
+/// Cached content hashes are stored directly on the node rather than in a
+/// separate global cache. This avoids type-erased cache keys and makes
+/// invalidation natural — when a node is tombstoned, the cached hash dies
+/// with it.
+///
 /// # Path storage
 ///
 /// The `path` field stores the absolute filesystem path. This is needed for
@@ -189,6 +194,9 @@ pub struct Node {
     parent: Option<u64>,
     /// Tombstone flag. Set by delete operations to mark this node as removed.
     pub(crate) deleted: bool,
+    /// Cached content hash (hex-encoded blake3). Only meaningful for files;
+    /// `None` means the file has not been hashed yet.
+    cached_hash: Option<String>,
 }
 
 impl Node {
@@ -205,6 +213,7 @@ impl Node {
             kind: NodeKind::Directory { children: None },
             parent: None,
             deleted: false,
+            cached_hash: None,
         }
     }
 
@@ -217,6 +226,7 @@ impl Node {
             kind: NodeKind::File,
             parent: None,
             deleted: false,
+            cached_hash: None,
         }
     }
 
@@ -234,6 +244,7 @@ impl Node {
             kind: NodeKind::Symlink { target },
             parent: None,
             deleted: false,
+            cached_hash: None,
         }
     }
 
@@ -246,6 +257,7 @@ impl Node {
             kind: NodeKind::Special,
             parent: None,
             deleted: false,
+            cached_hash: None,
         }
     }
 
@@ -307,6 +319,22 @@ impl Node {
     #[allow(dead_code)]
     pub fn parent(&self) -> Option<u64> {
         self.parent
+    }
+
+    /// Return the cached content hash, if this node has been hashed.
+    ///
+    /// Only meaningful for `NodeKind::File`. Returns `None` for directories
+    /// and if the file has not been hashed yet.
+    pub fn cached_hash(&self) -> Option<&str> {
+        self.cached_hash.as_deref()
+    }
+
+    /// Set the cached content hash.
+    ///
+    /// Used after computing a file hash to avoid re-hashing on subsequent
+    /// accesses. Only meaningful for files.
+    pub(crate) fn set_cached_hash(&mut self, hash: String) {
+        self.cached_hash = Some(hash);
     }
 }
 
@@ -438,5 +466,15 @@ mod tests {
             Metadata::dir(Utc::now()),
         );
         assert!(node.kind().children().is_none());
+    }
+
+    #[test]
+    fn cached_hash_none_by_default() {
+        let node = Node::file(
+            OsString::from("test.txt"),
+            PathBuf::from("/test.txt"),
+            dummy_meta(),
+        );
+        assert!(node.cached_hash().is_none());
     }
 }

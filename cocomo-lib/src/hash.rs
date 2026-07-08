@@ -100,7 +100,7 @@ pub async fn hash_file(
 /// node-based `NodeFileSystem` provider in a streaming fashion.
 ///
 /// Unlike [`hash_file`], this uses a [`FileId`] instead of a path, avoiding
-/// TOCTOU races.
+/// TOCTOU races. The caller is responsible for caching the result if needed.
 pub async fn hash_file_node<N>(
     fs: &N,
     file_id: FileId<N::Nid>,
@@ -121,6 +121,25 @@ where
         hasher.update(&chunk);
     }
     Ok(hasher.finalize())
+}
+
+/// Compute the blake3 hash and store it on the node.
+///
+/// Convenience wrapper around [`hash_file_node`] that also calls
+/// [`NodeFileSystem::set_node_hash`] so the result is cached on the
+/// provider for subsequent lookups.
+pub async fn hash_and_cache_node<N>(
+    fs: &N,
+    node_id: crate::identity::NodeId<N::Nid>,
+    file_id: FileId<N::Nid>,
+    node: &Node,
+) -> crate::error::Result<Blake3Hash>
+where
+    N: NodeFileSystem,
+{
+    let hash = hash_file_node(fs, file_id, node).await?;
+    fs.set_node_hash(node_id, hash.to_hex().to_string())?;
+    Ok(hash)
 }
 
 /// Compute the blake3 hash of in-memory data.

@@ -16,8 +16,8 @@ use std::{collections::HashMap, path::Path, sync::Arc};
 
 use crate::{
     FileSystem, NodeFileSystem, Result,
-    hash::{ContentCache, ContentId, hash_file, hash_file_node},
-    identity::FileId,
+    hash::{ContentCache, ContentId, hash_and_cache_node, hash_file},
+    identity::{FileId, NodeId},
     scan::{ScanConfig, ScanEntry, ScanResult, scan_directory_node},
 };
 
@@ -214,13 +214,14 @@ impl CompareConfig {
 ///
 /// Both paths are scanned with the given filesystem provider and config,
 /// then merged. When `compare_files` is enabled, content hashes are used
-/// to determine equality.
+/// to determine equality. The cache is optional and used as an optimization
+/// to avoid re-hashing files that were already processed.
 pub async fn compare_directories(
     fs: &Arc<dyn FileSystem>,
     left_path: &Path,
     right_path: &Path,
     config: &CompareConfig,
-    cache: &ContentCache,
+    cache: Option<&ContentCache>,
 ) -> Result<DirComparison> {
     let scan_config = ScanConfig {
         follow_symlinks: config.follow_symlinks,
@@ -309,13 +310,15 @@ async fn scan_dir_entries(
 ///
 /// Both paths are resolved to node identifiers, then scanned with
 /// [`scan_directory_node`], and merged. When `compare_files` is enabled,
-/// content hashes are computed via node-based reads.
+/// content hashes are computed via node-based reads and cached on the
+/// provider node. The optional `cache` provides a secondary LRU layer
+/// across provider instances.
 pub async fn compare_directories_node<N>(
     fs: &N,
     left_path: &Path,
     right_path: &Path,
     config: &CompareConfig,
-    cache: &ContentCache,
+    cache: Option<&ContentCache>,
 ) -> Result<DirComparison>
 where
     N: NodeFileSystem<Nid = u64>,
@@ -390,7 +393,7 @@ async fn merge_sync_node<N>(
     right_root: &Path,
     right: &ScanResult,
     config: &CompareConfig,
-    cache: &ContentCache,
+    cache: Option<&ContentCache>,
 ) -> Result<DirComparison>
 where
     N: NodeFileSystem<Nid = u64>,
@@ -435,7 +438,7 @@ async fn merge_entry_sync_node<N>(
     right_root: &Path,
     right: Option<&ScanEntry>,
     config: &CompareConfig,
-    cache: &ContentCache,
+    cache: Option<&ContentCache>,
 ) -> Result<DirEntry>
 where
     N: NodeFileSystem<Nid = u64>,
@@ -484,7 +487,7 @@ async fn compare_file_status_node<N>(
     right_root: &Path,
     right: &ScanEntry,
     config: &CompareConfig,
-    cache: &ContentCache,
+    cache: Option<&ContentCache>,
 ) -> Result<DirEntryStatus>
 where
     N: NodeFileSystem<Nid = u64>,
@@ -514,7 +517,7 @@ where
         return Ok(DirEntryStatus::Different);
     }
 
-    // Same size — resolve to node IDs and hash via the node API.
+    // Same size — resolve to node IDs and compare hashes.
     let left_path = left_root.join(&left.path);
     let right_path = right_root.join(&right.path);
     let label = fs.label_node();
@@ -522,50 +525,63 @@ where
     let left_id = fs.resolve_path(&left_path).await.ok();
     let right_id = fs.resolve_path(&right_path).await.ok();
 
-    // Check cache using paths (ContentCache is path-keyed).
-    let left_cid = cache.get(label, &left_path);
-    let right_cid = cache.get(label, &right_path);
-
-    if matches!(
-        (&left_cid, &right_cid),
-        (Some(lc), Some(rc)) if lc.hash == rc.hash
-    ) {
-        return Ok(DirEntryStatus::Same);
+    // Check the optional global cache first.
+    if let Some(c) = cache {
+        let left_cid = c.get(label, &left_path);
+        let right_cid = c.get(label, &right_path);
+        if matches!(
+            (&left_cid, &right_cid),
+            (Some(lc), Some(rc)) if lc.hash == rc.hash
+        ) {
+            return Ok(DirEntryStatus::Same);
+        }
     }
 
-    // Hash both files via node IDs.
-    let left_hash = match (left_id, fs.get_node(left_id.unwrap())) {
-        (Some(id), Ok(node)) => {
-            match hash_file_node(fs, FileId::new(*id.get()), &node).await {
-                Ok(h) => h,
-                Err(_) => return Ok(DirEntryStatus::Different),
-            }
+    // Helper: get the hash for a file, checking node cache first,
+    // then computing and caching.
+    async fn get_hash<N>(
+        fs: &N,
+        id: NodeId<u64>,
+        node: &crate::node::Node,
+    ) -> Option<blake3::Hash>
+    where
+        N: NodeFileSystem<Nid = u64>,
+    {
+        // Check if the node already has a cached hash.
+        if let Some(cached) = node.cached_hash() {
+            // Parse the hex string back to a blake3::Hash for comparison.
+            return blake3::Hash::from_hex(cached).ok();
         }
-        _ => return Ok(DirEntryStatus::Different),
+        // Compute and cache on the provider.
+        match hash_and_cache_node(fs, id, FileId::new(*id.get()), node).await {
+            Ok(h) => Some(h),
+            Err(_) => None,
+        }
+    }
+
+    let left_hash = match (left_id, fs.get_node(left_id.unwrap())) {
+        (Some(id), Ok(node)) => get_hash(fs, id, &node).await,
+        _ => None,
     };
 
     let right_hash = match (right_id, fs.get_node(right_id.unwrap())) {
-        (Some(id), Ok(node)) => {
-            match hash_file_node(fs, FileId::new(*id.get()), &node).await {
-                Ok(h) => h,
-                Err(_) => return Ok(DirEntryStatus::Different),
-            }
-        }
-        _ => return Ok(DirEntryStatus::Different),
+        (Some(id), Ok(node)) => get_hash(fs, id, &node).await,
+        _ => None,
     };
 
-    let left_hex = left_hash.to_hex().to_string();
-    let right_hex = right_hash.to_hex().to_string();
+    let (Some(lh), Some(rh)) = (left_hash, right_hash) else {
+        return Ok(DirEntryStatus::Different);
+    };
 
-    // Cache the results.
-    let left_cid_new =
-        ContentId::from_blake3(&left.meta, &left_hash);
-    let right_cid_new =
-        ContentId::from_blake3(&right.meta, &right_hash);
-    cache.insert(label, &left_path, left_cid_new);
-    cache.insert(label, &right_path, right_cid_new);
+    // Store in the optional global cache.
+    if let Some(c) = cache {
+        let left_cid = ContentId::from_blake3(&left.meta, &lh);
+        let right_cid = ContentId::from_blake3(&right.meta, &rh);
+        c.insert(label, &left_path, left_cid);
+        c.insert(label, &right_path, right_cid);
+    }
 
-    if left_hex == right_hex {
+    if lh == rh {
         return Ok(DirEntryStatus::Same);
     }
 
@@ -624,7 +640,7 @@ async fn merge_sync(
     right_root: &Path,
     right: &ScanResult,
     config: &CompareConfig,
-    cache: &ContentCache,
+    cache: Option<&ContentCache>,
 ) -> Result<DirComparison> {
     let mut comparison = DirComparison::default();
 
@@ -674,7 +690,7 @@ async fn merge_entry_sync(
     right_root: &Path,
     right: Option<&ScanEntry>,
     config: &CompareConfig,
-    cache: &ContentCache,
+    cache: Option<&ContentCache>,
 ) -> Result<DirEntry> {
     let name = left
         .map(|e| e.name.as_str())
@@ -720,7 +736,7 @@ async fn compare_file_status(
     right_root: &Path,
     right: &ScanEntry,
     config: &CompareConfig,
-    cache: &ContentCache,
+    cache: Option<&ContentCache>,
 ) -> Result<DirEntryStatus> {
     if !config.compare_files {
         return if left.meta.size == right.meta.size {
@@ -752,12 +768,14 @@ async fn compare_file_status(
     let right_path = right_root.join(&right.path);
     let label = fs.label();
 
-    let left_cid = cache.get(label, &left_path);
-    let right_cid = cache.get(label, &right_path);
-
-    if matches!((&left_cid, &right_cid), (Some(lc), Some(rc)) if lc.hash == rc.hash)
-    {
-        return Ok(DirEntryStatus::Same);
+    // Check the optional global cache.
+    if let Some(c) = cache {
+        let left_cid = c.get(label, &left_path);
+        let right_cid = c.get(label, &right_path);
+        if matches!((&left_cid, &right_cid), (Some(lc), Some(rc)) if lc.hash == rc.hash)
+        {
+            return Ok(DirEntryStatus::Same);
+        }
     }
 
     // Hash both files.
@@ -770,16 +788,15 @@ async fn compare_file_status(
         Err(_) => return Ok(DirEntryStatus::Different),
     };
 
-    let left_hex = left_hash.to_hex().to_string();
-    let right_hex = right_hash.to_hex().to_string();
+    // Store in the optional global cache.
+    if let Some(c) = cache {
+        let left_cid_new = ContentId::from_blake3(&left.meta, &left_hash);
+        let right_cid_new = ContentId::from_blake3(&right.meta, &right_hash);
+        c.insert(label, &left_path, left_cid_new);
+        c.insert(label, &right_path, right_cid_new);
+    }
 
-    // Cache the results.
-    let left_cid_new = ContentId::from_blake3(&left.meta, &left_hash);
-    let right_cid_new = ContentId::from_blake3(&right.meta, &right_hash);
-    cache.insert(label, &left_path, left_cid_new);
-    cache.insert(label, &right_path, right_cid_new);
-
-    if left_hex == right_hex {
+    if left_hash == right_hash {
         return Ok(DirEntryStatus::Same);
     }
 
@@ -846,7 +863,7 @@ mod tests {
         let cache = ContentCache::default_config();
         let config = CompareConfig::full();
 
-        let result = compare_directories(&fs, &left, &right, &config, &cache)
+        let result = compare_directories(&fs, &left, &right, &config, Some(&cache))
             .await
             .unwrap();
 
@@ -864,7 +881,7 @@ mod tests {
         let cache = ContentCache::default_config();
         let config = CompareConfig::structure_only();
 
-        let result = compare_directories(&fs, &left, &right, &config, &cache)
+        let result = compare_directories(&fs, &left, &right, &config, Some(&cache))
             .await
             .unwrap();
 
@@ -894,7 +911,7 @@ mod tests {
         let config = CompareConfig::full();
 
         let result =
-            compare_directories_node(&fs, &left, &right, &config, &cache)
+            compare_directories_node(&fs, &left, &right, &config, Some(&cache))
                 .await
                 .unwrap();
 
@@ -913,7 +930,7 @@ mod tests {
         let config = CompareConfig::structure_only();
 
         let result =
-            compare_directories_node(&fs, &left, &right, &config, &cache)
+            compare_directories_node(&fs, &left, &right, &config, Some(&cache))
                 .await
                 .unwrap();
 

@@ -34,6 +34,8 @@
 //! - [`error`] — Structured [`FsError`] with operation context.
 //! - [`meta`] — [`Metadata`] for files and directories.
 //! - [`file`] — [`FsFile`] trait for opened file handles.
+//! - [`session`] — Session management for workspaces.
+//! - [`snapshot`] — Point-in-time snapshots of directory trees.
 
 #![forbid(unsafe_code)]
 
@@ -50,6 +52,8 @@ pub mod local;
 pub mod meta;
 pub mod node;
 pub mod scan;
+pub mod session;
+pub mod snapshot;
 pub mod sync;
 pub mod text;
 pub mod transfer;
@@ -70,8 +74,8 @@ pub use fs::{
 };
 pub use grammar::{Grammar, GrammarRule, Importance};
 pub use hash::{
-    ContentCache, ContentCacheConfig, ContentId, hash_bytes, hash_file,
-    hash_file_node,
+    ContentCache, ContentCacheConfig, ContentId, hash_and_cache_node,
+    hash_bytes, hash_file, hash_file_node,
 };
 pub use identity::{DirId, FileId, FileSystemId, NodeId};
 pub use local::LocalFs;
@@ -79,6 +83,14 @@ pub use meta::Metadata;
 pub use node::{Node, NodeKind, SymlinkTarget, UserPermissions};
 pub use scan::{
     ScanConfig, ScanEntry, ScanResult, scan_directory, scan_directory_node,
+};
+pub use session::{
+    ProviderRef, Session, SessionConfig, SessionManager, SessionSettings,
+    SessionType,
+};
+pub use snapshot::{
+    ProviderId, Snapshot, SnapshotEntry, SnapshotEntryStatus, SnapshotManager,
+    capture_snapshot, entry_matches_node,
 };
 pub use sync::{
     SyncOperation, SyncResult, SyncRules, plan_sync, sync_directories,

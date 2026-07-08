@@ -800,6 +800,23 @@ impl NodeFileSystem for LocalFs {
         Ok(node.metadata().clone())
     }
 
+    fn set_node_hash(
+        &self,
+        id: NodeId<Self::Nid>,
+        hash: String,
+    ) -> Result<()> {
+        let mut nodes = self.nodes.write();
+        let Some(arc) = nodes.get_mut(id.get()) else {
+            return Err(FsError::NotFound {
+                path: PathBuf::from("(unknown node)"),
+            });
+        };
+        // Arc::make_mut clones the inner value if the arc is shared,
+        // ensuring exclusive access to update the cached hash.
+        Arc::make_mut(arc).set_cached_hash(hash);
+        Ok(())
+    }
+
     async fn read_dir_node(&self, dir_id: DirId<Self::Nid>) -> Result<()> {
         let dir_node = self.get_node(dir_id.as_node_id())?;
         let dir_path = dir_node.path();

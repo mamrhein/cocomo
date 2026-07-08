@@ -37,3 +37,6 @@ regex = { version = "1", default-features = false, features = [
 ] }
 bitflags = "2"
 globset = "0.4"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+uuid = { version = "1", features = ["v4", "serde"] }

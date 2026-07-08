@@ -201,6 +201,13 @@ pub trait NodeFileSystem: Send + Sync {
     /// Return the cached metadata for a node without resolving a path.
     fn node_metadata(&self, id: NodeId<Self::Nid>) -> Result<Metadata>;
 
+    /// Store a content hash on a file node.
+    ///
+    /// This is a metadata update, not a file-system write. Read-only providers
+    /// can still implement it to cache hashes in memory.
+    fn set_node_hash(&self, id: NodeId<Self::Nid>, hash: String)
+    -> Result<()>;
+
     // ── Directory traversal ──
 
     /// Populate the children of a directory node. If the children have

@@ -691,26 +691,37 @@ pub enum SessionType {
 
 ### 5.2 Session Object
 
+The runtime [`Session`](cocomo-lib/src/session.rs) holds live provider
+references and resolved node IDs. Paths are stored for display and
+serialization; node IDs are used for I/O operations.
+
 ```rust
 pub struct Session {
     pub id: Uuid,
     pub name: String,
     pub session_type: SessionType,
-    pub left_provider: Arc<dyn FileSystem>,
-    pub right_provider: Arc<dyn FileSystem>,
-    pub center_provider: Option<Arc<dyn FileSystem>>,  // 3-way
+    pub left_provider: Arc<dyn NodeFileSystem>,
+    pub right_provider: Arc<dyn NodeFileSystem>,
+    pub center_provider: Option<Arc<dyn NodeFileSystem>>,
     pub left_path: PathBuf,
     pub right_path: PathBuf,
     pub center_path: Option<PathBuf>,
-    pub settings: SessionSettings,  // per-type settings
-    pub created_at: DateTime,
-    pub modified_at: DateTime,
+    /// Resolved node IDs (valid while nodes exist in the provider cache).
+    pub left_node_id: Option<NodeId<u64>>,
+    pub right_node_id: Option<NodeId<u64>>,
+    pub center_node_id: Option<NodeId<u64>>,
+    pub settings: SessionSettings,
+    pub created_at: DateTime<Utc>,
+    pub modified_at: DateTime<Utc>,
 }
 ```
 
 ### 5.3 Session Serialization
 
-Sessions save to `.bcs` files (JSON or TOML):
+Sessions save to `.bcs` files (TOML format). The serializable form is
+[`SessionConfig`](cocomo-lib/src/session.rs), which stores paths and
+provider labels. On load, paths are resolved to node IDs via
+`resolve_path()`.
 
 ```toml
 name = "Project Alpha vs Beta"
@@ -840,11 +851,16 @@ pub struct ReportConfig {
 
 ## 8. Snapshots
 
-Capture a point-in-time view of a directory tree:
+Capture a point-in-time view of a directory tree.
+
+Snapshots are stored as serializable TOML files (`.snap` extension). The
+[`capture_snapshot`](cocomo-lib/src/snapshot.rs) function scans a directory
+and records paths, sizes, modification times, and hashes. Content hashes
+are computed on demand when comparing against a live filesystem.
 
 ```rust
 /// A serializable identifier that references a provider. Resolved lazily
-/// back to a live `FileSystem` when the snapshot is loaded for comparison.
+/// back to a live `NodeFileSystem` when the snapshot is loaded for comparison.
 pub struct ProviderId {
     pub scheme: String,  // "file", "s3", "ftp", ...
     pub profile: Option<String>, // optional named profile
@@ -855,12 +871,12 @@ pub struct Snapshot {
     pub provider_id: ProviderId,  // serializable; resolved on load
     pub path: PathBuf,
     pub entries: Vec<SnapshotEntry>,
-    pub created_at: DateTime,
+    pub created_at: DateTime<Utc>,
     pub labels: Vec<String>,
 }
 
 pub struct SnapshotEntry {
-    pub path: PathBuf,
+    pub path: PathBuf,  // relative to snapshot root
     pub size: u64,
     pub modified: DateTime,
     pub hash: String,

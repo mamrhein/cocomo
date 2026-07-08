@@ -693,7 +693,7 @@ async fn run_comparison(
     };
 
     let comparison =
-        cocomo_lib::compare_directories(&fs, &left, &right, &config, &cache)
+        cocomo_lib::compare_directories(&fs, &left, &right, &config, Some(&cache))
             .await?;
 
     app.comparison = Some(comparison);
