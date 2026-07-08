@@ -29,7 +29,13 @@ use blake3::Hash as Blake3Hash;
 use chrono::{DateTime, Utc};
 use parking_lot::Mutex;
 
-use crate::{fs::FileSystem, meta::Metadata};
+use crate::{
+    error::FsOperation,
+    fs::{FileSystem, NodeFileSystem},
+    identity::FileId,
+    meta::Metadata,
+    node::Node,
+};
 
 /// The triple used to identify file content for equality checks.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -83,6 +89,33 @@ pub async fn hash_file(
         let chunk = chunk.map_err(|e| crate::error::FsError::Io {
             operation: crate::error::FsOperation::Read,
             path: path.to_path_buf(),
+            message: format!("stream error: {e}"),
+        })?;
+        hasher.update(&chunk);
+    }
+    Ok(hasher.finalize())
+}
+
+/// Compute the blake3 hash of file content by reading it through a
+/// node-based `NodeFileSystem` provider in a streaming fashion.
+///
+/// Unlike [`hash_file`], this uses a [`FileId`] instead of a path, avoiding
+/// TOCTOU races.
+pub async fn hash_file_node<N>(
+    fs: &N,
+    file_id: FileId<N::Nid>,
+    node: &Node,
+) -> crate::error::Result<Blake3Hash>
+where
+    N: NodeFileSystem,
+{
+    let mut hasher = blake3::Hasher::new();
+    let mut stream = fs.read_stream_node(file_id, None).await?;
+    use futures::StreamExt;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| crate::error::FsError::Io {
+            operation: FsOperation::Read,
+            path: node.path().to_path_buf(),
             message: format!("stream error: {e}"),
         })?;
         hasher.update(&chunk);

@@ -15,9 +15,10 @@
 use std::{collections::HashMap, path::Path, sync::Arc};
 
 use crate::{
-    FileSystem, Result,
-    hash::{ContentCache, ContentId, hash_file},
-    scan::{ScanConfig, ScanEntry, ScanResult},
+    FileSystem, NodeFileSystem, Result,
+    hash::{ContentCache, ContentId, hash_file, hash_file_node},
+    identity::FileId,
+    scan::{ScanConfig, ScanEntry, ScanResult, scan_directory_node},
 };
 
 /// The comparison status of a directory entry.
@@ -298,6 +299,277 @@ async fn scan_dir_entries(
     config: &ScanConfig,
 ) -> Result<ScanResult> {
     crate::scan_directory(fs, path, config).await
+}
+
+// ---------------------------------------------------------------------------
+// Node-based comparison
+// ---------------------------------------------------------------------------
+
+/// Compare two directory trees using the node-based `NodeFileSystem` API.
+///
+/// Both paths are resolved to node identifiers, then scanned with
+/// [`scan_directory_node`], and merged. When `compare_files` is enabled,
+/// content hashes are computed via node-based reads.
+pub async fn compare_directories_node<N>(
+    fs: &N,
+    left_path: &Path,
+    right_path: &Path,
+    config: &CompareConfig,
+    cache: &ContentCache,
+) -> Result<DirComparison>
+where
+    N: NodeFileSystem<Nid = u64>,
+{
+    let scan_config = ScanConfig {
+        follow_symlinks: config.follow_symlinks,
+        max_depth: config.max_depth,
+    };
+
+    let left_result = scan_directory_node(fs, left_path, &scan_config).await?;
+    let right_result =
+        scan_directory_node(fs, right_path, &scan_config).await?;
+
+    // Collect all directory pairs for sub-comparison.
+    let dir_pairs = collect_dir_pairs(&left_result, &right_result);
+
+    // Do the top-level merge.
+    let mut comparison = merge_sync_node(
+        fs, left_path, &left_result, right_path, &right_result, config, cache,
+    )
+    .await?;
+
+    // Recursively compare subdirectories.
+    for (left_sub, right_sub) in dir_pairs {
+        let sub_left = left_path.join(&left_sub.path);
+        let sub_right = right_path.join(&right_sub.path);
+
+        let sub_scan_config = ScanConfig {
+            follow_symlinks: config.follow_symlinks,
+            max_depth: config.max_depth,
+        };
+
+        let left_entries =
+            scan_directory_node(fs, &sub_left, &sub_scan_config).await;
+        let right_entries =
+            scan_directory_node(fs, &sub_right, &sub_scan_config).await;
+
+        match (left_entries, right_entries) {
+            (Ok(le), Ok(re)) => {
+                let sub_comparison = merge_sync_node(
+                    fs, &sub_left, &le, &sub_right, &re, config, cache,
+                )
+                .await;
+
+                match sub_comparison {
+                    Ok(sub_comp) => {
+                        attach_sub_comparison(
+                            &mut comparison,
+                            &left_sub.name,
+                            Arc::new(sub_comp),
+                        );
+                    }
+                    Err(e) => {
+                        comparison.errors.push(e);
+                    }
+                }
+            }
+            (Err(e), _) | (_, Err(e)) => {
+                comparison.errors.push(e);
+            }
+        }
+    }
+
+    Ok(comparison)
+}
+
+/// Node-aware version of `merge_sync` that uses node-based file hashing.
+async fn merge_sync_node<N>(
+    fs: &N,
+    left_root: &Path,
+    left: &ScanResult,
+    right_root: &Path,
+    right: &ScanResult,
+    config: &CompareConfig,
+    cache: &ContentCache,
+) -> Result<DirComparison>
+where
+    N: NodeFileSystem<Nid = u64>,
+{
+    let mut comparison = DirComparison::default();
+
+    let left_map: HashMap<&str, &ScanEntry> =
+        left.entries.iter().map(|e| (e.name.as_str(), e)).collect();
+    let right_map: HashMap<&str, &ScanEntry> =
+        right.entries.iter().map(|e| (e.name.as_str(), e)).collect();
+
+    let mut names: Vec<&str> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for name in left_map.keys().chain(right_map.keys()) {
+        if seen.insert(name) {
+            names.push(name);
+        }
+    }
+    names.sort();
+
+    for &name in &names {
+        let left_entry = left_map.get(name).copied();
+        let right_entry = right_map.get(name).copied();
+
+        let dir_entry = merge_entry_sync_node(
+            fs, left_root, left_entry, right_root, right_entry, config, cache,
+        )
+        .await?;
+
+        *comparison.counts.entry(dir_entry.status).or_insert(0) += 1;
+        comparison.entries.push(dir_entry);
+    }
+
+    Ok(comparison)
+}
+
+/// Node-aware version of `merge_entry_sync`.
+async fn merge_entry_sync_node<N>(
+    fs: &N,
+    left_root: &Path,
+    left: Option<&ScanEntry>,
+    right_root: &Path,
+    right: Option<&ScanEntry>,
+    config: &CompareConfig,
+    cache: &ContentCache,
+) -> Result<DirEntry>
+where
+    N: NodeFileSystem<Nid = u64>,
+{
+    let name = left
+        .map(|e| e.name.as_str())
+        .or(right.map(|e| e.name.as_str()))
+        .unwrap_or("")
+        .to_string();
+
+    let left_info = left.map(scan_entry_to_info);
+    let right_info = right.map(scan_entry_to_info);
+
+    let status = if let (Some(le), Some(re)) = (left, right) {
+        if le.meta.is_dir != re.meta.is_dir {
+            DirEntryStatus::IdenticalNameDifferentType
+        } else if le.meta.is_dir {
+            DirEntryStatus::Same // placeholder; refined by caller
+        } else {
+            compare_file_status_node(
+                fs, left_root, le, right_root, re, config, cache,
+            )
+            .await?
+        }
+    } else if left.is_some() {
+        DirEntryStatus::LeftOnly
+    } else {
+        DirEntryStatus::RightOnly
+    };
+
+    Ok(DirEntry {
+        name,
+        status,
+        left: left_info,
+        right: right_info,
+        center: None,
+        sub_entries: None,
+    })
+}
+
+/// Node-aware file comparison. Uses node IDs for hashing instead of paths.
+async fn compare_file_status_node<N>(
+    fs: &N,
+    left_root: &Path,
+    left: &ScanEntry,
+    right_root: &Path,
+    right: &ScanEntry,
+    config: &CompareConfig,
+    cache: &ContentCache,
+) -> Result<DirEntryStatus>
+where
+    N: NodeFileSystem<Nid = u64>,
+{
+    if !config.compare_files {
+        return if left.meta.size == right.meta.size {
+            Ok(DirEntryStatus::Same)
+        } else {
+            Ok(DirEntryStatus::Different)
+        };
+    }
+
+    // Empty files are always the same.
+    if left.meta.size == right.meta.size && left.meta.size == 0 {
+        return Ok(DirEntryStatus::Same);
+    }
+
+    // Different sizes — check tolerance for "similar".
+    if left.meta.size != right.meta.size {
+        let size_diff = left.meta.size.abs_diff(right.meta.size);
+        let larger = std::cmp::max(left.meta.size, right.meta.size);
+        if larger > 0
+            && (size_diff as f64 / larger as f64) <= config.size_tolerance
+        {
+            return Ok(DirEntryStatus::Similar);
+        }
+        return Ok(DirEntryStatus::Different);
+    }
+
+    // Same size — resolve to node IDs and hash via the node API.
+    let left_path = left_root.join(&left.path);
+    let right_path = right_root.join(&right.path);
+    let label = fs.label_node();
+
+    let left_id = fs.resolve_path(&left_path).await.ok();
+    let right_id = fs.resolve_path(&right_path).await.ok();
+
+    // Check cache using paths (ContentCache is path-keyed).
+    let left_cid = cache.get(label, &left_path);
+    let right_cid = cache.get(label, &right_path);
+
+    if matches!(
+        (&left_cid, &right_cid),
+        (Some(lc), Some(rc)) if lc.hash == rc.hash
+    ) {
+        return Ok(DirEntryStatus::Same);
+    }
+
+    // Hash both files via node IDs.
+    let left_hash = match (left_id, fs.get_node(left_id.unwrap())) {
+        (Some(id), Ok(node)) => {
+            match hash_file_node(fs, FileId::new(*id.get()), &node).await {
+                Ok(h) => h,
+                Err(_) => return Ok(DirEntryStatus::Different),
+            }
+        }
+        _ => return Ok(DirEntryStatus::Different),
+    };
+
+    let right_hash = match (right_id, fs.get_node(right_id.unwrap())) {
+        (Some(id), Ok(node)) => {
+            match hash_file_node(fs, FileId::new(*id.get()), &node).await {
+                Ok(h) => h,
+                Err(_) => return Ok(DirEntryStatus::Different),
+            }
+        }
+        _ => return Ok(DirEntryStatus::Different),
+    };
+
+    let left_hex = left_hash.to_hex().to_string();
+    let right_hex = right_hash.to_hex().to_string();
+
+    // Cache the results.
+    let left_cid_new =
+        ContentId::from_blake3(&left.meta, &left_hash);
+    let right_cid_new =
+        ContentId::from_blake3(&right.meta, &right_hash);
+    cache.insert(label, &left_path, left_cid_new);
+    cache.insert(label, &right_path, right_cid_new);
+
+    if left_hex == right_hex {
+        return Ok(DirEntryStatus::Same);
+    }
+
+    Ok(DirEntryStatus::Different)
 }
 
 /// Collect pairs of entries that are directories on both sides.
@@ -608,5 +880,45 @@ mod tests {
         assert_eq!(DirEntryStatus::LeftOnly.symbol(), "<");
         assert_eq!(DirEntryStatus::RightOnly.symbol(), ">");
         assert_eq!(DirEntryStatus::Conflict.symbol(), "X");
+    }
+
+    // -----------------------------------------------------------------------
+    // Node-based compare tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn node_compare_detects_same_and_different() {
+        let (left, right) = make_test_dirs();
+        let fs = LocalFs::new("test");
+        let cache = ContentCache::default_config();
+        let config = CompareConfig::full();
+
+        let result =
+            compare_directories_node(&fs, &left, &right, &config, &cache)
+                .await
+                .unwrap();
+
+        assert!(result.same_count() > 0);
+        assert!(result.different_count() > 0);
+        assert!(result.orphan_count() > 0);
+
+        fs_err::remove_dir_all(left.parent().unwrap()).ok();
+    }
+
+    #[tokio::test]
+    async fn node_compare_structure_only() {
+        let (left, right) = make_test_dirs();
+        let fs = LocalFs::new("test");
+        let cache = ContentCache::default_config();
+        let config = CompareConfig::structure_only();
+
+        let result =
+            compare_directories_node(&fs, &left, &right, &config, &cache)
+                .await
+                .unwrap();
+
+        assert!(result.total() > 0);
+
+        fs_err::remove_dir_all(left.parent().unwrap()).ok();
     }
 }

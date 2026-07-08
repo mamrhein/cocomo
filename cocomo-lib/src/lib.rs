@@ -55,7 +55,7 @@ pub mod text;
 // Re-exports for convenience.
 pub use compare::{
     CompareConfig, DirComparison, DirEntry, DirEntryStatus, EntryInfo,
-    compare_directories,
+    compare_directories, compare_directories_node,
 };
 pub use error::{FsError, FsOperation, Result};
 pub use file::FsFile;
@@ -67,12 +67,15 @@ pub use fs::{DirEntryMeta, FileSystem, NodeFileSystem, OpenMode};
 pub use grammar::{Grammar, GrammarRule, Importance};
 pub use hash::{
     ContentCache, ContentCacheConfig, ContentId, hash_bytes, hash_file,
+    hash_file_node,
 };
 pub use identity::{DirId, FileId, FileSystemId, NodeId};
 pub use local::LocalFs;
 pub use meta::Metadata;
 pub use node::{Node, NodeKind, SymlinkTarget, UserPermissions};
-pub use scan::{ScanConfig, ScanEntry, ScanResult, scan_directory};
+pub use scan::{
+    ScanConfig, ScanEntry, ScanResult, scan_directory, scan_directory_node,
+};
 pub use text::{
     AlignmentMode, LineInfo, TextCompareSettings, TextDiff, TextDifference,
     Token, WhitespaceMode, compare_texts, lines_equal,

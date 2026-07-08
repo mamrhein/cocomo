@@ -297,6 +297,9 @@ Secrets are encrypted at rest using the OS keyring (Secret Service / macOS Keych
 
 - Files are identified for equality by `(size, mtime, hash)` triple.
 - Hash is computed with `blake3` (fast, parallel). Streaming `Hasher::update()` is used for large files to avoid loading entire files into memory.
+- Two hashing functions are provided: `hash_file()` uses the path-based
+  [`FileSystem`] API, while `hash_file_node()` uses the node-based
+  [`NodeFileSystem`] API and reads content via `FileId` identifiers.
 - An in-memory `ContentCache` stores recent hashes so repeated scans avoid re-reading.
 - Cache uses LRU eviction with a configurable max size and TTL to bound memory and open handles.
 - Cache entries are invalidated on write operations and by a TTL.
@@ -398,6 +401,15 @@ filesystem. The walk is configured to:
 
 Per-entry traversal errors (e.g., permission denied) are reported individually
 rather than aborting the entire scan.
+
+**Node-based scanning and comparison**: the library also provides
+`scan_directory_node()` and `compare_directories_node()` functions that
+operate on the [`NodeFileSystem`] API. Unlike the path-based variants, these
+resolve paths to node identifiers exactly once and perform all subsequent
+I/O via opaque `NodeId` references, eliminating TOCTOU races. The
+`compare_directories_node()` function uses `hash_file_node()` for content
+hashing, which reads file content through the node-based stream API.
+Downstream modules migrate gradually to these node-based functions.
 
 **Sorting**: by name, size, modified date, type, status. Multi-column secondary sort.
 

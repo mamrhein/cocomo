@@ -161,10 +161,15 @@ pub struct LocalFs {
 
 impl LocalFs {
     /// Create a new `LocalFs` with the given label.
+    ///
+    /// The filesystem identifier is derived from the current working
+    /// directory's device ID on unix, or a default value on other
+    /// platforms.
     pub fn new(label: impl Into<String>) -> Self {
+        let fs_id = detect_device_id();
         Self {
             label: label.into(),
-            fs_id: FileSystemId::new(0),
+            fs_id: FileSystemId::new(fs_id),
             nodes: parking_lot::RwLock::new(HashMap::new()),
             path_to_id: parking_lot::RwLock::new(HashMap::new()),
             next_id: AtomicU64::new(1),
@@ -363,6 +368,22 @@ fn platform_permissions(_meta: &fs::Metadata) -> UserPermissions {
 
 fn to_utc(opt: Option<SystemTime>) -> DateTime<Utc> {
     opt.map(DateTime::<Utc>::from).unwrap_or_default()
+}
+
+/// Detect the device ID for the current working directory. Used as the
+/// filesystem instance identifier for `LocalFs`.
+#[cfg(unix)]
+fn detect_device_id() -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    fs_err::metadata(".").map(|m| m.dev()).unwrap_or(0)
+}
+
+#[cfg(not(unix))]
+fn detect_device_id() -> u64 {
+    // Windows: use volume serial of current directory, or a default.
+    // For now, return 0. A real implementation would use
+    // GetVolumeInformation or similar.
+    0
 }
 
 // ---------------------------------------------------------------------------
