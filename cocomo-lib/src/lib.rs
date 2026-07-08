@@ -20,6 +20,8 @@
 //! # Key modules
 //!
 //! - [`fs`] — Core [`FileSystem`] trait and related types.
+//! - [`identity`] — Opaque identifiers for filesystems and nodes.
+//! - [`node`] — Filesystem node model, classification, and symlink targets.
 //! - [`local`] — [`LocalFs`], the local filesystem provider.
 //! - [`hash`] — Content hashing (blake3) and LRU [`ContentCache`].
 //! - [`scan`] — Directory scanning that produces a tree of [`ScanEntry`]
@@ -43,8 +45,10 @@ pub mod format;
 pub mod fs;
 pub mod grammar;
 pub mod hash;
+pub mod identity;
 pub mod local;
 pub mod meta;
+pub mod node;
 pub mod scan;
 pub mod text;
 
@@ -64,8 +68,10 @@ pub use grammar::{Grammar, GrammarRule, Importance};
 pub use hash::{
     ContentCache, ContentCacheConfig, ContentId, hash_bytes, hash_file,
 };
+pub use identity::{DirId, FileId, FileSystemId, NodeId};
 pub use local::LocalFs;
 pub use meta::Metadata;
+pub use node::{Node, NodeKind, SymlinkTarget, UserPermissions};
 pub use scan::{ScanConfig, ScanEntry, ScanResult, scan_directory};
 pub use text::{
     AlignmentMode, LineInfo, TextCompareSettings, TextDiff, TextDifference,

@@ -54,84 +54,140 @@ cocomo/
 
 ### 2.1 Core Trait: `FileSystem`
 
-Every filesystem backend implements this single trait. The design follows two principles derived from robust filesystem practices: paths are resolved exactly once at `open()` time, and all subsequent I/O operates on owned file handles rather than paths. This avoids TOCTOU races.
+Every filesystem backend implements this trait. The design uses opaque
+[`NodeId`] identifiers instead of paths for all operations after initial
+resolution. Paths are resolved exactly once at entry time, and all subsequent
+I/O operates on node identifiers to avoid TOCTOU races.
+
+#### 2.1.1 Opaque Identifiers
 
 ```rust
-/// Metadata returned by stat-like operations. For local filesystems this
-/// includes inode and device information for hard-link detection and
-/// cycle-safe traversal.
+/// Opaque identifier for a filesystem instance.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FileSystemId<F>;
+
+/// Opaque identifier for a node within a filesystem.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct NodeId<N>;
+
+/// Type-safe wrapper for a directory node. Conversion from `NodeId` is
+/// unchecked — callers must verify the node kind first.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct DirId<N>(NodeId<N>);
+
+/// Type-safe wrapper for a file node. Conversion from `NodeId` is unchecked.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FileId<N>(NodeId<N>);
+```
+
+#### 2.1.2 Node Model
+
+```rust
+/// Access rights evaluated for the calling user/context.
+bitflags::bitflags! {
+    pub struct UserPermissions: u8 {
+        const READ  = 0x04;
+        const WRITE = 0x02;
+        const EXEC  = 0x01;
+    }
+}
+
+/// Minimal metadata requirement.
 pub struct Metadata {
     pub size: u64,
-    pub modified: DateTime,
+    pub created: Option<DateTime<Utc>>,
+    pub modified: DateTime<Utc>,
+    pub permissions: UserPermissions,
     pub is_dir: bool,
     pub is_symlink: bool,
-    pub inode: Option<u64>,   // platform-specific, None for remote providers
-    pub device_id: Option<u64>, // platform-specific, tracks filesystem boundaries
+    pub inode: Option<u64>,
+    pub device_id: Option<u64>,
 }
 
-/// A handle to an opened file. The path is resolved at construction time;
-/// all subsequent operations go through this handle to avoid TOCTOU races.
-#[async_trait]
-pub trait FsFile: Send + AsyncRead + AsyncWrite {
-    /// Cached metadata captured at open time.
-    fn metadata(&self) -> &Metadata;
-
-    /// Flush any buffered writes.
-    async fn flush(&mut self) -> Result<()>;
+/// Classification of a filesystem node. File content is never stored in
+/// the node — it is always read via the `FileSystem` trait.
+#[derive(Clone, Debug)]
+pub enum NodeKind {
+    Directory { children: Option<Vec<String>> },
+    File,
+    Symlink { target: SymlinkTarget },
+    Special,
 }
+
+/// Target of a symbolic link. The raw path is always present; the resolved
+/// node ID is populated lazily.
+#[derive(Clone, Debug)]
+pub struct SymlinkTarget {
+    path: PathBuf,
+    node: Option<NodeId<u64>>,
+}
+
+/// A node in the filesystem graph. Parent references enable navigation
+/// ("go up") without storing full path history.
+pub struct Node {
+    name: OsString,
+    metadata: Metadata,
+    kind: NodeKind,
+    parent: Option<DirId>,  // strong index, not an Arc
+    deleted: bool,           // tombstone for stale ID detection
+}
+```
+
+#### 2.1.3 FileSystem Trait
+
+```rust
+pub type Result<T> = std::result::Result<T, FileSystemError>;
 
 #[async_trait]
 pub trait FileSystem: Send + Sync {
-    /// Resolve a path to metadata. Does not open the file.
-    async fn metadata(&self, path: &Path) -> Result<Metadata>;
+    type InnerFsId;
+    type InnerNodeId;
+    type Error: Into<FsError>;
 
-    /// List directory entries. Returns a stream for large directories.
-    async fn read_dir(&self, path: &Path) -> Result<DirStream>;
+    /// Id of the filesystem instance.
+    fn id(&self) -> FileSystemId<Self::InnerFsId>;
 
-    /// Open a file for I/O. The returned handle owns the open descriptor;
-    /// the caller should discard `path` after this call.
-    async fn open(&self, path: &Path, mode: OpenMode) -> Result<FsFile>;
+    // ── Resolution (path -> node, entry point) ──
+    async fn resolve_path(&self, path: &Path) -> Result<NodeId<Self::InnerNodeId>, Self::Error>;
+    async fn resolve_symlink(&self, id: NodeId<Self::InnerNodeId>) -> Result<NodeId<Self::InnerNodeId>, Self::Error>;
 
-    /// Read file content in a single call. `range` is optional for sparse
-    /// reads. For large files prefer `read_stream()` instead.
-    async fn read(&self, path: &Path, range: Option<Range<u64>>) -> Result<Bytes>;
+    // ── Node access ──
+    fn get_node(&self, id: NodeId<Self::InnerNodeId>) -> Result<&Node, Self::Error>;
 
-    /// Read file content as a stream. Suitable for large files and
-    /// streaming comparison or hashing.
-    async fn read_stream(
-        &self,
-        path: &Path,
-        range: Option<Range<u64>>,
-    ) -> Result<impl Stream<Item = Result<Bytes>>>;
+    // ── Directory Traversal ──
+    async fn read_dir(&self, id: DirId<Self::InnerNodeId>) -> Result<(), Self::Error>;
 
-    /// Write file content.
-    async fn write(&self, path: &Path, data: Bytes) -> Result<()>;
+    // ── File I/O (stream-based, no buffering of entire files) ──
+    async fn open(&self, id: FileId<Self::InnerNodeId>, mode: OpenMode) -> Result<Box<dyn FsFile>, Self::Error>;
+    async fn read(&self, id: FileId<Self::InnerNodeId>, range: Option<Range<u64>>) -> Result<Bytes, Self::Error>;
+    async fn read_stream(&self, id: FileId<Self::InnerNodeId>, range: Option<Range<u64>>) -> Result<impl Stream<Item = Result<Bytes>>, Self::Error>;
 
-    /// Create directory (parents as needed).
-    async fn create_dir(&self, path: &Path) -> Result<()>;
-
-    /// Delete a file or empty directory.
-    async fn remove(&self, path: &Path) -> Result<()>;
-
-    /// Delete recursively.
-    async fn remove_all(&self, path: &Path) -> Result<()>;
-
-    /// Rename / move within the same provider.
-    async fn rename(&self, src: &Path, dst: &Path) -> Result<()>;
-
-    /// Copy within the same provider.
-    async fn copy(&self, src: &Path, dst: &Path) -> Result<()>;
-
-    /// Symlink metadata (target path, if applicable).
-    async fn read_link(&self, path: &Path) -> Result<PathBuf>;
-
-    /// Create a symlink.
-    async fn symlink(&self, target: &Path, link: &Path) -> Result<()>;
-
-    /// Human-readable label for this provider instance.
     fn label(&self) -> &str;
 }
+
+#[async_trait]
+pub trait WritableFileSystem: FileSystem {
+    // ── Node Creation ──
+    async fn create_file(&self, parent: DirId<Self::InnerNodeId>, name: &OsStr) -> Result<FileId<Self::InnerNodeId>, Self::Error>;
+    async fn create_dir(&self, parent: DirId<Self::InnerNodeId>, name: &OsStr) -> Result<DirId<Self::InnerNodeId>, Self::Error>;
+    async fn create_symlink(&self, parent: DirId<Self::InnerNodeId>, name: &OsStr, target: &Path) -> Result<NodeId<Self::InnerNodeId>, Self::Error>;
+
+    // ── Write I/O ──
+    async fn write(&self, id: FileId<Self::InnerNodeId>, data: Bytes) -> Result<(), Self::Error>;
+    async fn flush(&self, id: FileId<Self::InnerNodeId>) -> Result<(), Self::Error>;
+
+    // ── High-Level Operations ──
+    async fn remove(&self, id: NodeId<Self::InnerNodeId>) -> Result<(), Self::Error>;
+    async fn remove_all(&self, id: NodeId<Self::InnerNodeId>) -> Result<(), Self::Error>;
+    async fn rename(&self, id: NodeId<Self::InnerNodeId>, new_name: &OsStr) -> Result<(), Self::Error>;
+    async fn copy_node(&self, src: NodeId<Self::InnerNodeId>, dst: DirId<Self::InnerNodeId>) -> Result<NodeId<Self::InnerNodeId>, Self::Error>;
+    async fn move_node(&self, src: NodeId<Self::InnerNodeId>, dst: DirId<Self::InnerNodeId>) -> Result<NodeId<Self::InnerNodeId>, Self::Error>;
+}
 ```
+
+The split between `FileSystem` (read) and `WritableFileSystem` (read + write)
+allows read-only providers (archives, Git commits, S3 in some modes) to
+implement only the read trait.
 
 ### 2.2 Built-in Providers
 
@@ -175,18 +231,23 @@ Secrets are encrypted at rest using the OS keyring (Secret Service / macOS Keych
 ### 2.5.1 Structured Errors
 
 All `FileSystem` methods return `Result<T, FsError>` where `FsError` carries
-rich context — the operation that failed, the path that was attempted, and the
-underlying `fs_err::Error` — so that callers can produce actionable diagnostics.
+rich context — the operation that failed, the path or node that was attempted,
+and the underlying cause — so that callers can produce actionable diagnostics.
 
 ```rust
 pub enum FsOperation {
-    Open, Read, Write, Remove, Rename, Copy, CreateDir, ReadDir, ReadLink, Symlink,
+    Open, Read, Write, Flush, Remove, Rename, Move, Copy, CreateDir, CreateFile,
+    CreateSymlink, ReadDir, ReadLink, Symlink, Resolve,
 }
 
 pub enum FsError {
-    Io { operation: FsOperation, path: PathBuf, source: fs_err::Error },
+    Io { operation: FsOperation, path: PathBuf, message: String },
     PermissionDenied { operation: FsOperation, path: PathBuf },
     NotFound { path: PathBuf },
+    InvalidArgument { operation: FsOperation, path: PathBuf, message: String },
+    StaleNode,               // node was deleted or evicted
+    NotResolved { field: &'static str },  // lazy field not yet populated
+    WrongKind { expected: &'static str, actual: &'static str },
 }
 ```
 

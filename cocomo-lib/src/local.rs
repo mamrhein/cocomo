@@ -32,6 +32,7 @@ use crate::{
     file::FsFile,
     fs::{DirEntryMeta, DirStream, FileSystem, OpenMode},
     meta::Metadata,
+    node::UserPermissions,
 };
 
 /// Counter for generating unique temporary file names.
@@ -166,30 +167,34 @@ impl LocalFs {
         let path = entry.path();
 
         // Use symlink_metadata to detect symlinks without following them.
-        let (size, modified, is_dir, is_symlink, inode, device_id) =
-            fs_err::symlink_metadata(path)
-                .ok()
-                .map(|meta| {
-                    let is_sym = meta.file_type().is_symlink();
-                    let (ino, dev) = platform_ids(&meta);
-                    (
-                        meta.len(),
-                        to_utc(meta.modified().ok()),
-                        meta.is_dir(),
-                        is_sym,
-                        Some(ino),
-                        Some(dev),
-                    )
-                })
-                .unwrap_or((0, DateTime::default(), false, false, None, None));
+        let meta = fs_err::symlink_metadata(path).ok();
+        if let Some(m) = &meta {
+            let is_sym = m.file_type().is_symlink();
+            let (ino, dev) = platform_ids(m);
+            let perms = platform_permissions(m);
+            let created = m.created().ok().map(DateTime::<Utc>::from);
+            return Metadata {
+                size: m.len(),
+                created,
+                modified: to_utc(m.modified().ok()),
+                is_dir: m.is_dir(),
+                is_symlink: is_sym,
+                inode: Some(ino),
+                device_id: Some(dev),
+                permissions: perms,
+            };
+        }
 
+        // Fallback when stat fails.
         Metadata {
-            size,
-            modified,
-            is_dir,
-            is_symlink,
-            inode,
-            device_id,
+            size: 0,
+            created: None,
+            modified: DateTime::default(),
+            is_dir: false,
+            is_symlink: false,
+            inode: None,
+            device_id: None,
+            permissions: UserPermissions::empty(),
         }
     }
 }
@@ -210,6 +215,30 @@ fn platform_ids(_meta: &fs::Metadata) -> (u64, u64) {
     (0, 0)
 }
 
+#[cfg(unix)]
+fn platform_permissions(meta: &fs::Metadata) -> UserPermissions {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = meta.permissions().mode();
+    let mut perms = UserPermissions::empty();
+    if mode & 0o400 != 0 {
+        perms |= UserPermissions::READ;
+    }
+    if mode & 0o200 != 0 {
+        perms |= UserPermissions::WRITE;
+    }
+    if mode & 0o100 != 0 {
+        perms |= UserPermissions::EXEC;
+    }
+    perms
+}
+
+#[cfg(not(unix))]
+fn platform_permissions(_meta: &fs::Metadata) -> UserPermissions {
+    // Windows permissions are more complex; default to read+write+exec for
+    // accessible files.
+    UserPermissions::READ | UserPermissions::WRITE | UserPermissions::EXEC
+}
+
 fn to_utc(opt: Option<SystemTime>) -> DateTime<Utc> {
     opt.map(DateTime::<Utc>::from).unwrap_or_default()
 }
@@ -226,13 +255,17 @@ impl FileSystem for LocalFs {
                 wrap(e, crate::error::FsOperation::Open, path.to_path_buf())
             })?;
         let (ino, dev) = platform_ids(&meta);
+        let perms = platform_permissions(&meta);
+        let created = meta.created().ok().map(DateTime::<Utc>::from);
         Ok(Metadata {
             size: meta.len(),
+            created,
             modified: to_utc(meta.modified().ok()),
             is_dir: meta.is_dir(),
             is_symlink: meta.file_type().is_symlink(),
             inode: Some(ino),
             device_id: Some(dev),
+            permissions: perms,
         })
     }
 
@@ -300,13 +333,17 @@ impl FileSystem for LocalFs {
             wrap(e, crate::error::FsOperation::Open, path.to_path_buf())
         })?;
         let (ino, dev) = platform_ids(&meta);
+        let perms = platform_permissions(&meta);
+        let created = meta.created().ok().map(DateTime::<Utc>::from);
         let metadata = Metadata {
             size: meta.len(),
+            created,
             modified: to_utc(meta.modified().ok()),
             is_dir: meta.is_dir(),
             is_symlink: meta.file_type().is_symlink(),
             inode: Some(ino),
             device_id: Some(dev),
+            permissions: perms,
         };
 
         Ok(Box::new(LocalFile {

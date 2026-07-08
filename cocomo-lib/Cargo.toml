@@ -35,4 +35,5 @@ regex = { version = "1", default-features = false, features = [
     "perf",
     "unicode-perl",
 ] }
+bitflags = "2"
 globset = "0.4"

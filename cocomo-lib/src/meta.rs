@@ -13,12 +13,17 @@
 
 use chrono::{DateTime, Utc};
 
+use crate::node::UserPermissions;
+
 /// File or directory metadata captured at stat time.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Metadata {
     /// Size in bytes. For directories this is filesystem-dependent and may
     /// not reflect the total size of contents.
     pub size: u64,
+    /// Creation time. `None` for remote providers that do not expose creation
+    /// timestamps.
+    pub created: Option<DateTime<Utc>>,
     /// Last modification time.
     pub modified: DateTime<Utc>,
     /// True when this entry is a directory.
@@ -31,6 +36,8 @@ pub struct Metadata {
     /// Device ID. Platform-specific; used to track filesystem boundaries
     /// so inode-based cycle detection is scoped correctly per mount.
     pub device_id: Option<u64>,
+    /// Access rights evaluated for the calling user/context.
+    pub permissions: UserPermissions,
 }
 
 impl Metadata {
@@ -39,11 +46,13 @@ impl Metadata {
     pub fn file(size: u64, modified: DateTime<Utc>) -> Self {
         Self {
             size,
+            created: None,
             modified,
             is_dir: false,
             is_symlink: false,
             inode: None,
             device_id: None,
+            permissions: UserPermissions::READ | UserPermissions::WRITE,
         }
     }
 
@@ -51,11 +60,15 @@ impl Metadata {
     pub fn dir(modified: DateTime<Utc>) -> Self {
         Self {
             size: 0,
+            created: None,
             modified,
             is_dir: true,
             is_symlink: false,
             inode: None,
             device_id: None,
+            permissions: UserPermissions::READ
+                | UserPermissions::WRITE
+                | UserPermissions::EXEC,
         }
     }
 
