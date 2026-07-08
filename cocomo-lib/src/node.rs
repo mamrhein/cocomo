@@ -16,10 +16,9 @@
 //!
 //! # Lazy loading
 //!
-//! Directory children and symlink targets are resolved lazily:
+//! Directory children are resolved lazily:
 //! - `children: None` means the directory entries have not been enumerated
 //!   yet.
-//! - `SymlinkTarget.node: None` means the symlink has not been resolved yet.
 //!
 //! # Node lifecycle
 //!
@@ -104,13 +103,13 @@ impl SymlinkTarget {
 
 /// Classification of a filesystem node.
 ///
-/// Directory children are populated lazily. File content is never stored in
-/// the node — it is always read via the [`FileSystem`] trait.
+/// Directory children names are populated lazily. File content is never stored
+/// in the node — it is always read via the [`FileSystem`] trait.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum NodeKind {
-    /// A directory. Children are resolved on demand.
+    /// A directory. Child names are resolved on demand.
     Directory {
-        /// Child entries, keyed by name. `None` if not yet resolved.
+        /// Child entry names. `None` if not yet resolved.
         #[allow(dead_code)]
         children: Option<Vec<String>>,
     },
@@ -140,6 +139,15 @@ impl NodeKind {
     pub fn is_symlink(&self) -> bool {
         matches!(self, Self::Symlink { .. })
     }
+
+    /// Return the child names if this is a resolved directory.
+    #[allow(dead_code)]
+    pub fn children(&self) -> Option<&[String]> {
+        match self {
+            NodeKind::Directory { children: Some(c) } => Some(c.as_slice()),
+            _ => None,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -148,9 +156,17 @@ impl NodeKind {
 
 /// A node in the filesystem graph.
 ///
-/// Every node carries metadata, a kind classification, and a parent reference
-/// (for navigation). The `deleted` flag implements a tombstone: tombstoned
-/// nodes are still addressable but return `NotFound` on access.
+/// Every node carries metadata, a kind classification, a full path (for I/O
+/// operations), and a parent reference (for navigation). The `deleted` flag
+/// implements a tombstone: tombstoned nodes are still addressable but return
+/// `NotFound` on access.
+///
+/// # Path storage
+///
+/// The `path` field stores the absolute filesystem path. This is needed for
+/// the provider to perform actual I/O (open, read, write) through the OS.
+/// The node graph provides an indexed view; the path provides the anchor to
+/// the real filesystem.
 ///
 /// # Parent navigation
 ///
@@ -163,23 +179,28 @@ impl NodeKind {
 pub struct Node {
     /// Node name (empty for a root directory).
     name: OsString,
+    /// Absolute path of this node on the underlying filesystem.
+    path: PathBuf,
     /// Node metadata.
     metadata: Metadata,
     /// Node kind classification.
     kind: NodeKind,
     /// Parent directory. `None` for root nodes.
-    #[allow(dead_code)]
     parent: Option<u64>,
     /// Tombstone flag. Set by delete operations to mark this node as removed.
-    #[allow(dead_code)]
-    deleted: bool,
+    pub(crate) deleted: bool,
 }
 
 impl Node {
     /// Create a new directory node.
-    pub fn directory(name: OsString, metadata: Metadata) -> Self {
+    pub fn directory(
+        name: OsString,
+        path: PathBuf,
+        metadata: Metadata,
+    ) -> Self {
         Self {
             name,
+            path,
             metadata,
             kind: NodeKind::Directory { children: None },
             parent: None,
@@ -188,9 +209,10 @@ impl Node {
     }
 
     /// Create a new file node.
-    pub fn file(name: OsString, metadata: Metadata) -> Self {
+    pub fn file(name: OsString, path: PathBuf, metadata: Metadata) -> Self {
         Self {
             name,
+            path,
             metadata,
             kind: NodeKind::File,
             parent: None,
@@ -201,11 +223,13 @@ impl Node {
     /// Create a new symlink node.
     pub fn symlink(
         name: OsString,
+        path: PathBuf,
         metadata: Metadata,
         target: SymlinkTarget,
     ) -> Self {
         Self {
             name,
+            path,
             metadata,
             kind: NodeKind::Symlink { target },
             parent: None,
@@ -214,9 +238,10 @@ impl Node {
     }
 
     /// Create a new special node.
-    pub fn special(name: OsString, metadata: Metadata) -> Self {
+    pub fn special(name: OsString, path: PathBuf, metadata: Metadata) -> Self {
         Self {
             name,
+            path,
             metadata,
             kind: NodeKind::Special,
             parent: None,
@@ -227,6 +252,11 @@ impl Node {
     /// Return the node name.
     pub fn name(&self) -> &OsString {
         &self.name
+    }
+
+    /// Return the absolute path of this node.
+    pub fn path(&self) -> &Path {
+        &self.path
     }
 
     /// Return a reference to the node metadata.
@@ -240,9 +270,43 @@ impl Node {
     }
 
     /// Return `true` if the node is tombstoned.
-    #[allow(dead_code)]
     pub fn is_deleted(&self) -> bool {
         self.deleted
+    }
+
+    /// Mark this node as deleted (tombstone).
+    pub(crate) fn set_deleted(&mut self) {
+        self.deleted = true;
+    }
+
+    /// Return a copy of this node with the parent field set.
+    pub(crate) fn with_parent(mut self, parent: Option<u64>) -> Self {
+        self.parent = parent;
+        self
+    }
+
+    /// Update the node name.
+    pub(crate) fn set_name(&mut self, name: OsString) {
+        self.name = name;
+    }
+
+    /// Update the absolute path.
+    pub(crate) fn set_path(&mut self, path: PathBuf) {
+        self.path = path;
+    }
+
+    /// Set the child names for a directory node. Does nothing if this is not
+    /// a directory.
+    pub(crate) fn set_children(&mut self, children: Vec<String>) {
+        if let NodeKind::Directory { children: c } = &mut self.kind {
+            *c = Some(children);
+        }
+    }
+
+    /// Return the parent node ID, if any.
+    #[allow(dead_code)]
+    pub fn parent(&self) -> Option<u64> {
+        self.parent
     }
 }
 
@@ -276,8 +340,11 @@ mod tests {
 
     #[test]
     fn directory_node_kind() {
-        let node =
-            Node::directory(OsString::from("src"), Metadata::dir(Utc::now()));
+        let node = Node::directory(
+            OsString::from("src"),
+            PathBuf::from("/home/src"),
+            Metadata::dir(Utc::now()),
+        );
         assert!(node.kind().is_directory());
         assert!(!node.kind().is_file());
         assert!(!node.kind().is_symlink());
@@ -285,7 +352,11 @@ mod tests {
 
     #[test]
     fn file_node_kind() {
-        let node = Node::file(OsString::from("main.rs"), dummy_meta());
+        let node = Node::file(
+            OsString::from("main.rs"),
+            PathBuf::from("/home/main.rs"),
+            dummy_meta(),
+        );
         assert!(node.kind().is_file());
         assert!(!node.kind().is_directory());
     }
@@ -293,7 +364,12 @@ mod tests {
     #[test]
     fn symlink_node_kind() {
         let target = SymlinkTarget::new(PathBuf::from("/tmp/link"));
-        let node = Node::symlink(OsString::from("link"), dummy_meta(), target);
+        let node = Node::symlink(
+            OsString::from("link"),
+            PathBuf::from("/home/link"),
+            dummy_meta(),
+            target,
+        );
         assert!(node.kind().is_symlink());
         assert!(!node.kind().is_file());
     }
@@ -316,7 +392,11 @@ mod tests {
 
     #[test]
     fn node_not_deleted_by_default() {
-        let node = Node::file(OsString::from("test.txt"), dummy_meta());
+        let node = Node::file(
+            OsString::from("test.txt"),
+            PathBuf::from("/test.txt"),
+            dummy_meta(),
+        );
         assert!(!node.is_deleted());
     }
 
@@ -333,11 +413,30 @@ mod tests {
     fn node_display() {
         let node = Node::file(
             OsString::from("hello.txt"),
+            PathBuf::from("/hello.txt"),
             Metadata::file(50, Utc::now()),
         );
         let display = format!("{node}");
         assert!(display.contains("hello.txt"));
         assert!(display.contains("file"));
         assert!(display.contains("50"));
+    }
+
+    #[test]
+    fn node_path_is_stored() {
+        let p = PathBuf::from("/some/deep/path/file.txt");
+        let node =
+            Node::file(OsString::from("file.txt"), p.clone(), dummy_meta());
+        assert_eq!(node.path(), p.as_path());
+    }
+
+    #[test]
+    fn directory_children_lazy() {
+        let node = Node::directory(
+            OsString::from("dir"),
+            PathBuf::from("/dir"),
+            Metadata::dir(Utc::now()),
+        );
+        assert!(node.kind().children().is_none());
     }
 }

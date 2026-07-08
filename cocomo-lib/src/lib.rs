@@ -63,7 +63,7 @@ pub use format::{
     FileFormat, FormatRegistry, FormatSettings, FormatType, LineEnding,
     TableParser, TextEncoding,
 };
-pub use fs::{DirEntryMeta, FileSystem, OpenMode};
+pub use fs::{DirEntryMeta, FileSystem, NodeFileSystem, OpenMode};
 pub use grammar::{Grammar, GrammarRule, Importance};
 pub use hash::{
     ContentCache, ContentCacheConfig, ContentId, hash_bytes, hash_file,

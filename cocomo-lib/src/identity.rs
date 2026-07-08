@@ -124,6 +124,11 @@ impl<N> DirId<N> {
         Self(NodeId::new(inner))
     }
 
+    /// Extract the raw identifier value.
+    pub fn get(&self) -> &N {
+        self.0.get()
+    }
+
     /// Downcast to the raw [`NodeId`].
     pub fn as_node_id(self) -> NodeId<N> {
         self.0
@@ -168,6 +173,11 @@ impl<N> FileId<N> {
     /// constructor does not validate the node kind.
     pub fn new(inner: N) -> Self {
         Self(NodeId::new(inner))
+    }
+
+    /// Extract the raw identifier value.
+    pub fn get(&self) -> &N {
+        self.0.get()
     }
 
     /// Downcast to the raw [`NodeId`].
