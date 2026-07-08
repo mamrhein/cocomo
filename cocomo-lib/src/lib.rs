@@ -50,7 +50,9 @@ pub mod local;
 pub mod meta;
 pub mod node;
 pub mod scan;
+pub mod sync;
 pub mod text;
+pub mod transfer;
 
 // Re-exports for convenience.
 pub use compare::{
@@ -63,7 +65,9 @@ pub use format::{
     FileFormat, FormatRegistry, FormatSettings, FormatType, LineEnding,
     TableParser, TextEncoding,
 };
-pub use fs::{DirEntryMeta, FileSystem, NodeFileSystem, OpenMode};
+pub use fs::{
+    DirEntryMeta, FileSystem, NodeFileSystem, OpenMode, WritableFileSystem,
+};
 pub use grammar::{Grammar, GrammarRule, Importance};
 pub use hash::{
     ContentCache, ContentCacheConfig, ContentId, hash_bytes, hash_file,
@@ -76,7 +80,14 @@ pub use node::{Node, NodeKind, SymlinkTarget, UserPermissions};
 pub use scan::{
     ScanConfig, ScanEntry, ScanResult, scan_directory, scan_directory_node,
 };
+pub use sync::{
+    SyncOperation, SyncResult, SyncRules, plan_sync, sync_directories,
+};
 pub use text::{
     AlignmentMode, LineInfo, TextCompareSettings, TextDiff, TextDifference,
     Token, WhitespaceMode, compare_texts, lines_equal,
+};
+pub use transfer::{
+    TransferAction, TransferItem, TransferResult, execute_transfers,
+    plan_transfers,
 };

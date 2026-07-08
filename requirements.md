@@ -329,27 +329,56 @@ pub enum FsError {
 
 ### 2.6 Transfer Operations Between Providers
 
-A `Transfer` subsystem handles cross-provider copies and moves:
+The `transfer` module plans and executes file transfers (copy, move, delete)
+between filesystem providers. Operations work on a `DirComparison` result from
+the comparison engine and use the node-based [`WritableFileSystem`] API.
+
+#### Planning
+
+[`plan_transfers`] walks a `DirComparison` tree and collects all entries whose
+status matches the given [`TransferAction`]. For example,
+[`TransferAction::CopyRight`] collects all `LeftOnly` and `Different` entries.
+Directories with resolved sub-entries are recursed into rather than collected
+as single items, so the executor sees leaf-level operations.
 
 ```rust
-pub struct Transfer {
-    pub source: Arc<dyn FileSystem>,
-    pub destination: Arc<dyn FileSystem>,
-    pub items: Vec<TransferItem>,
-}
-
 pub enum TransferAction {
-    CopyLeft,   // left -> right
-    CopyRight,  // right -> left
-    CopyCenter, // center -> left & right (3-way merge)
+    CopyLeft,     // left -> right
+    CopyRight,    // right -> left
+    CopyCenter,   // center -> left & right (3-way merge)
     DeleteLeft,
     DeleteRight,
     MoveLeft,
     MoveRight,
 }
+
+pub struct TransferItem {
+    pub action: TransferAction,
+    pub name: String,
+    pub is_dir: bool,
+    pub rel_path: String,
+}
 ```
 
-Transfers run as an async queue with progress reporting, conflict detection, and backup-before-write.
+#### Execution
+
+[`execute_transfers`] runs a batch of [`TransferItem`] operations sequentially.
+Each item is resolved to a node identifier via [`NodeFileSystem::resolve_path`],
+and all I/O goes through the node-based API (`copy_node`, `write_node`,
+`remove_all_node`, etc.). Non-fatal errors are collected rather than aborting
+the entire batch.
+
+```rust
+pub struct TransferResult {
+    pub succeeded: usize,
+    pub failed: usize,
+    pub errors: Vec<String>,
+}
+```
+
+File copies stream content from source to destination via
+[`NodeFileSystem::read_stream_node`] and [`WritableFileSystem::write_node`],
+avoiding loading entire files into memory.
 
 ---
 
@@ -711,6 +740,10 @@ type = "DirCompare"
 
 ## 6. Synchronization
 
+The `sync` module provides directory synchronization by combining the comparison
+engine with the transfer executor. A [`SyncOperation`] defines the strategy,
+and [`SyncRules`] configure the behavior.
+
 ### 6.1 Sync Operations
 
 ```rust
@@ -726,28 +759,54 @@ pub enum SyncOperation {
 }
 ```
 
+Mirror operations copy matching entries and delete orphans. Copy operations
+transfer entries without deleting anything. Update operations compare
+modification times and copy only newer files.
+
 ### 6.2 Sync Safety
 
-| Feature         | Description                                   |
-| --------------- | --------------------------------------------- |
-| Dry run         | Preview operations without executing          |
-| Backup          | Copy to backup location before overwrite      |
-| Conflict prompt | Ask before overwriting conflicting files      |
-| Undo log        | Record all sync operations for potential undo |
-| Atomic writes   | Write to temp file, then rename               |
+| Feature       | Description                          |
+| ------------- | ------------------------------------ |
+| Dry run       | Preview operations without executing |
+| Atomic writes | Write to temp file, then rename      |
+
+Dry run mode is configured via [`SyncRules::dry_run`]. When enabled, the
+sync engine plans all transfers but does not execute them. The returned
+[`SyncResult`] contains the planned actions for review.
+
+Atomic writes are handled by the [`WritableFileSystem`] implementation
+(`LocalFs`), which writes to a temporary file and renames on success.
 
 ### 6.3 Sync Rules
 
-Per-session rules that determine which files sync:
+Configuration for a synchronization operation:
 
 ```rust
 pub struct SyncRules {
     pub operation: SyncOperation,
-    pub filters: OtherFilters,         // size, date, type restrictions
-    pub name_filters: Vec<NameFilter>,
-    pub prompt_on_conflict: bool,
-    pub backup_enabled: bool,
-    pub backup_path: Option<PathBuf>,
+    pub dry_run: bool,
+    pub max_depth: Option<usize>,
+    pub compare_files: bool,
+}
+```
+
+`max_depth` limits the recursive comparison depth. `compare_files` controls
+whether file contents are compared or only size/metadata.
+
+### 6.4 Sync API
+
+Two entry points are provided:
+
+- [`plan_sync`] — compares directories and plans transfers, returns a
+  [`SyncResult`] without executing any I/O.
+- [`sync_directories`] — plans and executes transfers (unless `dry_run`
+  is `true`). Returns a [`SyncResult`] with execution results.
+
+```rust
+pub struct SyncResult {
+    pub transfer: Option<TransferResult>,
+    pub planned: Vec<TransferItem>,
+    pub errors: Vec<String>,
 }
 ```
 
