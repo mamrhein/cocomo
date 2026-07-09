@@ -14,17 +14,14 @@
 
 use std::{
     path::PathBuf,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::atomic::{AtomicBool, Ordering},
 };
 
 use anyhow::Result;
 use clap::Parser;
 use cocomo_lib::{
     CompareConfig, ContentCache, DirComparison, DirEntry, DirEntryStatus,
-    FileSystem, LocalFs,
+    LocalFs,
 };
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 use ratatui::{
@@ -683,7 +680,7 @@ async fn run_comparison(
     left: PathBuf,
     right: PathBuf,
 ) -> Result<()> {
-    let fs: Arc<dyn FileSystem> = Arc::new(LocalFs::new("local"));
+    let fs = LocalFs::new("local");
     let cache = ContentCache::default_config();
 
     let config = if app.compare_files {
@@ -692,9 +689,10 @@ async fn run_comparison(
         CompareConfig::structure_only()
     };
 
-    let comparison =
-        cocomo_lib::compare_directories(&fs, &left, &right, &config, Some(&cache))
-            .await?;
+    let comparison = cocomo_lib::compare_directories_node(
+        &fs, &left, &right, &config, Some(&cache),
+    )
+    .await?;
 
     app.comparison = Some(comparison);
     app.table_state.select(Some(0));

@@ -553,10 +553,9 @@ where
             return blake3::Hash::from_hex(cached).ok();
         }
         // Compute and cache on the provider.
-        match hash_and_cache_node(fs, id, FileId::new(*id.get()), node).await {
-            Ok(h) => Some(h),
-            Err(_) => None,
-        }
+        hash_and_cache_node(fs, id, FileId::new(*id.get()), node)
+            .await
+            .ok()
     }
 
     let left_hash = match (left_id, fs.get_node(left_id.unwrap())) {
