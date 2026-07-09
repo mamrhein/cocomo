@@ -365,7 +365,7 @@ where
                 path: src_node.path().to_path_buf(),
                 message: format!("stream error: {e}"),
             })?;
-            dst_fs.write_node(new_file_id, chunk.into()).await?;
+            dst_fs.write_node(new_file_id, chunk).await?;
         }
     }
 
