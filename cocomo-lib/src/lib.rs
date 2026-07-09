@@ -13,8 +13,9 @@
 //! # Architecture
 //!
 //! All filesystem I/O is async behind the [`FileSystem`] trait. Built-in
-//! providers include [`LocalFs`] for the local filesystem. Front-ends (TUI,
-//! GUI, CLI) await on the same abstractions, keeping the library as the
+//! providers include [`LocalFs`] for the local filesystem, [`S3Fs`] for
+//! Amazon S3, [`FtpFs`] for FTP/FTPS, and [`WebDavFs`] for WebDAV. Front-ends
+//! (TUI, GUI, CLI) await on the same abstractions, keeping the library as the
 //! single source of business logic.
 //!
 //! # Key modules
@@ -23,6 +24,9 @@
 //! - [`identity`] — Opaque identifiers for filesystems and nodes.
 //! - [`node`] — Filesystem node model, classification, and symlink targets.
 //! - [`local`] — [`LocalFs`], the local filesystem provider.
+//! - [`s3`] — [`S3Fs`], the Amazon S3 provider (stub).
+//! - [`ftp`] — [`FtpFs`], the FTP/FTPS provider (stub).
+//! - [`webdav`] — [`WebDavFs`], the WebDAV provider (stub).
 //! - [`hash`] — Content hashing (blake3) and LRU [`ContentCache`].
 //! - [`scan`] — Directory scanning that produces a tree of [`ScanEntry`]
 //!   nodes.
@@ -45,18 +49,21 @@ pub mod file;
 pub mod filter;
 pub mod format;
 pub mod fs;
+pub mod ftp;
 pub mod grammar;
 pub mod hash;
 pub mod identity;
 pub mod local;
 pub mod meta;
 pub mod node;
+pub mod s3;
 pub mod scan;
 pub mod session;
 pub mod snapshot;
 pub mod sync;
 pub mod text;
 pub mod transfer;
+pub mod webdav;
 
 // Re-exports for convenience.
 pub use compare::{
@@ -72,6 +79,7 @@ pub use format::{
 pub use fs::{
     DirEntryMeta, FileSystem, NodeFileSystem, OpenMode, WritableFileSystem,
 };
+pub use ftp::{FtpConfig, FtpDirId, FtpFileId, FtpFs, FtpNodeId};
 pub use grammar::{Grammar, GrammarRule, Importance};
 pub use hash::{
     ContentCache, ContentCacheConfig, ContentId, hash_and_cache_node,
@@ -81,6 +89,7 @@ pub use identity::{DirId, FileId, FileSystemId, NodeId};
 pub use local::LocalFs;
 pub use meta::Metadata;
 pub use node::{Node, NodeKind, SymlinkTarget, UserPermissions};
+pub use s3::{S3Config, S3DirId, S3FileId, S3Fs, S3NodeId};
 pub use scan::{
     ScanConfig, ScanEntry, ScanResult, scan_directory, scan_directory_node,
 };
@@ -102,4 +111,7 @@ pub use text::{
 pub use transfer::{
     TransferAction, TransferItem, TransferResult, execute_transfers,
     plan_transfers,
+};
+pub use webdav::{
+    WebDavConfig, WebDavDirId, WebDavFileId, WebDavFs, WebDavNodeId,
 };

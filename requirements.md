@@ -264,15 +264,15 @@ The split between [`NodeFileSystem`] (read) and [`WritableFileSystem`] (read
 
 ### 2.2 Built-in Providers
 
-| Provider    | Scheme                                          | Notes                                                                                                                    |
-| ----------- | ----------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
-| `LocalFs`   | `file://` or bare paths                         | Uses `fs_err::tokio` for rich error context; `walkdir` for directory traversal; inode-based hardlink and cycle detection |
-| `FtpFs`     | `ftp://`, `ftps://`                             | Async FTP via `async-ftp`; profile-based auth                                                                            |
-| `S3Fs`      | `s3://bucket/path`                              | `aws-sdk-s3`; credential profiles                                                                                        |
-| `WebDavFs`  | `davs://`                                       | `webdav` crate                                                                                                           |
-| `ArchiveFs` | `zip://file.zip!/inner/`, `tar://`, `tar.gz://` | Virtual FS over read-only compressed archives                                                                            |
-| `SshFs`     | `sftp://` (future)                              | SFTP over SSH keys/passwords                                                                                             |
-| `GitFs`     | `git://repo@rev/path` (future)                  | Virtual FS over a specific commit                                                                                        |
+| Provider    | Scheme                                          | Status      | Notes                                                                                                                    |
+| ----------- | ----------------------------------------------- | ----------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `LocalFs`   | `file://` or bare paths                         | Implemented | Uses `fs_err::tokio` for rich error context; `walkdir` for directory traversal; inode-based hardlink and cycle detection |
+| `S3Fs`      | `s3://bucket/path`                              | Scaffolding | `aws-sdk-s3`; credential profiles; stub struct and trait impls                                                           |
+| `FtpFs`     | `ftp://`, `ftps://`                             | Scaffolding | Async FTP via `async-ftp`; profile-based auth; stub struct and trait impls                                               |
+| `WebDavFs`  | `davs://`                                       | Scaffolding | `webdav` crate; stub struct and trait impls                                                                              |
+| `ArchiveFs` | `zip://file.zip!/inner/`, `tar://`, `tar.gz://` | Planned     | Virtual FS over read-only compressed archives                                                                            |
+| `SshFs`     | `sftp://` (future)                              | Planned     | SFTP over SSH keys/passwords                                                                                             |
+| `GitFs`     | `git://repo@rev/path` (future)                  | Planned     | Virtual FS over a specific commit                                                                                        |
 
 ### 2.3 Provider Registry
 
