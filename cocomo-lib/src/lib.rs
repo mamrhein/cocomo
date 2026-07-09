@@ -38,6 +38,7 @@
 //! - [`error`] — Structured [`FsError`] with operation context.
 //! - [`meta`] — [`Metadata`] for files and directories.
 //! - [`file`] — [`FsFile`] trait for opened file handles.
+//! - [`profile`] — Connection profiles with encrypted secrets.
 //! - [`session`] — Session management for workspaces.
 //! - [`snapshot`] — Point-in-time snapshots of directory trees.
 
@@ -56,6 +57,7 @@ pub mod identity;
 pub mod local;
 pub mod meta;
 pub mod node;
+pub mod profile;
 pub mod s3;
 pub mod scan;
 pub mod session;
@@ -89,6 +91,9 @@ pub use identity::{DirId, FileId, FileSystemId, NodeId};
 pub use local::LocalFs;
 pub use meta::Metadata;
 pub use node::{Node, NodeKind, SymlinkTarget, UserPermissions};
+pub use profile::{
+    EncryptedSecrets, Profile, ProfileError, ProfileStore, ProviderType,
+};
 pub use s3::{S3Config, S3DirId, S3FileId, S3Fs, S3NodeId};
 pub use scan::{
     ScanConfig, ScanEntry, ScanResult, scan_directory, scan_directory_node,
