@@ -133,19 +133,33 @@ impl WebDavFs {
 #[async_trait]
 impl FileSystem for WebDavFs {
     async fn metadata(&self, _path: &Path) -> Result<Metadata> {
-        unimplemented!("WebDavFs::metadata — implement with webdav PROPFIND (depth 0)")
+        unimplemented!(
+            "WebDavFs::metadata — implement with webdav PROPFIND (depth 0)"
+        )
     }
 
     async fn read_dir(&self, _path: &Path) -> Result<DirStream<'_>> {
-        unimplemented!("WebDavFs::read_dir — implement with webdav PROPFIND (depth 1)")
+        unimplemented!(
+            "WebDavFs::read_dir — implement with webdav PROPFIND (depth 1)"
+        )
     }
 
-    async fn open(&self, _path: &Path, _mode: OpenMode) -> Result<Box<dyn FsFile>> {
+    async fn open(
+        &self,
+        _path: &Path,
+        _mode: OpenMode,
+    ) -> Result<Box<dyn FsFile>> {
         unimplemented!("WebDavFs::open — implement with webdav GET/PUT")
     }
 
-    async fn read(&self, _path: &Path, _range: Option<Range<u64>>) -> Result<Bytes> {
-        unimplemented!("WebDavFs::read — implement with webdav GET (Range header)")
+    async fn read(
+        &self,
+        _path: &Path,
+        _range: Option<Range<u64>>,
+    ) -> Result<Bytes> {
+        unimplemented!(
+            "WebDavFs::read — implement with webdav GET (Range header)"
+        )
     }
 
     async fn read_stream(
@@ -153,7 +167,9 @@ impl FileSystem for WebDavFs {
         _path: &Path,
         _range: Option<Range<u64>>,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<Bytes>> + Send>>> {
-        unimplemented!("WebDavFs::read_stream — implement with webdav streaming GET")
+        unimplemented!(
+            "WebDavFs::read_stream — implement with webdav streaming GET"
+        )
     }
 
     async fn write(&self, _path: &Path, _data: Bytes) -> Result<()> {
@@ -169,7 +185,9 @@ impl FileSystem for WebDavFs {
     }
 
     async fn remove_all(&self, _path: &Path) -> Result<()> {
-        unimplemented!("WebDavFs::remove_all — implement with recursive PROPFIND + DELETE")
+        unimplemented!(
+            "WebDavFs::remove_all — implement with recursive PROPFIND + DELETE"
+        )
     }
 
     async fn rename(&self, _src: &Path, _dst: &Path) -> Result<()> {
@@ -216,7 +234,9 @@ impl NodeFileSystem for WebDavFs {
     }
 
     async fn resolve_path(&self, _path: &Path) -> Result<NodeId<Self::Nid>> {
-        unimplemented!("WebDavFs::resolve_path — implement with webdav PROPFIND and node cache")
+        unimplemented!(
+            "WebDavFs::resolve_path — implement with webdav PROPFIND and node cache"
+        )
     }
 
     async fn resolve_symlink(
@@ -248,11 +268,15 @@ impl NodeFileSystem for WebDavFs {
         _id: NodeId<Self::Nid>,
         _hash: String,
     ) -> Result<()> {
-        unimplemented!("WebDavFs::set_node_hash — implement with Arc::make_mut on cached node")
+        unimplemented!(
+            "WebDavFs::set_node_hash — implement with Arc::make_mut on cached node"
+        )
     }
 
     async fn read_dir_node(&self, _id: DirId<Self::Nid>) -> Result<()> {
-        unimplemented!("WebDavFs::read_dir_node — implement with webdav PROPFIND and populate node cache")
+        unimplemented!(
+            "WebDavFs::read_dir_node — implement with webdav PROPFIND and populate node cache"
+        )
     }
 
     async fn open_node(
@@ -276,7 +300,9 @@ impl NodeFileSystem for WebDavFs {
         _id: FileId<Self::Nid>,
         _range: Option<Range<u64>>,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<Bytes>> + Send>>> {
-        unimplemented!("WebDavFs::read_stream_node — implement with webdav streaming GET")
+        unimplemented!(
+            "WebDavFs::read_stream_node — implement with webdav streaming GET"
+        )
     }
 }
 
@@ -287,7 +313,9 @@ impl WritableFileSystem for WebDavFs {
         _parent: DirId<Self::Nid>,
         _name: &OsStr,
     ) -> Result<FileId<Self::Nid>> {
-        unimplemented!("WebDavFs::create_file — implement with webdav PUT (zero-byte)")
+        unimplemented!(
+            "WebDavFs::create_file — implement with webdav PUT (zero-byte)"
+        )
     }
 
     async fn create_dir_node(
@@ -295,7 +323,9 @@ impl WritableFileSystem for WebDavFs {
         _parent: DirId<Self::Nid>,
         _name: &OsStr,
     ) -> Result<DirId<Self::Nid>> {
-        unimplemented!("WebDavFs::create_dir_node — implement with webdav MKCOL")
+        unimplemented!(
+            "WebDavFs::create_dir_node — implement with webdav MKCOL"
+        )
     }
 
     async fn create_symlink(
@@ -328,7 +358,9 @@ impl WritableFileSystem for WebDavFs {
     }
 
     async fn remove_all_node(&self, _id: NodeId<Self::Nid>) -> Result<()> {
-        unimplemented!("WebDavFs::remove_all_node — implement with recursive PROPFIND + DELETE")
+        unimplemented!(
+            "WebDavFs::remove_all_node — implement with recursive PROPFIND + DELETE"
+        )
     }
 
     async fn rename_node(

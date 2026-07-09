@@ -595,10 +595,14 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     let left = cli.left.as_ref().ok_or_else(|| {
-        anyhow::anyhow!("--left is required. Provide a file or directory path.")
+        anyhow::anyhow!(
+            "--left is required. Provide a file or directory path."
+        )
     })?;
     let right = cli.right.as_ref().ok_or_else(|| {
-        anyhow::anyhow!("--right is required. Provide a file or directory path.")
+        anyhow::anyhow!(
+            "--right is required. Provide a file or directory path."
+        )
     })?;
 
     let left = tokio::fs::canonicalize(left).await?;
@@ -690,7 +694,11 @@ async fn run_comparison(
     };
 
     let comparison = cocomo_lib::compare_directories_node(
-        &fs, &left, &right, &config, Some(&cache),
+        &fs,
+        &left,
+        &right,
+        &config,
+        Some(&cache),
     )
     .await?;
 

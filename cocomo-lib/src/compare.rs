@@ -337,7 +337,13 @@ where
 
     // Do the top-level merge.
     let mut comparison = merge_sync_node(
-        fs, left_path, &left_result, right_path, &right_result, config, cache,
+        fs,
+        left_path,
+        &left_result,
+        right_path,
+        &right_result,
+        config,
+        cache,
     )
     .await?;
 
@@ -419,7 +425,13 @@ where
         let right_entry = right_map.get(name).copied();
 
         let dir_entry = merge_entry_sync_node(
-            fs, left_root, left_entry, right_root, right_entry, config, cache,
+            fs,
+            left_root,
+            left_entry,
+            right_root,
+            right_entry,
+            config,
+            cache,
         )
         .await?;
 
@@ -862,9 +874,10 @@ mod tests {
         let cache = ContentCache::default_config();
         let config = CompareConfig::full();
 
-        let result = compare_directories(&fs, &left, &right, &config, Some(&cache))
-            .await
-            .unwrap();
+        let result =
+            compare_directories(&fs, &left, &right, &config, Some(&cache))
+                .await
+                .unwrap();
 
         assert!(result.same_count() > 0);
         assert!(result.different_count() > 0);
@@ -880,9 +893,10 @@ mod tests {
         let cache = ContentCache::default_config();
         let config = CompareConfig::structure_only();
 
-        let result = compare_directories(&fs, &left, &right, &config, Some(&cache))
-            .await
-            .unwrap();
+        let result =
+            compare_directories(&fs, &left, &right, &config, Some(&cache))
+                .await
+                .unwrap();
 
         assert!(result.total() > 0);
 
@@ -909,10 +923,15 @@ mod tests {
         let cache = ContentCache::default_config();
         let config = CompareConfig::full();
 
-        let result =
-            compare_directories_node(&fs, &left, &right, &config, Some(&cache))
-                .await
-                .unwrap();
+        let result = compare_directories_node(
+            &fs,
+            &left,
+            &right,
+            &config,
+            Some(&cache),
+        )
+        .await
+        .unwrap();
 
         assert!(result.same_count() > 0);
         assert!(result.different_count() > 0);
@@ -928,10 +947,15 @@ mod tests {
         let cache = ContentCache::default_config();
         let config = CompareConfig::structure_only();
 
-        let result =
-            compare_directories_node(&fs, &left, &right, &config, Some(&cache))
-                .await
-                .unwrap();
+        let result = compare_directories_node(
+            &fs,
+            &left,
+            &right,
+            &config,
+            Some(&cache),
+        )
+        .await
+        .unwrap();
 
         assert!(result.total() > 0);
 

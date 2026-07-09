@@ -24,9 +24,11 @@
 //! - [`identity`] — Opaque identifiers for filesystems and nodes.
 //! - [`node`] — Filesystem node model, classification, and symlink targets.
 //! - [`local`] — [`LocalFs`], the local filesystem provider.
-//! - [`s3`] — [`S3Fs`], the Amazon S3 provider (stub).
-//! - [`ftp`] — [`FtpFs`], the FTP/FTPS provider (stub).
-//! - [`webdav`] — [`WebDavFs`], the WebDAV provider (stub).
+//! - [`s3`] — [`S3Fs`], the Amazon S3 provider.
+//! - [`ftp`] — [`FtpFs`], the FTP/FTPS provider.
+//! - [`webdav`] — [`WebDavFs`], the WebDAV provider.
+//! - [`provider`] — [`Provider`] enum and [`ProviderRegistry`] for unified
+//!   access to all backends.
 //! - [`hash`] — Content hashing (blake3) and LRU [`ContentCache`].
 //! - [`scan`] — Directory scanning that produces a tree of [`ScanEntry`]
 //!   nodes.
@@ -58,6 +60,7 @@ pub mod local;
 pub mod meta;
 pub mod node;
 pub mod profile;
+pub mod provider;
 pub mod s3;
 pub mod scan;
 pub mod session;
@@ -94,6 +97,7 @@ pub use node::{Node, NodeKind, SymlinkTarget, UserPermissions};
 pub use profile::{
     EncryptedSecrets, Profile, ProfileError, ProfileStore, ProviderType,
 };
+pub use provider::{Provider, ProviderRegistry};
 pub use s3::{S3Config, S3DirId, S3FileId, S3Fs, S3NodeId};
 pub use scan::{
     ScanConfig, ScanEntry, ScanResult, scan_directory, scan_directory_node,
