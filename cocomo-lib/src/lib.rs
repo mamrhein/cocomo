@@ -96,6 +96,7 @@ pub use meta::Metadata;
 pub use node::{Node, NodeKind, SymlinkTarget, UserPermissions};
 pub use profile::{
     EncryptedSecrets, Profile, ProfileError, ProfileStore, ProviderType,
+    default_store_path, derive_master_key,
 };
 pub use provider::{Provider, ProviderRegistry};
 pub use s3::{S3Config, S3DirId, S3FileId, S3Fs, S3NodeId};

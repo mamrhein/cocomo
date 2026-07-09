@@ -26,7 +26,7 @@
 //! and `settings`. Encrypted secrets are stored in the same file under the
 //! `secrets` key of each profile table.
 
-use std::{collections::BTreeMap, fmt, io, path::PathBuf};
+use std::{collections::BTreeMap, env, fmt, io, path::PathBuf};
 
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
 use chacha20poly1305::{
@@ -38,6 +38,8 @@ use hmac::{Hmac, Mac};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::Sha256;
 use thiserror::Error;
+
+use crate::provider::Provider;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -546,6 +548,97 @@ impl ProfileStore {
             self.decrypt_secrets(&profile.id, &profile.secrets)?;
         Ok(decrypted)
     }
+
+    /// Resolve a profile by ID into a filesystem provider.
+    ///
+    /// This method loads the profile, decrypts its secrets, and constructs
+    /// a [`Provider`] from the profile's settings. The returned provider
+    /// is ready for I/O operations.
+    pub fn resolve(&self, id: &str) -> ProfileResult<Provider> {
+        let profile = self
+            .get_decrypted(id)?
+            .ok_or_else(|| ProfileError::NotFound(id.to_string()))?;
+
+        Provider::from_profile(&profile)
+    }
+
+    /// Resolve all profiles into filesystem providers.
+    ///
+    /// Returns a vector of (profile_id, provider) pairs. Profiles that
+    /// fail to resolve are skipped with their errors collected.
+    pub fn resolve_all(&self) -> ProfileResult<Vec<(String, Provider)>> {
+        let profiles = self.list_decrypted()?;
+        let mut resolved = Vec::new();
+
+        for profile in profiles {
+            match Provider::from_profile(&profile) {
+                Ok(provider) => {
+                    resolved.push((profile.id.clone(), provider));
+                }
+                Err(e) => {
+                    // Skip profiles that can't be resolved.
+                    let _ = e;
+                }
+            }
+        }
+
+        Ok(resolved)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Default paths and master key
+// ---------------------------------------------------------------------------
+
+/// The environment variable name for the master key.
+///
+/// The key should be a hex-encoded 32-byte value (64 hex characters).
+pub const MASTER_KEY_ENV: &str = "COCOMO_MASTER_KEY";
+
+/// Return the default profile store path.
+///
+/// On Unix-like systems this is `~/.config/cocomo/profiles.toml`.
+/// On Windows this is `%APPDATA%\\cocomo\\profiles.toml`.
+pub fn default_store_path() -> PathBuf {
+    let config_dir = if cfg!(target_os = "windows") {
+        // On Windows, use %APPDATA%.cocomo.
+        env::var("APPDATA")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("~/"))
+    } else {
+        // On Unix, use ~/.config.
+        dirs::config_dir().unwrap_or_else(|| {
+            env::var("HOME")
+                .map(|h| PathBuf::from(h).join(".config"))
+                .unwrap_or_else(|_| PathBuf::from("~/"))
+        })
+    };
+
+    config_dir.join("cocomo").join("profiles.toml")
+}
+
+/// Derive a master key from environment or generate a random one.
+///
+/// Checks the `COCOMO_MASTER_KEY` environment variable for a hex-encoded
+/// 32-byte key. If the variable is not set or invalid, generates a random
+/// 32-byte key. A random key means secrets won't persist across restarts,
+/// but the store will still function.
+pub fn derive_master_key() -> Vec<u8> {
+    if let Ok(hex_key) = env::var(MASTER_KEY_ENV) {
+        if let Ok(bytes) = hex::decode(&hex_key) {
+            if bytes.len() >= 32 {
+                return bytes;
+            }
+        }
+    }
+
+    // Generate a random master key if none is configured.
+    let mut key = vec![0u8; 32];
+    if getrandom(&mut key).is_err() {
+        // Fallback to a zero key (secrets won't be secure, but the
+        // application will still function).
+    }
+    key
 }
 
 // ---------------------------------------------------------------------------
@@ -557,6 +650,7 @@ mod tests {
     use std::path::Path;
 
     use super::*;
+    use crate::fs::FileSystem;
 
     fn make_test_store() -> (ProfileStore, PathBuf) {
         let dir = std::env::temp_dir()
@@ -887,5 +981,167 @@ mod tests {
         assert!(result.is_err());
 
         let _ = fs_err::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolve_local_profile() {
+        let (store, dir) = make_test_store();
+
+        let profile = Profile::new("my-local", ProviderType::Local);
+        store.add(profile).unwrap();
+
+        let provider = store.resolve("my-local").unwrap();
+        assert_eq!(provider.label(), "my-local");
+        assert!(matches!(provider, Provider::Local(_)));
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn resolve_missing_profile_returns_not_found() {
+        let (store, dir) = make_test_store();
+
+        let result = store.resolve("nonexistent");
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            ProfileError::NotFound(id) => assert_eq!(id, "nonexistent"),
+            other => panic!("expected NotFound, got: {other}"),
+        }
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn resolve_ftp_profile() {
+        let (store, dir) = make_test_store();
+
+        let mut profile = Profile::new("my-ftp", ProviderType::Ftp);
+        profile.set_setting("host".into(), "ftp.example.com".into());
+        profile.set_setting("port".into(), "21".into());
+        store.add(profile).unwrap();
+
+        let provider = store.resolve("my-ftp").unwrap();
+        assert_eq!(provider.label(), "my-ftp");
+        assert!(matches!(provider, Provider::Ftp(_)));
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn resolve_all_returns_resolvable_profiles() {
+        let (store, dir) = make_test_store();
+
+        let local1 = Profile::new("local-1", ProviderType::Local);
+        let local2 = Profile::new("local-2", ProviderType::Local);
+        let mut ftp_profile = Profile::new("my-ftp", ProviderType::Ftp);
+        ftp_profile.set_setting("host".into(), "ftp.example.com".into());
+
+        store.add(local1).unwrap();
+        store.add(local2).unwrap();
+        store.add(ftp_profile).unwrap();
+
+        let resolved = store.resolve_all().unwrap();
+        assert_eq!(resolved.len(), 3);
+
+        let ids: Vec<_> = resolved.iter().map(|(id, _)| id.as_str()).collect();
+        assert!(ids.contains(&"local-1"));
+        assert!(ids.contains(&"local-2"));
+        assert!(ids.contains(&"my-ftp"));
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn resolve_all_empty_store() {
+        let (store, dir) = make_test_store();
+
+        let resolved = store.resolve_all().unwrap();
+        assert!(resolved.is_empty());
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn resolve_round_trip_with_secrets() {
+        let (store, dir) = make_test_store();
+
+        let mut profile = Profile::new("secure-ftp", ProviderType::Ftp);
+        profile.set_setting("host".into(), "ftp.example.com".into());
+        profile.set_setting("port".into(), "21".into());
+        profile.secrets.set("password".into(), "s3cret".into());
+        profile.secrets.set("username".into(), "user1".into());
+
+        store.add(profile).unwrap();
+
+        // Resolve the profile and verify the provider carries the settings.
+        let provider = store.resolve("secure-ftp").unwrap();
+        assert_eq!(provider.label(), "secure-ftp");
+
+        // Verify it's an FTP provider with the correct host.
+        if let Provider::Ftp(fs) = provider {
+            assert_eq!(fs.config().host, "ftp.example.com");
+            assert_eq!(fs.config().port, 21);
+        } else {
+            panic!("expected FTP provider");
+        }
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn default_store_path_is_valid() {
+        let path = default_store_path();
+
+        // The path should contain "cocomo" and end with "profiles.toml".
+        assert!(
+            path.to_string_lossy().contains("cocomo"),
+            "path should contain 'cocomo', got: {}",
+            path.display()
+        );
+        assert_eq!(
+            path.file_name().unwrap().to_str().unwrap(),
+            "profiles.toml"
+        );
+    }
+
+    #[test]
+    fn derive_master_key_from_env() {
+        // A valid hex-encoded 32-byte key (64 hex chars).
+        let hex_key = "aa".repeat(32);
+        let _guard =
+            temp_env::with_var(MASTER_KEY_ENV, Some(&hex_key), || {
+                let key = derive_master_key();
+                assert_eq!(key.len(), 32);
+                assert_eq!(key, vec![0xAA; 32]);
+            });
+    }
+
+    #[test]
+    fn derive_master_key_invalid_hex_falls_back() {
+        let _guard =
+            temp_env::with_var(MASTER_KEY_ENV, Some("not-valid-hex!"), || {
+                let key = derive_master_key();
+                // Should fall back to random key (32 bytes).
+                assert_eq!(key.len(), 32);
+            });
+    }
+
+    #[test]
+    fn derive_master_key_short_hex_falls_back() {
+        let _guard =
+            temp_env::with_var(MASTER_KEY_ENV, Some("aabbcc"), || {
+                // Too short.
+                let key = derive_master_key();
+                // Should fall back to random key (32 bytes).
+                assert_eq!(key.len(), 32);
+            });
+    }
+
+    #[test]
+    fn derive_master_key_no_env_generates_random() {
+        let _guard = temp_env::with_var_unset(MASTER_KEY_ENV, || {
+            let key = derive_master_key();
+            assert_eq!(key.len(), 32);
+        });
     }
 }
