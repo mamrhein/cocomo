@@ -217,11 +217,8 @@ fn plan_sync_items(
             collect_mirror_items(comparison, &mut items, MirrorDir::Left);
             items
         }
-        SyncOperation::UpdateNewer => {
-            collect_update_newer_items(comparison, UpdateDir::OneWay)
-        }
-        SyncOperation::UpdateBoth => {
-            collect_update_newer_items(comparison, UpdateDir::Both)
+        SyncOperation::UpdateNewer | SyncOperation::UpdateBoth => {
+            collect_update_newer_items(comparison)
         }
         SyncOperation::CopyLeft => {
             // Copy right-only and different to left.
@@ -235,9 +232,7 @@ fn plan_sync_items(
             collect_copy_items(comparison, &mut items, CopyDir::ToRight);
             items
         }
-        SyncOperation::CopyNewer => {
-            collect_update_newer_items(comparison, UpdateDir::OneWay)
-        }
+        SyncOperation::CopyNewer => collect_update_newer_items(comparison),
         SyncOperation::DeleteOrphans => {
             let mut items = Vec::new();
             collect_orphan_delete_items(comparison, &mut items);
@@ -431,17 +426,9 @@ fn collect_copy_items(
     }
 }
 
-/// Which direction for update-newer.
-#[derive(Clone, Copy)]
-enum UpdateDir {
-    OneWay,
-    Both,
-}
-
 /// Collect update-newer items.
 fn collect_update_newer_items(
     comparison: &DirComparison,
-    direction: UpdateDir,
 ) -> Vec<TransferItem> {
     let mut items = Vec::new();
 
@@ -449,35 +436,34 @@ fn collect_update_newer_items(
         if matches!(
             entry.status,
             DirEntryStatus::Different | DirEntryStatus::Similar
-        ) {
-            if let (Some(left), Some(right)) = (&entry.left, &entry.right) {
-                // Compare modification times.
-                let left_time = parse_mtime(&left.modified);
-                let right_time = parse_mtime(&right.modified);
+        ) && let (Some(left), Some(right)) = (&entry.left, &entry.right)
+        {
+            // Compare modification times.
+            let left_time = parse_mtime(&left.modified);
+            let right_time = parse_mtime(&right.modified);
 
-                if left_time > right_time {
-                    // Left is newer.
-                    items.push(TransferItem::new(
-                        TransferAction::CopyRight,
-                        entry.name.clone(),
-                        left.is_dir,
-                        left.path.clone(),
-                    ));
-                } else if right_time > left_time {
-                    // Right is newer.
-                    items.push(TransferItem::new(
-                        TransferAction::CopyLeft,
-                        entry.name.clone(),
-                        right.is_dir,
-                        right.path.clone(),
-                    ));
-                }
-                // If equal, skip.
+            if left_time > right_time {
+                // Left is newer.
+                items.push(TransferItem::new(
+                    TransferAction::CopyRight,
+                    entry.name.clone(),
+                    left.is_dir,
+                    left.path.clone(),
+                ));
+            } else if right_time > left_time {
+                // Right is newer.
+                items.push(TransferItem::new(
+                    TransferAction::CopyLeft,
+                    entry.name.clone(),
+                    right.is_dir,
+                    right.path.clone(),
+                ));
             }
+            // If equal, skip.
         }
 
         if let Some(ref sub) = entry.sub_entries {
-            items.extend(collect_update_newer_items(sub, direction));
+            items.extend(collect_update_newer_items(sub));
         }
     }
 
