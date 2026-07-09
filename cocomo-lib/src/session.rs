@@ -293,6 +293,7 @@ impl Session {
     /// This constructor does not resolve paths; the caller must provide
     /// pre-resolved node IDs. Use [`Session::from_config_and_providers`]
     /// to create a session by resolving paths asynchronously.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         name: String,
         session_type: SessionType,
