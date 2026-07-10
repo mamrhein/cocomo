@@ -470,7 +470,7 @@ impl ProfileStore {
                 msg: v.as_bytes(),
                 aad: k.as_bytes(),
             };
-            let ciphertext = cipher.encrypt(&nonce, payload).map_err(|e| {
+            let ciphertext = cipher.encrypt(nonce, payload).map_err(|e| {
                 ProfileError::EncryptionFailed {
                     profile_id: profile_id.to_string(),
                     reason: e.to_string(),
@@ -479,7 +479,7 @@ impl ProfileStore {
 
             // Pack nonce + ciphertext into base64.
             let mut packed = Vec::with_capacity(12 + ciphertext.len());
-            packed.extend_from_slice(&nonce);
+            packed.extend_from_slice(nonce);
             packed.extend_from_slice(&ciphertext);
             encrypted.insert(k.clone(), B64.encode(&packed));
         }
