@@ -18,7 +18,9 @@ use std::path::{Path, PathBuf};
 
 use cocomo_lib::{
     CompareConfig, ContentCache, DirComparison, DirEntry, DirEntryStatus,
-    Grammar, LineInfo, LocalFs, TextCompareSettings, TextDiff, compare_texts,
+    Grammar, LineInfo, LocalFs, ProviderRef, SessionConfig, SessionSettings,
+    SessionType as LibSessionType, SyncOperation, SyncResult, SyncRules,
+    TextCompareSettings, TextDiff, compare_texts,
 };
 use ratatui::widgets::TableState;
 
@@ -37,6 +39,10 @@ pub enum AppMode {
     Normal,
     /// The user is typing a filter pattern.
     Filter,
+    /// The user is typing a session name to save.
+    SaveSession,
+    /// The user is browsing saved sessions to load one.
+    LoadSession,
 }
 
 /// The type of content a session displays.
@@ -59,6 +65,16 @@ pub enum SessionAction {
     GoUp,
     /// Reload the current session's comparison.
     Reload,
+    /// Plan a sync (dry-run) and display the preview.
+    PlanSync { operation: SyncOperation },
+    /// Execute the planned sync.
+    ExecuteSync,
+    /// Save the current session config to a file.
+    SaveSession { name: String },
+    /// List saved session files for loading.
+    ListSessions,
+    /// Load a session config from a file.
+    LoadSession { path: PathBuf },
     /// No action required.
     None,
 }
@@ -106,6 +122,10 @@ pub struct SessionView {
     pub compare_files: bool,
     /// Errors encountered during comparison.
     pub errors: Vec<String>,
+    /// Planned sync result for review. `Some` means sync preview is active.
+    pub sync_planned: Option<SyncResult>,
+    /// Sync operation currently configured.
+    pub sync_operation: SyncOperation,
 }
 
 impl SessionView {
@@ -134,6 +154,8 @@ impl SessionView {
             hide_same: false,
             compare_files,
             errors: Vec::new(),
+            sync_planned: None,
+            sync_operation: SyncOperation::default(),
         }
     }
 
@@ -165,6 +187,8 @@ impl SessionView {
             hide_same: false,
             compare_files: true,
             errors: Vec::new(),
+            sync_planned: None,
+            sync_operation: SyncOperation::default(),
         }
     }
 
@@ -424,4 +448,144 @@ pub async fn run_text_comparison(
         text_diff,
         grammar,
     ))
+}
+
+/// Plan a sync operation (dry-run) and populate the session's sync state.
+pub async fn plan_sync_session(
+    session: &mut SessionView,
+) -> anyhow::Result<()> {
+    let fs = LocalFs::new("local");
+    let rules = SyncRules {
+        operation: session.sync_operation,
+        dry_run: true,
+        max_depth: None,
+        compare_files: session.compare_files,
+    };
+
+    let result = cocomo_lib::plan_sync(
+        &fs,
+        &session.left_path,
+        &session.right_path,
+        &rules,
+    )
+    .await?;
+
+    session.sync_planned = Some(result);
+    session.table_state.select(Some(0));
+
+    Ok(())
+}
+
+/// Execute the planned sync operation.
+pub async fn execute_sync_session(
+    session: &mut SessionView,
+) -> anyhow::Result<()> {
+    let fs = LocalFs::new("local");
+    let rules = SyncRules {
+        operation: session.sync_operation,
+        dry_run: false,
+        max_depth: None,
+        compare_files: session.compare_files,
+    };
+
+    let result = cocomo_lib::sync_directories(
+        &fs,
+        &session.left_path,
+        &session.right_path,
+        &rules,
+    )
+    .await?;
+
+    session.sync_planned = Some(result);
+    session.table_state.select(Some(0));
+
+    Ok(())
+}
+
+/// Convert a directory comparison session to a serializable config.
+pub fn session_to_config(session: &SessionView) -> SessionConfig {
+    SessionConfig {
+        name: session.name.clone(),
+        session_type: LibSessionType::DirCompare,
+        left: ProviderRef {
+            provider: "local".to_string(),
+            path: session.left_path.clone(),
+        },
+        right: ProviderRef {
+            provider: "local".to_string(),
+            path: session.right_path.clone(),
+        },
+        center: None,
+        settings: SessionSettings {
+            compare_files: session.compare_files,
+            compare_structure: true,
+            name_filter: session
+                .active_filter
+                .as_ref()
+                .map(|f| vec![f.clone()])
+                .unwrap_or_default(),
+            ignore_whitespace: false,
+            skip_blank_lines: false,
+            skip_comments: false,
+            show_same: !session.hide_same,
+            show_different: true,
+            show_orphans: true,
+        },
+    }
+}
+
+/// List all saved session files in the default session directory.
+pub async fn list_saved_sessions() -> anyhow::Result<Vec<PathBuf>> {
+    let session_dir = default_session_dir();
+    if !session_dir.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut sessions = Vec::new();
+    let mut entries = tokio::fs::read_dir(&session_dir).await?;
+    while let Some(entry) = entries.next_entry().await? {
+        let path = entry.path();
+        if path.extension().is_some_and(|ext| ext == "toml") {
+            sessions.push(path);
+        }
+    }
+    sessions.sort();
+    Ok(sessions)
+}
+
+/// Return the default directory for saved session files.
+pub fn default_session_dir() -> PathBuf {
+    let config_dir = dirs::config_dir()
+        .unwrap_or_else(|| PathBuf::from("~/.config"))
+        .join("cocomo");
+    config_dir.join("sessions")
+}
+
+/// Create a directory comparison session from a saved config.
+pub async fn create_session_from_config(
+    config: &SessionConfig,
+) -> anyhow::Result<SessionView> {
+    // Resolve the paths from the provider ref.
+    let left_path = &config.left.path;
+    let right_path = &config.right.path;
+
+    let compare_files = config.settings.compare_files;
+    let mut session = SessionView::new_dir_compare(
+        left_path.clone(),
+        right_path.clone(),
+        compare_files,
+    );
+
+    // Run the comparison.
+    if let Err(e) = run_comparison(&mut session).await {
+        session.errors.push(format!("Comparison failed: {e}"));
+    }
+
+    // Restore filter settings.
+    if !config.settings.name_filter.is_empty() {
+        session.active_filter = Some(config.settings.name_filter[0].clone());
+    }
+    session.hide_same = !config.settings.show_same;
+
+    Ok(session)
 }

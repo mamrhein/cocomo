@@ -23,7 +23,11 @@ use std::{
 };
 
 use anyhow::Result;
-use app::{run_comparison, run_text_comparison, App, SessionAction, SessionView};
+use app::{
+    create_session_from_config, execute_sync_session, list_saved_sessions,
+    plan_sync_session, run_comparison, run_text_comparison, session_to_config,
+    App, SessionAction, SessionView,
+};
 use clap::Parser;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::{
@@ -333,8 +337,83 @@ async fn main() -> Result<()> {
                         }
                     }
                     SessionAction::Reload => {
+                        // Clear sync preview on reload.
+                        session.sync_planned = None;
                         if let Err(e) = run_comparison(session).await {
                             session.errors.push(format!("Reload failed: {e}"));
+                        }
+                    }
+                    SessionAction::PlanSync { operation } => {
+                        session.sync_operation = operation;
+                        if let Err(e) = plan_sync_session(session).await {
+                            session
+                                .errors
+                                .push(format!("Sync plan failed: {e}"));
+                        }
+                    }
+                    SessionAction::ExecuteSync => {
+                        if let Err(e) = execute_sync_session(session).await {
+                            session
+                                .errors
+                                .push(format!("Sync failed: {e}"));
+                        }
+                    }
+                    SessionAction::SaveSession { name } => {
+                        let config = session_to_config(session);
+                        let session_dir = app::default_session_dir();
+                        if let Err(_) = tokio::fs::create_dir_all(&session_dir).await {
+                            // Ignore if dir already exists.
+                        }
+                        let path = session_dir.join(format!("{name}.toml"));
+                        if let Err(e) = config.save_to_file(&path).await {
+                            session
+                                .errors
+                                .push(format!("Save failed: {e}"));
+                        } else {
+                            session.errors.clear();
+                        }
+                    }
+                    SessionAction::ListSessions => {
+                        match list_saved_sessions().await {
+                            Ok(paths) => {
+                                // Store paths as filter_input for display.
+                                // We'll render them in the footer.
+                                session.filter_input = paths
+                                    .iter()
+                                    .map(|p| {
+                                        p.file_name()
+                                            .map(|n| n.to_string_lossy().to_string())
+                                            .unwrap_or_default()
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .join(", ");
+                            }
+                            Err(e) => {
+                                session
+                                    .errors
+                                    .push(format!("List sessions failed: {e}"));
+                            }
+                        }
+                    }
+                    SessionAction::LoadSession { path } => {
+                        match cocomo_lib::SessionConfig::load_from_file(&path).await {
+                            Ok(config) => {
+                                match create_session_from_config(&config).await {
+                                    Ok(new_session) => {
+                                        app_state.add_session(new_session);
+                                    }
+                                    Err(e) => {
+                                        session
+                                            .errors
+                                            .push(format!("Load session failed: {e}"));
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                session
+                                    .errors
+                                    .push(format!("Failed to load config: {e}"));
+                            }
                         }
                     }
                     SessionAction::None => {}

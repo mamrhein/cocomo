@@ -13,7 +13,10 @@
 //! returns [`SessionAction`] values that the main loop acts upon (e.g.,
 //! creating new sessions for directory navigation).
 
-use cocomo_lib::{DirEntryStatus, Importance, LineInfo, TextDifference};
+use cocomo_lib::{
+    DirEntryStatus, Importance, LineInfo, SyncOperation, TextDifference,
+    TransferAction,
+};
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     Frame,
@@ -37,7 +40,12 @@ pub fn render_session(frame: &mut Frame, area: Rect, session: &SessionView) {
         .split(area);
 
     render_header(frame, chunks[0], session);
-    render_main(frame, chunks[1], session);
+    // Render sync preview if active, otherwise the normal comparison.
+    if session.sync_planned.is_some() {
+        render_sync_preview(frame, chunks[1], session);
+    } else {
+        render_main(frame, chunks[1], session);
+    }
     render_footer(frame, chunks[2], session);
 }
 
@@ -221,6 +229,89 @@ fn render_main(frame: &mut Frame, area: Rect, session: &SessionView) {
     );
 }
 
+/// Render the sync preview table showing planned transfer items.
+fn render_sync_preview(frame: &mut Frame, area: Rect, session: &SessionView) {
+    let Some(ref sync_result) = session.sync_planned else {
+        return;
+    };
+
+    let executed = sync_result.transfer.is_some();
+
+    // Build rows from planned transfer items.
+    let rows: Vec<_> =
+        sync_result
+            .planned
+            .iter()
+            .map(|item| {
+                let action_str = item.action.label().to_string();
+                let dir_indicator = if item.is_dir { "📁 " } else { "  " };
+                let path = &item.rel_path;
+
+                // Color by action type.
+                let action_color =
+                    match item.action {
+                        TransferAction::CopyLeft
+                        | TransferAction::CopyRight => Color::Green,
+                        TransferAction::CopyCenter => Color::Yellow,
+                        TransferAction::DeleteLeft
+                        | TransferAction::DeleteRight => Color::Red,
+                        TransferAction::MoveLeft
+                        | TransferAction::MoveRight => Color::Magenta,
+                    };
+
+                Row::new(vec![
+                    Span::styled(
+                        action_str,
+                        Style::default()
+                            .fg(action_color)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw(format!("{dir_indicator}{path}")),
+                ])
+            })
+            .collect();
+
+    let header = Row::new(vec![
+        Span::styled("Action", Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled("Path", Style::default().add_modifier(Modifier::BOLD)),
+    ]);
+
+    let widths = [Constraint::Length(30), Constraint::Min(20)];
+
+    let title = if executed {
+        " Sync Executed "
+    } else {
+        " Sync Preview (dry-run) "
+    };
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(Span::styled(
+            title,
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .border_style(Style::default().fg(Color::Gray));
+
+    let table = Table::new(rows, widths)
+        .header(header)
+        .block(block)
+        .column_spacing(1)
+        .row_highlight_style(
+            Style::default()
+                .bg(Color::DarkGray)
+                .add_modifier(Modifier::REVERSED),
+        )
+        .highlight_symbol(ratatui::symbols::block::FULL);
+
+    frame.render_stateful_widget(
+        table,
+        area,
+        &mut session.table_state.clone(),
+    );
+}
+
 fn render_footer(frame: &mut Frame, area: Rect, session: &SessionView) {
     let lines = if session.mode == AppMode::Filter {
         vec![
@@ -229,6 +320,22 @@ fn render_footer(frame: &mut Frame, area: Rect, session: &SessionView) {
                 Style::default().fg(Color::Yellow),
             )),
             Line::from(Span::raw("Enter=apply  Esc=cancel")),
+        ]
+    } else if session.mode == AppMode::SaveSession {
+        vec![
+            Line::from(Span::styled(
+                format!("Save session as: {}", session.filter_input),
+                Style::default().fg(Color::Yellow),
+            )),
+            Line::from(Span::raw("Enter=save  Esc=cancel")),
+        ]
+    } else if session.mode == AppMode::LoadSession {
+        vec![
+            Line::from(Span::styled(
+                format!("Load session: {}", session.filter_input),
+                Style::default().fg(Color::Yellow),
+            )),
+            Line::from(Span::raw("j/k=select  Enter=load  Esc=cancel")),
         ]
     } else {
         let stats = session.comparison.as_ref().map(|c| {
@@ -263,33 +370,82 @@ fn render_footer(frame: &mut Frame, area: Rect, session: &SessionView) {
         ]
     };
 
-    let help = Line::from(vec![
-        Span::styled("j/k", Style::default().add_modifier(Modifier::BOLD)),
-        Span::raw(" navigate  "),
-        Span::styled("l/Tab", Style::default().add_modifier(Modifier::BOLD)),
-        Span::raw(" focus  "),
-        Span::styled("f", Style::default().add_modifier(Modifier::BOLD)),
-        Span::raw(" filter  "),
-        Span::styled("F", Style::default().add_modifier(Modifier::BOLD)),
-        Span::raw(" hide same  "),
-        Span::styled("S", Style::default().add_modifier(Modifier::BOLD)),
-        Span::raw(" files/struct  "),
-        Span::styled("r", Style::default().add_modifier(Modifier::BOLD)),
-        Span::raw(" reload  "),
-        Span::styled("↵", Style::default().add_modifier(Modifier::BOLD)),
-        Span::raw(" open dir  "),
-        Span::styled("⌫", Style::default().add_modifier(Modifier::BOLD)),
-        Span::raw(" up  "),
-        Span::styled("Ctrl+W", Style::default().add_modifier(Modifier::BOLD)),
-        Span::raw(" close  "),
-        Span::styled(
-            "Ctrl+Tab",
-            Style::default().add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" tabs  "),
-        Span::styled("q", Style::default().add_modifier(Modifier::BOLD)),
-        Span::raw(" quit"),
-    ]);
+    // Show different help text depending on context.
+    let help = if session.sync_planned.is_some() {
+        let count = session
+            .sync_planned
+            .as_ref()
+            .map(|s| s.planned_count())
+            .unwrap_or(0);
+        let executed = session
+            .sync_planned
+            .as_ref()
+            .map(|s| s.transfer.is_some())
+            .unwrap_or(false);
+        let op_label = session.sync_operation.label();
+        let status = if executed {
+            "Executed".to_string()
+        } else {
+            format!("Planned: {count} transfers")
+        };
+        Line::from(vec![
+            Span::styled(
+                format!("Sync: {op_label}  |  {status}"),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("  |  "),
+            Span::styled("j/k", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(" navigate  "),
+            Span::styled("Esc", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(" cancel"),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled("j/k", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(" navigate  "),
+            Span::styled(
+                "l/Tab",
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" focus  "),
+            Span::styled("f", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(" filter  "),
+            Span::styled("F", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(" hide same  "),
+            Span::styled("S", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(" files/struct  "),
+            Span::styled("m/M", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(" sync op  "),
+            Span::styled("P", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(" plan  "),
+            Span::styled("e", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(" execute  "),
+            Span::styled("r", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(" reload  "),
+            Span::styled("s", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(" save  "),
+            Span::styled("O", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(" load  "),
+            Span::styled("↵", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(" open dir  "),
+            Span::styled("⌫", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(" up  "),
+            Span::styled(
+                "Ctrl+W",
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" close  "),
+            Span::styled(
+                "Ctrl+Tab",
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" tabs  "),
+            Span::styled("q", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(" quit"),
+        ])
+    };
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -306,9 +462,12 @@ pub fn handle_session_key(
     session: &mut SessionView,
     key: KeyEvent,
 ) -> SessionAction {
-    if session.mode == AppMode::Filter {
-        handle_filter_input(session, key);
-        return SessionAction::None;
+    // Handle input modes (filter, save session, load session).
+    if session.mode == AppMode::Filter
+        || session.mode == AppMode::SaveSession
+        || session.mode == AppMode::LoadSession
+    {
+        return handle_filter_input(session, key);
     }
 
     // Route to text-specific handler for text diff sessions.
@@ -361,25 +520,101 @@ pub fn handle_session_key(
             session.compare_files = !session.compare_files;
             SessionAction::None
         }
+        KeyCode::Char('P') => {
+            // Plan sync with the current operation (dry-run).
+            SessionAction::PlanSync {
+                operation: session.sync_operation,
+            }
+        }
+        KeyCode::Char('m') => {
+            // Cycle through sync operations.
+            session.sync_operation = cycle_sync_op(&session.sync_operation, 1);
+            SessionAction::None
+        }
+        KeyCode::Char('M') => {
+            // Cycle through sync operations (reverse).
+            session.sync_operation =
+                cycle_sync_op(&session.sync_operation, -1);
+            SessionAction::None
+        }
+        KeyCode::Char('e') => {
+            // Execute the planned sync (only meaningful when preview is
+            // active, but we dispatch it and the main loop handles it).
+            SessionAction::ExecuteSync
+        }
+        KeyCode::Char('s') => {
+            // Save session — enter input mode for the session name.
+            session.mode = AppMode::SaveSession;
+            session.filter_input.clear();
+            SessionAction::None
+        }
+        KeyCode::Char('O') => {
+            // List saved sessions for loading.
+            session.mode = AppMode::LoadSession;
+            SessionAction::ListSessions
+        }
         KeyCode::Char('r') => SessionAction::Reload,
         KeyCode::Enter => handle_enter(session),
         KeyCode::Backspace => handle_backspace(session),
         KeyCode::Esc => {
-            session.active_filter = None;
-            session.table_state.select(Some(0));
+            // If sync preview is active, cancel it. Otherwise, clear filter.
+            if session.sync_planned.is_some() {
+                session.sync_planned = None;
+                session.table_state.select(Some(0));
+            } else {
+                session.active_filter = None;
+                session.table_state.select(Some(0));
+            }
             SessionAction::None
         }
         _ => SessionAction::None,
     }
 }
 
-fn handle_filter_input(session: &mut SessionView, key: KeyEvent) {
+fn handle_filter_input(
+    session: &mut SessionView,
+    key: KeyEvent,
+) -> SessionAction {
     match key.code {
         KeyCode::Esc => {
             session.filter_input.clear();
             session.mode = AppMode::Normal;
+            SessionAction::None
         }
         KeyCode::Enter => {
+            // SaveSession mode — dispatch save action.
+            if session.mode == AppMode::SaveSession {
+                let name = if session.filter_input.is_empty() {
+                    session.name.clone()
+                } else {
+                    session.filter_input.clone()
+                };
+                session.mode = AppMode::Normal;
+                return SessionAction::SaveSession { name };
+            }
+
+            // LoadSession mode — load the first (or selected) session.
+            if session.mode == AppMode::LoadSession {
+                // filter_input contains comma-separated session names.
+                // Build the path from the first entry.
+                let session_dir = crate::app::default_session_dir();
+                let entries: Vec<_> = session
+                    .filter_input
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                let idx = session.table_state.selected().unwrap_or(0);
+                if let Some(name) = entries.get(idx) {
+                    let path = session_dir.join(format!("{name}.toml"));
+                    session.mode = AppMode::Normal;
+                    return SessionAction::LoadSession { path };
+                }
+                session.mode = AppMode::Normal;
+                return SessionAction::None;
+            }
+
+            // Normal filter mode.
             if session.filter_input.is_empty() {
                 session.active_filter = None;
             } else {
@@ -388,14 +623,52 @@ fn handle_filter_input(session: &mut SessionView, key: KeyEvent) {
             session.filter_input.clear();
             session.mode = AppMode::Normal;
             session.table_state.select(Some(0));
+            SessionAction::None
+        }
+        KeyCode::Char('j')
+        | KeyCode::Down
+        | KeyCode::Char('k')
+        | KeyCode::Up => {
+            // In LoadSession mode, navigate through the session list.
+            if session.mode == AppMode::LoadSession {
+                let entries: Vec<_> = session
+                    .filter_input
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                let delta = if matches!(
+                    key.code,
+                    KeyCode::Char('j') | KeyCode::Down
+                ) {
+                    1
+                } else {
+                    -1
+                };
+                if let Some(selected) = session.table_state.selected() {
+                    let new_idx = if delta > 0 {
+                        selected
+                            .saturating_add(1)
+                            .min(entries.len().saturating_sub(1))
+                    } else {
+                        selected.saturating_sub(1)
+                    };
+                    session.table_state.select(Some(new_idx));
+                } else if !entries.is_empty() {
+                    session.table_state.select(Some(0));
+                }
+            }
+            SessionAction::None
         }
         KeyCode::Backspace => {
             session.filter_input.pop();
+            SessionAction::None
         }
         KeyCode::Char(c) => {
             session.filter_input.push(c);
+            SessionAction::None
         }
-        _ => {}
+        _ => SessionAction::None,
     }
 }
 
@@ -474,6 +747,25 @@ fn handle_backspace(_session: &SessionView) -> SessionAction {
 ///
 /// Returns [`SessionAction::None`] for all handled keys; text diff sessions
 /// don't trigger any session-level actions.
+
+/// Cycle through sync operations.
+fn cycle_sync_op(current: &SyncOperation, delta: isize) -> SyncOperation {
+    let ops = [
+        SyncOperation::MirrorLeft,
+        SyncOperation::MirrorRight,
+        SyncOperation::UpdateNewer,
+        SyncOperation::UpdateBoth,
+        SyncOperation::CopyLeft,
+        SyncOperation::CopyRight,
+        SyncOperation::CopyNewer,
+        SyncOperation::DeleteOrphans,
+    ];
+    let len = ops.len() as isize;
+    let idx = ops.iter().position(|x| x == current).unwrap_or(0) as isize;
+    let new_idx = ((idx + delta) % len + len) % len;
+    ops[new_idx as usize]
+}
+
 pub fn handle_text_key(
     session: &mut SessionView,
     key: KeyEvent,
