@@ -618,19 +618,18 @@ pub fn default_store_path() -> PathBuf {
 /// 32-byte key. A random key means secrets won't persist across restarts,
 /// but the store will still function.
 pub fn derive_master_key() -> Vec<u8> {
-    if let Ok(hex_key) = env::var(MASTER_KEY_ENV) {
-        if let Ok(bytes) = hex::decode(&hex_key) {
-            if bytes.len() >= 32 {
-                return bytes;
-            }
-        }
+    if let Ok(hex_key) = env::var(MASTER_KEY_ENV)
+        && let Ok(bytes) = hex::decode(&hex_key)
+        && bytes.len() >= 32
+    {
+        return bytes;
     }
-
     // Generate a random master key if none is configured.
     let mut key = vec![0u8; 32];
     if getrandom(&mut key).is_err() {
         // Fallback to a zero key (secrets won't be secure, but the
         // application will still function).
+        // TODO: Fix this!
     }
     key
 }
