@@ -365,16 +365,23 @@ async fn main() -> Result<()> {
                     SessionAction::SaveSession { name } => {
                         let config = session_to_config(session);
                         let session_dir = app::default_session_dir();
-                        if let Err(_) =
-                            tokio::fs::create_dir_all(&session_dir).await
+                        if !session_dir.exists()
+                            && let Err(e) =
+                                tokio::fs::create_dir_all(&session_dir).await
                         {
-                            // Ignore if dir already exists.
-                        }
-                        let path = session_dir.join(format!("{name}.toml"));
-                        if let Err(e) = config.save_to_file(&path).await {
-                            session.errors.push(format!("Save failed: {e}"));
+                            session.errors.push(format!(
+                                "Failed to create session dir: {e}"
+                            ));
                         } else {
-                            session.errors.clear();
+                            let path =
+                                session_dir.join(format!("{name}.toml"));
+                            if let Err(e) = config.save_to_file(&path).await {
+                                session
+                                    .errors
+                                    .push(format!("Save failed: {e}"));
+                            } else {
+                                session.errors.clear();
+                            }
                         }
                     }
                     SessionAction::ListSessions => {
