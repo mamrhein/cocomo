@@ -1071,7 +1071,7 @@ fn render_text_main(frame: &mut Frame, area: Rect, session: &SessionView) {
             let left_content =
                 left_line.as_ref().map(|l| l.content.as_str()).unwrap_or("");
             let left_importance = left_line
-                .map(|l| importance_for_line(l))
+                .map(importance_for_line)
                 .unwrap_or(Importance::Ignored);
 
             // Format right side.
@@ -1081,7 +1081,7 @@ fn render_text_main(frame: &mut Frame, area: Rect, session: &SessionView) {
                 .map(|l| l.content.as_str())
                 .unwrap_or("");
             let right_importance = right_line
-                .map(|l| importance_for_line(l))
+                .map(importance_for_line)
                 .unwrap_or(Importance::Ignored);
 
             // Diff markers.
