@@ -743,11 +743,6 @@ fn handle_backspace(_session: &SessionView) -> SessionAction {
 // Text diff key handling
 // ---------------------------------------------------------------------------
 
-/// Handle keys specific to text diff sessions.
-///
-/// Returns [`SessionAction::None`] for all handled keys; text diff sessions
-/// don't trigger any session-level actions.
-
 /// Cycle through sync operations.
 fn cycle_sync_op(current: &SyncOperation, delta: isize) -> SyncOperation {
     let ops = [
@@ -766,6 +761,10 @@ fn cycle_sync_op(current: &SyncOperation, delta: isize) -> SyncOperation {
     ops[new_idx as usize]
 }
 
+/// Handle keys specific to text diff sessions.
+///
+/// Returns [`SessionAction::None`] for all handled keys; text diff sessions
+/// don't trigger any session-level actions.
 pub fn handle_text_key(
     session: &mut SessionView,
     key: KeyEvent,
@@ -801,9 +800,7 @@ pub fn handle_text_key(
 
             let current = session.table_state.selected().unwrap_or(0);
             // Find the first group start > current.
-            if let Some(&target) =
-                groups.iter().skip_while(|&&g| g <= current).next()
-            {
+            if let Some(&target) = groups.iter().find(|&&g| g > current) {
                 session.table_state.select(Some(target));
             } else {
                 // Wrap to the first group.
@@ -820,8 +817,7 @@ pub fn handle_text_key(
 
             let current = session.table_state.selected().unwrap_or(0);
             // Find the last group start < current.
-            if let Some(&target) =
-                groups.iter().rev().filter(|&&g| g < current).next()
+            if let Some(&target) = groups.iter().rev().find(|&&g| g > current)
             {
                 session.table_state.select(Some(target));
             } else {
@@ -1075,7 +1071,7 @@ fn render_text_main(frame: &mut Frame, area: Rect, session: &SessionView) {
             let left_content =
                 left_line.as_ref().map(|l| l.content.as_str()).unwrap_or("");
             let left_importance = left_line
-                .map(|l| importance_for_line(l))
+                .map(importance_for_line)
                 .unwrap_or(Importance::Ignored);
 
             // Format right side.
@@ -1085,24 +1081,12 @@ fn render_text_main(frame: &mut Frame, area: Rect, session: &SessionView) {
                 .map(|l| l.content.as_str())
                 .unwrap_or("");
             let right_importance = right_line
-                .map(|l| importance_for_line(l))
+                .map(importance_for_line)
                 .unwrap_or(Importance::Ignored);
 
             // Diff markers.
-            let left_marker = if left_is_diff {
-                "▶ "
-            } else if left_line.is_none() {
-                "  "
-            } else {
-                "  "
-            };
-            let right_marker = if right_is_diff {
-                "▶ "
-            } else if right_line.is_none() {
-                "  "
-            } else {
-                "  "
-            };
+            let left_marker = if left_is_diff { "▶ " } else { "  " };
+            let right_marker = if right_is_diff { "▶ " } else { "  " };
 
             let left_style = if left_is_diff {
                 Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)

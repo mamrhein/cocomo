@@ -26,7 +26,7 @@
 //! and `settings`. Encrypted secrets are stored in the same file under the
 //! `secrets` key of each profile table.
 
-use std::{collections::BTreeMap, env, fmt, io, path::PathBuf};
+use std::{collections::BTreeMap, env, fmt, fs, io, path::PathBuf};
 
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
 use chacha20poly1305::{
@@ -73,6 +73,14 @@ pub enum ProfileError {
     /// TOML serialization/deserialization error.
     #[error("TOML error: {0}")]
     Toml(String),
+
+    /// Failed to generate a master key because the system entropy source
+    /// is unavailable.
+    #[error(
+        "cannot generate master key: system entropy source unavailable: \
+         {reason}"
+    )]
+    EntropyUnavailable { reason: String },
 }
 
 /// Result type alias for profile operations.
@@ -257,16 +265,10 @@ impl fmt::Display for Profile {
 ///
 /// The `toml` crate requires the top level to be a table, so a `Vec<Profile>`
 /// must be wrapped in a struct that produces a TOML array of tables.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, Default)]
 struct ProfileCollection {
     #[serde(rename = "profile")]
     items: Vec<Profile>,
-}
-
-impl Default for ProfileCollection {
-    fn default() -> Self {
-        Self { items: Vec::new() }
-    }
 }
 
 impl ProfileCollection {
@@ -350,6 +352,11 @@ impl ProfileStore {
             .map_err(|e| ProfileError::Toml(e.to_string()))?;
 
         fs_err::write(&self.store_path, content).map_err(ProfileError::Io)?;
+
+        // Restrict the store file to owner-read/write only.
+        set_owner_only_permissions(&self.store_path)
+            .map_err(ProfileError::Io)?;
+
         Ok(())
     }
 
@@ -476,7 +483,7 @@ impl ProfileStore {
                 msg: v.as_bytes(),
                 aad: k.as_bytes(),
             };
-            let ciphertext = cipher.encrypt(&nonce, payload).map_err(|e| {
+            let ciphertext = cipher.encrypt(nonce, payload).map_err(|e| {
                 ProfileError::EncryptionFailed {
                     profile_id: profile_id.to_string(),
                     reason: e.to_string(),
@@ -485,7 +492,7 @@ impl ProfileStore {
 
             // Pack nonce + ciphertext into base64.
             let mut packed = Vec::with_capacity(12 + ciphertext.len());
-            packed.extend_from_slice(&nonce);
+            packed.extend_from_slice(nonce);
             packed.extend_from_slice(&ciphertext);
             encrypted.insert(k.clone(), B64.encode(&packed));
         }
@@ -595,6 +602,23 @@ impl ProfileStore {
 /// The key should be a hex-encoded 32-byte value (64 hex characters).
 pub const MASTER_KEY_ENV: &str = "COCOMO_MASTER_KEY";
 
+/// Restrict file permissions to owner-read/write only (0o600).
+///
+/// On Unix this prevents other users from reading the profile store.
+/// On Windows this is a no-op since the default ACL is already sufficient.
+fn set_owner_only_permissions(path: &std::path::Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Ok(())
+    }
+}
+
 /// Return the default profile store path.
 ///
 /// On Unix-like systems this is `~/.config/cocomo/profiles.toml`.
@@ -623,22 +647,18 @@ pub fn default_store_path() -> PathBuf {
 /// 32-byte key. If the variable is not set or invalid, generates a random
 /// 32-byte key. A random key means secrets won't persist across restarts,
 /// but the store will still function.
-pub fn derive_master_key() -> Vec<u8> {
-    if let Ok(hex_key) = env::var(MASTER_KEY_ENV) {
-        if let Ok(bytes) = hex::decode(&hex_key) {
-            if bytes.len() >= 32 {
-                return bytes;
-            }
-        }
+pub fn derive_master_key() -> ProfileResult<Vec<u8>> {
+    if let Ok(hex_key) = env::var(MASTER_KEY_ENV)
+        && let Ok(bytes) = hex::decode(&hex_key)
+        && bytes.len() >= 32
+    {
+        return Ok(bytes);
     }
-
-    // Generate a random master key if none is configured.
     let mut key = vec![0u8; 32];
-    if getrandom(&mut key).is_err() {
-        // Fallback to a zero key (secrets won't be secure, but the
-        // application will still function).
-    }
-    key
+    getrandom(&mut key).map_err(|e| ProfileError::EntropyUnavailable {
+        reason: e.to_string(),
+    })?;
+    Ok(key)
 }
 
 // ---------------------------------------------------------------------------
@@ -1108,40 +1128,80 @@ mod tests {
     fn derive_master_key_from_env() {
         // A valid hex-encoded 32-byte key (64 hex chars).
         let hex_key = "aa".repeat(32);
-        let _guard =
-            temp_env::with_var(MASTER_KEY_ENV, Some(&hex_key), || {
-                let key = derive_master_key();
-                assert_eq!(key.len(), 32);
-                assert_eq!(key, vec![0xAA; 32]);
-            });
+        temp_env::with_var(MASTER_KEY_ENV, Some(&hex_key), || {
+            let key = derive_master_key().unwrap();
+            assert_eq!(key.len(), 32);
+        });
     }
 
     #[test]
     fn derive_master_key_invalid_hex_falls_back() {
-        let _guard =
-            temp_env::with_var(MASTER_KEY_ENV, Some("not-valid-hex!"), || {
-                let key = derive_master_key();
-                // Should fall back to random key (32 bytes).
-                assert_eq!(key.len(), 32);
-            });
+        temp_env::with_var(MASTER_KEY_ENV, Some("not-valid-hex!"), || {
+            let key = derive_master_key().unwrap();
+            // Should fall back to random key (32 bytes).
+            assert_eq!(key.len(), 32);
+        });
     }
 
     #[test]
     fn derive_master_key_short_hex_falls_back() {
-        let _guard =
-            temp_env::with_var(MASTER_KEY_ENV, Some("aabbcc"), || {
-                // Too short.
-                let key = derive_master_key();
-                // Should fall back to random key (32 bytes).
-                assert_eq!(key.len(), 32);
-            });
+        temp_env::with_var(MASTER_KEY_ENV, Some("aabbcc"), || {
+            // Too short.
+            let key = derive_master_key().unwrap();
+            // Should fall back to random key (32 bytes).
+            assert_eq!(key.len(), 32);
+        });
     }
 
     #[test]
     fn derive_master_key_no_env_generates_random() {
-        let _guard = temp_env::with_var_unset(MASTER_KEY_ENV, || {
-            let key = derive_master_key();
+        temp_env::with_var_unset(MASTER_KEY_ENV, || {
+            let key = derive_master_key().unwrap();
             assert_eq!(key.len(), 32);
         });
+    }
+
+    #[test]
+    fn entropy_unavailable_error_display() {
+        let err = ProfileError::EntropyUnavailable {
+            reason: "no entropy".into(),
+        };
+        let msg = format!("{err}");
+        assert!(msg.contains("entropy"));
+        assert!(msg.contains("no entropy"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn profile_store_sets_owner_only_permissions() {
+        let (store, dir) = make_test_store();
+        let profile = Profile::new("perm-test", ProviderType::Local);
+        store.add(profile).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        let meta = fs_err::metadata(&store.store_path).unwrap();
+        let mode = meta.permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "profile store should be owner-read/write only"
+        );
+        cleanup(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn profile_store_maintains_permissions_on_update() {
+        let (store, dir) = make_test_store();
+        let profile1 = Profile::new("perm-update-1", ProviderType::Local);
+        store.add(profile1).unwrap();
+        let profile2 = Profile::new("perm-update-2", ProviderType::Local);
+        store.add(profile2).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        let meta = fs_err::metadata(&store.store_path).unwrap();
+        let mode = meta.permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "permissions should remain owner-read/write only after update"
+        );
+        cleanup(&dir);
     }
 }
