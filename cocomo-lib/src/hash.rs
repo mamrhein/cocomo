@@ -238,13 +238,11 @@ impl ContentCache {
         let mut inner = self.inner.lock();
 
         // Check existence and expiry first, cloning the data we need.
-        let (expired, content_id) =
-            if let Some(entry) = inner.entries.get(&key) {
-                let expired = now.duration_since(entry.last_access) > ttl;
-                (expired, entry.content_id.clone())
-            } else {
-                return None;
-            };
+        let (expired, content_id) = {
+            let entry = inner.entries.get(&key)?;
+            let expired = now.duration_since(entry.last_access) > ttl;
+            (expired, entry.content_id.clone())
+        };
 
         if expired {
             // Entry expired — evict it.
