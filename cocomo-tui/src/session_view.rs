@@ -800,9 +800,7 @@ pub fn handle_text_key(
 
             let current = session.table_state.selected().unwrap_or(0);
             // Find the first group start > current.
-            if let Some(&target) =
-                groups.iter().skip_while(|&&g| g <= current).next()
-            {
+            if let Some(&target) = groups.iter().find(|&&g| g > current) {
                 session.table_state.select(Some(target));
             } else {
                 // Wrap to the first group.
