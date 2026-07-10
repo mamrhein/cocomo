@@ -1050,20 +1050,17 @@ impl WritableFileSystem for LocalFs {
         }
 
         // Remove from filesystem.
-        match fs_err::tokio::remove_file(&path).await {
-            Ok(()) => {
-                self.path_to_id.write().remove(&path);
-                Ok(())
-            }
-            Err(e) if e.kind() == io::ErrorKind::IsADirectory => {
-                fs_err::tokio::remove_dir(&path)
-                    .await
-                    .map_err(|e| wrap(e, FsOperation::Remove, path.clone()))?;
-                self.path_to_id.write().remove(&path);
-                Ok(())
-            }
-            Err(e) => Err(wrap(e, FsOperation::Remove, path)),
+        if node.kind().is_directory() {
+            fs_err::tokio::remove_dir(&path)
+                .await
+                .map_err(|e| wrap(e, FsOperation::Remove, path.clone()))?;
+        } else {
+            fs_err::tokio::remove_file(&path)
+                .await
+                .map_err(|e| wrap(e, FsOperation::Remove, path.clone()))?;
         }
+        self.path_to_id.write().remove(&path);
+        Ok(())
     }
 
     async fn remove_all_node(&self, id: NodeId<Self::Nid>) -> Result<()> {
