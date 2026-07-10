@@ -24,12 +24,14 @@ use std::{
 
 use anyhow::Result;
 use app::{
-    create_session_from_config, execute_sync_session, list_saved_sessions,
-    plan_sync_session, run_comparison, run_text_comparison, session_to_config,
-    App, SessionAction, SessionView,
+    App, SessionAction, SessionView, create_session_from_config,
+    execute_sync_session, list_saved_sessions, plan_sync_session,
+    run_comparison, run_text_comparison, session_to_config,
 };
 use clap::Parser;
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
+};
 use ratatui::{
     Frame, Terminal,
     backend::CrosstermBackend,
@@ -116,13 +118,14 @@ fn render_tab_bar(frame: &mut Frame, area: Rect, app: &App) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Gray));
-    let paragraph = Paragraph::new(line)
-        .block(block)
-        .style(if active < sessions.len() {
-            Style::default().fg(Color::Yellow)
-        } else {
-            Style::default()
-        });
+    let paragraph =
+        Paragraph::new(line)
+            .block(block)
+            .style(if active < sessions.len() {
+                Style::default().fg(Color::Yellow)
+            } else {
+                Style::default()
+            });
     frame.render_widget(paragraph, area);
 }
 
@@ -162,7 +165,9 @@ fn handle_global_key(app: &mut App, key: KeyEvent) -> bool {
     }
 
     // Ctrl+Tab — next tab.
-    if key.code == KeyCode::Tab && key.modifiers.contains(KeyModifiers::CONTROL) {
+    if key.code == KeyCode::Tab
+        && key.modifiers.contains(KeyModifiers::CONTROL)
+    {
         let is_shift = key.modifiers.contains(KeyModifiers::SHIFT);
         app.switch_tab(if is_shift { -1 } else { 1 });
         return true;
@@ -170,7 +175,8 @@ fn handle_global_key(app: &mut App, key: KeyEvent) -> bool {
 
     // q — quit (only when not in a session filter mode).
     if key.code == KeyCode::Char('q') || key.code == KeyCode::Char('Q') {
-        // If there's an active session in filter mode, let the session handle it.
+        // If there's an active session in filter mode, let the session handle
+        // it.
         if let Some(session) = app.active() {
             if session.mode != app::AppMode::Filter {
                 app.running = false;
@@ -228,13 +234,15 @@ async fn main() -> Result<()> {
 
         if left_meta.is_file() && right_meta.is_file() {
             return Err(anyhow::anyhow!(
-                "Comparing individual files is not yet implemented. Please provide directories."
+                "Comparing individual files is not yet implemented. Please \
+                 provide directories."
             ));
         }
 
         if !left_meta.is_dir() || !right_meta.is_dir() {
             return Err(anyhow::anyhow!(
-                "Both --left and --right must be directories, or both must be files."
+                "Both --left and --right must be directories, or both must \
+                 be files."
             ));
         }
 
@@ -262,9 +270,7 @@ async fn main() -> Result<()> {
     loop {
         terminal.draw(|frame| render(frame, &app_state))?;
 
-        if event::poll(std::time::Duration::from_millis(100))?
-            && matches!(event::read().ok(), Some(Event::Key(key)) if key.kind == KeyEventKind::Press)
-        {
+        if event::poll(std::time::Duration::from_millis(100))? {
             let key = match event::read()? {
                 Event::Key(k) if k.kind == KeyEventKind::Press => k,
                 _ => continue,
@@ -285,14 +291,12 @@ async fn main() -> Result<()> {
                 // Handle async actions.
                 match action {
                     SessionAction::OpenDir { left, right } => {
-                        let mut new_session =
-                            SessionView::new_dir_compare(
-                                left,
-                                right,
-                                session.compare_files,
-                            );
-                        if let Err(e) =
-                            run_comparison(&mut new_session).await
+                        let mut new_session = SessionView::new_dir_compare(
+                            left,
+                            right,
+                            session.compare_files,
+                        );
+                        if let Err(e) = run_comparison(&mut new_session).await
                         {
                             new_session
                                 .errors
@@ -303,7 +307,8 @@ async fn main() -> Result<()> {
                     SessionAction::GoUp => {
                         let left_parent = session.left_path.parent();
                         let right_parent = session.right_path.parent();
-                        if let (Some(l), Some(r)) = (left_parent, right_parent) {
+                        if let (Some(l), Some(r)) = (left_parent, right_parent)
+                        {
                             // Avoid going above root.
                             if l != session.left_path.as_path()
                                 || r != session.right_path.as_path()
@@ -317,8 +322,9 @@ async fn main() -> Result<()> {
                                 if let Err(e) =
                                     run_comparison(&mut new_session).await
                                 {
-                                    new_session.errors
-                                        .push(format!("Comparison failed: {e}"));
+                                    new_session.errors.push(format!(
+                                        "Comparison failed: {e}"
+                                    ));
                                 }
                                 app_state.add_session(new_session);
                             }
@@ -330,9 +336,9 @@ async fn main() -> Result<()> {
                                 app_state.add_session(new_session);
                             }
                             Err(e) => {
-                                session
-                                    .errors
-                                    .push(format!("Text comparison failed: {e}"));
+                                session.errors.push(format!(
+                                    "Text comparison failed: {e}"
+                                ));
                             }
                         }
                     }
@@ -353,22 +359,20 @@ async fn main() -> Result<()> {
                     }
                     SessionAction::ExecuteSync => {
                         if let Err(e) = execute_sync_session(session).await {
-                            session
-                                .errors
-                                .push(format!("Sync failed: {e}"));
+                            session.errors.push(format!("Sync failed: {e}"));
                         }
                     }
                     SessionAction::SaveSession { name } => {
                         let config = session_to_config(session);
                         let session_dir = app::default_session_dir();
-                        if let Err(_) = tokio::fs::create_dir_all(&session_dir).await {
+                        if let Err(_) =
+                            tokio::fs::create_dir_all(&session_dir).await
+                        {
                             // Ignore if dir already exists.
                         }
                         let path = session_dir.join(format!("{name}.toml"));
                         if let Err(e) = config.save_to_file(&path).await {
-                            session
-                                .errors
-                                .push(format!("Save failed: {e}"));
+                            session.errors.push(format!("Save failed: {e}"));
                         } else {
                             session.errors.clear();
                         }
@@ -382,37 +386,42 @@ async fn main() -> Result<()> {
                                     .iter()
                                     .map(|p| {
                                         p.file_name()
-                                            .map(|n| n.to_string_lossy().to_string())
+                                            .map(|n| {
+                                                n.to_string_lossy().to_string()
+                                            })
                                             .unwrap_or_default()
                                     })
                                     .collect::<Vec<_>>()
                                     .join(", ");
                             }
                             Err(e) => {
-                                session
-                                    .errors
-                                    .push(format!("List sessions failed: {e}"));
+                                session.errors.push(format!(
+                                    "List sessions failed: {e}"
+                                ));
                             }
                         }
                     }
                     SessionAction::LoadSession { path } => {
-                        match cocomo_lib::SessionConfig::load_from_file(&path).await {
+                        match cocomo_lib::SessionConfig::load_from_file(&path)
+                            .await
+                        {
                             Ok(config) => {
-                                match create_session_from_config(&config).await {
+                                match create_session_from_config(&config).await
+                                {
                                     Ok(new_session) => {
                                         app_state.add_session(new_session);
                                     }
                                     Err(e) => {
-                                        session
-                                            .errors
-                                            .push(format!("Load session failed: {e}"));
+                                        session.errors.push(format!(
+                                            "Load session failed: {e}"
+                                        ));
                                     }
                                 }
                             }
                             Err(e) => {
-                                session
-                                    .errors
-                                    .push(format!("Failed to load config: {e}"));
+                                session.errors.push(format!(
+                                    "Failed to load config: {e}"
+                                ));
                             }
                         }
                     }
