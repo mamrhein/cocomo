@@ -243,6 +243,7 @@ impl SessionView {
     }
 
     /// Return the path of the focused side.
+    #[allow(unused)]
     pub fn active_path(&self) -> &PathBuf {
         match self.focus {
             Focus::Left => &self.left_path,
