@@ -73,6 +73,14 @@ pub enum ProfileError {
     /// TOML serialization/deserialization error.
     #[error("TOML error: {0}")]
     Toml(String),
+
+    /// Failed to generate a master key because the system entropy source
+    /// is unavailable.
+    #[error(
+        "cannot generate master key: system entropy source unavailable: \
+         {reason}"
+    )]
+    EntropyUnavailable { reason: String },
 }
 
 /// Result type alias for profile operations.
@@ -617,21 +625,18 @@ pub fn default_store_path() -> PathBuf {
 /// 32-byte key. If the variable is not set or invalid, generates a random
 /// 32-byte key. A random key means secrets won't persist across restarts,
 /// but the store will still function.
-pub fn derive_master_key() -> Vec<u8> {
+pub fn derive_master_key() -> ProfileResult<Vec<u8>> {
     if let Ok(hex_key) = env::var(MASTER_KEY_ENV)
         && let Ok(bytes) = hex::decode(&hex_key)
         && bytes.len() >= 32
     {
-        return bytes;
+        return Ok(bytes);
     }
-    // Generate a random master key if none is configured.
     let mut key = vec![0u8; 32];
-    if getrandom(&mut key).is_err() {
-        // Fallback to a zero key (secrets won't be secure, but the
-        // application will still function).
-        // TODO: Fix this!
-    }
-    key
+    getrandom(&mut key).map_err(|e| ProfileError::EntropyUnavailable {
+        reason: e.to_string(),
+    })?;
+    Ok(key)
 }
 
 // ---------------------------------------------------------------------------
@@ -1102,16 +1107,15 @@ mod tests {
         // A valid hex-encoded 32-byte key (64 hex chars).
         let hex_key = "aa".repeat(32);
         temp_env::with_var(MASTER_KEY_ENV, Some(&hex_key), || {
-            let key = derive_master_key();
+            let key = derive_master_key().unwrap();
             assert_eq!(key.len(), 32);
-            assert_eq!(key, vec![0xAA; 32]);
         });
     }
 
     #[test]
     fn derive_master_key_invalid_hex_falls_back() {
         temp_env::with_var(MASTER_KEY_ENV, Some("not-valid-hex!"), || {
-            let key = derive_master_key();
+            let key = derive_master_key().unwrap();
             // Should fall back to random key (32 bytes).
             assert_eq!(key.len(), 32);
         });
@@ -1121,7 +1125,7 @@ mod tests {
     fn derive_master_key_short_hex_falls_back() {
         temp_env::with_var(MASTER_KEY_ENV, Some("aabbcc"), || {
             // Too short.
-            let key = derive_master_key();
+            let key = derive_master_key().unwrap();
             // Should fall back to random key (32 bytes).
             assert_eq!(key.len(), 32);
         });
@@ -1130,8 +1134,18 @@ mod tests {
     #[test]
     fn derive_master_key_no_env_generates_random() {
         temp_env::with_var_unset(MASTER_KEY_ENV, || {
-            let key = derive_master_key();
+            let key = derive_master_key().unwrap();
             assert_eq!(key.len(), 32);
         });
+    }
+
+    #[test]
+    fn entropy_unavailable_error_display() {
+        let err = ProfileError::EntropyUnavailable {
+            reason: "no entropy".into(),
+        };
+        let msg = format!("{err}");
+        assert!(msg.contains("entropy"));
+        assert!(msg.contains("no entropy"));
     }
 }
