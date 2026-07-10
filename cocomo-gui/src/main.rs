@@ -7,10 +7,120 @@
 // $Source$
 // $Revision$
 
-use anyhow::Result;
+//! cocomo_gui — Desktop GUI for directory comparison.
+//!
+//! Provides a folder comparison view with navigation, status
+//! indicators, and directory tree browsing. Built on gpui for GPU-accelerated
+//! rendering.
 
-#[allow(unreachable_code)]
-#[tokio::main]
-async fn main() -> Result<()> {
-    !unimplemented!()
+mod state;
+mod ui;
+
+use std::path::PathBuf;
+
+use anyhow::Result;
+use gpui::{
+    App, AppContext, Application, Bounds, SharedString, WindowBounds,
+    WindowOptions, px, size,
+};
+
+use crate::{state::AppState, ui::FolderCompareView};
+
+// ---------------------------------------------------------------------------
+// Main entry point
+// ---------------------------------------------------------------------------
+
+fn main() -> Result<()> {
+    // Parse CLI arguments for left and right paths.
+    let args: Vec<String> = std::env::args().collect();
+    let (left, right) = parse_args(&args)?;
+
+    Application::new().run(|cx: &mut App| {
+        // Center the window on screen.
+        let bounds = Bounds::centered(None, size(px(1200.), px(800.)), cx);
+
+        cx.open_window(
+            WindowOptions {
+                focus: true,
+                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                ..Default::default()
+            },
+            |_, cx| {
+                // Create the app state.
+                let app_state = cx.new(|cx| {
+                    AppState::new(
+                        left,
+                        right,
+                        SharedString::from("cocomo — compare"),
+                        cx,
+                    )
+                });
+
+                // Create the folder compare view as the window root.
+                cx.new(|cx| FolderCompareView::new(app_state, cx))
+            },
+        )
+        .unwrap();
+
+        cx.activate(true);
+    });
+
+    Ok(())
+}
+
+/// Parse command-line arguments for left and right directory paths.
+fn parse_args(args: &[String]) -> Result<(PathBuf, PathBuf)> {
+    let mut left: Option<PathBuf> = None;
+    let mut right: Option<PathBuf> = None;
+
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--left" | "-l" => {
+                i += 1;
+                if i < args.len() {
+                    left = Some(PathBuf::from(&args[i]));
+                }
+            }
+            "--right" | "-r" => {
+                i += 1;
+                if i < args.len() {
+                    right = Some(PathBuf::from(&args[i]));
+                }
+            }
+            "--" => {
+                // Positional args after --.
+                i += 1;
+                if i < args.len() && left.is_none() {
+                    left = Some(PathBuf::from(&args[i]));
+                }
+                i += 1;
+                if i < args.len() && right.is_none() {
+                    right = Some(PathBuf::from(&args[i]));
+                }
+            }
+            _ => {
+                // Positional args.
+                if left.is_none() {
+                    left = Some(PathBuf::from(&args[i]));
+                } else if right.is_none() {
+                    right = Some(PathBuf::from(&args[i]));
+                }
+            }
+        }
+        i += 1;
+    }
+
+    // Validate and canonicalize.
+    let left = left.ok_or_else(|| anyhow::anyhow!("--left is required"))?;
+    let right = right.ok_or_else(|| anyhow::anyhow!("--right is required"))?;
+
+    if !left.is_dir() {
+        return Err(anyhow::anyhow!("{} is not a directory", left.display()));
+    }
+    if !right.is_dir() {
+        return Err(anyhow::anyhow!("{} is not a directory", right.display()));
+    }
+
+    Ok((left.canonicalize()?, right.canonicalize()?))
 }

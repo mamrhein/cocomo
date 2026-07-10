@@ -1,3 +1,7 @@
+# ---------------------------------------------------------------------------
+# cocomo_gui — Desktop GUI for directory comparison
+# ---------------------------------------------------------------------------
+
 [package]
 name = "cocomo-gui"
 version = "0.0.1"
@@ -7,11 +11,18 @@ description = "GUI-App: COmpare, COpy & MOve directories and files."
 readme = "../README.md"
 homepage = "https://github.com/mamrhein/cocomo"
 repository = "https://github.com/mamrhein/cocomo"
-documentation = "https://docs.rs/cocomo-tui/"
+documentation = "https://docs.rs/cocomo-gui/"
 license-file = "../LICENSE.TXT"
 keywords = ["directory", "file", "compare", "copy", "move"]
-categories = ["command-line-utilities", "filesystem"]
+categories = ["gui", "filesystem"]
+
+[[bin]]
+name = "cocomo-gui"
+path = "src/main.rs"
 
 [dependencies]
-tokio = { version = "1", features = ["macros", "rt-multi-thread",] }
+cocomo-lib = { path = "../cocomo-lib" }
+gpui = "0.2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 anyhow = "1"
+log = "0.4"
