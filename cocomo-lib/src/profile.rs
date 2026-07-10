@@ -1101,38 +1101,35 @@ mod tests {
     fn derive_master_key_from_env() {
         // A valid hex-encoded 32-byte key (64 hex chars).
         let hex_key = "aa".repeat(32);
-        let _guard =
-            temp_env::with_var(MASTER_KEY_ENV, Some(&hex_key), || {
-                let key = derive_master_key();
-                assert_eq!(key.len(), 32);
-                assert_eq!(key, vec![0xAA; 32]);
-            });
+        temp_env::with_var(MASTER_KEY_ENV, Some(&hex_key), || {
+            let key = derive_master_key();
+            assert_eq!(key.len(), 32);
+            assert_eq!(key, vec![0xAA; 32]);
+        });
     }
 
     #[test]
     fn derive_master_key_invalid_hex_falls_back() {
-        let _guard =
-            temp_env::with_var(MASTER_KEY_ENV, Some("not-valid-hex!"), || {
-                let key = derive_master_key();
-                // Should fall back to random key (32 bytes).
-                assert_eq!(key.len(), 32);
-            });
+        temp_env::with_var(MASTER_KEY_ENV, Some("not-valid-hex!"), || {
+            let key = derive_master_key();
+            // Should fall back to random key (32 bytes).
+            assert_eq!(key.len(), 32);
+        });
     }
 
     #[test]
     fn derive_master_key_short_hex_falls_back() {
-        let _guard =
-            temp_env::with_var(MASTER_KEY_ENV, Some("aabbcc"), || {
-                // Too short.
-                let key = derive_master_key();
-                // Should fall back to random key (32 bytes).
-                assert_eq!(key.len(), 32);
-            });
+        temp_env::with_var(MASTER_KEY_ENV, Some("aabbcc"), || {
+            // Too short.
+            let key = derive_master_key();
+            // Should fall back to random key (32 bytes).
+            assert_eq!(key.len(), 32);
+        });
     }
 
     #[test]
     fn derive_master_key_no_env_generates_random() {
-        let _guard = temp_env::with_var_unset(MASTER_KEY_ENV, || {
+        temp_env::with_var_unset(MASTER_KEY_ENV, || {
             let key = derive_master_key();
             assert_eq!(key.len(), 32);
         });
