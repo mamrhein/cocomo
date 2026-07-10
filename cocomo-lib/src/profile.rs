@@ -26,7 +26,7 @@
 //! and `settings`. Encrypted secrets are stored in the same file under the
 //! `secrets` key of each profile table.
 
-use std::{collections::BTreeMap, env, fmt, io, path::PathBuf};
+use std::{collections::BTreeMap, env, fmt, fs, io, path::PathBuf};
 
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
 use chacha20poly1305::{
@@ -352,6 +352,11 @@ impl ProfileStore {
             .map_err(|e| ProfileError::Toml(e.to_string()))?;
 
         fs_err::write(&self.store_path, content).map_err(ProfileError::Io)?;
+
+        // Restrict the store file to owner-read/write only.
+        set_owner_only_permissions(&self.store_path)
+            .map_err(ProfileError::Io)?;
+
         Ok(())
     }
 
@@ -596,6 +601,23 @@ impl ProfileStore {
 ///
 /// The key should be a hex-encoded 32-byte value (64 hex characters).
 pub const MASTER_KEY_ENV: &str = "COCOMO_MASTER_KEY";
+
+/// Restrict file permissions to owner-read/write only (0o600).
+///
+/// On Unix this prevents other users from reading the profile store.
+/// On Windows this is a no-op since the default ACL is already sufficient.
+fn set_owner_only_permissions(path: &std::path::Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Ok(())
+    }
+}
 
 /// Return the default profile store path.
 ///
@@ -1147,5 +1169,39 @@ mod tests {
         let msg = format!("{err}");
         assert!(msg.contains("entropy"));
         assert!(msg.contains("no entropy"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn profile_store_sets_owner_only_permissions() {
+        let (store, dir) = make_test_store();
+        let profile = Profile::new("perm-test", ProviderType::Local);
+        store.add(profile).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        let meta = fs_err::metadata(&store.store_path).unwrap();
+        let mode = meta.permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "profile store should be owner-read/write only"
+        );
+        cleanup(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn profile_store_maintains_permissions_on_update() {
+        let (store, dir) = make_test_store();
+        let profile1 = Profile::new("perm-update-1", ProviderType::Local);
+        store.add(profile1).unwrap();
+        let profile2 = Profile::new("perm-update-2", ProviderType::Local);
+        store.add(profile2).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        let meta = fs_err::metadata(&store.store_path).unwrap();
+        let mode = meta.permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "permissions should remain owner-read/write only after update"
+        );
+        cleanup(&dir);
     }
 }
