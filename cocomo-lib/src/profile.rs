@@ -257,16 +257,10 @@ impl fmt::Display for Profile {
 ///
 /// The `toml` crate requires the top level to be a table, so a `Vec<Profile>`
 /// must be wrapped in a struct that produces a TOML array of tables.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, Default)]
 struct ProfileCollection {
     #[serde(rename = "profile")]
     items: Vec<Profile>,
-}
-
-impl Default for ProfileCollection {
-    fn default() -> Self {
-        Self { items: Vec::new() }
-    }
 }
 
 impl ProfileCollection {
