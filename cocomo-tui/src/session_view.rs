@@ -743,11 +743,6 @@ fn handle_backspace(_session: &SessionView) -> SessionAction {
 // Text diff key handling
 // ---------------------------------------------------------------------------
 
-/// Handle keys specific to text diff sessions.
-///
-/// Returns [`SessionAction::None`] for all handled keys; text diff sessions
-/// don't trigger any session-level actions.
-
 /// Cycle through sync operations.
 fn cycle_sync_op(current: &SyncOperation, delta: isize) -> SyncOperation {
     let ops = [
@@ -766,6 +761,10 @@ fn cycle_sync_op(current: &SyncOperation, delta: isize) -> SyncOperation {
     ops[new_idx as usize]
 }
 
+/// Handle keys specific to text diff sessions.
+///
+/// Returns [`SessionAction::None`] for all handled keys; text diff sessions
+/// don't trigger any session-level actions.
 pub fn handle_text_key(
     session: &mut SessionView,
     key: KeyEvent,
