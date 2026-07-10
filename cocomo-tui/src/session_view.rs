@@ -817,8 +817,7 @@ pub fn handle_text_key(
 
             let current = session.table_state.selected().unwrap_or(0);
             // Find the last group start < current.
-            if let Some(&target) =
-                groups.iter().rev().filter(|&&g| g < current).next()
+            if let Some(&target) = groups.iter().rev().find(|&&g| g > current)
             {
                 session.table_state.select(Some(target));
             } else {
