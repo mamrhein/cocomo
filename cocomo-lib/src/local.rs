@@ -1076,9 +1076,7 @@ impl WritableFileSystem for LocalFs {
         }
 
         // Remove recursively from filesystem.
-        let meta = fs_err::symlink_metadata(&path)
-            .map_err(|e| wrap(e, FsOperation::Remove, path.clone()))?;
-        if meta.is_dir() {
+        if node.kind().is_directory() {
             fs_err::tokio::remove_dir_all(&path)
                 .await
                 .map_err(|e| wrap(e, FsOperation::Remove, path.clone()))?;
