@@ -23,7 +23,7 @@ use std::{
 };
 
 use anyhow::Result;
-use app::{run_comparison, App, SessionAction, SessionView};
+use app::{run_comparison, run_text_comparison, App, SessionAction, SessionView};
 use clap::Parser;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::{
@@ -69,7 +69,14 @@ fn render(frame: &mut Frame, app: &App) {
     render_tab_bar(frame, chunks[0], app);
 
     if let Some(session) = app.active() {
-        session_view::render_session(frame, chunks[1], session);
+        match session.session_type {
+            app::SessionType::DirCompare => {
+                session_view::render_session(frame, chunks[1], session);
+            }
+            app::SessionType::TextCompare => {
+                session_view::render_text_session(frame, chunks[1], session);
+            }
+        }
     } else {
         // No sessions open — show welcome screen.
         render_welcome(frame, chunks[1]);
@@ -310,6 +317,18 @@ async fn main() -> Result<()> {
                                         .push(format!("Comparison failed: {e}"));
                                 }
                                 app_state.add_session(new_session);
+                            }
+                        }
+                    }
+                    SessionAction::OpenFile { left, right } => {
+                        match run_text_comparison(left, right).await {
+                            Ok(new_session) => {
+                                app_state.add_session(new_session);
+                            }
+                            Err(e) => {
+                                session
+                                    .errors
+                                    .push(format!("Text comparison failed: {e}"));
                             }
                         }
                     }

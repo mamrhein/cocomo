@@ -13,7 +13,7 @@
 //! returns [`SessionAction`] values that the main loop acts upon (e.g.,
 //! creating new sessions for directory navigation).
 
-use cocomo_lib::DirEntryStatus;
+use cocomo_lib::{DirEntryStatus, Importance, LineInfo, TextDifference};
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     Frame,
@@ -419,14 +419,6 @@ fn handle_enter(session: &SessionView) -> SessionAction {
         _ => return SessionAction::None,
     };
 
-    // Check if the selected entry is a directory.
-    let is_dir = selected.left.as_ref().is_some_and(|l| l.is_dir)
-        || selected.right.as_ref().is_some_and(|r| r.is_dir);
-
-    if !is_dir {
-        return SessionAction::None;
-    }
-
     // Build the sub-paths for the new comparison.
     let left_sub = selected
         .left
@@ -445,9 +437,20 @@ fn handle_enter(session: &SessionView) -> SessionAction {
             Some(session.right_path.join(&selected.name))
         });
 
-    match (left_sub, right_sub) {
-        (Some(l), Some(r)) => SessionAction::OpenDir { left: l, right: r },
-        _ => SessionAction::None,
+    let (left, right) = match (left_sub, right_sub) {
+        (Some(l), Some(r)) => (l, r),
+        _ => return SessionAction::None,
+    };
+
+    // Check if the selected entry is a directory.
+    let is_dir = selected.left.as_ref().is_some_and(|l| l.is_dir)
+        || selected.right.as_ref().is_some_and(|r| r.is_dir);
+
+    if is_dir {
+        SessionAction::OpenDir { left, right }
+    } else {
+        // It's a file — open a text diff session.
+        SessionAction::OpenFile { left, right }
     }
 }
 
@@ -493,5 +496,320 @@ pub fn format_date(date_str: &str) -> String {
         date_str[..16].replace('T', " ")
     } else {
         date_str.to_string()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Text diff rendering
+// ---------------------------------------------------------------------------
+
+/// Render a text comparison session.
+pub fn render_text_session(
+    frame: &mut Frame,
+    area: Rect,
+    session: &SessionView,
+) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2),
+            Constraint::Min(1),
+            Constraint::Length(2),
+        ])
+        .split(area);
+
+    render_text_header(frame, chunks[0], session);
+    render_text_main(frame, chunks[1], session);
+    render_text_footer(frame, chunks[2], session);
+}
+
+fn render_text_header(frame: &mut Frame, area: Rect, session: &SessionView) {
+    let left_name = session
+        .left_path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "(empty)".to_string());
+    let right_name = session
+        .right_path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "(empty)".to_string());
+
+    let left_lines = session.left_lines.len();
+    let right_lines = session.right_lines.len();
+
+    let lines = vec![Line::from(format!(
+        "Text Diff  |  {}: {left_lines}L  |  {}: {right_lines}L  |  Grammar: \
+         {}",
+        left_name, right_name, session.grammar.name,
+    ))];
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Gray));
+    let paragraph = Paragraph::new(lines).block(block);
+    frame.render_widget(paragraph, area);
+}
+
+/// Build a set of line numbers that are part of a difference.
+fn diff_line_numbers(
+    session: &SessionView,
+) -> std::collections::HashSet<usize> {
+    let mut numbers = std::collections::HashSet::new();
+
+    if let Some(ref diff) = session.text_diff {
+        for td in &diff.differences {
+            match td {
+                TextDifference::LineDifferent(left, right) => {
+                    numbers.insert(left.number);
+                    numbers.insert(right.number);
+                }
+                TextDifference::LinesAdded(_, lines) => {
+                    for l in lines {
+                        numbers.insert(l.number);
+                    }
+                }
+                TextDifference::LinesRemoved(_, lines) => {
+                    for l in lines {
+                        numbers.insert(l.number);
+                    }
+                }
+                TextDifference::LinesChanged(_, removed, added) => {
+                    for l in removed {
+                        numbers.insert(l.number);
+                    }
+                    for l in added {
+                        numbers.insert(l.number);
+                    }
+                }
+                TextDifference::BlankLine => {}
+            }
+        }
+    }
+
+    numbers
+}
+
+fn render_text_main(frame: &mut Frame, area: Rect, session: &SessionView) {
+    let diff_numbers = diff_line_numbers(session);
+
+    // Build the rows for the side-by-side diff view.
+    let max_lines =
+        std::cmp::max(session.left_lines.len(), session.right_lines.len());
+    if max_lines == 0 {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(Span::styled(
+                " Text Diff ",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ))
+            .border_style(Style::default().fg(Color::Gray));
+        let paragraph = Paragraph::new(Line::from("Empty file(s)."))
+            .block(block)
+            .alignment(Alignment::Center);
+        frame.render_widget(paragraph, area);
+        return;
+    }
+
+    let rows: Vec<_> = (0..max_lines)
+        .map(|i| {
+            let left_line = session.left_lines.get(i);
+            let right_line = session.right_lines.get(i);
+
+            let left_num = left_line.map(|l| l.number).unwrap_or(0);
+            let right_num = right_line.map(|l| l.number).unwrap_or(0);
+
+            let left_is_diff =
+                left_line.is_some_and(|l| diff_numbers.contains(&l.number));
+            let right_is_diff =
+                right_line.is_some_and(|l| diff_numbers.contains(&l.number));
+
+            // Format left side.
+            let left_num_str = format!("{left_num:<6}");
+            let left_content =
+                left_line.as_ref().map(|l| l.content.as_str()).unwrap_or("");
+            let left_importance = left_line
+                .map(|l| importance_for_line(l))
+                .unwrap_or(Importance::Ignored);
+
+            // Format right side.
+            let right_num_str = format!("{right_num:<6}");
+            let right_content = right_line
+                .as_ref()
+                .map(|l| l.content.as_str())
+                .unwrap_or("");
+            let right_importance = right_line
+                .map(|l| importance_for_line(l))
+                .unwrap_or(Importance::Ignored);
+
+            // Diff markers.
+            let left_marker = if left_is_diff {
+                "▶ "
+            } else if left_line.is_none() {
+                "  "
+            } else {
+                "  "
+            };
+            let right_marker = if right_is_diff {
+                "▶ "
+            } else if right_line.is_none() {
+                "  "
+            } else {
+                "  "
+            };
+
+            let left_style = if left_is_diff {
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+            } else {
+                grammar_style(left_importance)
+            };
+            let right_style = if right_is_diff {
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                grammar_style(right_importance)
+            };
+
+            Row::new(vec![
+                Span::styled(
+                    left_num_str,
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::styled(left_marker, left_style),
+                Span::styled(left_content, left_style),
+                Span::styled(
+                    right_num_str,
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::styled(right_marker, right_style),
+                Span::styled(right_content, right_style),
+            ])
+        })
+        .collect();
+
+    let header = Row::new(vec![
+        Span::styled("Num", Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled("", Style::default()),
+        Span::styled(
+            session
+                .left_path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default(),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("Num", Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled("", Style::default()),
+        Span::styled(
+            session
+                .right_path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default(),
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]);
+
+    let widths = [
+        Constraint::Length(7),
+        Constraint::Length(2),
+        Constraint::Min(20),
+        Constraint::Length(7),
+        Constraint::Length(2),
+        Constraint::Min(20),
+    ];
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(Span::styled(
+            " Text Diff ",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .border_style(Style::default().fg(Color::Gray));
+
+    let table = Table::new(rows, widths)
+        .header(header)
+        .block(block)
+        .column_spacing(1)
+        .row_highlight_style(
+            Style::default()
+                .bg(Color::DarkGray)
+                .add_modifier(Modifier::REVERSED),
+        )
+        .highlight_symbol(ratatui::symbols::block::FULL);
+
+    frame.render_stateful_widget(
+        table,
+        area,
+        &mut session.table_state.clone(),
+    );
+}
+
+fn render_text_footer(frame: &mut Frame, area: Rect, session: &SessionView) {
+    let diff_count = session
+        .text_diff
+        .as_ref()
+        .map(|d| d.differences.len())
+        .unwrap_or(0);
+
+    let lines = vec![Line::from(format!(
+        "Differences: {}  |  Left: {} lines  |  Right: {} lines",
+        diff_count,
+        session.left_lines.len(),
+        session.right_lines.len(),
+    ))];
+
+    let help = Line::from(vec![
+        Span::styled("j/k", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(" navigate  "),
+        Span::styled("n/N", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(" next/prev diff  "),
+        Span::styled("l/Tab", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(" focus  "),
+        Span::styled("Ctrl+W", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(" close  "),
+        Span::styled(
+            "Ctrl+Tab",
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" tabs  "),
+        Span::styled("q", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(" quit"),
+    ]);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Gray));
+    let paragraph = Paragraph::new([lines, vec![help]].concat()).block(block);
+    frame.render_widget(paragraph, area);
+}
+
+/// Return the highest importance token in a line.
+fn importance_for_line(line: &LineInfo) -> Importance {
+    let mut max_imp = Importance::Ignored;
+    for token in &line.tokens {
+        if token.importance > max_imp {
+            max_imp = token.importance;
+        }
+    }
+    max_imp
+}
+
+/// Return a text style based on the grammar importance of a token.
+fn grammar_style(importance: Importance) -> Style {
+    match importance {
+        Importance::Code => Style::default(),
+        Importance::Data => Style::default().fg(Color::Yellow),
+        Importance::Comment => Style::default().fg(Color::DarkGray),
+        Importance::Ignored => Style::default().fg(Color::DarkGray),
     }
 }

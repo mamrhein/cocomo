@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 
 use cocomo_lib::{
     CompareConfig, ContentCache, DirComparison, DirEntry, DirEntryStatus,
-    LocalFs,
+    Grammar, LineInfo, LocalFs, TextCompareSettings, TextDiff, compare_texts,
 };
 use ratatui::widgets::TableState;
 
@@ -54,6 +54,8 @@ pub enum SessionType {
 pub enum SessionAction {
     /// Open a subdirectory comparison in a new session.
     OpenDir { left: PathBuf, right: PathBuf },
+    /// Open a file comparison (text diff) in a new session.
+    OpenFile { left: PathBuf, right: PathBuf },
     /// Navigate to the parent directories in a new session.
     GoUp,
     /// Reload the current session's comparison.
@@ -67,18 +69,28 @@ pub enum SessionAction {
 /// Each tab in the TUI corresponds to one `SessionView`. It owns the
 /// comparison results, selection state, filters, and UI preferences for
 /// that session.
-#[allow(dead_code)] // session_type and some fields are stubs for M5.2+.
 pub struct SessionView {
     /// Type of content this session displays.
     pub session_type: SessionType,
     /// Display name shown in the tab bar.
     pub name: String,
-    /// Left-side directory path.
+    /// Left-side path (directory or file).
     pub left_path: PathBuf,
-    /// Right-side directory path.
+    /// Right-side path (directory or file).
     pub right_path: PathBuf,
-    /// Comparison result, or `None` if still loading or not yet run.
+    /// Directory comparison result, or `None` if still loading or not yet
+    /// run.
     pub comparison: Option<DirComparison>,
+    /// Text diff result, or `None` if not a text compare session.
+    pub text_diff: Option<TextDiff>,
+    /// Full left file content (for text compare sessions), indexed by line
+    /// number (1-based).
+    pub left_lines: Vec<LineInfo>,
+    /// Full right file content (for text compare sessions), indexed by line
+    /// number (1-based).
+    pub right_lines: Vec<LineInfo>,
+    /// Grammar used for syntax classification in text compare sessions.
+    pub grammar: Grammar,
     /// Selected row in the entry table.
     pub table_state: TableState,
     /// Which pane has keyboard focus.
@@ -111,6 +123,10 @@ impl SessionView {
             left_path: left,
             right_path: right,
             comparison: None,
+            text_diff: None,
+            left_lines: Vec::new(),
+            right_lines: Vec::new(),
+            grammar: Grammar::plain_text(),
             table_state: TableState::default(),
             focus: Focus::default(),
             mode: AppMode::default(),
@@ -118,6 +134,37 @@ impl SessionView {
             active_filter: None,
             hide_same: false,
             compare_files,
+            errors: Vec::new(),
+        }
+    }
+
+    /// Create a new text comparison session.
+    pub fn new_text_compare(
+        left: PathBuf,
+        right: PathBuf,
+        left_lines: Vec<LineInfo>,
+        right_lines: Vec<LineInfo>,
+        text_diff: TextDiff,
+        grammar: Grammar,
+    ) -> Self {
+        let name = Self::tab_title_for_paths(&left, &right);
+        Self {
+            session_type: SessionType::TextCompare,
+            name,
+            left_path: left,
+            right_path: right,
+            comparison: None,
+            text_diff: Some(text_diff),
+            left_lines,
+            right_lines,
+            grammar,
+            table_state: TableState::default(),
+            focus: Focus::default(),
+            mode: AppMode::default(),
+            filter_input: String::new(),
+            active_filter: None,
+            hide_same: false,
+            compare_files: true,
             errors: Vec::new(),
         }
     }
@@ -173,7 +220,6 @@ impl SessionView {
     }
 
     /// Return the path of the focused side.
-    #[allow(dead_code)] // Used by M5.2+ for text diff sessions.
     pub fn active_path(&self) -> &PathBuf {
         match self.focus {
             Focus::Left => &self.left_path,
@@ -299,4 +345,84 @@ pub async fn run_comparison(session: &mut SessionView) -> anyhow::Result<()> {
     session.table_state.select(Some(0));
 
     Ok(())
+}
+
+/// Detect a suitable grammar for syntax classification based on file
+/// extension.
+pub fn detect_grammar(path: &Path) -> Grammar {
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+
+    match ext {
+        "rs" => Grammar::rust(),
+        "py" => Grammar::python(),
+        "c" | "h" | "cpp" | "hpp" => Grammar::c(),
+        _ => Grammar::plain_text(),
+    }
+}
+
+/// Build the text compare settings using a detected grammar.
+fn build_text_settings(grammar: &Grammar) -> TextCompareSettings {
+    TextCompareSettings {
+        grammar: Some(grammar.clone()),
+        ..TextCompareSettings::default()
+    }
+}
+
+/// Read a file and split it into line info entries with grammar
+/// classification.
+async fn read_file_lines(
+    path: &Path,
+    grammar: &Grammar,
+) -> anyhow::Result<Vec<LineInfo>> {
+    let content = tokio::fs::read_to_string(path).await?;
+    let mut lines = Vec::new();
+    for (i, line) in content.lines().enumerate() {
+        lines.push(
+            LineInfo::new(i + 1, line.to_string()).with_grammar(grammar),
+        );
+    }
+    Ok(lines)
+}
+
+/// Run a text comparison and create a new [`SessionView`].
+pub async fn run_text_comparison(
+    left: PathBuf,
+    right: PathBuf,
+) -> anyhow::Result<SessionView> {
+    // Detect grammar from the left file (fall back to right if left is
+    // missing).
+    let grammar = if left.exists() {
+        detect_grammar(&left)
+    } else {
+        detect_grammar(&right)
+    };
+
+    // Read file contents.
+    let left_content = if left.exists() {
+        tokio::fs::read_to_string(&left).await.unwrap_or_default()
+    } else {
+        String::new()
+    };
+    let right_content = if right.exists() {
+        tokio::fs::read_to_string(&right).await.unwrap_or_default()
+    } else {
+        String::new()
+    };
+
+    // Build line info for both sides.
+    let left_lines = read_file_lines(&left, &grammar).await?;
+    let right_lines = read_file_lines(&right, &grammar).await?;
+
+    // Run the text comparison.
+    let settings = build_text_settings(&grammar);
+    let text_diff = compare_texts(&left_content, &right_content, &settings);
+
+    Ok(SessionView::new_text_compare(
+        left,
+        right,
+        left_lines,
+        right_lines,
+        text_diff,
+        grammar,
+    ))
 }
