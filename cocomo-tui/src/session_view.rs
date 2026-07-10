@@ -23,7 +23,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Row, Table},
 };
 
-use crate::app::{AppMode, Focus, SessionAction, SessionView};
+use crate::app::{AppMode, Focus, SessionAction, SessionType, SessionView};
 
 /// Render the active session's content (header, main table, footer).
 pub fn render_session(frame: &mut Frame, area: Rect, session: &SessionView) {
@@ -311,6 +311,11 @@ pub fn handle_session_key(
         return SessionAction::None;
     }
 
+    // Route to text-specific handler for text diff sessions.
+    if session.session_type == SessionType::TextCompare {
+        return handle_text_key(session, key);
+    }
+
     match key.code {
         KeyCode::Char('q') | KeyCode::Char('Q') => {
             // The main loop handles quit via a separate global key handler.
@@ -462,6 +467,89 @@ fn handle_backspace(_session: &SessionView) -> SessionAction {
 }
 
 // ---------------------------------------------------------------------------
+// Text diff key handling
+// ---------------------------------------------------------------------------
+
+/// Handle keys specific to text diff sessions.
+///
+/// Returns [`SessionAction::None`] for all handled keys; text diff sessions
+/// don't trigger any session-level actions.
+pub fn handle_text_key(
+    session: &mut SessionView,
+    key: KeyEvent,
+) -> SessionAction {
+    let max_lines =
+        std::cmp::max(session.left_lines.len(), session.right_lines.len());
+
+    match key.code {
+        KeyCode::Char('j') | KeyCode::Down => {
+            navigate(session, 1);
+            SessionAction::None
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            navigate(session, -1);
+            SessionAction::None
+        }
+        KeyCode::Char('g') => {
+            session.table_state.select(Some(0));
+            SessionAction::None
+        }
+        KeyCode::Char('G') => {
+            if max_lines > 0 {
+                session.table_state.select(Some(max_lines - 1));
+            }
+            SessionAction::None
+        }
+        KeyCode::Char('n') => {
+            // Jump to the next difference group.
+            let groups = diff_group_starts(session);
+            if groups.is_empty() {
+                return SessionAction::None;
+            }
+
+            let current = session.table_state.selected().unwrap_or(0);
+            // Find the first group start > current.
+            if let Some(&target) =
+                groups.iter().skip_while(|&&g| g <= current).next()
+            {
+                session.table_state.select(Some(target));
+            } else {
+                // Wrap to the first group.
+                session.table_state.select(Some(groups[0]));
+            }
+            SessionAction::None
+        }
+        KeyCode::Char('N') => {
+            // Jump to the previous difference group.
+            let groups = diff_group_starts(session);
+            if groups.is_empty() {
+                return SessionAction::None;
+            }
+
+            let current = session.table_state.selected().unwrap_or(0);
+            // Find the last group start < current.
+            if let Some(&target) =
+                groups.iter().rev().filter(|&&g| g < current).next()
+            {
+                session.table_state.select(Some(target));
+            } else {
+                // Wrap to the last group.
+                session.table_state.select(Some(*groups.last().unwrap()));
+            }
+            SessionAction::None
+        }
+        KeyCode::Char('l') | KeyCode::Tab => {
+            session.focus = match session.focus {
+                Focus::Left => Focus::Right,
+                Focus::Right => Focus::Left,
+            };
+            SessionAction::None
+        }
+        _ => SessionAction::None,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -588,6 +676,70 @@ fn diff_line_numbers(
     }
 
     numbers
+}
+
+/// Return the first row index of each contiguous difference group.
+///
+/// Each element is the row index (0-based into the merged view) where a
+/// difference group starts. These are the targets for n/N navigation.
+fn diff_group_starts(session: &SessionView) -> Vec<usize> {
+    let diff_numbers = diff_line_numbers(session);
+
+    let max_lines =
+        std::cmp::max(session.left_lines.len(), session.right_lines.len());
+
+    // Find all rows that contain at least one diff line.
+    let diff_rows: Vec<usize> = (0..max_lines)
+        .filter(|&i| {
+            let left_is_diff = session
+                .left_lines
+                .get(i)
+                .is_some_and(|l| diff_numbers.contains(&l.number));
+            let right_is_diff = session
+                .right_lines
+                .get(i)
+                .is_some_and(|l| diff_numbers.contains(&l.number));
+            left_is_diff || right_is_diff
+        })
+        .collect();
+
+    // Group contiguous rows and return the first index of each group.
+    let mut groups = Vec::new();
+    let mut i = 0;
+    while i < diff_rows.len() {
+        groups.push(diff_rows[i]);
+        while i + 1 < diff_rows.len() && diff_rows[i + 1] == diff_rows[i] + 1 {
+            i += 1;
+        }
+        i += 1;
+    }
+
+    groups
+}
+
+/// Return the current diff group index (1-based) and total count.
+///
+/// Scans backward from the current selection to find which contiguous
+/// difference group the cursor is on. Returns `(current, total)` where
+/// `current` is 1-based. Returns `(0, total)` if no group is selected.
+fn current_diff_position(session: &SessionView) -> (usize, usize) {
+    let groups = diff_group_starts(session);
+    let total = groups.len();
+    if total == 0 {
+        return (0, 0);
+    }
+
+    let selected = session.table_state.selected().unwrap_or(0);
+
+    // Find the group whose start is <= selected.
+    for (i, &start) in groups.iter().enumerate().rev() {
+        if selected >= start {
+            return (i + 1, total);
+        }
+    }
+
+    // Selected is before the first group.
+    (0, total)
 }
 
 fn render_text_main(frame: &mut Frame, area: Rect, session: &SessionView) {
@@ -755,15 +907,20 @@ fn render_text_main(frame: &mut Frame, area: Rect, session: &SessionView) {
 }
 
 fn render_text_footer(frame: &mut Frame, area: Rect, session: &SessionView) {
-    let diff_count = session
-        .text_diff
-        .as_ref()
-        .map(|d| d.differences.len())
-        .unwrap_or(0);
+    let (current, total) = current_diff_position(session);
+
+    let position_str = if total > 0 {
+        if current > 0 {
+            format!("Diff {current}/{total}")
+        } else {
+            format!("Diff 0/{total} (no diff selected)")
+        }
+    } else {
+        "No differences".to_string()
+    };
 
     let lines = vec![Line::from(format!(
-        "Differences: {}  |  Left: {} lines  |  Right: {} lines",
-        diff_count,
+        "{position_str}  |  Left: {} lines  |  Right: {} lines",
         session.left_lines.len(),
         session.right_lines.len(),
     ))];

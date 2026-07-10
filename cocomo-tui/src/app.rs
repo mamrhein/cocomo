@@ -40,7 +40,6 @@ pub enum AppMode {
 }
 
 /// The type of content a session displays.
-#[allow(dead_code)] // TextCompare is a stub for M5.2.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum SessionType {
     /// Two-way folder comparison.
