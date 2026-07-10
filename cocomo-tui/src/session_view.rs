@@ -1085,20 +1085,8 @@ fn render_text_main(frame: &mut Frame, area: Rect, session: &SessionView) {
                 .unwrap_or(Importance::Ignored);
 
             // Diff markers.
-            let left_marker = if left_is_diff {
-                "▶ "
-            } else if left_line.is_none() {
-                "  "
-            } else {
-                "  "
-            };
-            let right_marker = if right_is_diff {
-                "▶ "
-            } else if right_line.is_none() {
-                "  "
-            } else {
-                "  "
-            };
+            let left_marker = if left_is_diff { "▶ " } else { "  " };
+            let right_marker = if right_is_diff { "▶ " } else { "  " };
 
             let left_style = if left_is_diff {
                 Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
