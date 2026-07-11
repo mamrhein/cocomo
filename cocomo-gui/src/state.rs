@@ -52,6 +52,8 @@ pub struct AppState {
     session_type: SessionType,
 }
 
+// TODO: remove this
+#[allow(dead_code)]
 impl AppState {
     /// Create a new application state with the given paths.
     pub fn new(
@@ -222,9 +224,9 @@ impl AppState {
             let async_app = cx.clone();
             async move {
                 let result = task.await;
-                let _ = async_app.update(|cx| {
+                async_app.update(|cx| {
                     if let Some(state) = this.upgrade() {
-                        let _ = state.update(cx, |state, _| {
+                        state.update(cx, |state, _| {
                             state.loading = false;
                             match result {
                                 Ok(comparison) => {
@@ -252,21 +254,21 @@ impl AppState {
     /// Select a row by index.
     #[allow(dead_code)]
     pub fn select_row(&mut self, index: usize, cx: &mut Context<Self>) {
-        if let Some(comparison) = &self.comparison {
-            if index < comparison.entries.len() {
-                self.selected_index = index;
-                cx.notify();
-            }
+        if let Some(comparison) = &self.comparison
+            && index < comparison.entries.len()
+        {
+            self.selected_index = index;
+            cx.notify();
         }
     }
 
     /// Navigate down by one row.
     pub fn select_next(&mut self, cx: &mut Context<Self>) {
-        if let Some(comparison) = &self.comparison {
-            if self.selected_index + 1 < comparison.entries.len() {
-                self.selected_index += 1;
-                cx.notify();
-            }
+        if let Some(comparison) = &self.comparison
+            && self.selected_index + 1 < comparison.entries.len()
+        {
+            self.selected_index += 1;
+            cx.notify();
         }
     }
 
@@ -286,9 +288,9 @@ impl AppState {
         };
 
         // Only navigate into directories.
-        let is_dir = entry.left.as_ref().map_or(false, |l| l.is_dir)
-            || entry.right.as_ref().map_or(false, |r| r.is_dir);
-        if !is_dir {
+        if !(entry.left.as_ref().is_some_and(|l| l.is_dir)
+            || entry.right.as_ref().is_some_and(|r| r.is_dir))
+        {
             return;
         }
 

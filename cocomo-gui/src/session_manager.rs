@@ -88,6 +88,8 @@ pub struct GuiSessionManager {
     recent_sessions: Vec<SessionConfig>,
 }
 
+// TODO: remove this
+#[allow(dead_code)]
 impl GuiSessionManager {
     /// Create a new session manager that stores sessions in the given
     /// directory.
@@ -357,15 +359,13 @@ impl GuiSessionManager {
                                         .extension()
                                         .and_then(|e| e.to_str())
                                         == Some("bcs")
-                                    {
-                                        if let Ok(config) =
+                                        && let Ok(config) =
                                             SessionConfig::load_from_file(
                                                 &path,
                                             )
                                             .await
-                                        {
-                                            found.push(config);
-                                        }
+                                    {
+                                        found.push(config);
                                     }
                                 }
                                 found
@@ -373,9 +373,9 @@ impl GuiSessionManager {
                             Err(_) => Vec::new(),
                         };
 
-                    let _ = async_app.update(|cx| {
+                    async_app.update(|cx| {
                         if let Some(manager) = weak.upgrade() {
-                            let _ = manager.update(cx, |m, cx| {
+                            manager.update(cx, |m, cx| {
                                 m.recent_sessions = configs;
                                 cx.notify();
                             });
@@ -451,8 +451,7 @@ pub fn create_default_manager(cx: &mut App) -> Entity<GuiSessionManager> {
 /// Return the default session directory path.
 fn default_session_dir() -> PathBuf {
     if let Some(config_dir) = dirs::config_dir() {
-        let dir = config_dir.join("cocomo").join("sessions");
-        dir
+        config_dir.join("cocomo").join("sessions")
     } else {
         PathBuf::from(".cocomo/sessions")
     }

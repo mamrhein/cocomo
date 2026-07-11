@@ -175,17 +175,19 @@ impl Render for FolderCompareView {
 
         // Build the tab bar callbacks using Entity::update(&mut App).
         let mgr = self.session_manager.clone();
+        #[allow(clippy::type_complexity)]
         let on_activate: Arc<dyn Fn(usize, &mut App) + Send + Sync> =
             Arc::new(move |index: usize, app: &mut App| {
-                let _ = mgr.update(app, |m, cx| {
+                mgr.update(app, |m, cx| {
                     m.activate_session(index, cx);
                 });
             });
 
         let mgr = self.session_manager.clone();
+        #[allow(clippy::type_complexity)]
         let on_close: Arc<dyn Fn(usize, &mut App) + Send + Sync> =
             Arc::new(move |index: usize, app: &mut App| {
-                let _ = mgr.update(app, |m, cx| {
+                mgr.update(app, |m, cx| {
                     m.close_session(index, cx);
                 });
             });
@@ -193,7 +195,7 @@ impl Render for FolderCompareView {
         let mgr = self.session_manager.clone();
         let on_new: Arc<dyn Fn(&mut App) + Send + Sync> =
             Arc::new(move |app: &mut App| {
-                let _ = mgr.update(app, |m, cx| {
+                mgr.update(app, |m, cx| {
                     m.add_new_session(cx);
                 });
             });
@@ -484,13 +486,13 @@ impl EntryRowData {
         let has_right = entry.right.is_some();
         let left_size = entry.left.as_ref().map(|l| l.size);
         let right_size = entry.right.as_ref().map(|r| r.size);
-        let is_dir = entry.left.as_ref().map_or(false, |l| l.is_dir)
-            || entry.right.as_ref().map_or(false, |r| r.is_dir);
+        let is_dir = entry.left.as_ref().is_some_and(|l| l.is_dir)
+            || entry.right.as_ref().is_some_and(|r| r.is_dir);
 
         Self {
             index,
             name: SharedString::from(entry.name.clone()),
-            status: entry.status.clone(),
+            status: entry.status,
             is_dir,
             is_selected,
             left_size,
