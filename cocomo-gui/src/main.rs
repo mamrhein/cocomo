@@ -22,9 +22,10 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use gpui::{
-    App, AppContext, Application, Bounds, SharedString, WindowBounds,
-    WindowOptions, px, size,
+    App, AppContext, Bounds, SharedString, WindowBounds, WindowOptions, px,
+    size,
 };
+use gpui_platform::application as create_application;
 
 use crate::{
     session_manager::create_default_manager, state::AppState,
@@ -40,7 +41,7 @@ fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let (left, right) = parse_args(&args)?;
 
-    Application::new().run(|cx: &mut App| {
+    create_application().run(|cx: &mut App| {
         // Center the window on screen.
         let bounds = Bounds::centered(None, size(px(1200.), px(800.)), cx);
 

@@ -171,7 +171,7 @@ impl Render for FolderCompareView {
         }
 
         // Focus the app state for keyboard navigation.
-        window.focus(&self.state.focus_handle(cx));
+        window.focus(&self.state.focus_handle(cx), cx);
 
         // Build the tab bar callbacks using Entity::update(&mut App).
         let mgr = self.session_manager.clone();
@@ -365,7 +365,7 @@ impl FolderCompareView {
                                 },
                             )
                             .size_full()
-                            .track_scroll(scroll_handle),
+                            .track_scroll(&scroll_handle),
                         )
                     }),
             )
