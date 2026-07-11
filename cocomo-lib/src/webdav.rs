@@ -22,6 +22,7 @@
 use std::{
     collections::{HashMap, hash_map::DefaultHasher},
     ffi::OsStr,
+    fmt,
     hash::{Hash, Hasher},
     ops::Range,
     path::{Path, PathBuf},
@@ -59,7 +60,7 @@ pub type WebDavFileId = FileId<u64>;
 /// WebDAV provider configuration.
 ///
 /// Holds the parameters needed to connect to a WebDAV server.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct WebDavConfig {
     /// Base URL of the WebDAV server (e.g., `"https://dav.example.com/remote/"`).
     pub base_url: String,
@@ -71,6 +72,18 @@ pub struct WebDavConfig {
     pub tls: bool,
     /// Optional root path within the WebDAV share.
     pub root_path: Option<PathBuf>,
+}
+
+impl fmt::Debug for WebDavConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("WebDavConfig")
+            .field("base_url", &self.base_url)
+            .field("username", &self.username)
+            .field("password", &"[REDACTED]")
+            .field("tls", &self.tls)
+            .field("root_path", &self.root_path)
+            .finish()
+    }
 }
 
 /// WebDAV filesystem provider.
@@ -433,5 +446,21 @@ mod tests {
         let result =
             rt.block_on(fs.symlink(Path::new("/target"), Path::new("/link")));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn webdav_config_debug_redacts_password() {
+        let config = WebDavConfig {
+            base_url: "https://dav.example.com/".into(),
+            username: Some("user".into()),
+            password: Some("secret-pass".into()),
+            tls: true,
+            root_path: None,
+        };
+        let debug = format!("{config:?}");
+        assert!(debug.contains("dav.example.com"));
+        assert!(debug.contains("user"));
+        assert!(debug.contains("REDACTED"));
+        assert!(!debug.contains("secret-pass"), "password should not appear in debug output");
     }
 }

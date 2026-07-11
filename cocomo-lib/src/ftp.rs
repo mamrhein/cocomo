@@ -28,6 +28,7 @@
 use std::{
     collections::{HashMap, hash_map::DefaultHasher},
     ffi::OsStr,
+    fmt,
     hash::{Hash, Hasher},
     io,
     ops::Range,
@@ -79,7 +80,7 @@ pub type FtpFileId = FileId<u64>;
 /// FTP provider configuration.
 ///
 /// Holds the parameters needed to connect to an FTP server.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct FtpConfig {
     /// Server hostname or IP address.
     pub host: String,
@@ -93,6 +94,19 @@ pub struct FtpConfig {
     pub tls: bool,
     /// Optional initial working directory.
     pub root_path: Option<PathBuf>,
+}
+
+impl fmt::Debug for FtpConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FtpConfig")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("username", &self.username)
+            .field("password", &"[REDACTED]")
+            .field("tls", &self.tls)
+            .field("root_path", &self.root_path)
+            .finish()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1615,5 +1629,25 @@ mod tests {
         let err = result.unwrap_err();
         let msg = format!("{err}");
         assert!(msg.contains("secure"));
+    }
+
+    #[test]
+    fn ftp_config_debug_redacts_password() {
+        let config = FtpConfig {
+            host: "ftp.example.com".into(),
+            port: 21,
+            username: "user".into(),
+            password: "xS3cR3tX".into(),
+            tls: false,
+            root_path: None,
+        };
+        let debug = format!("{config:?}");
+        assert!(debug.contains("ftp.example.com"));
+        assert!(debug.contains("user"));
+        assert!(debug.contains("REDACTED"));
+        assert!(
+            !debug.contains("xS3cR3tX"),
+            "password should not appear in debug output"
+        );
     }
 }
