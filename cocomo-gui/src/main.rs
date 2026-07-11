@@ -13,9 +13,11 @@
 //! indicators, and directory tree browsing. Built on gpui for GPU-accelerated
 //! rendering.
 
+mod menus;
 mod session_manager;
 mod state;
 mod tab_bar;
+mod toolbar;
 mod ui;
 
 use std::path::PathBuf;
@@ -28,8 +30,10 @@ use gpui::{
 use gpui_platform::application as create_application;
 
 use crate::{
-    session_manager::create_default_manager, state::AppState,
-    ui::FolderCompareView,
+    menus::{menu_bindings, register_menu_handlers, set_app_menus},
+    session_manager::create_default_manager,
+    state::AppState,
+    ui::{FolderCompareView, folder_compare_bindings},
 };
 
 // ---------------------------------------------------------------------------
@@ -47,6 +51,18 @@ fn main() -> Result<()> {
 
         // Create the session manager.
         let session_manager = create_default_manager(cx);
+
+        // Set up the application menu bar.
+        set_app_menus(cx);
+
+        // Register global menu action handlers.
+        register_menu_handlers(session_manager.clone(), cx);
+
+        // Register global menu key bindings.
+        cx.bind_keys(menu_bindings());
+
+        // Register folder compare key bindings.
+        cx.bind_keys(folder_compare_bindings());
 
         // Add an initial session with the CLI-provided paths.
         session_manager.update(cx, |mgr, cx| {

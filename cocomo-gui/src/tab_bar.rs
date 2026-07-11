@@ -55,7 +55,7 @@ impl TabBar {
         on_activate: ActivateCallback,
         on_close: CloseCallback,
         on_new: NewCallback,
-    ) -> impl gpui::IntoElement {
+    ) -> impl gpui::IntoElement + use<P> {
         let mgr = self.session_manager.read(cx);
         let active_index = mgr.active_index();
         let sessions = mgr.open_sessions().to_vec();

@@ -21,9 +21,11 @@ use gpui::{
     px, rgb, uniform_list,
 };
 
+use crate::menus::{ReloadCompare, SaveSession};
 use crate::session_manager::GuiSessionManager;
 use crate::state::{AppState, StatusSummary};
 use crate::tab_bar::TabBar;
+use crate::toolbar::Toolbar;
 
 // ---------------------------------------------------------------------------
 // Actions
@@ -142,6 +144,33 @@ impl FolderCompareView {
         });
     }
 
+    /// Handle the ReloadCompare action dispatched from menus or toolbar.
+    fn handle_reload_compare(
+        &mut self,
+        _: &ReloadCompare,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.state.update(cx, |state, cx| {
+            state.reload(cx);
+        });
+    }
+
+    /// Handle the SaveSession action dispatched from menus or toolbar.
+    fn handle_save_session(
+        &mut self,
+        _: &SaveSession,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let name = self.state.read(cx).title().to_string();
+        let config = self.state.read(cx).to_config(name.clone());
+
+        self.session_manager.update(cx, |mgr, cx| {
+            mgr.update_active_config(config, cx);
+        });
+    }
+
     // -----------------------------------------------------------------------
     // Session callbacks (used by TabBar)
     // -----------------------------------------------------------------------
@@ -204,6 +233,10 @@ impl Render for FolderCompareView {
         let tab_bar_element =
             tab_bar.render(window, cx, on_activate, on_close, on_new);
 
+        // Build the toolbar.
+        let mut toolbar = Toolbar::new();
+        let toolbar_element = toolbar.render(window, cx);
+
         div()
             .key_context("FolderCompare")
             .flex()
@@ -214,18 +247,23 @@ impl Render for FolderCompareView {
             .text_sm()
             // Tab bar
             .child(tab_bar_element)
+            // Toolbar
+            .child(toolbar_element)
             // Header bar
             .child(self.render_header(cx))
             // Main content area
             .child(self.render_content(window, cx))
             // Status bar
             .child(self.render_status_bar(cx))
-            // Action handlers
+            // View-scoped action handlers (keyboard shortcuts).
             .on_action(cx.listener(Self::select_next))
             .on_action(cx.listener(Self::select_prev))
             .on_action(cx.listener(Self::enter_dir))
             .on_action(cx.listener(Self::leave_dir))
             .on_action(cx.listener(Self::reload))
+            // Menu-dispatched actions that need view context.
+            .on_action(cx.listener(Self::handle_reload_compare))
+            .on_action(cx.listener(Self::handle_save_session))
     }
 }
 
