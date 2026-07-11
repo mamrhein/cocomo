@@ -22,14 +22,14 @@ path = "src/main.rs"
 
 [dependencies]
 cocomo-lib = { path = "../cocomo-lib" }
-gpui = { git = "https://github.com/zed-industries/zed", package = "gpui", version = "*" }
+gpui = { git = "https://github.com/zed-industries/zed", package = "gpui", tag = "v1.10.2" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 anyhow = "1"
 log = "0.4"
 dirs = "6"
 
 [target.'cfg(target_os = "linux")'.dependencies]
-gpui_platform = { git = "https://github.com/zed-industries/zed", package = "gpui_platform", version = "*", features = ["wayland"] }
+gpui_platform = { git = "https://github.com/zed-industries/zed", package = "gpui_platform", tag = "v1.10.2", features = ["wayland"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-gpui_platform = { git = "https://github.com/zed-industries/zed", package = "gpui_platform", version = "*", features = ["font-kit"] }
+gpui_platform = { git = "https://github.com/zed-industries/zed", package = "gpui_platform", tag = "v1.10.2", features = ["font-kit"] }
