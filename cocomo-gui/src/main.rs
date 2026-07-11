@@ -13,7 +13,9 @@
 //! indicators, and directory tree browsing. Built on gpui for GPU-accelerated
 //! rendering.
 
+mod session_manager;
 mod state;
+mod tab_bar;
 mod ui;
 
 use std::path::PathBuf;
@@ -24,7 +26,10 @@ use gpui::{
     WindowOptions, px, size,
 };
 
-use crate::{state::AppState, ui::FolderCompareView};
+use crate::{
+    session_manager::create_default_manager, state::AppState,
+    ui::FolderCompareView,
+};
 
 // ---------------------------------------------------------------------------
 // Main entry point
@@ -38,6 +43,14 @@ fn main() -> Result<()> {
     Application::new().run(|cx: &mut App| {
         // Center the window on screen.
         let bounds = Bounds::centered(None, size(px(1200.), px(800.)), cx);
+
+        // Create the session manager.
+        let session_manager = create_default_manager(cx);
+
+        // Add an initial session with the CLI-provided paths.
+        session_manager.update(cx, |mgr, cx| {
+            mgr.add_new_session(cx);
+        });
 
         cx.open_window(
             WindowOptions {
@@ -57,7 +70,13 @@ fn main() -> Result<()> {
                 });
 
                 // Create the folder compare view as the window root.
-                cx.new(|cx| FolderCompareView::new(app_state, cx))
+                cx.new(|cx| {
+                    FolderCompareView::new(
+                        app_state,
+                        session_manager.clone(),
+                        cx,
+                    )
+                })
             },
         )
         .unwrap();

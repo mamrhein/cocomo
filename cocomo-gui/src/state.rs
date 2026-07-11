@@ -17,7 +17,8 @@ use std::path::PathBuf;
 
 use cocomo_lib::{
     CompareConfig, ContentCache, DirComparison, DirEntry, DirEntryStatus,
-    LocalFs, compare_directories_node,
+    LocalFs, ProviderRef, SessionConfig, SessionSettings, SessionType,
+    compare_directories_node,
 };
 use gpui::{
     App, AppContext as _, Context, FocusHandle, SharedString, WeakEntity,
@@ -45,6 +46,10 @@ pub struct AppState {
     loading: bool,
     /// Error message, if any.
     error: Option<String>,
+    /// Per-session comparison settings.
+    settings: SessionSettings,
+    /// Session type.
+    session_type: SessionType,
 }
 
 impl AppState {
@@ -64,6 +69,28 @@ impl AppState {
             selected_index: 0,
             loading: false,
             error: None,
+            settings: SessionSettings::default(),
+            session_type: SessionType::DirCompare,
+        }
+    }
+
+    /// Create a new application state from a session config.
+    pub fn from_config(
+        config: &SessionConfig,
+        title: SharedString,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self {
+            focus_handle: cx.focus_handle(),
+            title,
+            left_path: config.left.path.clone(),
+            right_path: config.right.path.clone(),
+            comparison: None,
+            selected_index: 0,
+            loading: false,
+            error: None,
+            settings: config.settings.clone(),
+            session_type: config.session_type,
         }
     }
 
@@ -117,6 +144,42 @@ impl AppState {
     /// Return the number of entries in the comparison.
     pub fn entry_count(&self) -> usize {
         self.comparison.as_ref().map_or(0, |c| c.entries.len())
+    }
+
+    /// Return the session type.
+    #[allow(dead_code)]
+    pub fn session_type(&self) -> SessionType {
+        self.session_type
+    }
+
+    /// Return the session settings.
+    #[allow(dead_code)]
+    pub fn settings(&self) -> &SessionSettings {
+        &self.settings
+    }
+
+    /// Convert the current state to a serializable session config.
+    pub fn to_config(&self, name: String) -> SessionConfig {
+        SessionConfig {
+            name,
+            session_type: self.session_type,
+            left: ProviderRef {
+                provider: "local".to_string(),
+                path: self.left_path.clone(),
+            },
+            right: ProviderRef {
+                provider: "local".to_string(),
+                path: self.right_path.clone(),
+            },
+            center: None,
+            settings: self.settings.clone(),
+        }
+    }
+
+    /// Update the paths from new values (e.g., after navigating).
+    pub fn update_paths(&mut self, left: PathBuf, right: PathBuf) {
+        self.left_path = left;
+        self.right_path = right;
     }
 
     // -----------------------------------------------------------------------

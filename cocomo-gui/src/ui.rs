@@ -12,7 +12,7 @@
 //! This module provides the directory comparison view, including
 //! status indicators, navigation, and entry rendering.
 
-use std::ops::Range;
+use std::{ops::Range, sync::Arc};
 
 use cocomo_lib::DirEntryStatus;
 use gpui::{
@@ -21,7 +21,9 @@ use gpui::{
     px, rgb, uniform_list,
 };
 
+use crate::session_manager::GuiSessionManager;
 use crate::state::{AppState, StatusSummary};
+use crate::tab_bar::TabBar;
 
 // ---------------------------------------------------------------------------
 // Actions
@@ -57,6 +59,8 @@ pub fn folder_compare_bindings() -> Vec<KeyBinding> {
 pub struct FolderCompareView {
     /// Handle to the application state.
     state: Entity<AppState>,
+    /// Handle to the session manager.
+    session_manager: Entity<GuiSessionManager>,
     /// Scroll handle for the entry list.
     scroll_handle: UniformListScrollHandle,
     /// Whether key bindings have been registered.
@@ -65,7 +69,11 @@ pub struct FolderCompareView {
 
 impl FolderCompareView {
     /// Create a new folder compare view.
-    pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        state: Entity<AppState>,
+        session_manager: Entity<GuiSessionManager>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         // Trigger auto-load of comparison if not already loaded.
         state.update(cx, |state, cx| {
             state.trigger_auto_load(cx);
@@ -73,6 +81,7 @@ impl FolderCompareView {
 
         Self {
             state,
+            session_manager,
             scroll_handle: UniformListScrollHandle::new(),
             bindings_registered: false,
         }
@@ -132,6 +141,21 @@ impl FolderCompareView {
             state.reload(cx);
         });
     }
+
+    // -----------------------------------------------------------------------
+    // Session callbacks (used by TabBar)
+    // -----------------------------------------------------------------------
+
+    /// Save the current session.
+    #[allow(dead_code)]
+    fn save_session(&mut self, cx: &mut Context<Self>) {
+        let name = self.state.read(cx).title().to_string();
+        let config = self.state.read(cx).to_config(name.clone());
+
+        self.session_manager.update(cx, |mgr, cx| {
+            mgr.update_active_config(config, cx);
+        });
+    }
 }
 
 impl Render for FolderCompareView {
@@ -149,6 +173,35 @@ impl Render for FolderCompareView {
         // Focus the app state for keyboard navigation.
         window.focus(&self.state.focus_handle(cx));
 
+        // Build the tab bar callbacks using Entity::update(&mut App).
+        let mgr = self.session_manager.clone();
+        let on_activate: Arc<dyn Fn(usize, &mut App) + Send + Sync> =
+            Arc::new(move |index: usize, app: &mut App| {
+                let _ = mgr.update(app, |m, cx| {
+                    m.activate_session(index, cx);
+                });
+            });
+
+        let mgr = self.session_manager.clone();
+        let on_close: Arc<dyn Fn(usize, &mut App) + Send + Sync> =
+            Arc::new(move |index: usize, app: &mut App| {
+                let _ = mgr.update(app, |m, cx| {
+                    m.close_session(index, cx);
+                });
+            });
+
+        let mgr = self.session_manager.clone();
+        let on_new: Arc<dyn Fn(&mut App) + Send + Sync> =
+            Arc::new(move |app: &mut App| {
+                let _ = mgr.update(app, |m, cx| {
+                    m.add_new_session(cx);
+                });
+            });
+
+        let mut tab_bar = TabBar::new(self.session_manager.clone());
+        let tab_bar_element =
+            tab_bar.render(window, cx, on_activate, on_close, on_new);
+
         div()
             .key_context("FolderCompare")
             .flex()
@@ -157,6 +210,8 @@ impl Render for FolderCompareView {
             .bg(rgb(0x1e1e2e))
             .text_color(rgb(0xcdd6f4))
             .text_sm()
+            // Tab bar
+            .child(tab_bar_element)
             // Header bar
             .child(self.render_header(cx))
             // Main content area
