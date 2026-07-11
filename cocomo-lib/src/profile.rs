@@ -33,15 +33,15 @@ use chacha20poly1305::{
     ChaCha20Poly1305, Key, Nonce,
     aead::{Aead, KeyInit, Payload},
 };
-use getrandom::getrandom;
-use hmac::{Hmac, Mac};
+use getrandom::{SysRng, rand_core::TryRng};
+use hmac::{Mac, SimpleHmac};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::Sha256;
 use thiserror::Error;
 
 use crate::provider::Provider;
 
-type HmacSha256 = Hmac<Sha256>;
+type HmacSha256 = SimpleHmac<Sha256>;
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -466,7 +466,7 @@ impl ProfileStore {
 
     /// Derive a per-profile encryption key from the master key.
     fn derive_key(&self, profile_id: &str) -> Key {
-        let mut mac: HmacSha256 = hmac::Mac::new_from_slice(&self.master_key)
+        let mut mac: HmacSha256 = KeyInit::new_from_slice(&self.master_key)
             .expect("HMAC can accept keys of any size");
         mac.update(profile_id.as_bytes());
         let result = mac.finalize().into_bytes();
@@ -491,18 +491,19 @@ impl ProfileStore {
 
         for (k, v) in secrets.0.iter() {
             let mut nonce_bytes = [0u8; 12];
-            getrandom(&mut nonce_bytes).map_err(|e| {
+            SysRng.try_fill_bytes(&mut nonce_bytes).map_err(|e| {
                 ProfileError::EncryptionFailed {
                     profile_id: profile_id.to_string(),
                     reason: format!("failed to generate nonce: {e}"),
                 }
             })?;
-            let nonce = Nonce::from_slice(&nonce_bytes);
+            let nonce = Nonce::try_from(&nonce_bytes[..])
+                .expect("nonce is exactly 12 bytes");
             let payload = Payload {
                 msg: v.as_bytes(),
                 aad: k.as_bytes(),
             };
-            let ciphertext = cipher.encrypt(nonce, payload).map_err(|e| {
+            let ciphertext = cipher.encrypt(&nonce, payload).map_err(|e| {
                 ProfileError::EncryptionFailed {
                     profile_id: profile_id.to_string(),
                     reason: e.to_string(),
@@ -511,7 +512,7 @@ impl ProfileStore {
 
             // Pack nonce + ciphertext into base64.
             let mut packed = Vec::with_capacity(12 + ciphertext.len());
-            packed.extend_from_slice(nonce);
+            packed.extend_from_slice(&nonce);
             packed.extend_from_slice(&ciphertext);
             encrypted.insert(k.clone(), B64.encode(&packed));
         }
@@ -547,13 +548,14 @@ impl ProfileStore {
             }
 
             let (nonce_bytes, ciphertext) = packed.split_at(12);
-            let nonce = Nonce::from_slice(nonce_bytes);
+            let nonce = Nonce::try_from(nonce_bytes)
+                .expect("nonce is exactly 12 bytes");
             let payload = Payload {
                 msg: ciphertext,
                 aad: k.as_bytes(),
             };
 
-            let plaintext = cipher.decrypt(nonce, payload).map_err(|e| {
+            let plaintext = cipher.decrypt(&nonce, payload).map_err(|e| {
                 ProfileError::DecryptionFailed {
                     profile_id: profile_id.to_string(),
                     reason: e.to_string(),
@@ -674,8 +676,10 @@ pub fn derive_master_key() -> ProfileResult<Vec<u8>> {
         return Ok(bytes);
     }
     let mut key = vec![0u8; 32];
-    getrandom(&mut key).map_err(|e| ProfileError::EntropyUnavailable {
-        reason: e.to_string(),
+    SysRng.try_fill_bytes(&mut key).map_err(|e| {
+        ProfileError::EntropyUnavailable {
+            reason: e.to_string(),
+        }
     })?;
     Ok(key)
 }
