@@ -19,7 +19,7 @@ path = "src/main.rs"
 [dependencies]
 cocomo-lib = { path = "../cocomo-lib" }
 crossterm = "0.29"
-dirs = "5"
+dirs = "6"
 ratatui = { version = "0.30", default-features = false, features = [
     "crossterm_0_29",
 ] }

@@ -46,7 +46,7 @@ getrandom = "0.2"
 hmac = "0.12"
 sha2 = "0.10"
 async_ftp = "6.0.0"
-dirs = "5"
+dirs = "6"
 hex = "0.4"
 
 [dev-dependencies]
