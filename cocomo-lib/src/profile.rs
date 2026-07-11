@@ -136,7 +136,7 @@ impl fmt::Display for ProviderType {
 /// In memory, this is just a plain `BTreeMap<String, String>`. When
 /// serialized, values are encrypted with ChaCha20-Poly1305 and stored as
 /// base64 strings.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Default, Eq, PartialEq)]
 pub struct EncryptedSecrets(BTreeMap<String, String>);
 
 impl EncryptedSecrets {
@@ -186,6 +186,14 @@ impl EncryptedSecrets {
     }
 }
 
+impl fmt::Debug for EncryptedSecrets {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Show key names but never the secret values.
+        let keys: Vec<_> = self.0.keys().map(|k| k.as_str()).collect();
+        write!(f, "EncryptedSecrets {{ {:?} }}", keys)
+    }
+}
+
 impl Serialize for EncryptedSecrets {
     fn serialize<S: Serializer>(
         &self,
@@ -214,7 +222,7 @@ impl<'de> Deserialize<'de> for EncryptedSecrets {
 /// Profiles store all the settings and secrets needed to connect to a remote
 /// filesystem. They are referenced by ID in sessions, snapshots, and CLI
 /// commands.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Profile {
     /// Unique profile identifier.
     pub id: String,
@@ -258,6 +266,17 @@ impl Profile {
 impl fmt::Display for Profile {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{} ({})", self.id, self.provider_type)
+    }
+}
+
+impl fmt::Debug for Profile {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Profile")
+            .field("id", &self.id)
+            .field("provider_type", &self.provider_type)
+            .field("settings", &self.settings)
+            .field("secrets", &"[REDACTED]")
+            .finish()
     }
 }
 
@@ -1203,5 +1222,40 @@ mod tests {
             "permissions should remain owner-read/write only after update"
         );
         cleanup(&dir);
+    }
+
+    #[test]
+    fn encrypted_secrets_debug_redacts_values() {
+        let mut secrets = EncryptedSecrets::new();
+        secrets.set("password".into(), "super-secret".into());
+        secrets.set("token".into(), "abc123".into());
+
+        let debug = format!("{secrets:?}");
+        assert!(debug.contains("password"));
+        assert!(debug.contains("token"));
+        assert!(
+            !debug.contains("super-secret"),
+            "secret value should not appear in debug output"
+        );
+        assert!(
+            !debug.contains("abc123"),
+            "secret value should not appear in debug output"
+        );
+    }
+
+    #[test]
+    fn profile_debug_redacts_secrets() {
+        let mut profile = Profile::new("debug-test", ProviderType::Ftp);
+        profile.set_setting("host".into(), "ftp.example.com".into());
+        profile.secrets.set("password".into(), "my-password".into());
+
+        let debug = format!("{profile:?}");
+        assert!(debug.contains("debug-test"));
+        assert!(debug.contains("ftp.example.com"));
+        assert!(debug.contains("REDACTED"));
+        assert!(
+            !debug.contains("my-password"),
+            "secret should not appear in debug output"
+        );
     }
 }
