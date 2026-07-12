@@ -21,7 +21,8 @@ use cocomo_lib::{
     compare_directories_node,
 };
 use gpui::{
-    App, AppContext as _, Context, FocusHandle, SharedString, WeakEntity,
+    App, AppContext, AppContext as _, Context, FocusHandle, SharedString,
+    WeakEntity,
 };
 
 // ---------------------------------------------------------------------------
@@ -100,8 +101,12 @@ impl AppState {
     // Public accessors
     // -----------------------------------------------------------------------
 
+    /// Return the focus handle for keyboard navigation.
+    pub fn focus_handle(&self, _cx: &App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+
     /// Return the window title.
-    #[allow(dead_code)]
     pub fn title(&self) -> &SharedString {
         &self.title
     }

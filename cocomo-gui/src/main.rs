@@ -17,23 +17,22 @@ mod menus;
 mod session_manager;
 mod state;
 mod tab_bar;
+mod tabview;
+mod text_diff;
 mod toolbar;
 mod ui;
 
 use std::path::PathBuf;
 
 use anyhow::Result;
-use gpui::{
-    App, AppContext, Bounds, SharedString, WindowBounds, WindowOptions, px,
-    size,
-};
+use gpui::{App, AppContext, Bounds, WindowBounds, WindowOptions, px, size};
 use gpui_platform::application as create_application;
 
 use crate::{
     menus::{menu_bindings, register_menu_handlers, set_app_menus},
     session_manager::create_default_manager,
-    state::AppState,
-    ui::{FolderCompareView, folder_compare_bindings},
+    tabview::WindowRoot,
+    ui::folder_compare_bindings,
 };
 
 // ---------------------------------------------------------------------------
@@ -45,7 +44,24 @@ fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let (left, right) = parse_args(&args)?;
 
-    create_application().run(|cx: &mut App| {
+    // Clone paths for the closure.
+    let left_path = left.clone();
+    let right_path = right.clone();
+
+    // Start a tokio multi-thread runtime so that tokio::fs operations work.
+    // gpui uses async-task as its executor, but cocomo-lib's async fs
+    // operations rely on tokio's spawn_blocking for non-blocking IO.
+    //
+    // We create the runtime and call `enter()` to install the runtime
+    // handle in thread-local storage. The guard is kept alive for the
+    // entire duration of the gpui event loop.
+    let rt = tokio::runtime::Runtime::new()
+        .expect("failed to create tokio runtime");
+    let _rt_guard = rt.enter();
+
+    create_application().run(move |cx: &mut App| {
+        let left = left_path;
+        let right = right_path;
         // Center the window on screen.
         let bounds = Bounds::centered(None, size(px(1200.), px(800.)), cx);
 
@@ -64,9 +80,24 @@ fn main() -> Result<()> {
         // Register folder compare key bindings.
         cx.bind_keys(folder_compare_bindings());
 
-        // Add an initial session with the CLI-provided paths.
+        // Add an initial folder-compare tab with the CLI-provided paths.
         session_manager.update(cx, |mgr, cx| {
-            mgr.add_new_session(cx);
+            mgr.add_new_folder_tab(cx);
+            // Override the default paths with CLI args.
+            mgr.set_active_paths(left.clone(), right.clone());
+            // Re-create the tab entity with correct paths.
+            let title = gpui::SharedString::from("cocomo — compare");
+            let config = mgr.active_config().unwrap().clone();
+            let state = cx.new(|cx| {
+                crate::state::AppState::from_config(&config, title, cx)
+            });
+            let mgr_clone = cx.entity().clone();
+            let view = cx.new(|cx| {
+                crate::ui::FolderCompareView::new(state, mgr_clone, cx)
+            });
+            mgr.replace_active_tab(crate::tabview::TabEntity::from_folder(
+                view,
+            ));
         });
 
         cx.open_window(
@@ -75,26 +106,7 @@ fn main() -> Result<()> {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 ..Default::default()
             },
-            |_, cx| {
-                // Create the app state.
-                let app_state = cx.new(|cx| {
-                    AppState::new(
-                        left,
-                        right,
-                        SharedString::from("cocomo — compare"),
-                        cx,
-                    )
-                });
-
-                // Create the folder compare view as the window root.
-                cx.new(|cx| {
-                    FolderCompareView::new(
-                        app_state,
-                        session_manager.clone(),
-                        cx,
-                    )
-                })
-            },
+            |_, cx| cx.new(|cx| WindowRoot::new(session_manager.clone(), cx)),
         )
         .unwrap();
 

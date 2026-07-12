@@ -24,11 +24,12 @@ use cocomo_lib::{
 };
 use gpui::{App, AppContext, Context, Entity, Task, WeakEntity};
 
+use crate::tabview::TabEntity;
+
 /// A single open tab in the GUI.
 ///
-/// Stores the serializable config plus a weak handle to the runtime
-/// [`AppState`] so the tab can be closed independently.
-#[derive(Clone, Debug)]
+/// Stores the serializable config plus a type-erased [`TabEntity`] so
+/// the tab can be rendered and closed independently.
 pub struct OpenSession {
     /// Unique index for this tab (stable across saves).
     pub tab_id: usize,
@@ -36,38 +37,8 @@ pub struct OpenSession {
     pub config: SessionConfig,
     /// Whether the session has unsaved changes.
     pub dirty: bool,
-}
-
-impl OpenSession {
-    /// Create a new open session from a config.
-    pub fn new(tab_id: usize, config: SessionConfig) -> Self {
-        Self {
-            tab_id,
-            config,
-            dirty: false,
-        }
-    }
-
-    /// Create a new empty dir-compare session config.
-    pub fn empty_compare() -> Self {
-        Self::new(
-            0,
-            SessionConfig {
-                name: "untitled".to_string(),
-                session_type: SessionType::DirCompare,
-                left: ProviderRef {
-                    provider: "local".to_string(),
-                    path: PathBuf::from("/"),
-                },
-                right: ProviderRef {
-                    provider: "local".to_string(),
-                    path: PathBuf::from("/"),
-                },
-                center: None,
-                settings: SessionSettings::default(),
-            },
-        )
-    }
+    /// The rendered content for this tab.
+    pub tab_entity: TabEntity,
 }
 
 /// Manages open sessions and session persistence for the GUI.
@@ -107,10 +78,18 @@ impl GuiSessionManager {
     // Accessors
     // -----------------------------------------------------------------------
 
-    /// Return the open sessions.
+    /// Return the open sessions' tab IDs and names.
     #[allow(dead_code)]
-    pub fn open_sessions(&self) -> &[OpenSession] {
-        &self.open_sessions
+    pub fn open_tab_ids(&self) -> Vec<(usize, String)> {
+        self.open_sessions
+            .iter()
+            .map(|s| (s.tab_id, s.config.name.clone()))
+            .collect()
+    }
+
+    /// Return the active session's config, if any.
+    pub fn active_config(&self) -> Option<&SessionConfig> {
+        self.open_sessions.get(self.active_index).map(|s| &s.config)
     }
 
     /// Return the active session, if any.
@@ -150,28 +129,150 @@ impl GuiSessionManager {
     // Session operations
     // -----------------------------------------------------------------------
 
-    /// Add a new empty dir-compare session and make it active.
-    pub fn add_new_session(&mut self, cx: &mut Context<Self>) {
-        let mut session = OpenSession::empty_compare();
-        session.tab_id = self.next_tab_id;
+    /// Add a new empty dir-compare tab and make it active.
+    pub fn add_new_folder_tab(&mut self, cx: &mut Context<Self>) {
+        let config = SessionConfig {
+            name: "untitled".to_string(),
+            session_type: SessionType::DirCompare,
+            left: ProviderRef {
+                provider: "local".to_string(),
+                path: PathBuf::from("/"),
+            },
+            right: ProviderRef {
+                provider: "local".to_string(),
+                path: PathBuf::from("/"),
+            },
+            center: None,
+            settings: SessionSettings::default(),
+        };
+        self.open_folder_tab(config, cx);
+    }
+
+    /// Open a folder-compare tab from a session config and make it active.
+    fn open_folder_tab(
+        &mut self,
+        config: SessionConfig,
+        cx: &mut Context<Self>,
+    ) {
+        let title = gpui::SharedString::from(format!(
+            "cocomo — {} vs {}",
+            config.left.path.display(),
+            config.right.path.display()
+        ));
+
+        let state = cx
+            .new(|cx| crate::state::AppState::from_config(&config, title, cx));
+
+        let mgr = cx.entity().clone();
+        let view =
+            cx.new(|cx| crate::ui::FolderCompareView::new(state, mgr, cx));
+
+        let tab_entity = TabEntity::from_folder(view);
+
+        let session = OpenSession {
+            tab_id: self.next_tab_id,
+            config,
+            dirty: false,
+            tab_entity,
+        };
         self.next_tab_id += 1;
         self.open_sessions.push(session);
         self.active_index = self.open_sessions.len() - 1;
         cx.notify();
     }
 
-    /// Open a session config as a new tab.
-    pub fn open_session(
+    /// Add a text diff tab for the given file paths and make it active.
+    pub fn add_text_diff_tab(
         &mut self,
-        config: SessionConfig,
+        left_path: PathBuf,
+        right_path: PathBuf,
         cx: &mut Context<Self>,
     ) {
-        let mut session = OpenSession::new(self.next_tab_id, config);
-        session.tab_id = self.next_tab_id;
+        let view = crate::text_diff::new_text_diff_view(
+            left_path, right_path, None, cx,
+        );
+
+        let config = SessionConfig {
+            name: "text diff".to_string(),
+            session_type: SessionType::TextCompare,
+            left: ProviderRef {
+                provider: "local".to_string(),
+                path: PathBuf::from("/"),
+            },
+            right: ProviderRef {
+                provider: "local".to_string(),
+                path: PathBuf::from("/"),
+            },
+            center: None,
+            settings: SessionSettings::default(),
+        };
+
+        let tab_entity = TabEntity::from_text_diff(view);
+
+        let session = OpenSession {
+            tab_id: self.next_tab_id,
+            config,
+            dirty: false,
+            tab_entity,
+        };
         self.next_tab_id += 1;
         self.open_sessions.push(session);
         self.active_index = self.open_sessions.len() - 1;
         cx.notify();
+    }
+
+    /// Open a directory compare in a new tab.
+    pub fn add_dir_diff_tab(
+        &mut self,
+        left_path: PathBuf,
+        right_path: PathBuf,
+        cx: &mut Context<Self>,
+    ) {
+        let config = SessionConfig {
+            name: "dir diff".to_string(),
+            session_type: SessionType::DirCompare,
+            left: ProviderRef {
+                provider: "local".to_string(),
+                path: left_path.clone(),
+            },
+            right: ProviderRef {
+                provider: "local".to_string(),
+                path: right_path.clone(),
+            },
+            center: None,
+            settings: SessionSettings::default(),
+        };
+        self.open_folder_tab(config, cx);
+    }
+
+    /// Return the active tab's content, if any.
+    pub fn active_tab_content(&self) -> Option<&TabEntity> {
+        self.open_sessions
+            .get(self.active_index)
+            .map(|s| &s.tab_entity)
+    }
+
+    /// Return clones of all tab entities.
+    pub fn tab_entities(&self) -> Vec<TabEntity> {
+        self.open_sessions
+            .iter()
+            .map(|s| s.tab_entity.clone())
+            .collect()
+    }
+
+    /// Update the active session's paths.
+    pub fn set_active_paths(&mut self, left: PathBuf, right: PathBuf) {
+        if let Some(session) = self.open_sessions.get_mut(self.active_index) {
+            session.config.left.path = left;
+            session.config.right.path = right;
+        }
+    }
+
+    /// Replace the active tab's entity.
+    pub fn replace_active_tab(&mut self, entity: TabEntity) {
+        if let Some(session) = self.open_sessions.get_mut(self.active_index) {
+            session.tab_entity = entity;
+        }
     }
 
     /// Close the session at the given index.
@@ -247,8 +348,8 @@ impl GuiSessionManager {
         &self,
         cx: &mut Context<Self>,
     ) -> Task<Result<()>> {
-        let config = match self.active_session() {
-            Some(s) => s.config.clone(),
+        let config = match self.active_config() {
+            Some(c) => c.clone(),
             None => return cx.background_spawn(async { Ok(()) }),
         };
         let session_dir = self.session_dir.clone();
@@ -301,7 +402,7 @@ impl GuiSessionManager {
         if let Some(session) = self.open_sessions.get_mut(self.active_index) {
             session.config.name = name.clone();
         }
-        let config = self.active_session().map(|s| s.config.clone());
+        let config = self.active_config().map(|c| c.clone());
         let session_dir = self.session_dir.clone();
 
         cx.background_spawn(async move {
@@ -470,18 +571,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn open_session_new_starts_empty() {
+    fn manager_new_starts_empty() {
         let mgr = GuiSessionManager::new(PathBuf::from("/tmp/test_sessions"));
         assert!(mgr.is_empty());
-        assert!(mgr.active_session().is_none());
-    }
-
-    #[test]
-    fn open_session_empty_compare_has_defaults() {
-        let session = OpenSession::empty_compare();
-        assert_eq!(session.config.name, "untitled");
-        assert_eq!(session.config.session_type, SessionType::DirCompare);
-        assert_eq!(session.config.left.provider, "local");
-        assert!(!session.dirty);
+        assert!(mgr.active_config().is_none());
     }
 }

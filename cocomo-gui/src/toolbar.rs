@@ -37,7 +37,7 @@ impl Toolbar {
         &mut self,
         _window: &mut Window,
         _cx: &mut Context<P>,
-    ) -> impl gpui::IntoElement {
+    ) -> impl gpui::IntoElement + use<P> {
         div()
             .flex()
             .items_center()
