@@ -1394,29 +1394,40 @@ Directory scans use a semaphore to limit the number of concurrently open file ha
 
 The following Beyond Compare features are deferred to later releases:
 
-| Feature                                | Reason                                              |
-| -------------------------------------- | --------------------------------------------------- |
-| Registry Compare                       | Windows-specific                                    |
-| Source Control Integration             | Complex plugin system; use external tools           |
-| Dropbox / OneDrive native profiles     | Use FTP/WebDAV/S3 equivalents; SDKs are restrictive |
-| Touch UI                               | Desktop-focused                                     |
-| Explorer / Finder integration          | Requires native shell extensions                    |
-| Admin policies / Group Policy          | Enterprise feature                                  |
-| Clipboard Compare (GUI)                | Platform-dependent clipboard API                    |
-| Media Compare (ID3/EXIF deep metadata) | Low priority; basic metadata is enough              |
+| Feature                                | Reason                                               |
+| -------------------------------------- | ---------------------------------------------------- |
+| Registry Compare                       | Windows-specific                                     |
+| Source Control Integration             | Complex plugin system; use external tools            |
+| Dropbox / OneDrive native profiles     | Use FTP/WebDAV/S3 equivalents; SDKs are restrictive  |
+| Touch UI                               | Desktop-focused                                      |
+| Explorer / Finder integration          | Requires native shell extensions                     |
+| Admin policies / Group Policy          | Enterprise feature                                   |
+| Clipboard Compare (GUI)                | Platform-dependent clipboard API                     |
+| Media Compare (ID3/EXIF deep metadata) | Low priority; basic metadata is enough               |
+| FTP provider (`FtpFs`)                 | Network providers deferred to v2                     |
+| S3 provider (`S3Fs`)                   | Network providers deferred to v2                     |
+| WebDAV provider (`WebDavFs`)           | Network providers deferred to v2                     |
+| Profile management (`ProfileStore`)    | Only needed for remote providers                     |
+| Script engine (BCS language)           | Full interpreter deferred to v2                      |
+| Table Comparison                       | Requires structured data parsers (CSV, TSV, etc.)    |
+| Hex Comparison                         | Binary comparison deferred to v2                     |
+| Picture Comparison                     | Image comparison deferred to v2                      |
+| HTML reports (`askama` templates)      | Report formats Text, CSV, JSON are sufficient for v1 |
+| 3-way Merge / Version Comparison       | Merge workflows deferred to v2                       |
 
 ---
 
 ## 17. Milestones
 
-| Phase  | Deliverable                                                                  |
-| ------ | ---------------------------------------------------------------------------- |
-| **M1** | `cocomo_lib`: `FileSystem` trait, `LocalFs`, content hashing, directory scan |
-| **M2** | `cocomo_lib`: Text diff engine, `TextCompareSettings`, grammar system        |
-| **M3** | `cocomo_tui`: Folder compare view, navigation, basic filtering               |
-| **M4** | `cocomo_lib`: `FtpFs`, `S3Fs`, profile management                            |
-| **M5** | `cocomo_tui`: Text diff modal, sync operations, session save/load            |
-| **M6** | `cocomo_gui`: gpui scaffold, folder compare view                             |
-| **M7** | `cocomo_gui`: Text diff, hex compare, picture compare views                  |
-| **M8** | `cocomo_cli`: Script engine, CLI commands, report generation                 |
-| **M9** | Polish: themes, keyboard shortcuts, performance tuning, documentation        |
+| Phase   | Deliverable                                                                  |
+| ------- | ---------------------------------------------------------------------------- |
+| **M1**  | `cocomo_lib`: `FileSystem` trait, `LocalFs`, content hashing, directory scan |
+| **M2**  | `cocomo_lib`: Text diff engine, `TextCompareSettings`, grammar system        |
+| **M3**  | `cocomo_tui`: Folder compare view, navigation, basic filtering               |
+| **M4**  | `cocomo_lib`: `FtpFs`, `S3Fs`, profile management — **POSTPONED to v2**      |
+| **M5**  | `cocomo_tui`: Text diff, sync operations, session save/load                  |
+| **M6**  | `cocomo_cli`: CLI commands, report generation (text/csv/json)                |
+| **M7**  | `cocomo_tui`: Sync progress display, file comparison from CLI                |
+| **M8**  | `cocomo_gui`: gpui scaffold, folder compare view                             |
+| **M9**  | `cocomo_gui`: Text diff, display filters, menu action wiring                 |
+| **M10** | Polish: themes, keyboard shortcuts, performance tuning, documentation        |
