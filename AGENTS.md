@@ -36,6 +36,9 @@ Every Rust source file must start with:
 
 where {YEAR} is to be replaced by the current year.
 
+Note: When you save an empty Rust source file the header is added in the background by an
+auto-file-header service. In this case don't add a header.
+
 ### Rust edition and formatting
 
 - Use Rust 2024 edition.
