@@ -14,6 +14,7 @@
 //! rendering.
 
 mod menus;
+mod runtime;
 mod session_manager;
 mod state;
 mod tab_bar;
@@ -49,15 +50,17 @@ fn main() -> Result<()> {
     let right_path = right.clone();
 
     // Start a tokio multi-thread runtime so that tokio::fs operations work.
-    // gpui uses async-task as its executor, but cocomo-lib's async fs
-    // operations rely on tokio's spawn_blocking for non-blocking IO.
+    // gpui uses its own executor, but cocomo-lib's async fs operations rely
+    // on tokio's reactor for non-blocking IO.
     //
-    // We create the runtime and call `enter()` to install the runtime
-    // handle in thread-local storage. The guard is kept alive for the
+    // We call `enter()` to install the runtime handle in thread-local
+    // storage, and `set_handle()` to store it globally so background tasks
+    // can use `Handle::block_on`. The runtime guard is kept alive for the
     // entire duration of the gpui event loop.
     let rt = tokio::runtime::Runtime::new()
         .expect("failed to create tokio runtime");
     let _rt_guard = rt.enter();
+    runtime::set_handle();
 
     create_application().run(move |cx: &mut App| {
         let left = left_path;

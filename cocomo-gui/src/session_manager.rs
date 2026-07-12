@@ -22,7 +22,7 @@ use anyhow::{Context as _, Result};
 use cocomo_lib::{
     LocalFs, ProviderRef, Session, SessionConfig, SessionSettings, SessionType,
 };
-use gpui::{App, AppContext, Context, Entity, Task, WeakEntity};
+use gpui::{App, AppContext, Context, Entity, Task};
 
 use crate::tabview::TabEntity;
 
@@ -355,7 +355,9 @@ impl GuiSessionManager {
         let session_dir = self.session_dir.clone();
         let name = config.name.clone();
 
-        cx.background_spawn(async move {
+        // Spawn the work on tokio and await the JoinHandle inside a gpui
+        // Task. Awaiting a JoinHandle does not require a tokio reactor.
+        let join_handle = crate::runtime::spawn_on_tokio(async move {
             let file_name = if name == "untitled" || name.is_empty() {
                 "untitled.bcs".to_string()
             } else {
@@ -390,6 +392,12 @@ impl GuiSessionManager {
             })?;
 
             Ok(())
+        });
+
+        cx.background_spawn(async move {
+            join_handle
+                .await
+                .map_err(|e| anyhow::anyhow!("task panicked: {e}"))?
         })
     }
 
@@ -405,7 +413,7 @@ impl GuiSessionManager {
         let config = self.active_config().map(|c| c.clone());
         let session_dir = self.session_dir.clone();
 
-        cx.background_spawn(async move {
+        let join_handle = crate::runtime::spawn_on_tokio(async move {
             let config = match config {
                 Some(c) => c,
                 None => return Ok(()),
@@ -421,6 +429,12 @@ impl GuiSessionManager {
                 .save_to_file(&path)
                 .await
                 .map_err(|e| anyhow::anyhow!("{e}"))
+        });
+
+        cx.background_spawn(async move {
+            join_handle
+                .await
+                .map_err(|e| anyhow::anyhow!("task panicked: {e}"))?
         })
     }
 
@@ -430,10 +444,16 @@ impl GuiSessionManager {
         path: PathBuf,
         cx: &mut Context<Self>,
     ) -> Task<Result<SessionConfig>> {
-        cx.background_spawn(async move {
+        let join_handle = crate::runtime::spawn_on_tokio(async move {
             SessionConfig::load_from_file(&path)
                 .await
                 .map_err(|e| anyhow::anyhow!("{e}"))
+        });
+
+        cx.background_spawn(async move {
+            join_handle
+                .await
+                .map_err(|e| anyhow::anyhow!("task panicked: {e}"))?
         })
     }
 
@@ -442,49 +462,50 @@ impl GuiSessionManager {
         let weak = cx.entity().downgrade();
         let session_dir = self.session_dir.clone();
 
-        cx.spawn(
-            |this: WeakEntity<GuiSessionManager>, cx: &mut gpui::AsyncApp| {
-                // Clone async_app OUTSIDE the async block.
-                let async_app = cx.clone();
-                async move {
-                    let _ = this;
-                    let configs: Vec<SessionConfig> =
-                        match tokio::fs::read_dir(&session_dir).await {
-                            Ok(mut entries) => {
-                                let mut found = Vec::new();
-                                while let Ok(Some(entry)) =
-                                    entries.next_entry().await
-                                {
-                                    let path = entry.path();
-                                    if path
-                                        .extension()
-                                        .and_then(|e| e.to_str())
-                                        == Some("bcs")
-                                        && let Ok(config) =
-                                            SessionConfig::load_from_file(
-                                                &path,
-                                            )
-                                            .await
-                                    {
-                                        found.push(config);
-                                    }
-                                }
-                                found
+        // Spawn the filesystem I/O on the tokio runtime.
+        let load_task = crate::runtime::spawn_on_tokio(async move {
+            let configs: Vec<SessionConfig> =
+                match tokio::fs::read_dir(&session_dir).await {
+                    Ok(mut entries) => {
+                        let mut found = Vec::new();
+                        while let Ok(Some(entry)) = entries.next_entry().await
+                        {
+                            let path = entry.path();
+                            if path.extension().and_then(|e| e.to_str())
+                                == Some("bcs")
+                                && let Ok(config) =
+                                    SessionConfig::load_from_file(&path).await
+                            {
+                                found.push(config);
                             }
-                            Err(_) => Vec::new(),
-                        };
-
-                    async_app.update(|cx| {
-                        if let Some(manager) = weak.upgrade() {
-                            manager.update(cx, |m, cx| {
-                                m.recent_sessions = configs;
-                                cx.notify();
-                            });
                         }
-                    });
+                        found
+                    }
+                    Err(_) => Vec::new(),
+                };
+            Ok(configs)
+        });
+
+        // Observe the I/O task and update the GUI when complete.
+        cx.spawn(|_, cx: &mut gpui::AsyncApp| {
+            let async_app = cx.clone();
+            async move {
+                match load_task.await {
+                    Ok(Ok(configs)) => {
+                        async_app.update(|cx| {
+                            if let Some(manager) = weak.upgrade() {
+                                manager.update(cx, |m, cx| {
+                                    m.recent_sessions = configs;
+                                    cx.notify();
+                                });
+                            }
+                        });
+                    }
+                    // Silently ignore errors when loading recent sessions.
+                    _ => {}
                 }
-            },
-        )
+            }
+        })
         .detach();
     }
 

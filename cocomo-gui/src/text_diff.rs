@@ -154,9 +154,11 @@ impl TextDiffState {
 
         let left_path = self.left_path.clone();
         let right_path = self.right_path.clone();
-        let _entity = cx.entity().downgrade();
+        let weak = cx.entity().downgrade();
 
-        let task = cx.background_spawn(async move {
+        // Spawn file I/O on the tokio runtime because tokio::fs requires
+        // a tokio reactor.
+        let join_handle = crate::runtime::spawn_on_tokio(async move {
             let left_content = tokio::fs::read_to_string(&left_path)
                 .await
                 .unwrap_or_default();
@@ -191,29 +193,31 @@ impl TextDiffState {
 
             let diff = compare_texts(&left_text, &right_text, &settings);
 
-            (diff, left_lines, right_lines)
+            Ok((diff, left_lines, right_lines))
         });
 
-        cx.spawn(
-            |this: gpui::WeakEntity<TextDiffState>,
-             cx: &mut gpui::AsyncApp| {
-                let async_app = cx.clone();
-                async move {
-                    let result = task.await;
-                    async_app.update(|cx| {
-                        if let Some(state) = this.upgrade() {
-                            state.update(cx, |state, _| {
-                                state.loading = false;
-                                let (diff, left_lines, right_lines) = result;
-                                state.diff = Some(diff);
-                                state.left_lines = left_lines;
-                                state.right_lines = right_lines;
-                            });
-                        }
-                    });
+        // Await the JoinHandle inside a gpui Task.
+        cx.spawn(|_, cx: &mut gpui::AsyncApp| {
+            let async_app = cx.clone();
+            async move {
+                match join_handle.await {
+                    Ok(Ok((diff, left_lines, right_lines))) => {
+                        async_app.update(|cx| {
+                            if let Some(state) = weak.upgrade() {
+                                state.update(cx, |state, _| {
+                                    state.loading = false;
+                                    state.diff = Some(diff);
+                                    state.left_lines = left_lines;
+                                    state.right_lines = right_lines;
+                                });
+                            }
+                        });
+                    }
+                    // Silently ignore errors when loading the diff.
+                    _ => {}
                 }
-            },
-        )
+            }
+        })
         .detach();
     }
 
