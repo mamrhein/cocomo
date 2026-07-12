@@ -12,13 +12,13 @@
 //! This module provides the directory comparison view, including
 //! status indicators, navigation, and entry rendering.
 
-use std::{ops::Range, sync::Arc};
+use std::{ops::Range, path::PathBuf, sync::Arc};
 
 use cocomo_lib::DirEntryStatus;
 use gpui::{
-    App, Context, Entity, Focusable, FontWeight, KeyBinding, Render,
-    SharedString, UniformListScrollHandle, Window, actions, div, prelude::*,
-    px, rgb, uniform_list,
+    App, Context, Entity, FocusHandle, Focusable, FontWeight, KeyBinding,
+    Render, SharedString, UniformListScrollHandle, Window, actions, div,
+    prelude::*, px, rgb, uniform_list,
 };
 
 use crate::menus::{ReloadCompare, SaveSession};
@@ -36,8 +36,71 @@ actions!(
     [SelectNext, SelectPrev, EnterDir, LeaveDir, Reload]
 );
 
-// ---------------------------------------------------------------------------
-// Key bindings
+/// Action to open a text diff for a file in a new tab.
+pub struct OpenFileDiff {
+    /// Left file path.
+    pub left_path: PathBuf,
+    /// Right file path (optional).
+    pub right_path: Option<PathBuf>,
+}
+impl gpui::Action for OpenFileDiff {
+    fn boxed_clone(&self) -> Box<dyn gpui::Action> {
+        Box::new(self.clone())
+    }
+    fn partial_eq(&self, _other: &dyn gpui::Action) -> bool {
+        false
+    }
+    fn name(&self) -> &'static str {
+        "OpenFileDiff"
+    }
+    fn name_for_type() -> &'static str {
+        "OpenFileDiff"
+    }
+    fn build(_value: gpui::private::serde_json::Value) -> anyhow::Result<Box<dyn gpui::Action>> {
+        Err(anyhow::anyhow!("OpenFileDiff cannot be built from JSON"))
+    }
+}
+impl Clone for OpenFileDiff {
+    fn clone(&self) -> Self {
+        Self {
+            left_path: self.left_path.clone(),
+            right_path: self.right_path.clone(),
+        }
+    }
+}
+
+/// Action to open a directory compare in a new tab.
+pub struct OpenDirDiff {
+    /// Left directory path.
+    pub left_path: PathBuf,
+    /// Right directory path.
+    pub right_path: PathBuf,
+}
+impl gpui::Action for OpenDirDiff {
+    fn boxed_clone(&self) -> Box<dyn gpui::Action> {
+        Box::new(self.clone())
+    }
+    fn partial_eq(&self, _other: &dyn gpui::Action) -> bool {
+        false
+    }
+    fn name(&self) -> &'static str {
+        "OpenDirDiff"
+    }
+    fn name_for_type() -> &'static str {
+        "OpenDirDiff"
+    }
+    fn build(_value: gpui::private::serde_json::Value) -> anyhow::Result<Box<dyn gpui::Action>> {
+        Err(anyhow::anyhow!("OpenDirDiff cannot be built from JSON"))
+    }
+}
+impl Clone for OpenDirDiff {
+    fn clone(&self) -> Self {
+        Self {
+            left_path: self.left_path.clone(),
+            right_path: self.right_path.clone(),
+        }
+    }
+}
 // ---------------------------------------------------------------------------
 
 /// Register key bindings for folder comparison navigation.
@@ -89,6 +152,16 @@ impl FolderCompareView {
         }
     }
 
+    /// Return the focus handle for keyboard navigation.
+    pub fn focus_handle(&self, cx: &App) -> FocusHandle {
+        self.state.read(cx).focus_handle(cx).clone()
+    }
+
+    /// Return the tab title.
+    pub fn title(&self, cx: &App) -> SharedString {
+        self.state.read(cx).title().clone()
+    }
+
     /// Handle the select-next action.
     fn select_next(
         &mut self,
@@ -113,15 +186,32 @@ impl FolderCompareView {
         });
     }
 
-    /// Handle the enter-directory action.
+    /// Handle the enter-directory action: open a new dir-diff tab.
     fn enter_dir(
         &mut self,
         _: &EnterDir,
-        _: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.state.update(cx, |state, cx| {
-            state.navigate_into_subdir(cx);
+        let entry = match self.state.read(cx).selected_entry() {
+            Some(e) => e,
+            None => return,
+        };
+
+        // Determine sub-paths for both sides.
+        let left_sub = match &entry.left {
+            Some(left_info) => PathBuf::from(&left_info.path),
+            None => self.state.read(cx).left_path().join(&entry.name),
+        };
+        let right_sub = match &entry.right {
+            Some(right_info) => PathBuf::from(&right_info.path),
+            None => self.state.read(cx).right_path().join(&entry.name),
+        };
+
+        // Dispatch action to open a new dir-diff tab.
+        cx.dispatch_action(&crate::ui::OpenDirDiff {
+            left_path: left_sub,
+            right_path: right_sub,
         });
     }
 
@@ -168,6 +258,34 @@ impl FolderCompareView {
 
         self.session_manager.update(cx, |mgr, cx| {
             mgr.update_active_config(config, cx);
+        });
+    }
+
+    /// Handle OpenFileDiff: dispatch to session manager to create a text diff tab.
+    fn handle_open_file_diff(
+        &mut self,
+        action: &OpenFileDiff,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let right_path = action.right_path.clone().unwrap_or_else(|| {
+            // Fallback: use the same file on the other side.
+            action.left_path.clone()
+        });
+        self.session_manager.update(cx, |mgr, cx| {
+            mgr.add_text_diff_tab(action.left_path.clone(), right_path, cx);
+        });
+    }
+
+    /// Handle OpenDirDiff: dispatch to session manager to create a dir diff tab.
+    fn handle_open_dir_diff(
+        &mut self,
+        action: &OpenDirDiff,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.session_manager.update(cx, |mgr, cx| {
+            mgr.add_dir_diff_tab(action.left_path.clone(), action.right_path.clone(), cx);
         });
     }
 
@@ -225,7 +343,7 @@ impl Render for FolderCompareView {
         let on_new: Arc<dyn Fn(&mut App) + Send + Sync> =
             Arc::new(move |app: &mut App| {
                 mgr.update(app, |m, cx| {
-                    m.add_new_session(cx);
+                    m.add_new_folder_tab(cx);
                 });
             });
 
@@ -264,6 +382,9 @@ impl Render for FolderCompareView {
             // Menu-dispatched actions that need view context.
             .on_action(cx.listener(Self::handle_reload_compare))
             .on_action(cx.listener(Self::handle_save_session))
+            // File/dir diff actions.
+            .on_action(cx.listener(Self::handle_open_file_diff))
+            .on_action(cx.listener(Self::handle_open_dir_diff))
     }
 }
 
@@ -372,7 +493,7 @@ impl FolderCompareView {
                                 move |range: Range<usize>,
                                       _: &mut Window,
                                       app: &mut App| {
-                                    let mut items =
+                                    let mut items: Vec<gpui::AnyElement> =
                                         Vec::with_capacity(range.end - range.start);
                                     if let Some(state_entity) =
                                         state_weak.upgrade()
@@ -390,13 +511,15 @@ impl FolderCompareView {
                                                         .entries
                                                         .get(i)
                                                 {
-                                                    items
-                                                        .push(EntryRow::new(
+                                                    use gpui::IntoElement;
+                                                    items.push(
+                                                        EntryRow::render_row(
                                                             i,
                                                             entry,
-                                                            i
-                                                                == selected,
-                                                        ));
+                                                            i == selected,
+                                                        )
+                                                        .into_any_element(),
+                                                    );
                                                 }
                                             }
                                         }
@@ -511,6 +634,10 @@ struct EntryRowData {
     has_left: bool,
     /// Whether entry exists on right side.
     has_right: bool,
+    /// Left file path (for double-click to open text diff).
+    left_path: Option<PathBuf>,
+    /// Right file path (for double-click to open text diff).
+    right_path: Option<PathBuf>,
 }
 
 impl EntryRowData {
@@ -526,6 +653,14 @@ impl EntryRowData {
         let right_size = entry.right.as_ref().map(|r| r.size);
         let is_dir = entry.left.as_ref().is_some_and(|l| l.is_dir)
             || entry.right.as_ref().is_some_and(|r| r.is_dir);
+        let left_path = entry
+            .left
+            .as_ref()
+            .map(|l| PathBuf::from(&l.path));
+        let right_path = entry
+            .right
+            .as_ref()
+            .map(|r| PathBuf::from(&r.path));
 
         Self {
             index,
@@ -537,12 +672,13 @@ impl EntryRowData {
             right_size,
             has_left,
             has_right,
+            left_path,
+            right_path,
         }
     }
 }
 
 /// A single row in the entry list, showing one comparison entry.
-#[derive(IntoElement)]
 struct EntryRow {
     data: EntryRowData,
 }
@@ -556,6 +692,123 @@ impl EntryRow {
         Self {
             data: EntryRowData::new(index, entry, is_selected),
         }
+    }
+
+    /// Render a row as a div (for use in uniform_list).
+    fn render_row(
+        index: usize,
+        entry: &cocomo_lib::DirEntry,
+        is_selected: bool,
+    ) -> impl IntoElement {
+        let data = EntryRowData::new(index, entry, is_selected);
+        let EntryRowData {
+            index,
+            name,
+            status,
+            is_dir: _is_dir,
+            is_selected,
+            left_size,
+            right_size,
+            has_left,
+            has_right,
+            left_path: _left_path,
+            right_path: _right_path,
+        } = data;
+
+        let status_color = status_color(&status);
+        let status_char = status_indicator(&status);
+        let dir_icon = if _is_dir { "D" } else { "F" };
+        let selection_indicator = if is_selected { "► " } else { "  " };
+
+        let bg_color = if is_selected {
+            rgb(0x313244)
+        } else if index % 2 == 0 {
+            rgb(0x1e1e2e)
+        } else {
+            rgb(0x1a1a28)
+        };
+
+        let size_display = if has_left && has_right {
+            if left_size == right_size {
+                format_size(left_size.unwrap_or(0))
+            } else {
+                format!(
+                    "{}/{}",
+                    format_size(left_size.unwrap_or(0)),
+                    format_size(right_size.unwrap_or(0))
+                )
+            }
+        } else if has_left || has_right {
+            format_size(left_size.or(right_size).unwrap_or(0))
+        } else {
+            String::new()
+        };
+
+        div()
+            .flex()
+            .items_center()
+            .gap_1()
+            .px_2()
+            .py_0p5()
+            .bg(bg_color)
+            .cursor_pointer()
+            .child(
+                div()
+                    .w(px(16.))
+                    .text_color(rgb(0x89b4fa))
+                    .child(selection_indicator),
+            )
+            .child(
+                div()
+                    .w(px(16.))
+                    .text_color(status_color)
+                    .font_weight(FontWeight(700.))
+                    .child(status_char),
+            )
+            .child(
+                div()
+                    .w(px(16.))
+                    .text_color(rgb(0x6c7086))
+                    .child(dir_icon),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_color(if has_left || has_right {
+                        rgb(0xcdd6f4)
+                    } else {
+                        rgb(0x6c7086)
+                    })
+                    .child(name),
+            )
+            .child(
+                div()
+                    .w(px(80.))
+                    .text_color(rgb(0x6c7086))
+                    .child(size_display),
+            )
+            .child(
+                div()
+                    .w(px(60.))
+                    .text_color(if has_left {
+                        rgb(0xa6e3a1)
+                    } else {
+                        rgb(0x6c7086)
+                    })
+                    .child(if has_left { "yes" } else { "—" }),
+            )
+            .child(
+                div()
+                    .w(px(60.))
+                    .text_color(if has_right {
+                        rgb(0xf38ba8)
+                    } else {
+                        rgb(0x6c7086)
+                    })
+                    .child(if has_right { "yes" } else { "—" }),
+            )
     }
 }
 
@@ -571,6 +824,8 @@ impl gpui::RenderOnce for EntryRow {
             right_size,
             has_left,
             has_right,
+            left_path,
+            right_path,
         } = self.data;
 
         let status_color = status_color(&status);
@@ -663,6 +918,21 @@ impl gpui::RenderOnce for EntryRow {
                     })
                     .child(if has_right { "yes" } else { "—" }),
             )
+            // Double-click on files opens a text diff in a new tab.
+            .when(!is_dir, |this| {
+                this.on_mouse_down(gpui::MouseButton::Left, {
+                    let left_path = left_path.clone();
+                    let right_path = right_path.clone();
+                    move |_event, _window, cx: &mut App| {
+                        if let Some(lp) = &left_path {
+                            cx.dispatch_action(&OpenFileDiff {
+                                left_path: lp.clone(),
+                                right_path: right_path.clone(),
+                            });
+                        }
+                    }
+                })
+            })
     }
 }
 

@@ -20,9 +20,7 @@ use cocomo_lib::{
     LocalFs, ProviderRef, SessionConfig, SessionSettings, SessionType,
     compare_directories_node,
 };
-use gpui::{
-    App, AppContext as _, Context, FocusHandle, SharedString, WeakEntity,
-};
+use gpui::{App, Context, FocusHandle, SharedString};
 
 // ---------------------------------------------------------------------------
 // Application state
@@ -100,8 +98,12 @@ impl AppState {
     // Public accessors
     // -----------------------------------------------------------------------
 
+    /// Return the focus handle for keyboard navigation.
+    pub fn focus_handle(&self, _cx: &App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+
     /// Return the window title.
-    #[allow(dead_code)]
     pub fn title(&self) -> &SharedString {
         &self.title
     }
@@ -205,27 +207,32 @@ impl AppState {
         let title = self.title.clone();
         let left_display = left.to_string_lossy().to_string();
         let right_display = right.to_string_lossy().to_string();
-        let _entity = cx.entity().downgrade();
+        let weak = cx.entity().downgrade();
 
-        // Spawn the comparison on a background thread.
-        let task = cx.background_spawn(async move {
+        // Spawn the comparison on the tokio runtime because LocalFs uses
+        // tokio::fs internally and requires a tokio reactor.
+        let join_handle = crate::runtime::spawn_on_tokio(async move {
             let fs = LocalFs::new("local");
             let cache = ContentCache::default_config();
             let config = CompareConfig::full();
 
             compare_directories_node(&fs, &left, &right, &config, Some(&cache))
                 .await
+                .map_err(|e| anyhow::anyhow!("{e}"))
         });
 
-        // Observe the task completion and update state when done.
-        cx.spawn(|this: WeakEntity<AppState>, cx: &mut gpui::AsyncApp| {
-            // Clone async_app OUTSIDE the async block so the async block
-            // captures an owned AsyncApp, not a reference.
+        // Await the JoinHandle inside a gpui Task. Awaiting a JoinHandle
+        // does not require a tokio reactor — it just polls the task running
+        // on tokio's executor.
+        cx.spawn(|_, cx: &mut gpui::AsyncApp| {
             let async_app = cx.clone();
             async move {
-                let result = task.await;
+                let result = match join_handle.await {
+                    Ok(r) => r,
+                    Err(e) => Err(anyhow::anyhow!("task panicked: {e}")),
+                };
                 async_app.update(|cx| {
-                    if let Some(state) = this.upgrade() {
+                    if let Some(state) = weak.upgrade() {
                         state.update(cx, |state, _| {
                             state.loading = false;
                             match result {

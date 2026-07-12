@@ -131,7 +131,7 @@ pub fn register_menu_handlers(
     // File menu — new compare.
     cx.on_action(move |_action: &NewCompare, cx: &mut App| {
         mgr_new.update(cx, |mgr, cx| {
-            mgr.add_new_session(cx);
+            mgr.add_new_folder_tab(cx);
         });
     });
 

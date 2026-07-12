@@ -58,7 +58,7 @@ impl TabBar {
     ) -> impl gpui::IntoElement + use<P> {
         let mgr = self.session_manager.read(cx);
         let active_index = mgr.active_index();
-        let sessions = mgr.open_sessions().to_vec();
+        let tab_ids = mgr.open_tab_ids();
 
         div()
             .flex()
@@ -68,74 +68,72 @@ impl TabBar {
             .border_color(rgb(0x313244))
             .h(px(32.))
             .overflow_hidden()
-            .children(sessions.iter().enumerate().map(|(i, session)| {
-                let is_active = i == active_index;
-                let name: SharedString = if session.dirty {
-                    SharedString::from(format!("*{}", session.config.name))
-                } else {
-                    SharedString::from(&session.config.name)
-                };
+            .children(tab_ids.iter().enumerate().map(
+                |(i, (_tab_id, name))| {
+                    let is_active = i == active_index;
+                    let name: SharedString = SharedString::from(name.as_str());
 
-                // Close button.
-                let on_close = on_close.clone();
-                let close_button = div()
-                    .id(("close_tab", session.tab_id))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .size(px(20.))
-                    .rounded_sm()
-                    .cursor_pointer()
-                    .text_xs()
-                    .font_weight(gpui::FontWeight(600.))
-                    .text_color(rgb(0x6c7086))
-                    .child("x")
-                    .hover(|this| {
-                        this.bg(rgb(0x313244)).text_color(rgb(0xf38ba8))
-                    })
-                    .active(|this| {
-                        this.bg(rgb(0xf38ba8)).text_color(rgb(0x1e1e2e))
-                    })
-                    .on_click(move |_event, _window, app: &mut App| {
-                        on_close(i, app);
-                    });
+                    // Close button.
+                    let on_close = on_close.clone();
+                    let close_button = div()
+                        .id(("close_tab", i))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .size(px(20.))
+                        .rounded_sm()
+                        .cursor_pointer()
+                        .text_xs()
+                        .font_weight(gpui::FontWeight(600.))
+                        .text_color(rgb(0x6c7086))
+                        .child("x")
+                        .hover(|this| {
+                            this.bg(rgb(0x313244)).text_color(rgb(0xf38ba8))
+                        })
+                        .active(|this| {
+                            this.bg(rgb(0xf38ba8)).text_color(rgb(0x1e1e2e))
+                        })
+                        .on_click(move |_event, _window, app: &mut App| {
+                            on_close(i, app);
+                        });
 
-                // Tab.
-                let on_activate = on_activate.clone();
-                div()
-                    .id(("tab", session.tab_id))
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .px_3()
-                    .py_0p5()
-                    .min_w(px(100.))
-                    .max_w(px(200.))
-                    .h_full()
-                    .cursor_pointer()
-                    .text_xs()
-                    .rounded_tl_md()
-                    .rounded_tr_md()
-                    .when(is_active, |this| {
-                        this.bg(rgb(0x1e1e2e))
-                            .text_color(rgb(0xcdd6f4))
-                            .border_t_2()
-                            .border_color(rgb(0x89b4fa))
-                    })
-                    .when(!is_active, |this| {
-                        this.bg(rgb(0x181825)).text_color(rgb(0x6c7086)).hover(
-                            |this| {
-                                this.bg(rgb(0x1e1e2e))
-                                    .text_color(rgb(0xa6adc8))
-                            },
-                        )
-                    })
-                    .on_click(move |_event, _window, app: &mut App| {
-                        on_activate(i, app);
-                    })
-                    .child(div().truncate().child(name))
-                    .child(close_button)
-            }))
+                    // Tab.
+                    let on_activate = on_activate.clone();
+                    div()
+                        .id(("tab", i))
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .px_3()
+                        .py_0p5()
+                        .min_w(px(100.))
+                        .max_w(px(200.))
+                        .h_full()
+                        .cursor_pointer()
+                        .text_xs()
+                        .rounded_tl_md()
+                        .rounded_tr_md()
+                        .when(is_active, |this| {
+                            this.bg(rgb(0x1e1e2e))
+                                .text_color(rgb(0xcdd6f4))
+                                .border_t_2()
+                                .border_color(rgb(0x89b4fa))
+                        })
+                        .when(!is_active, |this| {
+                            this.bg(rgb(0x181825))
+                                .text_color(rgb(0x6c7086))
+                                .hover(|this| {
+                                    this.bg(rgb(0x1e1e2e))
+                                        .text_color(rgb(0xa6adc8))
+                                })
+                        })
+                        .on_click(move |_event, _window, app: &mut App| {
+                            on_activate(i, app);
+                        })
+                        .child(div().truncate().child(name))
+                        .child(close_button)
+                },
+            ))
             // New tab button.
             .child(
                 div()
