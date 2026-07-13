@@ -61,6 +61,7 @@ pub mod meta;
 pub mod node;
 pub mod profile;
 pub mod provider;
+pub mod report;
 pub mod s3;
 pub mod scan;
 pub mod session;

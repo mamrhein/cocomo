@@ -56,7 +56,9 @@ impl gpui::Action for OpenFileDiff {
     fn name_for_type() -> &'static str {
         "OpenFileDiff"
     }
-    fn build(_value: gpui::private::serde_json::Value) -> anyhow::Result<Box<dyn gpui::Action>> {
+    fn build(
+        _value: gpui::private::serde_json::Value,
+    ) -> anyhow::Result<Box<dyn gpui::Action>> {
         Err(anyhow::anyhow!("OpenFileDiff cannot be built from JSON"))
     }
 }
@@ -89,7 +91,9 @@ impl gpui::Action for OpenDirDiff {
     fn name_for_type() -> &'static str {
         "OpenDirDiff"
     }
-    fn build(_value: gpui::private::serde_json::Value) -> anyhow::Result<Box<dyn gpui::Action>> {
+    fn build(
+        _value: gpui::private::serde_json::Value,
+    ) -> anyhow::Result<Box<dyn gpui::Action>> {
         Err(anyhow::anyhow!("OpenDirDiff cannot be built from JSON"))
     }
 }
@@ -285,7 +289,11 @@ impl FolderCompareView {
         cx: &mut Context<Self>,
     ) {
         self.session_manager.update(cx, |mgr, cx| {
-            mgr.add_dir_diff_tab(action.left_path.clone(), action.right_path.clone(), cx);
+            mgr.add_dir_diff_tab(
+                action.left_path.clone(),
+                action.right_path.clone(),
+                cx,
+            );
         });
     }
 
@@ -653,14 +661,8 @@ impl EntryRowData {
         let right_size = entry.right.as_ref().map(|r| r.size);
         let is_dir = entry.left.as_ref().is_some_and(|l| l.is_dir)
             || entry.right.as_ref().is_some_and(|r| r.is_dir);
-        let left_path = entry
-            .left
-            .as_ref()
-            .map(|l| PathBuf::from(&l.path));
-        let right_path = entry
-            .right
-            .as_ref()
-            .map(|r| PathBuf::from(&r.path));
+        let left_path = entry.left.as_ref().map(|l| PathBuf::from(&l.path));
+        let right_path = entry.right.as_ref().map(|r| PathBuf::from(&r.path));
 
         Self {
             index,
@@ -765,12 +767,7 @@ impl EntryRow {
                     .font_weight(FontWeight(700.))
                     .child(status_char),
             )
-            .child(
-                div()
-                    .w(px(16.))
-                    .text_color(rgb(0x6c7086))
-                    .child(dir_icon),
-            )
+            .child(div().w(px(16.)).text_color(rgb(0x6c7086)).child(dir_icon))
             .child(
                 div()
                     .flex_1()

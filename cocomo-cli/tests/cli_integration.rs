@@ -311,6 +311,103 @@ mod dir_compare {
             .stdout(predicate::str::contains("same"))
             .stdout(predicate::str::contains("only_left"));
     }
+
+    #[test]
+    fn report_text_writes_file() {
+        let dir = create_test_dirs();
+        let report_path = dir.path().join("report.txt");
+        cmd()
+            .args(["dir", "compare", "--report"])
+            .arg(&report_path)
+            .args([
+                dir.path().join("left").to_str().unwrap(),
+                dir.path().join("right").to_str().unwrap(),
+            ])
+            .assert()
+            .code(1)
+            .stdout(predicate::str::contains("Report written to"));
+        assert!(report_path.exists());
+        let content = std::fs::read_to_string(&report_path).unwrap();
+        assert!(content.contains("Summary:"));
+    }
+
+    #[test]
+    fn report_csv_writes_file() {
+        let dir = create_test_dirs();
+        let report_path = dir.path().join("report.csv");
+        cmd()
+            .args(["dir", "compare", "--report-format", "csv"])
+            .arg("--report")
+            .arg(&report_path)
+            .args([
+                dir.path().join("left").to_str().unwrap(),
+                dir.path().join("right").to_str().unwrap(),
+            ])
+            .assert()
+            .code(1);
+        assert!(report_path.exists());
+        let content = std::fs::read_to_string(&report_path).unwrap();
+        assert!(content.contains("status,name"));
+    }
+
+    #[test]
+    fn report_json_writes_valid_json() {
+        let dir = create_test_dirs();
+        let report_path = dir.path().join("report.json");
+        cmd()
+            .args(["dir", "compare", "--report-format", "json"])
+            .arg("--report")
+            .arg(&report_path)
+            .args([
+                dir.path().join("left").to_str().unwrap(),
+                dir.path().join("right").to_str().unwrap(),
+            ])
+            .assert()
+            .code(1);
+        assert!(report_path.exists());
+        let content = std::fs::read_to_string(&report_path).unwrap();
+        let parsed: serde_json::Value =
+            serde_json::from_str(&content).expect("valid json");
+        assert!(parsed.get("summary").is_some());
+        assert!(parsed.get("entries").is_some());
+    }
+
+    #[test]
+    fn report_respects_show_different_filter() {
+        let dir = create_test_dirs();
+        let report_path = dir.path().join("report.txt");
+        cmd()
+            .args(["dir", "compare", "--show-different"])
+            .arg("--report")
+            .arg(&report_path)
+            .args([
+                dir.path().join("left").to_str().unwrap(),
+                dir.path().join("right").to_str().unwrap(),
+            ])
+            .assert()
+            .code(1);
+        let content = std::fs::read_to_string(&report_path).unwrap();
+        // With --show-different, same entries should be excluded from the
+        // report.
+        assert!(!content.contains("same.txt"));
+        assert!(content.contains("diff.txt"));
+    }
+
+    #[test]
+    fn report_invalid_format_fails() {
+        let dir = create_test_dirs();
+        let report_path = dir.path().join("report.txt");
+        cmd()
+            .args(["dir", "compare", "--report-format", "invalid"])
+            .arg("--report")
+            .arg(&report_path)
+            .args([
+                dir.path().join("left").to_str().unwrap(),
+                dir.path().join("right").to_str().unwrap(),
+            ])
+            .assert()
+            .failure();
+    }
 }
 
 // ---------------------------------------------------------------------------

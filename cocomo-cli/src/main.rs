@@ -29,6 +29,7 @@ use cocomo_lib::{
     },
     error::{FsError, FsOperation, wrap},
     grammar::Grammar,
+    report::{ReportConfig, ReportFormat, generate_report},
     snapshot::{
         ProviderId, Snapshot, SnapshotEntry, SnapshotEntryStatus,
         capture_snapshot,
@@ -117,7 +118,7 @@ struct DirCompareArgs {
     /// Compare directory structure only (skip content hashing).
     #[arg(long)]
     structure_only: bool,
-    /// Output format.
+    /// Output format for console display.
     #[arg(long, default_value = "text")]
     format: OutputFormat,
     /// Show only entries that differ between left and right.
@@ -126,6 +127,12 @@ struct DirCompareArgs {
     /// Show only orphan entries (left-only or right-only).
     #[arg(long)]
     show_orphans: bool,
+    /// Write a report file in the specified format.
+    #[arg(long)]
+    report: Option<PathBuf>,
+    /// Format for the report file (used with --report).
+    #[arg(long, default_value = "text")]
+    report_format: ReportFormatArg,
 }
 
 #[derive(Parser)]
@@ -284,6 +291,23 @@ impl From<GrammarArg> for Grammar {
     }
 }
 
+#[derive(Debug, Clone, ValueEnum)]
+enum ReportFormatArg {
+    Text,
+    Csv,
+    Json,
+}
+
+impl From<ReportFormatArg> for ReportFormat {
+    fn from(arg: ReportFormatArg) -> Self {
+        match arg {
+            ReportFormatArg::Text => ReportFormat::Text,
+            ReportFormatArg::Csv => ReportFormat::Csv,
+            ReportFormatArg::Json => ReportFormat::Json,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Main dispatch
 // ---------------------------------------------------------------------------
@@ -350,10 +374,44 @@ async fn dir_compare(args: &DirCompareArgs) -> Result<DiffResult, FsError> {
     // Print summary.
     print_summary(&comparison);
 
+    // Write report file if requested.
+    if let Some(ref report_path) = args.report {
+        let report_format: ReportFormat = args.report_format.clone().into();
+        let report_config = build_report_config(args);
+        let report =
+            generate_report(&comparison, report_format, &report_config);
+        tokio::fs::write(report_path, &report)
+            .await
+            .map_err(|e| wrap(e, FsOperation::Write, report_path.clone()))?;
+        println!("Report written to {}.", report_path.display());
+    }
+
     if comparison.different_count() > 0 || comparison.orphan_count() > 0 {
         Ok(DiffResult::HasDiffs)
     } else {
         Ok(DiffResult::NoDiffs)
+    }
+}
+
+fn build_report_config(args: &DirCompareArgs) -> ReportConfig {
+    // Derive report config from the CLI filter flags.
+    let (include_same, include_different, include_orphans) =
+        if args.show_different && args.show_orphans {
+            (true, true, true)
+        } else if args.show_different {
+            (false, true, false)
+        } else if args.show_orphans {
+            (false, false, true)
+        } else {
+            (true, true, true)
+        };
+
+    ReportConfig {
+        include_same,
+        include_different,
+        include_orphans,
+        include_subdirectories: true,
+        include_file_details: true,
     }
 }
 

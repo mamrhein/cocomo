@@ -461,6 +461,9 @@ mod tests {
         assert!(debug.contains("dav.example.com"));
         assert!(debug.contains("user"));
         assert!(debug.contains("REDACTED"));
-        assert!(!debug.contains("secret-pass"), "password should not appear in debug output");
+        assert!(
+            !debug.contains("secret-pass"),
+            "password should not appear in debug output"
+        );
     }
 }

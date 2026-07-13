@@ -90,7 +90,9 @@ impl Provider {
     /// # Errors
     ///
     /// Returns an error if required settings are missing or invalid.
-    pub fn from_profile(profile: &Profile) -> std::result::Result<Self, ProfileError> {
+    pub fn from_profile(
+        profile: &Profile,
+    ) -> std::result::Result<Self, ProfileError> {
         let label = profile.id.clone();
         match profile.provider_type {
             ProviderType::Local => {
@@ -108,22 +110,16 @@ impl Provider {
                     .unwrap_or("21")
                     .parse::<u16>()
                     .map_err(|e| ProfileError::Toml(e.to_string()))?;
-                let username = profile
-                    .setting("username")
-                    .unwrap_or("")
-                    .to_string();
-                let password = profile
-                    .secrets
-                    .get("password")
-                    .unwrap_or("")
-                    .to_string();
+                let username =
+                    profile.setting("username").unwrap_or("").to_string();
+                let password =
+                    profile.secrets.get("password").unwrap_or("").to_string();
                 let tls = profile
                     .setting("tls")
                     .map(|s| s == "true")
                     .unwrap_or(false);
-                let root_path = profile
-                    .setting("root_path")
-                    .map(PathBuf::from);
+                let root_path =
+                    profile.setting("root_path").map(PathBuf::from);
 
                 Ok(Self::Ftp(FtpFs::new(
                     label,
@@ -146,9 +142,7 @@ impl Provider {
                     .setting("bucket")
                     .ok_or_else(|| ProfileError::NotFound(profile.id.clone()))?
                     .to_string();
-                let prefix = profile
-                    .setting("prefix")
-                    .map(PathBuf::from);
+                let prefix = profile.setting("prefix").map(PathBuf::from);
 
                 Ok(Self::S3(S3Fs::new(
                     label,
@@ -165,17 +159,14 @@ impl Provider {
                     .ok_or_else(|| ProfileError::NotFound(profile.id.clone()))?
                     .to_string();
                 let username = profile.setting("username").map(String::from);
-                let password = profile
-                    .secrets
-                    .get("password")
-                    .map(String::from);
+                let password =
+                    profile.secrets.get("password").map(String::from);
                 let tls = profile
                     .setting("tls")
                     .map(|s| s == "true")
                     .unwrap_or(true);
-                let root_path = profile
-                    .setting("root_path")
-                    .map(PathBuf::from);
+                let root_path =
+                    profile.setting("root_path").map(PathBuf::from);
 
                 Ok(Self::WebDav(WebDavFs::new(
                     label,
@@ -198,8 +189,7 @@ impl std::fmt::Debug for Provider {
             Self::Local(_) => f.debug_tuple("Provider::Local").finish(),
             Self::Ftp(_) => f.debug_tuple("Provider::Ftp").finish(),
             Self::S3(_) => f.debug_tuple("Provider::S3").finish(),
-            Self::WebDav(_) =>
-                f.debug_tuple("Provider::WebDav").finish(),
+            Self::WebDav(_) => f.debug_tuple("Provider::WebDav").finish(),
         }
     }
 }
@@ -520,8 +510,7 @@ impl WritableFileSystem for Provider {
             Self::Local(p) => p.create_symlink(parent, name, target).await,
             Self::Ftp(p) => p.create_symlink(parent, name, target).await,
             Self::S3(p) => p.create_symlink(parent, name, target).await,
-            Self::WebDav(p) =>
-                p.create_symlink(parent, name, target).await,
+            Self::WebDav(p) => p.create_symlink(parent, name, target).await,
         }
     }
 
@@ -643,10 +632,7 @@ impl ProviderRegistry {
     /// Look up a provider by filesystem ID.
     ///
     /// Returns `None` if no provider with the given ID is registered.
-    pub fn get(
-        &self,
-        id: &FileSystemId<u64>,
-    ) -> Option<Arc<Provider>> {
+    pub fn get(&self, id: &FileSystemId<u64>) -> Option<Arc<Provider>> {
         self.providers.read().get(id.get()).cloned()
     }
 
@@ -719,9 +705,7 @@ mod tests {
         profile.set_setting("host".into(), "ftp.example.com".into());
         profile.set_setting("port".into(), "21".into());
         profile.set_setting("username".into(), "user".into());
-        profile
-            .secrets
-            .set("password".into(), "pass".into());
+        profile.secrets.set("password".into(), "pass".into());
         profile
     }
 
@@ -733,8 +717,7 @@ mod tests {
     }
 
     fn webdav_profile() -> Profile {
-        let mut profile =
-            Profile::new("test-webdav", ProviderType::WebDav);
+        let mut profile = Profile::new("test-webdav", ProviderType::WebDav);
         profile
             .set_setting("base_url".into(), "https://dav.example.com/".into());
         profile.set_setting("tls".into(), "true".into());
@@ -912,12 +895,10 @@ mod tests {
     #[tokio::test]
     async fn registry_get_or_create_missing_profile_fails() {
         let registry = ProviderRegistry::new();
-        let bad_profile =
-            Profile::new("bad-s3", ProviderType::S3); // missing required fields
+        let bad_profile = Profile::new("bad-s3", ProviderType::S3); // missing required fields
         let fake_id = FileSystemId::new(999u64);
 
-        let result =
-            registry.get_or_create(&fake_id, &bad_profile).await;
+        let result = registry.get_or_create(&fake_id, &bad_profile).await;
         assert!(result.is_err());
     }
 
