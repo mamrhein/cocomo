@@ -716,12 +716,12 @@ async fn text_compare(args: &TextCompareArgs) -> Result<DiffResult, FsError> {
 
 fn print_text_diff_table(diff: &TextDiff) {
     println!(
-        "{:<6} {:<6}   {:<6} {:<6}   {}",
-        "L-No", "R-No", "L-No", "R-No", "Content"
+        "{:<6} {:<6}   {:<6} {:<6}   Content",
+        "L-No", "R-No", "L-No", "R-No"
     );
     println!(
-        "{:<6} {:<6}   {:<6} {:<6}   {}",
-        "----", "----", "----", "----", "-------"
+        "{:<6} {:<6}   {:<6} {:<6}   -------",
+        "----", "----", "----", "----"
     );
 
     for difference in &diff.differences {
