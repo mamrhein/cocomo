@@ -35,6 +35,7 @@
 //! - [`compare`] — Directory comparison engine that merges two scanned trees.
 //! - [`filter`] — Name, display, and content filters for comparison results.
 //! - [`text`] — Line-based text comparison engine.
+//! - [`patch`] — Unified diff generation and patch application.
 //! - [`grammar`] — Syntax-aware grammar rules for smart diffing.
 //! - [`format`] — File format registry and format-specific settings.
 //! - [`error`] — Structured [`FsError`] with operation context.
@@ -59,6 +60,7 @@ pub mod identity;
 pub mod local;
 pub mod meta;
 pub mod node;
+pub mod patch;
 pub mod profile;
 pub mod provider;
 pub mod report;
@@ -95,6 +97,7 @@ pub use identity::{DirId, FileId, FileSystemId, NodeId};
 pub use local::LocalFs;
 pub use meta::Metadata;
 pub use node::{Node, NodeKind, SymlinkTarget, UserPermissions};
+pub use patch::{PatchError, PatchResult, apply_patch, generate_unified_diff};
 pub use profile::{
     EncryptedSecrets, Profile, ProfileError, ProfileStore, ProviderType,
     default_store_path, derive_master_key,
