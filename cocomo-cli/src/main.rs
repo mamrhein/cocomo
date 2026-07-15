@@ -439,29 +439,35 @@ fn print_comparison_text(comparison: &DirComparison, args: &DirCompareArgs) {
     let mut entries = Vec::new();
     collect_entries(&comparison.entries, &mut entries);
 
-    if entries.is_empty() {
-        println!("Directories are identical.");
+    // Filter entries according to display flags.
+    let visible: Vec<&DirEntry> = entries
+        .iter()
+        .filter(|e| should_show_entry(e, args))
+        .collect();
+
+    if visible.is_empty() {
+        if entries.is_empty() {
+            println!("Directories are identical.");
+        } else {
+            println!("No matching entries.");
+        }
         return;
     }
 
     // Print header.
     println!(
-        "{:<5} {:<40} {:>12} {:>12}",
+        "{:5} {:<40} {:>12} {:>12}",
         "Stat", "Name", "Left Size", "Right Size"
     );
     println!(
-        "{:<5} {:<40} {:>12} {:>12}",
+        "{:5} {:<40} {:>12} {:>12}",
         "----",
         "----------------------------------------",
         "------------",
         "------------"
     );
 
-    for entry in &entries {
-        if !should_show_entry(entry, args) {
-            continue;
-        }
-
+    for entry in &visible {
         let status_sym = entry.status.symbol();
         let name = &entry.name;
         let left_size = entry
@@ -476,7 +482,7 @@ fn print_comparison_text(comparison: &DirComparison, args: &DirCompareArgs) {
             .unwrap_or("-".to_string());
 
         println!(
-            "{:<5} {:<40} {:>12} {:>12}",
+            "{:5} {:<40} {:>12} {:>12}",
             status_sym, name, left_size, right_size
         );
     }

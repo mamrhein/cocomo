@@ -241,11 +241,16 @@ where
     let root_id = fs.resolve_path(path).await?;
     let root_node = fs.get_node(root_id)?;
 
+    // Use the absolute path of the resolved root for computing relative
+    // entry paths, regardless of whether the caller passed a relative or
+    // absolute scan root.
+    let scan_root = root_node.path();
+
     if !root_node.kind().is_directory() {
         // The root is not a directory; return the single entry.
         result
             .entries
-            .push(scan_node_to_entry(&root_node, &root_id, path));
+            .push(scan_node_to_entry(&root_node, &root_id, scan_root));
         return Ok(result);
     }
 
@@ -329,7 +334,7 @@ where
                 result.entries.push(scan_node_to_entry(
                     &child_node,
                     &child_id,
-                    path,
+                    scan_root,
                 ));
                 continue;
             }
@@ -341,13 +346,13 @@ where
                 result.entries.push(scan_node_to_entry(
                     &child_node,
                     &child_id,
-                    path,
+                    scan_root,
                 ));
             } else {
                 result.entries.push(scan_node_to_entry(
                     &child_node,
                     &child_id,
-                    path,
+                    scan_root,
                 ));
             }
         }
