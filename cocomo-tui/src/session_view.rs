@@ -28,13 +28,14 @@ use ratatui::{
 
 use crate::app::{AppMode, Focus, SessionAction, SessionType, SessionView};
 
-/// Render the active session's content (header, main table, status bar, help
-/// bar).
+/// Render the active session's content (header, filter bar, main table, status
+/// bar, help bar).
 pub fn render_session(frame: &mut Frame, area: Rect, session: &SessionView) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(5), // header (3 lines + borders)
+            Constraint::Length(3), // filter bar (1 line + borders)
             Constraint::Min(1),    // main content
             Constraint::Length(3), // status bar (1 line + borders)
             Constraint::Length(3), // help bar (1 line + borders)
@@ -42,14 +43,16 @@ pub fn render_session(frame: &mut Frame, area: Rect, session: &SessionView) {
         .split(area);
 
     render_header(frame, chunks[0], session);
-    // Render sync preview if active, otherwise the normal comparison.
+    // Render sync preview if active, otherwise the filter bar + normal
+    // comparison.
     if session.sync_planned.is_some() {
-        render_sync_preview(frame, chunks[1], session);
+        render_sync_preview(frame, chunks[2], session);
     } else {
-        render_main(frame, chunks[1], session);
+        render_filter_bar(frame, chunks[1], session);
+        render_main(frame, chunks[2], session);
     }
-    render_status_bar(frame, chunks[2], session);
-    render_help_bar(frame, chunks[3], session);
+    render_status_bar(frame, chunks[3], session);
+    render_help_bar(frame, chunks[4], session);
 }
 
 fn render_header(frame: &mut Frame, area: Rect, session: &SessionView) {
@@ -97,6 +100,37 @@ fn render_header(frame: &mut Frame, area: Rect, session: &SessionView) {
     frame.render_widget(paragraph, area);
 }
 
+/// Render the filter bar showing active filters and toggles.
+fn render_filter_bar(frame: &mut Frame, area: Rect, session: &SessionView) {
+    let mut parts = Vec::new();
+
+    // Show orphan filter status.
+    if session.hide_same {
+        parts.push(Span::styled(
+            "No Orphans".to_string(),
+            Style::default().fg(Color::Yellow),
+        ));
+    } else {
+        parts.push(Span::raw("Show Orphans".to_string()));
+    }
+
+    // Show active name filter.
+    if let Some(ref filter) = session.active_filter {
+        parts.push(Span::raw(" | ".to_string()));
+        parts.push(Span::styled(
+            format!("*{filter}*"),
+            Style::default().fg(Color::Cyan),
+        ));
+    }
+
+    let line = Line::from(parts);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Gray));
+    let paragraph = Paragraph::new(line).block(block);
+    frame.render_widget(paragraph, area);
+}
+
 fn render_main(frame: &mut Frame, area: Rect, session: &SessionView) {
     let entries = session.filtered_entries();
 
@@ -130,27 +164,34 @@ fn render_main(frame: &mut Frame, area: Rect, session: &SessionView) {
     let rows = entries.iter().map(|entry| {
         let status_style = status_style(entry.status);
         let name = &entry.name;
-        let left_size = entry
-            .left
-            .as_ref()
-            .map(|l| format_size(l.size))
-            .unwrap_or_else(|| "-".to_string());
-        let right_size = entry
-            .right
-            .as_ref()
-            .map(|r| format_size(r.size))
-            .unwrap_or_else(|| "-".to_string());
-        let left_date = entry
-            .left
-            .as_ref()
-            .map(|l| format_date(&l.modified))
-            .unwrap_or_else(|| "-".to_string());
-        let right_date = entry
-            .right
-            .as_ref()
-            .map(|r| format_date(&r.modified))
-            .unwrap_or_else(|| "-".to_string());
 
+        // Format left metadata: "size  date".
+        let left_meta = entry
+            .left
+            .as_ref()
+            .map(|l| {
+                format!(
+                    "{}  {}",
+                    format_size(l.size),
+                    format_date(&l.modified)
+                )
+            })
+            .unwrap_or_else(|| "-             ".to_string());
+
+        // Format right metadata: "size  date".
+        let right_meta = entry
+            .right
+            .as_ref()
+            .map(|r| {
+                format!(
+                    "{}  {}",
+                    format_size(r.size),
+                    format_date(&r.modified)
+                )
+            })
+            .unwrap_or_else(|| "-             ".to_string());
+
+        // Directory expand indicator.
         let dir_indicator = if entry.left.as_ref().is_some_and(|l| l.is_dir)
             || entry.right.as_ref().is_some_and(|r| r.is_dir)
         {
@@ -160,48 +201,36 @@ fn render_main(frame: &mut Frame, area: Rect, session: &SessionView) {
         };
 
         Row::new(vec![
+            Span::raw(format!("{dir_indicator}{name}")),
+            Span::raw(left_meta),
             Span::styled(
                 entry.status.symbol(),
                 Style::default()
                     .fg(status_style)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::raw(format!("{dir_indicator}{name}")),
-            Span::raw(left_size),
-            Span::raw(left_date),
-            Span::raw(right_size),
-            Span::raw(right_date),
+            Span::raw(right_meta),
         ])
     });
 
     let header = Row::new(vec![
-        Span::styled("S", Style::default().add_modifier(Modifier::BOLD)),
         Span::styled("Name", Style::default().add_modifier(Modifier::BOLD)),
         Span::styled(
-            "Left Size",
+            "Left (size  modified)",
             Style::default().add_modifier(Modifier::BOLD),
         ),
+        Span::styled("S", Style::default().add_modifier(Modifier::BOLD)),
         Span::styled(
-            "Left Modified",
-            Style::default().add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            "Right Size",
-            Style::default().add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            "Right Modified",
+            "Right (size  modified)",
             Style::default().add_modifier(Modifier::BOLD),
         ),
     ]);
 
     let widths = [
-        Constraint::Length(2),
-        Constraint::Min(20),
-        Constraint::Length(10),
-        Constraint::Length(20),
-        Constraint::Length(10),
-        Constraint::Length(20),
+        Constraint::Min(20),    // Name
+        Constraint::Length(24), // Left metadata
+        Constraint::Length(2),  // Status
+        Constraint::Length(24), // Right metadata
     ];
 
     let block = Block::default()
