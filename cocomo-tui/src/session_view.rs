@@ -28,14 +28,16 @@ use ratatui::{
 
 use crate::app::{AppMode, Focus, SessionAction, SessionType, SessionView};
 
-/// Render the active session's content (header, main table, footer).
+/// Render the active session's content (header, main table, status bar, help
+/// bar).
 pub fn render_session(frame: &mut Frame, area: Rect, session: &SessionView) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),
-            Constraint::Min(1),
-            Constraint::Length(3),
+            Constraint::Length(5), // header (3 lines + borders)
+            Constraint::Min(1),    // main content
+            Constraint::Length(3), // status bar (1 line + borders)
+            Constraint::Length(3), // help bar (1 line + borders)
         ])
         .split(area);
 
@@ -46,7 +48,8 @@ pub fn render_session(frame: &mut Frame, area: Rect, session: &SessionView) {
     } else {
         render_main(frame, chunks[1], session);
     }
-    render_footer(frame, chunks[2], session);
+    render_status_bar(frame, chunks[2], session);
+    render_help_bar(frame, chunks[3], session);
 }
 
 fn render_header(frame: &mut Frame, area: Rect, session: &SessionView) {
@@ -312,66 +315,24 @@ fn render_sync_preview(frame: &mut Frame, area: Rect, session: &SessionView) {
     );
 }
 
-fn render_footer(frame: &mut Frame, area: Rect, session: &SessionView) {
-    let lines = if session.mode == AppMode::Filter {
-        vec![
-            Line::from(Span::styled(
-                format!("Filter: {}", session.filter_input),
-                Style::default().fg(Color::Yellow),
-            )),
-            Line::from(Span::raw("Enter=apply  Esc=cancel")),
-        ]
+/// Render the status bar with comparison statistics or mode-specific info.
+fn render_status_bar(frame: &mut Frame, area: Rect, session: &SessionView) {
+    let text = if session.mode == AppMode::Filter {
+        Line::from(Span::styled(
+            format!("Filter: {}", session.filter_input),
+            Style::default().fg(Color::Yellow),
+        ))
     } else if session.mode == AppMode::SaveSession {
-        vec![
-            Line::from(Span::styled(
-                format!("Save session as: {}", session.filter_input),
-                Style::default().fg(Color::Yellow),
-            )),
-            Line::from(Span::raw("Enter=save  Esc=cancel")),
-        ]
+        Line::from(Span::styled(
+            format!("Save session as: {}", session.filter_input),
+            Style::default().fg(Color::Yellow),
+        ))
     } else if session.mode == AppMode::LoadSession {
-        vec![
-            Line::from(Span::styled(
-                format!("Load session: {}", session.filter_input),
-                Style::default().fg(Color::Yellow),
-            )),
-            Line::from(Span::raw("j/k=select  Enter=load  Esc=cancel")),
-        ]
-    } else {
-        let stats = session.comparison.as_ref().map(|c| {
-            format!(
-                "Total: {}  Same: {}  Diff: {}  Orphans: {}",
-                c.total(),
-                c.same_count(),
-                c.different_count(),
-                c.orphan_count(),
-            )
-        });
-
-        let filter_info = session
-            .active_filter
-            .as_ref()
-            .map(|f| format!("Filter: *{f}*"))
-            .unwrap_or_else(|| "No filter".to_string());
-
-        vec![
-            Line::from(Span::raw(
-                stats.unwrap_or_else(|| "No data".to_string()),
-            )),
-            Line::from(vec![
-                Span::raw(filter_info),
-                Span::raw("  |  "),
-                Span::raw(if session.hide_same {
-                    "Hiding identical"
-                } else {
-                    "Showing all"
-                }),
-            ]),
-        ]
-    };
-
-    // Show different help text depending on context.
-    let help = if session.sync_planned.is_some() {
+        Line::from(Span::styled(
+            format!("Load session: {}", session.filter_input),
+            Style::default().fg(Color::Yellow),
+        ))
+    } else if session.sync_planned.is_some() {
         let count = session
             .sync_planned
             .as_ref()
@@ -388,14 +349,58 @@ fn render_footer(frame: &mut Frame, area: Rect, session: &SessionView) {
         } else {
             format!("Planned: {count} transfers")
         };
+        Line::from(Span::styled(
+            format!("Sync: {op_label}  |  {status}"),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ))
+    } else {
+        let stats = session.comparison.as_ref().map(|c| {
+            format!(
+                "Total: {}  Same: {}  Diff: {}  Orphans: {}",
+                c.total(),
+                c.same_count(),
+                c.different_count(),
+                c.orphan_count(),
+            )
+        });
+        let filter_info = session
+            .active_filter
+            .as_ref()
+            .map(|f| format!("Filter: *{f}*"))
+            .unwrap_or_else(|| "No filter".to_string());
+        let display = if session.hide_same {
+            "Hiding identical"
+        } else {
+            "Showing all"
+        };
         Line::from(vec![
-            Span::styled(
-                format!("Sync: {op_label}  |  {status}"),
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            ),
+            Span::raw(stats.unwrap_or_else(|| "No data".to_string())),
             Span::raw("  |  "),
+            Span::raw(filter_info),
+            Span::raw("  |  "),
+            Span::raw(display),
+        ])
+    };
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Gray));
+    let paragraph = Paragraph::new(text).block(block);
+    frame.render_widget(paragraph, area);
+}
+
+/// Render the help bar with keybinding hints.
+fn render_help_bar(frame: &mut Frame, area: Rect, session: &SessionView) {
+    let help = if session.mode == AppMode::Filter {
+        Line::from("Enter=apply  Esc=cancel")
+    } else if session.mode == AppMode::SaveSession {
+        Line::from("Enter=save  Esc=cancel")
+    } else if session.mode == AppMode::LoadSession {
+        Line::from("j/k=select  Enter=load  Esc=cancel")
+    } else if session.sync_planned.is_some() {
+        Line::from(vec![
             Span::styled("j/k", Style::default().add_modifier(Modifier::BOLD)),
             Span::raw(" navigate  "),
             Span::styled("Esc", Style::default().add_modifier(Modifier::BOLD)),
@@ -450,7 +455,7 @@ fn render_footer(frame: &mut Frame, area: Rect, session: &SessionView) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Gray));
-    let paragraph = Paragraph::new([lines, vec![help]].concat()).block(block);
+    let paragraph = Paragraph::new(help).block(block);
     frame.render_widget(paragraph, area);
 }
 
@@ -888,15 +893,17 @@ pub fn render_text_session(
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(2),
-            Constraint::Min(1),
-            Constraint::Length(2),
+            Constraint::Length(3), // header (1 line + borders)
+            Constraint::Min(1),    // main content
+            Constraint::Length(3), // status bar (1 line + borders)
+            Constraint::Length(3), // help bar (1 line + borders)
         ])
         .split(area);
 
     render_text_header(frame, chunks[0], session);
     render_text_main(frame, chunks[1], session);
-    render_text_footer(frame, chunks[2], session);
+    render_text_status_bar(frame, chunks[2], session);
+    render_text_help_bar(frame, chunks[3], session);
 }
 
 fn render_text_header(frame: &mut Frame, area: Rect, session: &SessionView) {
@@ -1182,7 +1189,12 @@ fn render_text_main(frame: &mut Frame, area: Rect, session: &SessionView) {
     );
 }
 
-fn render_text_footer(frame: &mut Frame, area: Rect, session: &SessionView) {
+/// Render the status bar for text diff sessions.
+fn render_text_status_bar(
+    frame: &mut Frame,
+    area: Rect,
+    session: &SessionView,
+) {
     let (current, total) = current_diff_position(session);
 
     let position_str = if total > 0 {
@@ -1195,12 +1207,25 @@ fn render_text_footer(frame: &mut Frame, area: Rect, session: &SessionView) {
         "No differences".to_string()
     };
 
-    let lines = vec![Line::from(format!(
+    let text = Line::from(format!(
         "{position_str}  |  Left: {} lines  |  Right: {} lines",
         session.left_lines.len(),
         session.right_lines.len(),
-    ))];
+    ));
 
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Gray));
+    let paragraph = Paragraph::new(text).block(block);
+    frame.render_widget(paragraph, area);
+}
+
+/// Render the help bar for text diff sessions.
+fn render_text_help_bar(
+    frame: &mut Frame,
+    area: Rect,
+    _session: &SessionView,
+) {
     let help = Line::from(vec![
         Span::styled("j/k", Style::default().add_modifier(Modifier::BOLD)),
         Span::raw(" navigate  "),
@@ -1222,7 +1247,7 @@ fn render_text_footer(frame: &mut Frame, area: Rect, session: &SessionView) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Gray));
-    let paragraph = Paragraph::new([lines, vec![help]].concat()).block(block);
+    let paragraph = Paragraph::new(help).block(block);
     frame.render_widget(paragraph, area);
 }
 

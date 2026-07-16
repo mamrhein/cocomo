@@ -256,7 +256,7 @@ impl SessionView {
 ///
 /// Manages multiple [`SessionView`] instances as tabs and tracks which tab
 /// is currently active.
-#[allow(dead_code)] // reload_pending and session_count are stubs for M5.2+.
+#[allow(dead_code)] // reload_pending, session_count and menu_selection are stubs for M5.2+.
 pub struct App {
     /// `false` when the app should exit.
     pub running: bool,
@@ -266,6 +266,8 @@ pub struct App {
     pub active_tab: usize,
     /// Session index that needs an async reload.
     pub reload_pending: Option<usize>,
+    /// Index of the currently selected menu item.
+    pub menu_selection: usize,
 }
 
 impl App {
@@ -276,6 +278,7 @@ impl App {
             sessions: Vec::new(),
             active_tab: 0,
             reload_pending: None,
+            menu_selection: 0,
         }
     }
 

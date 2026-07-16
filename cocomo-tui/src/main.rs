@@ -36,9 +36,9 @@ use ratatui::{
     Frame, Terminal,
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Style},
-    text::Line,
-    widgets::{Block, Borders, Paragraph},
+    style::{Color, Modifier, Style},
+    text::{Line, Span},
+    widgets::{Block, Borders, Paragraph, Tabs},
 };
 
 // ---------------------------------------------------------------------------
@@ -69,24 +69,51 @@ struct Cli {
 fn render(frame: &mut Frame, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(1)].as_ref())
+        .constraints(
+            [
+                Constraint::Length(3), // menu bar (1 line + borders)
+                Constraint::Length(3), // tab bar (1 line + borders)
+                Constraint::Min(1),    // main content
+            ]
+            .as_ref(),
+        )
         .split(frame.area());
 
-    render_tab_bar(frame, chunks[0], app);
+    render_menu_bar(frame, chunks[0], app);
+    render_tab_bar(frame, chunks[1], app);
 
     if let Some(session) = app.active() {
         match session.session_type {
             app::SessionType::DirCompare => {
-                session_view::render_session(frame, chunks[1], session);
+                session_view::render_session(frame, chunks[2], session);
             }
             app::SessionType::TextCompare => {
-                session_view::render_text_session(frame, chunks[1], session);
+                session_view::render_text_session(frame, chunks[2], session);
             }
         }
     } else {
         // No sessions open — show welcome screen.
-        render_welcome(frame, chunks[1]);
+        render_welcome(frame, chunks[2], app);
     }
+}
+
+/// Render the top menu bar with Tabs widget.
+fn render_menu_bar(frame: &mut Frame, area: Rect, app: &App) {
+    let menu_items = ["Sessions", "Compare", "Sync", "View", "Filter", "Help"];
+    let tabs = Tabs::new(menu_items.map(Line::from))
+        .select(app.menu_selection)
+        .highlight_style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )
+        .divider(Span::raw(" | "))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Gray)),
+        );
+    frame.render_widget(tabs, area);
 }
 
 fn render_tab_bar(frame: &mut Frame, area: Rect, app: &App) {
@@ -101,35 +128,27 @@ fn render_tab_bar(frame: &mut Frame, area: Rect, app: &App) {
         return;
     }
 
-    // Build tab labels.
-    let tabs: Vec<_> = sessions
-        .iter()
-        .enumerate()
-        .map(|(i, s)| {
-            if i == active {
-                format!(" {} ", s.tab_title())
-            } else {
-                format!("  {}  ", s.tab_title())
-            }
-        })
-        .collect();
+    // Build tab titles from session names.
+    let titles: Vec<Line> =
+        sessions.iter().map(|s| Line::from(s.tab_title())).collect();
 
-    let line = Line::from(tabs.join("│"));
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Gray));
-    let paragraph =
-        Paragraph::new(line)
-            .block(block)
-            .style(if active < sessions.len() {
-                Style::default().fg(Color::Yellow)
-            } else {
-                Style::default()
-            });
-    frame.render_widget(paragraph, area);
+    let tabs = Tabs::new(titles)
+        .select(active)
+        .highlight_style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )
+        .divider(Span::raw(" | "))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Gray)),
+        );
+    frame.render_widget(tabs, area);
 }
 
-fn render_welcome(frame: &mut Frame, area: Rect) {
+fn render_welcome(frame: &mut Frame, area: Rect, _app: &App) {
     let lines = vec![
         Line::from("cocomo — COmpare, COpy & MOve"),
         Line::from(""),
@@ -151,11 +170,13 @@ fn render_welcome(frame: &mut Frame, area: Rect) {
 // Global key handling
 // ---------------------------------------------------------------------------
 
-/// Handle keys that affect the app globally (tab switching, quit).
+/// Handle keys that affect the app globally (tab switching, menu, quit).
 ///
 /// Returns `true` if the key was consumed by a global handler, `false` if it
 /// should be dispatched to the active session.
 fn handle_global_key(app: &mut App, key: KeyEvent) -> bool {
+    const MENU_COUNT: usize = 6; // Sessions, Compare, Sync, View, Filter, Help
+
     // Ctrl+W — close active tab.
     if key.code == KeyCode::Char('w')
         && key.modifiers.contains(KeyModifiers::CONTROL)
@@ -171,6 +192,25 @@ fn handle_global_key(app: &mut App, key: KeyEvent) -> bool {
         let is_shift = key.modifiers.contains(KeyModifiers::SHIFT);
         app.switch_tab(if is_shift { -1 } else { 1 });
         return true;
+    }
+
+    // Left/Right arrow keys — navigate menu bar.
+    if key.modifiers == KeyModifiers::NONE {
+        match key.code {
+            KeyCode::Left => {
+                app.menu_selection = if app.menu_selection > 0 {
+                    app.menu_selection - 1
+                } else {
+                    MENU_COUNT - 1
+                };
+                return true;
+            }
+            KeyCode::Right => {
+                app.menu_selection = (app.menu_selection + 1) % MENU_COUNT;
+                return true;
+            }
+            _ => {}
+        }
     }
 
     // q — quit (only when not in a session filter mode).
