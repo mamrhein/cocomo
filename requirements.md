@@ -1048,56 +1048,61 @@ Exit codes: `0` = no differences / success, `1` = differences found (compare mod
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│  [Sessions] [Compare] [Sync] [View] [Filter] [Help]    │  ← Menu bar
-├──────────────┬──────────────────────┬───────────────────┤
-│  Left:/src   │  Right:/dst          │  Status panel     │
-│              │                      │                   │
-│  [=] file.rs │  [=] file.rs        │  Filter: *.rs     │
-│  [>] mod.rs  │  [ ] mod.rs         │  Status: 42 diff  │
-│  [<] util.rs │  [=] util.rs        │  Same: 15        │
-│  ...         │  ...                 │  Left-only: 3    │
-│              │                      │  Right-only: 24   │
-├──────────────┴──────────────────────┴───────────────────┤
-│  >  [L/R] [Copy] [Delete] [Sync] [Open Diff] [Next]    │  ← Action bar
+│  [Sessions] [Compare] [Sync] [View] [Filter] [Help]     │  ← Menu bar
 ├─────────────────────────────────────────────────────────┤
-│  file.rs  │  Same  │  1.2KB  │  2024-01-15 14:32:01   │  ← Detail row
+│  MyProject | file.rs |                                  │  ← Tab bar
+├─────────────────────────────────────────────────────────┤
+│                                                         │
+│                   Diff View                             │
+│                                                         │
+│                                                         │
+├─────────────────────────────────────────────────────────┤
+│  Total: 42 diff Same: 15 Left-only: 3 Right-only: 24    │  ← Status bar
 └─────────────────────────────────────────────────────────┘
 ```
 
-### 11.2 Text Diff View (Modal)
+### 11.2 Dir Diff View
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│  file.rs: Left vs Right              [ESC] close        │
-├──────────────────────┬──────────────────────────────────┤
-│  7 │- fn old_name()  │  9 │+ fn new_name()             │
-│  8 │  let x = 42;    │ 10 │  let x = 42;               │
-│  9 │-  return x;     │ 11 │+  x                         │
-│ 10 │+  x             │ 12 │ }                           │
-│ 11 │ }               │                                  │
-└──────────────────────┴──────────────────────────────────┘
-   [n]ext diff  [p]rev  [c]opy left  [v]copy right  [e]dit
+│  No Orphans | *.rs                                      │  ← Filter bar
+├─────────────────────────────────────────────────────────┤
+│     Name           │ <src>          │S│ <dst>           │
+│ [+] subdir         │ 216B  2026-03..│<│ 216B  2026-04.. │
+│     file.rs        │ 328K  2026-03..│=│ 328K  2026-02.. │
+│     mod.rs         │ 700B  2026-03..│=│ 700B  2026-02.. │
+│     util.rs        │ 137K  2026-03..│>│ 117K  2026-02.. │
+│     ...            │  ...           │ | ...             │
 ```
 
-### 11.3 Keybindings
+### 11.3 Text Diff View
+
+```
+│  7 fn old_name()          │<│  9 fn new_name()          │
+│  8   let x = 42;          │=│ 10   let x = 42;          │
+|                           |<│ 11   let y = x + 42;      |
+│  9   return x;            │<│ 12   return y;            │
+│ 10 }                      │=| 13 }                      │
+```
+
+### 11.4 Keybindings
 
 | Key           | Action                                  |
 | ------------- | --------------------------------------- |
 | `j` / `k`     | Navigate down / up                      |
-| `l`           | Open file diff / descend into directory |
-| `h`           | Go back / ascend                        |
+| `+`           | descend into directory                  |
+| `-`           | ascend out of directory                 |
 | `n` / `N`     | Next / previous difference              |
 | `C-l` / `C-r` | Copy left → right / right → left        |
 | `D-l` / `D-r` | Delete from left / right                |
 | `S`           | Run sync (with confirmation modal)      |
-| `f`           | Toggle filter panel                     |
+| `f`           | Toggle filter bar                       |
 | `/`           | Search in files                         |
 | `:`           | Enter command mode (run script command) |
-| `q`           | Quit session / app                      |
+| `q`           | Quit app                                |
 | `ESC`         | Close modal / panel                     |
-| `Tab`         | Switch between panes                    |
+| `Tab`         | Switch between tab panes                |
 
-### 11.4 Modal Panels
+### 11.5 Modal Panels
 
 - **Filter panel**: regex input, name filter toggle, status filter checkboxes
 - **Settings modal**: per-session settings editor
@@ -1105,7 +1110,7 @@ Exit codes: `0` = no differences / success, `1` = differences found (compare mod
 - **Report modal**: choose format, destination, options
 - **Session browser**: list saved sessions, create new
 
-### 11.5 Terminal Features
+### 11.6 Terminal Features
 
 - Fullscreen mode (alt-screen)
 - Mouse support (click to select, drag to multi-select)
