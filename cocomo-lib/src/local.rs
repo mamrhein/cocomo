@@ -1873,18 +1873,20 @@ mod tests {
         let base = temp_dir().join("node_sym");
         let _ = fs_err::remove_dir_all(&base);
         fs_err::create_dir_all(&base).unwrap();
-        fs_err::write(base.join("target.txt"), "linked").unwrap();
+        let target = base.join("target.txt");
+        fs_err::write(&target, "linked").unwrap();
+        let link = base.join("link.txt");
 
         let fs = LocalFs::new("node_test");
 
         // Create a symlink via path-based API.
         #[cfg(unix)]
         {
-            std::os::unix::fs::symlink(
-                base.join("target.txt"),
-                base.join("link.txt"),
-            )
-            .unwrap();
+            std::os::unix::fs::symlink(target, link).unwrap();
+        }
+        #[cfg(windows)]
+        {
+            std::os::windows::fs::symlink_file(target, link).unwrap();
         }
 
         let link_id = fs.resolve_path(&base.join("link.txt")).await.unwrap();
