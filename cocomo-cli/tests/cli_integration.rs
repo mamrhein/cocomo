@@ -86,10 +86,17 @@ mod top_level {
 
     #[test]
     fn no_command_shows_help() {
+        #[cfg(windows)]
+        let exe = ".exe";
+        #[cfg(not(windows))]
+        let exe = "";
         cmd()
             .assert()
             .failure()
-            .stderr(predicate::str::contains("Usage: cocomo-cli <COMMAND>"));
+            .stderr(predicate::str::contains(format!(
+                "Usage: cocomo-cli{} <COMMAND>",
+                exe
+            )));
     }
 
     #[test]
