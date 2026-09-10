@@ -1773,20 +1773,30 @@ mod tests {
     #[tokio::test]
     async fn node_copy_file() {
         let base = temp_dir().join("node_copy");
+        let src_dir_path = base.join("src");
+        let src_file_path = src_dir_path.join("src.txt");
+        let dst_dir_path = base.join("dst");
         let _ = fs_err::remove_dir_all(&base);
-        fs_err::create_dir_all(&base).unwrap();
-        fs_err::write(base.join("src.txt"), "copy me").unwrap();
+        fs_err::create_dir_all(&src_dir_path).unwrap();
+        fs_err::write(&src_file_path, "copy me").unwrap();
+        fs_err::create_dir_all(&dst_dir_path).unwrap();
 
         let fs = LocalFs::new("node_test");
-        let src_id = fs.resolve_path(&base.join("src.txt")).await.unwrap();
-        let dst_id = fs.resolve_path(&base).await.unwrap();
-        let dst_dir = DirId::<u64>::new(*dst_id.get());
+        let src_nodeid = fs.resolve_path(&src_file_path).await.unwrap();
+        let dst_nodeid = fs.resolve_path(&base).await.unwrap();
+        let dst_dirid = DirId::<u64>::new(*dst_nodeid.get());
 
-        let new_id = fs.copy_node(src_id, dst_dir).await.unwrap();
-        assert!(base.join("src.txt").exists());
+        let new_id = fs.copy_node(src_nodeid, dst_dirid).await.unwrap();
+        assert!(src_file_path.exists());
         // The copy gets the same name in the destination directory.
         let new_node = fs.get_node(new_id).unwrap();
+        assert!(new_node.kind().is_file());
         assert_eq!(new_node.name(), "src.txt");
+        let content = fs
+            .read_node(FileId::new(*new_id.get()), None)
+            .await
+            .unwrap();
+        assert_eq!(content, Bytes::from("copy me"));
 
         fs_err::remove_dir_all(&base).ok();
     }
