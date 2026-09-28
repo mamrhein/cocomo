@@ -161,11 +161,6 @@ impl FolderCompareView {
         self.state.read(cx).focus_handle(cx).clone()
     }
 
-    /// Return the tab title.
-    pub fn title(&self, cx: &App) -> SharedString {
-        self.state.read(cx).title().clone()
-    }
-
     /// Handle the select-next action.
     fn select_next(
         &mut self,
@@ -521,11 +516,12 @@ impl FolderCompareView {
                                                 {
                                                     use gpui::IntoElement;
                                                     items.push(
-                                                        EntryRow::render_row(
+                                                        EntryRowData::new(
                                                             i,
                                                             entry,
                                                             i == selected,
                                                         )
+                                                        .render_row()
                                                         .into_any_element(),
                                                     );
                                                 }
@@ -680,29 +676,9 @@ impl EntryRowData {
     }
 }
 
-/// A single row in the entry list, showing one comparison entry.
-struct EntryRow {
-    data: EntryRowData,
-}
-
-impl EntryRow {
-    fn new(
-        index: usize,
-        entry: &cocomo_lib::DirEntry,
-        is_selected: bool,
-    ) -> Self {
-        Self {
-            data: EntryRowData::new(index, entry, is_selected),
-        }
-    }
-
+impl EntryRowData {
     /// Render a row as a div (for use in uniform_list).
-    fn render_row(
-        index: usize,
-        entry: &cocomo_lib::DirEntry,
-        is_selected: bool,
-    ) -> impl IntoElement {
-        let data = EntryRowData::new(index, entry, is_selected);
+    fn render_row(self) -> impl IntoElement {
         let EntryRowData {
             index,
             name,
@@ -715,7 +691,7 @@ impl EntryRow {
             has_right,
             left_path: _left_path,
             right_path: _right_path,
-        } = data;
+        } = self;
 
         let status_color = status_color(&status);
         let status_char = status_indicator(&status);
@@ -806,130 +782,6 @@ impl EntryRow {
                     })
                     .child(if has_right { "yes" } else { "—" }),
             )
-    }
-}
-
-impl gpui::RenderOnce for EntryRow {
-    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
-        let EntryRowData {
-            index,
-            name,
-            status,
-            is_dir,
-            is_selected,
-            left_size,
-            right_size,
-            has_left,
-            has_right,
-            left_path,
-            right_path,
-        } = self.data;
-
-        let status_color = status_color(&status);
-        let status_char = status_indicator(&status);
-        let dir_icon = if is_dir { "D" } else { "F" };
-        let selection_indicator = if is_selected { "► " } else { "  " };
-
-        let bg_color = if is_selected {
-            rgb(0x313244)
-        } else if index % 2 == 0 {
-            rgb(0x1e1e2e)
-        } else {
-            rgb(0x1a1a28)
-        };
-
-        // Format size display.
-        let size_display = if has_left && has_right {
-            if left_size == right_size {
-                format_size(left_size.unwrap_or(0))
-            } else {
-                format!(
-                    "{}/{}",
-                    format_size(left_size.unwrap_or(0)),
-                    format_size(right_size.unwrap_or(0))
-                )
-            }
-        } else if has_left || has_right {
-            format_size(left_size.or(right_size).unwrap_or(0))
-        } else {
-            String::new()
-        };
-
-        div()
-            .flex()
-            .items_center()
-            .gap_1()
-            .px_2()
-            .py_0p5()
-            .bg(bg_color)
-            .cursor_pointer()
-            .child(
-                div()
-                    .w(px(16.))
-                    .text_color(rgb(0x89b4fa))
-                    .child(selection_indicator),
-            )
-            .child(
-                div()
-                    .w(px(16.))
-                    .text_color(status_color)
-                    .font_weight(FontWeight(700.))
-                    .child(status_char),
-            )
-            .child(div().w(px(16.)).text_color(rgb(0x6c7086)).child(dir_icon))
-            .child(
-                div()
-                    .flex_1()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_color(if has_left || has_right {
-                        rgb(0xcdd6f4)
-                    } else {
-                        rgb(0x6c7086)
-                    })
-                    .child(name),
-            )
-            .child(
-                div()
-                    .w(px(80.))
-                    .text_color(rgb(0x6c7086))
-                    .child(size_display),
-            )
-            .child(
-                div()
-                    .w(px(60.))
-                    .text_color(if has_left {
-                        rgb(0xa6e3a1)
-                    } else {
-                        rgb(0x6c7086)
-                    })
-                    .child(if has_left { "yes" } else { "—" }),
-            )
-            .child(
-                div()
-                    .w(px(60.))
-                    .text_color(if has_right {
-                        rgb(0xf38ba8)
-                    } else {
-                        rgb(0x6c7086)
-                    })
-                    .child(if has_right { "yes" } else { "—" }),
-            )
-            // Double-click on files opens a text diff in a new tab.
-            .when(!is_dir, |this| {
-                this.on_mouse_down(gpui::MouseButton::Left, {
-                    let left_path = left_path.clone();
-                    let right_path = right_path.clone();
-                    move |_event, _window, cx: &mut App| {
-                        if let Some(lp) = &left_path {
-                            cx.dispatch_action(&OpenFileDiff {
-                                left_path: lp.clone(),
-                                right_path: right_path.clone(),
-                            });
-                        }
-                    }
-                })
-            })
     }
 }
 

@@ -240,10 +240,7 @@ pub fn generate_unified_diff_with_settings(
     output.push_str(right_path);
     output.push('\n');
 
-    // Emit hunks. Track how many lines we've already consumed to handle
-    // the diff::slice walk correctly.
-    let mut last_right_end: usize = 0;
-
+    // Emit hunks.
     for (l_start, l_end, r_start, r_end) in &merged {
         let l_count = l_end - l_start;
         let r_count = r_end - r_start;
@@ -267,16 +264,11 @@ pub fn generate_unified_diff_with_settings(
         emit_hunk_body(
             &mut output,
             &changes,
-            &left_lines,
-            &right_lines,
             *l_start,
             *l_end,
             *r_start,
             *r_end,
-            last_right_end,
         );
-
-        last_right_end = *r_end;
     }
 
     output
@@ -378,13 +370,10 @@ fn merge_and_expand_ranges(
 fn emit_hunk_body(
     output: &mut String,
     changes: &[diff::Result<&str>],
-    left_lines: &[&str],
-    right_lines: &[&str],
     l_start: usize,
     l_end: usize,
     r_start: usize,
     r_end: usize,
-    _prev_right_end: usize,
 ) {
     let mut l_pos = 0usize;
     let mut r_pos = 0usize;
@@ -422,8 +411,6 @@ fn emit_hunk_body(
             }
         }
     }
-
-    let _ = (right_lines, left_lines);
 }
 
 // ---------------------------------------------------------------------------
@@ -475,16 +462,15 @@ pub(crate) fn parse_patch(
                 && (old_count > 0 || new_count > 0)
             {
                 let cur_line = lines[i];
-                if cur_line.starts_with(' ') {
-                    hunk_lines
-                        .push(HunkLine::Context(cur_line[1..].to_string()));
+                if let Some(rest) = cur_line.strip_prefix(' ') {
+                    hunk_lines.push(HunkLine::Context(rest.to_string()));
                     old_count = old_count.saturating_sub(1);
                     new_count = new_count.saturating_sub(1);
                 } else if cur_line.starts_with('-') {
                     hunk_lines.push(HunkLine::Remove);
                     old_count = old_count.saturating_sub(1);
-                } else if cur_line.starts_with('+') {
-                    hunk_lines.push(HunkLine::Add(cur_line[1..].to_string()));
+                } else if let Some(rest) = cur_line.strip_prefix('+') {
+                    hunk_lines.push(HunkLine::Add(rest.to_string()));
                     new_count = new_count.saturating_sub(1);
                 } else if cur_line == "\\ No newline at end of file" {
                     // Marker; keep track but don't add as content line.

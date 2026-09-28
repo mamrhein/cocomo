@@ -128,28 +128,28 @@ fn generate_text_report(
 
     if entries.is_empty() && !config.include_same {
         // No diffs found — still useful to report that.
-        write!(buf, "No differences found.\n").ok();
+        writeln!(buf, "No differences found.").ok();
         write_summary(&mut buf, comparison);
         return buf;
     }
 
     if entries.is_empty() {
-        write!(buf, "Directories are identical.\n").ok();
+        writeln!(buf, "Directories are identical.").ok();
         write_summary(&mut buf, comparison);
         return buf;
     }
 
     // Print header.
     if config.include_file_details {
-        write!(
+        writeln!(
             buf,
-            "{:<5} {:<40} {:>12} {:>12}\n",
+            "{:<5} {:<40} {:>12} {:>12}",
             "Stat", "Name", "Left Size", "Right Size"
         )
         .ok();
-        write!(
+        writeln!(
             buf,
-            "{:<5} {:<40} {:>12} {:>12}\n",
+            "{:<5} {:<40} {:>12} {:>12}",
             "----",
             "----------------------------------------",
             "------------",
@@ -157,10 +157,10 @@ fn generate_text_report(
         )
         .ok();
     } else {
-        write!(buf, "{:<5} {:<40}\n", "Stat", "Name").ok();
-        write!(
+        writeln!(buf, "{:<5} {:<40}", "Stat", "Name").ok();
+        writeln!(
             buf,
-            "{:<5} {:<40}\n",
+            "{:<5} {:<40}",
             "----", "----------------------------------------"
         )
         .ok();
@@ -193,14 +193,14 @@ fn writeln_entry_text(
             .as_ref()
             .map(|r| format_size(r.size))
             .unwrap_or_else(|| "-".to_string());
-        write!(
+        writeln!(
             buf,
-            "{:<5} {:<40} {:>12} {:>12}\n",
+            "{:<5} {:<40} {:>12} {:>12}",
             status_sym, name, left_size, right_size
         )
         .ok();
     } else {
-        write!(buf, "{:<5} {:<40}\n", status_sym, name).ok();
+        writeln!(buf, "{:<5} {:<40}", status_sym, name).ok();
     }
 }
 
@@ -324,7 +324,7 @@ fn generate_json_report(
 
     let json_entries: Vec<serde_json::Value> = entries
         .iter()
-        .map(|entry| entry_to_json(*entry, config))
+        .map(|entry| entry_to_json(entry, config))
         .collect();
 
     let output = serde_json::json!({
@@ -408,10 +408,10 @@ fn collect_matching_entries<'a>(
             out.push(entry);
         }
         // Recurse into subdirectories if configured.
-        if config.include_subdirectories {
-            if let Some(ref sub) = entry.sub_entries {
-                collect_matching_entries(&sub.entries, config, out);
-            }
+        if config.include_subdirectories
+            && let Some(ref sub) = entry.sub_entries
+        {
+            collect_matching_entries(&sub.entries, config, out);
         }
     }
 }

@@ -16,14 +16,16 @@
 use std::any::Any;
 
 use gpui::{
-    AnyElement, App, AppContext, Context, Entity, FocusHandle, Focusable,
-    Render, SharedString, Window, div, prelude::*, rgb,
+    AnyElement, App, Context, Entity, FocusHandle, Render, Window, div,
+    prelude::*, rgb,
 };
 
 use crate::{
     session_manager::GuiSessionManager, text_diff::TextDiffView,
     ui::FolderCompareView,
 };
+
+type TabCallback = std::sync::Arc<dyn Fn(usize, &mut App) + Send + Sync>;
 
 // ---------------------------------------------------------------------------
 // Type-erased tab entity
@@ -65,16 +67,6 @@ impl TabEntity {
         self.inner.focus_handle(cx)
     }
 
-    /// Get the tab title.
-    pub fn title(&self, cx: &App) -> SharedString {
-        self.inner.title(cx)
-    }
-
-    /// Get the type label.
-    pub fn type_label(&self) -> &'static str {
-        self.inner.type_label()
-    }
-
     /// Render this tab's content as an element.
     pub fn render(&self, window: &mut Window, cx: &mut App) -> AnyElement {
         self.inner.render(window, cx)
@@ -84,8 +76,6 @@ impl TabEntity {
 /// Inner trait for type-erased tab entities.
 trait TabEntityInner: Any + Send + Sync {
     fn focus_handle(&self, cx: &App) -> FocusHandle;
-    fn title(&self, cx: &App) -> SharedString;
-    fn type_label(&self) -> &'static str;
     fn render(&self, window: &mut Window, cx: &mut App) -> AnyElement;
     fn clone_inner(&self) -> Box<dyn TabEntityInner>;
 }
@@ -95,14 +85,6 @@ struct FolderTabEntity(Entity<FolderCompareView>);
 impl TabEntityInner for FolderTabEntity {
     fn focus_handle(&self, cx: &App) -> FocusHandle {
         self.0.read(cx).focus_handle(cx)
-    }
-
-    fn title(&self, cx: &App) -> SharedString {
-        self.0.read(cx).title(cx)
-    }
-
-    fn type_label(&self) -> &'static str {
-        "dir compare"
     }
 
     fn render(&self, window: &mut Window, cx: &mut App) -> AnyElement {
@@ -122,14 +104,6 @@ struct TextDiffTabEntity(Entity<TextDiffView>);
 impl TabEntityInner for TextDiffTabEntity {
     fn focus_handle(&self, cx: &App) -> FocusHandle {
         self.0.read(cx).focus_handle(cx)
-    }
-
-    fn title(&self, cx: &App) -> SharedString {
-        self.0.read(cx).title(cx)
-    }
-
-    fn type_label(&self) -> &'static str {
-        "text diff"
     }
 
     fn render(&self, window: &mut Window, cx: &mut App) -> AnyElement {
@@ -205,16 +179,15 @@ impl Render for WindowRoot {
 
         // Build tab bar callbacks.
         let mgr_activate = self.session_manager.clone();
-        let on_activate: std::sync::Arc<
-            dyn Fn(usize, &mut App) + Send + Sync,
-        > = std::sync::Arc::new(move |index: usize, app: &mut App| {
-            mgr_activate.update(app, |m, cx| {
-                m.activate_session(index, cx);
+        let on_activate: TabCallback =
+            std::sync::Arc::new(move |index: usize, app: &mut App| {
+                mgr_activate.update(app, |m, cx| {
+                    m.activate_session(index, cx);
+                });
             });
-        });
 
         let mgr_close = self.session_manager.clone();
-        let on_close: std::sync::Arc<dyn Fn(usize, &mut App) + Send + Sync> =
+        let on_close: TabCallback =
             std::sync::Arc::new(move |index: usize, app: &mut App| {
                 mgr_close.update(app, |m, cx| {
                     m.close_session(index, cx);

@@ -17,8 +17,8 @@ use std::path::PathBuf;
 
 use cocomo_lib::{LineInfo, TextCompareSettings, TextDiff, compare_texts};
 use gpui::{
-    App, Context, Entity, FocusHandle, Focusable, Render, SharedString,
-    Window, actions, div, prelude::*, px, rgb,
+    App, Context, Entity, FocusHandle, Render, SharedString, Window, actions,
+    div, prelude::*, px, rgb,
 };
 
 // ---------------------------------------------------------------------------
@@ -200,21 +200,20 @@ impl TextDiffState {
         cx.spawn(|_, cx: &mut gpui::AsyncApp| {
             let async_app = cx.clone();
             async move {
-                match join_handle.await {
-                    Ok(Ok((diff, left_lines, right_lines))) => {
-                        async_app.update(|cx| {
-                            if let Some(state) = weak.upgrade() {
-                                state.update(cx, |state, _| {
-                                    state.loading = false;
-                                    state.diff = Some(diff);
-                                    state.left_lines = left_lines;
-                                    state.right_lines = right_lines;
-                                });
-                            }
-                        });
-                    }
-                    // Silently ignore errors when loading the diff.
-                    _ => {}
+                // Silently ignore errors when loading the diff.
+                if let Ok(Ok((diff, left_lines, right_lines))) =
+                    join_handle.await
+                {
+                    async_app.update(|cx| {
+                        if let Some(state) = weak.upgrade() {
+                            state.update(cx, |state, _| {
+                                state.loading = false;
+                                state.diff = Some(diff);
+                                state.left_lines = left_lines;
+                                state.right_lines = right_lines;
+                            });
+                        }
+                    });
                 }
             }
         })
@@ -263,11 +262,6 @@ impl TextDiffView {
     /// Return the focus handle.
     pub fn focus_handle(&self, cx: &App) -> FocusHandle {
         self.state.read(cx).focus_handle(cx).clone()
-    }
-
-    /// Return the tab title.
-    pub fn title(&self, cx: &App) -> SharedString {
-        self.state.read(cx).title().clone()
     }
 
     /// Handle select-next action.

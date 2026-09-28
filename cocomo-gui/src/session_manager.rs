@@ -410,7 +410,7 @@ impl GuiSessionManager {
         if let Some(session) = self.open_sessions.get_mut(self.active_index) {
             session.config.name = name.clone();
         }
-        let config = self.active_config().map(|c| c.clone());
+        let config = self.active_config().cloned();
         let session_dir = self.session_dir.clone();
 
         let join_handle = crate::runtime::spawn_on_tokio(async move {
@@ -490,19 +490,16 @@ impl GuiSessionManager {
         cx.spawn(|_, cx: &mut gpui::AsyncApp| {
             let async_app = cx.clone();
             async move {
-                match load_task.await {
-                    Ok(Ok(configs)) => {
-                        async_app.update(|cx| {
-                            if let Some(manager) = weak.upgrade() {
-                                manager.update(cx, |m, cx| {
-                                    m.recent_sessions = configs;
-                                    cx.notify();
-                                });
-                            }
-                        });
-                    }
-                    // Silently ignore errors when loading recent sessions.
-                    _ => {}
+                // Silently ignore errors when loading recent sessions.
+                if let Ok(Ok(configs)) = load_task.await {
+                    async_app.update(|cx| {
+                        if let Some(manager) = weak.upgrade() {
+                            manager.update(cx, |m, cx| {
+                                m.recent_sessions = configs;
+                                cx.notify();
+                            });
+                        }
+                    });
                 }
             }
         })
