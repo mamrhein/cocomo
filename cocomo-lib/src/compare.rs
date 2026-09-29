@@ -12,13 +12,19 @@
 //! Merges two scanned directory trees into a unified [`DirComparison`] result.
 //! Each entry is classified by its status: same, different, orphan, etc.
 
-use std::{collections::HashMap, path::Path, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    path::Path,
+    sync::Arc,
+};
+
+use futures::future::BoxFuture;
 
 use crate::{
     FileSystem, NodeFileSystem, Result,
     hash::{ContentCache, ContentId, hash_and_cache_node, hash_file},
     identity::{FileId, NodeId},
-    scan::{ScanConfig, ScanEntry, ScanResult, scan_directory_node},
+    scan::{ScanConfig, ScanEntry, scan_directory, scan_directory_node},
 };
 
 /// The comparison status of a directory entry.
@@ -212,8 +218,10 @@ impl CompareConfig {
 
 /// Compare two directory trees and produce a unified `DirComparison`.
 ///
-/// Both paths are scanned with the given filesystem provider and config,
-/// then merged. When `compare_files` is enabled, content hashes are used
+/// Both paths are scanned once with the given filesystem provider and
+/// config, then the two scanned trees are merged in a single recursive
+/// walk over the `children` of each `ScanEntry`; no subdirectory is ever
+/// re-scanned. When `compare_files` is enabled, content hashes are used
 /// to determine equality. The cache is optional and used as an optimization
 /// to avoid re-hashing files that were already processed.
 pub async fn compare_directories(
@@ -228,78 +236,109 @@ pub async fn compare_directories(
         max_depth: config.max_depth,
     };
 
-    let left_result =
-        crate::scan_directory(fs, left_path, &scan_config).await?;
-    let right_result =
-        crate::scan_directory(fs, right_path, &scan_config).await?;
+    let left_result = scan_directory(fs, left_path, &scan_config).await?;
+    let right_result = scan_directory(fs, right_path, &scan_config).await?;
 
-    // Collect all directory pairs for sub-comparison.
-    let dir_pairs = collect_dir_pairs(&left_result, &right_result);
-
-    // Do the top-level merge.
-    let mut comparison = merge_sync(
-        fs,
+    let mut comparison = compare_children(
+        &**fs,
+        &left_result.entries,
+        &right_result.entries,
         left_path,
-        &left_result,
         right_path,
-        &right_result,
         config,
         cache,
     )
-    .await?;
+    .await;
 
-    // Recursively compare subdirectories.
-    for (left_sub, right_sub) in dir_pairs {
-        let sub_left = left_path.join(&left_sub.path);
-        let sub_right = right_path.join(&right_sub.path);
-
-        let sub_scan_config = ScanConfig {
-            follow_symlinks: config.follow_symlinks,
-            max_depth: config.max_depth,
-        };
-
-        let left_entries =
-            scan_dir_entries(fs, &sub_left, &sub_scan_config).await;
-        let right_entries =
-            scan_dir_entries(fs, &sub_right, &sub_scan_config).await;
-
-        match (left_entries, right_entries) {
-            (Ok(le), Ok(re)) => {
-                let sub_comparison = merge_sync(
-                    fs, &sub_left, &le, &sub_right, &re, config, cache,
-                )
-                .await;
-
-                match sub_comparison {
-                    Ok(sub_comp) => {
-                        // Attach sub-comparison to the parent directory entry.
-                        attach_sub_comparison(
-                            &mut comparison,
-                            &left_sub.name,
-                            Arc::new(sub_comp),
-                        );
-                    }
-                    Err(e) => {
-                        comparison.errors.push(e);
-                    }
-                }
-            }
-            (Err(e), _) | (_, Err(e)) => {
-                comparison.errors.push(e);
-            }
-        }
-    }
+    // Surface non-fatal scan errors instead of dropping them.
+    comparison.errors.extend(left_result.errors);
+    comparison.errors.extend(right_result.errors);
 
     Ok(comparison)
 }
 
-/// Scan a directory and return its entries as a ScanResult.
-async fn scan_dir_entries(
-    fs: &Arc<dyn FileSystem>,
-    path: &Path,
-    config: &ScanConfig,
-) -> Result<ScanResult> {
-    crate::scan_directory(fs, path, config).await
+/// Merge two lists of scanned sibling entries into a `DirComparison`.
+///
+/// For a pair of files the status is determined by [`compare_file_status`].
+/// For a pair of directories the children already attached to the scan
+/// entries are merged recursively, so every nesting level is compared
+/// exactly once. Directory entries whose subtree contains differences get
+/// their placeholder `Same` status refined to `Different`.
+fn compare_children<'a>(
+    fs: &'a dyn FileSystem,
+    left: &'a [ScanEntry],
+    right: &'a [ScanEntry],
+    left_root: &'a Path,
+    right_root: &'a Path,
+    config: &'a CompareConfig,
+    cache: Option<&'a ContentCache>,
+) -> BoxFuture<'a, DirComparison> {
+    Box::pin(async move {
+        let mut comparison = DirComparison::default();
+
+        let left_map: HashMap<&str, &ScanEntry> =
+            left.iter().map(|e| (e.name.as_str(), e)).collect();
+        let right_map: HashMap<&str, &ScanEntry> =
+            right.iter().map(|e| (e.name.as_str(), e)).collect();
+
+        let mut names: Vec<&str> = Vec::new();
+        let mut seen = HashSet::new();
+        for name in left_map.keys().chain(right_map.keys()) {
+            if seen.insert(name) {
+                names.push(name);
+            }
+        }
+        names.sort();
+
+        for &name in &names {
+            let left_entry = left_map.get(name).copied();
+            let right_entry = right_map.get(name).copied();
+
+            let mut entry = match merge_entry_sync(
+                fs,
+                left_root,
+                left_entry,
+                right_root,
+                right_entry,
+                config,
+                cache,
+            )
+            .await
+            {
+                Ok(e) => e,
+                Err(e) => {
+                    comparison.errors.push(e);
+                    continue;
+                }
+            };
+
+            // For a directory pair, recurse one level into the children
+            // that the scan already attached to the entries.
+            let both_dirs = left_entry.is_some_and(|e| e.is_dir())
+                && right_entry.is_some_and(|e| e.is_dir());
+
+            if both_dirs {
+                let lc = left_entry.and_then(|e| e.children()).unwrap_or(&[]);
+                let rc = right_entry.and_then(|e| e.children()).unwrap_or(&[]);
+
+                let sub = compare_children(
+                    fs, lc, rc, left_root, right_root, config, cache,
+                )
+                .await;
+
+                let has_diff = sub.different_count() > 0;
+                entry.sub_entries = Some(Arc::new(sub));
+                if has_diff {
+                    entry.status = DirEntryStatus::Different;
+                }
+            }
+
+            *comparison.counts.entry(entry.status).or_insert(0) += 1;
+            comparison.entries.push(entry);
+        }
+
+        comparison
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -308,8 +347,10 @@ async fn scan_dir_entries(
 
 /// Compare two directory trees using the node-based `NodeFileSystem` API.
 ///
-/// Both paths are resolved to node identifiers, then scanned with
-/// [`scan_directory_node`], and merged. When `compare_files` is enabled,
+/// Both paths are resolved to node identifiers and scanned once with
+/// [`scan_directory_node`], then the two scanned trees are merged in a
+/// single recursive walk over the `children` of each `ScanEntry`; no
+/// subdirectory is ever re-scanned. When `compare_files` is enabled,
 /// content hashes are computed via node-based reads and cached on the
 /// provider node. The optional `cache` provides a secondary LRU layer
 /// across provider instances.
@@ -332,114 +373,104 @@ where
     let right_result =
         scan_directory_node(fs, right_path, &scan_config).await?;
 
-    // Collect all directory pairs for sub-comparison.
-    let dir_pairs = collect_dir_pairs(&left_result, &right_result);
-
-    // Do the top-level merge.
-    let mut comparison = merge_sync_node(
+    let mut comparison = compare_children_node(
         fs,
+        &left_result.entries,
+        &right_result.entries,
         left_path,
-        &left_result,
         right_path,
-        &right_result,
         config,
         cache,
     )
-    .await?;
+    .await;
 
-    // Recursively compare subdirectories.
-    for (left_sub, right_sub) in dir_pairs {
-        let sub_left = left_path.join(&left_sub.path);
-        let sub_right = right_path.join(&right_sub.path);
-
-        let sub_scan_config = ScanConfig {
-            follow_symlinks: config.follow_symlinks,
-            max_depth: config.max_depth,
-        };
-
-        let left_entries =
-            scan_directory_node(fs, &sub_left, &sub_scan_config).await;
-        let right_entries =
-            scan_directory_node(fs, &sub_right, &sub_scan_config).await;
-
-        match (left_entries, right_entries) {
-            (Ok(le), Ok(re)) => {
-                let sub_comparison = merge_sync_node(
-                    fs, &sub_left, &le, &sub_right, &re, config, cache,
-                )
-                .await;
-
-                match sub_comparison {
-                    Ok(sub_comp) => {
-                        attach_sub_comparison(
-                            &mut comparison,
-                            &left_sub.name,
-                            Arc::new(sub_comp),
-                        );
-                    }
-                    Err(e) => {
-                        comparison.errors.push(e);
-                    }
-                }
-            }
-            (Err(e), _) | (_, Err(e)) => {
-                comparison.errors.push(e);
-            }
-        }
-    }
+    // Surface non-fatal scan errors instead of dropping them.
+    comparison.errors.extend(left_result.errors);
+    comparison.errors.extend(right_result.errors);
 
     Ok(comparison)
 }
 
-/// Node-aware version of `merge_sync` that uses node-based file hashing.
-async fn merge_sync_node<N>(
-    fs: &N,
-    left_root: &Path,
-    left: &ScanResult,
-    right_root: &Path,
-    right: &ScanResult,
-    config: &CompareConfig,
-    cache: Option<&ContentCache>,
-) -> Result<DirComparison>
+/// Node-aware version of [`compare_children`], mirroring the recursive
+/// tree walk of the path-based pipeline.
+fn compare_children_node<'a, N>(
+    fs: &'a N,
+    left: &'a [ScanEntry],
+    right: &'a [ScanEntry],
+    left_root: &'a Path,
+    right_root: &'a Path,
+    config: &'a CompareConfig,
+    cache: Option<&'a ContentCache>,
+) -> BoxFuture<'a, DirComparison>
 where
     N: NodeFileSystem<Nid = u64>,
 {
-    let mut comparison = DirComparison::default();
+    Box::pin(async move {
+        let mut comparison = DirComparison::default();
 
-    let left_map: HashMap<&str, &ScanEntry> =
-        left.entries.iter().map(|e| (e.name.as_str(), e)).collect();
-    let right_map: HashMap<&str, &ScanEntry> =
-        right.entries.iter().map(|e| (e.name.as_str(), e)).collect();
+        let left_map: HashMap<&str, &ScanEntry> =
+            left.iter().map(|e| (e.name.as_str(), e)).collect();
+        let right_map: HashMap<&str, &ScanEntry> =
+            right.iter().map(|e| (e.name.as_str(), e)).collect();
 
-    let mut names: Vec<&str> = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    for name in left_map.keys().chain(right_map.keys()) {
-        if seen.insert(name) {
-            names.push(name);
+        let mut names: Vec<&str> = Vec::new();
+        let mut seen = HashSet::new();
+        for name in left_map.keys().chain(right_map.keys()) {
+            if seen.insert(name) {
+                names.push(name);
+            }
         }
-    }
-    names.sort();
+        names.sort();
 
-    for &name in &names {
-        let left_entry = left_map.get(name).copied();
-        let right_entry = right_map.get(name).copied();
+        for &name in &names {
+            let left_entry = left_map.get(name).copied();
+            let right_entry = right_map.get(name).copied();
 
-        let dir_entry = merge_entry_sync_node(
-            fs,
-            left_root,
-            left_entry,
-            right_root,
-            right_entry,
-            config,
-            cache,
-        )
-        .await?;
+            let mut entry = match merge_entry_sync_node(
+                fs,
+                left_root,
+                left_entry,
+                right_root,
+                right_entry,
+                config,
+                cache,
+            )
+            .await
+            {
+                Ok(e) => e,
+                Err(e) => {
+                    comparison.errors.push(e);
+                    continue;
+                }
+            };
 
-        *comparison.counts.entry(dir_entry.status).or_insert(0) += 1;
-        comparison.entries.push(dir_entry);
-    }
+            // For a directory pair, recurse one level into the children
+            // that the scan already attached to the entries.
+            let both_dirs = left_entry.is_some_and(|e| e.is_dir())
+                && right_entry.is_some_and(|e| e.is_dir());
 
-    Ok(comparison)
+            if both_dirs {
+                let lc = left_entry.and_then(|e| e.children()).unwrap_or(&[]);
+                let rc = right_entry.and_then(|e| e.children()).unwrap_or(&[]);
+
+                let sub = compare_children_node(
+                    fs, lc, rc, left_root, right_root, config, cache,
+                )
+                .await;
+
+                let has_diff = sub.different_count() > 0;
+                entry.sub_entries = Some(Arc::new(sub));
+                if has_diff {
+                    entry.status = DirEntryStatus::Different;
+                }
+            }
+
+            *comparison.counts.entry(entry.status).or_insert(0) += 1;
+            comparison.entries.push(entry);
+        }
+
+        comparison
+    })
 }
 
 /// Node-aware version of `merge_entry_sync`.
@@ -597,100 +628,6 @@ where
     }
 
     Ok(DirEntryStatus::Different)
-}
-
-/// Collect pairs of entries that are directories on both sides.
-fn collect_dir_pairs(
-    left: &ScanResult,
-    right: &ScanResult,
-) -> Vec<(ScanEntry, ScanEntry)> {
-    let left_map: HashMap<&str, &ScanEntry> =
-        left.entries.iter().map(|e| (e.name.as_str(), e)).collect();
-    let right_map: HashMap<&str, &ScanEntry> =
-        right.entries.iter().map(|e| (e.name.as_str(), e)).collect();
-
-    let mut pairs = Vec::new();
-    for (name, &le) in &left_map {
-        if le.meta.is_dir
-            && let Some(&re) = right_map.get(*name)
-            && re.meta.is_dir
-        {
-            pairs.push((le.clone(), re.clone()));
-        }
-    }
-    pairs
-}
-
-/// Attach a sub-comparison to the matching directory entry in the parent.
-fn attach_sub_comparison(
-    comparison: &mut DirComparison,
-    dir_name: &str,
-    sub: Arc<DirComparison>,
-) {
-    for entry in &mut comparison.entries {
-        if entry.name == dir_name
-            && entry.left.as_ref().is_some_and(|l| l.is_dir)
-        {
-            // Update the parent status based on sub-comparison.
-            let has_diff = sub.different_count() > 0;
-            entry.sub_entries = Some(sub);
-            if has_diff {
-                entry.status = DirEntryStatus::Different;
-            }
-            return;
-        }
-    }
-}
-
-/// Merge two scan results (file-level comparison only;
-/// directories get a placeholder status that is refined later).
-async fn merge_sync(
-    fs: &Arc<dyn FileSystem>,
-    left_root: &Path,
-    left: &ScanResult,
-    right_root: &Path,
-    right: &ScanResult,
-    config: &CompareConfig,
-    cache: Option<&ContentCache>,
-) -> Result<DirComparison> {
-    let mut comparison = DirComparison::default();
-
-    let left_map: HashMap<&str, &ScanEntry> =
-        left.entries.iter().map(|e| (e.name.as_str(), e)).collect();
-    let right_map: HashMap<&str, &ScanEntry> =
-        right.entries.iter().map(|e| (e.name.as_str(), e)).collect();
-
-    let mut names: Vec<&str> = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    for name in left_map.keys().chain(right_map.keys()) {
-        if seen.insert(name) {
-            names.push(name);
-        }
-    }
-    names.sort();
-
-    let fs_ref: &dyn FileSystem = &**fs;
-
-    for &name in &names {
-        let left_entry = left_map.get(name).copied();
-        let right_entry = right_map.get(name).copied();
-
-        let dir_entry = merge_entry_sync(
-            fs_ref,
-            left_root,
-            left_entry,
-            right_root,
-            right_entry,
-            config,
-            cache,
-        )
-        .await?;
-
-        *comparison.counts.entry(dir_entry.status).or_insert(0) += 1;
-        comparison.entries.push(dir_entry);
-    }
-
-    Ok(comparison)
 }
 
 /// Merge a single pair of entries into a `DirEntry`.
@@ -958,6 +895,96 @@ mod tests {
         .unwrap();
 
         assert!(result.total() > 0);
+
+        fs_err::remove_dir_all(left.parent().unwrap()).ok();
+    }
+
+    // -----------------------------------------------------------------------
+    // Nested-tree tests
+    // -----------------------------------------------------------------------
+
+    /// Create `x/y/deep.txt` on both sides with identical-size,
+    /// different-content payloads.
+    fn make_nested_dirs() -> (std::path::PathBuf, std::path::PathBuf) {
+        let base = env::temp_dir()
+            .join(format!("cocomo_nested_{}", std::process::id()));
+        let _ = fs_err::remove_dir_all(&base);
+
+        let left = base.join("left");
+        let right = base.join("right");
+
+        fs_err::create_dir_all(left.join("x/y")).unwrap();
+        fs_err::create_dir_all(right.join("x/y")).unwrap();
+        fs_err::write(left.join("x/y/deep.txt"), "aaaaaaaaaa").unwrap();
+        fs_err::write(right.join("x/y/deep.txt"), "bbbbbbbbbb").unwrap();
+
+        (left, right)
+    }
+
+    /// Look up an entry by name in a comparison.
+    fn find_entry<'a>(
+        comp: &'a DirComparison,
+        name: &str,
+    ) -> Option<&'a DirEntry> {
+        comp.entries.iter().find(|e| e.name == name)
+    }
+
+    /// Verify that `x`, `x/y`, and `x/y/deep.txt` are all flagged as
+    /// `Different` and that sub-comparisons are attached at every nesting
+    /// level.
+    fn check_nested_differences(comp: &DirComparison) {
+        let x = find_entry(comp, "x").expect("top-level dir `x` missing");
+        assert_eq!(x.status, DirEntryStatus::Different);
+        let sub_x = x
+            .sub_entries
+            .as_ref()
+            .expect("sub comparison for `x` missing");
+        let y = find_entry(sub_x, "y").expect("nested dir `x/y` missing");
+        assert_eq!(y.status, DirEntryStatus::Different);
+        let sub_y = y
+            .sub_entries
+            .as_ref()
+            .expect("sub comparison for `x/y` missing");
+        let deep = find_entry(sub_y, "deep.txt")
+            .expect("file `x/y/deep.txt` missing");
+        assert_eq!(deep.status, DirEntryStatus::Different);
+    }
+
+    #[tokio::test]
+    async fn compare_detects_nested_differences() {
+        let (left, right) = make_nested_dirs();
+        let fs: Arc<dyn FileSystem> = Arc::new(LocalFs::new("test"));
+        let cache = ContentCache::default_config();
+        let config = CompareConfig::full();
+
+        let result =
+            compare_directories(&fs, &left, &right, &config, Some(&cache))
+                .await
+                .unwrap();
+
+        check_nested_differences(&result);
+
+        fs_err::remove_dir_all(left.parent().unwrap()).ok();
+    }
+
+    #[tokio::test]
+    async fn node_compare_detects_nested_differences() {
+        let (left, right) = make_nested_dirs();
+        let fs = LocalFs::new("test");
+        let cache = ContentCache::default_config();
+        let config = CompareConfig::full();
+
+        let result = compare_directories_node(
+            &fs,
+            &left,
+            &right,
+            &config,
+            Some(&cache),
+        )
+        .await
+        .unwrap();
+
+        check_nested_differences(&result);
 
         fs_err::remove_dir_all(left.parent().unwrap()).ok();
     }
