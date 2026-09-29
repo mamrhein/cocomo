@@ -35,6 +35,7 @@
 //! - [`compare`] — Directory comparison engine that merges two scanned trees.
 //! - [`filter`] — Name, display, and content filters for comparison results.
 //! - [`text`] — Line-based text comparison engine.
+//! - [`testutil`] — [`MockFs`], an in-memory `FileSystem` double for tests.
 //! - [`patch`] — Unified diff generation and patch application.
 //! - [`grammar`] — Syntax-aware grammar rules for smart diffing.
 //! - [`format`] — File format registry and format-specific settings.
@@ -59,6 +60,7 @@ pub mod hash;
 pub mod identity;
 pub mod local;
 pub mod meta;
+pub mod mockfs;
 pub mod node;
 pub mod patch;
 pub mod profile;
@@ -96,6 +98,7 @@ pub use hash::{
 pub use identity::{DirId, FileId, FileSystemId, NodeId};
 pub use local::LocalFs;
 pub use meta::Metadata;
+pub use mockfs::{MockFile, MockFs};
 pub use node::{Node, NodeKind, SymlinkTarget, UserPermissions};
 pub use patch::{PatchError, PatchResult, apply_patch, generate_unified_diff};
 pub use profile::{
