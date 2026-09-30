@@ -9,11 +9,8 @@
 
 //! Integration tests for the COCOMO CLI parameter handling and exit codes.
 
-use std::fs;
-
 use assert_cmd::Command;
 use predicates::prelude::*;
-use tempfile::TempDir;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -21,23 +18,6 @@ use tempfile::TempDir;
 
 fn cmd() -> Command {
     Command::cargo_bin("cocomo-cli").unwrap()
-}
-
-/// Create two temp text files with different content.
-fn create_diff_text_files() -> TempDir {
-    let dir = TempDir::with_prefix("cocomo_text").unwrap();
-
-    let left = dir.path().join("left.txt");
-    let right = dir.path().join("right.txt");
-
-    fs::write(&left, "line one\nline two\nline three\nline four\n").unwrap();
-    fs::write(
-        &right,
-        "line one\nLINE TWO\nline three\nextra line\nline four\n",
-    )
-    .unwrap();
-
-    dir
 }
 
 // ---------------------------------------------------------------------------
@@ -192,13 +172,11 @@ mod text_compare {
 
     #[test]
     fn grammar_invalid_fails() {
-        let dir = create_diff_text_files();
+        let left = "/tmp/left";
+        let right = "/tmp/right";
         cmd()
             .args(["text", "compare", "--grammar", "invalid"])
-            .args([
-                dir.path().join("left.txt").to_str().unwrap(),
-                dir.path().join("right.txt").to_str().unwrap(),
-            ])
+            .args([left, right])
             .assert()
             .failure()
             .stderr(predicate::str::contains("error:"));
@@ -206,13 +184,11 @@ mod text_compare {
 
     #[test]
     fn ignore_whitespace_invalid_fails() {
-        let dir = create_diff_text_files();
+        let left = "/tmp/left";
+        let right = "/tmp/right";
         cmd()
             .args(["text", "compare", "--ignore-whitespace", "invalid"])
-            .args([
-                dir.path().join("left.txt").to_str().unwrap(),
-                dir.path().join("right.txt").to_str().unwrap(),
-            ])
+            .args([left, right])
             .assert()
             .failure()
             .stderr(predicate::str::contains("error:"));
