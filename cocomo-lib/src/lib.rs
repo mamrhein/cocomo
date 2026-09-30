@@ -98,7 +98,7 @@ pub use hash::{
 pub use identity::{DirId, FileId, FileSystemId, NodeId};
 pub use local::LocalFs;
 pub use meta::Metadata;
-pub use mockfs::{MockFile, MockFs};
+pub use mockfs::{MockFile, MockFs, MockWritableFile};
 pub use node::{Node, NodeKind, SymlinkTarget, UserPermissions};
 pub use patch::{PatchError, PatchResult, apply_patch, generate_unified_diff};
 pub use profile::{
