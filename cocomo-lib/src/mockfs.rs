@@ -7,24 +7,30 @@
 // $Source$
 // $Revision$
 
-//! In-memory `FileSystem` double for tests.
+//! In-memory `FileSystem` and `NodeFileSystem` double for tests.
 //!
-//! [`MockFs`] is a read-only, path-based `FileSystem` implementation backed by
-//! a `BTreeMap` of predefined entries plus two error-injection maps. It lets
-//! provider-agnostic logic (scanning, comparison, hashing) be tested against
-//! per-operation failures such as `PermissionDenied`, which cannot be
-//! reproduced reliably on a real filesystem.
+//! [`MockFs`] is a read-only double backed by a `BTreeMap` of predefined
+//! entries plus two error-injection maps. It lets provider-agnostic logic
+//! (scanning, comparison, hashing) be tested against per-operation failures
+//! such as `PermissionDenied`, which cannot be reproduced reliably on a real
+//! filesystem.
 //!
-//! `MockFs` implements only the read half of the `FileSystem` trait: every
-//! mutating operation returns `FsError::Io` with a "not supported" message, so
-//! tests never mask bugs in code that assumes a mutable backend.
+//! `MockFs` implements only the read half of both the path-based `FileSystem`
+//! and the node-based `NodeFileSystem` traits: every mutating operation
+//! returns `FsError::Io` with a "not supported" message, so tests never mask
+//! bugs in code that assumes a mutable backend.
 
 use std::{
     collections::{BTreeMap, HashMap},
+    ffi::OsString,
     io,
     ops::Range,
     path::{Path, PathBuf},
     pin::Pin,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     task::{Context, Poll},
 };
 
@@ -37,8 +43,10 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use crate::{
     error::{FsError, FsOperation, Result},
     file::FsFile,
-    fs::{DirEntryMeta, DirStream, FileSystem, OpenMode},
+    fs::{DirEntryMeta, DirStream, FileSystem, NodeFileSystem, OpenMode},
+    identity::{DirId, FileId, FileSystemId, NodeId},
     meta::Metadata,
+    node::Node,
 };
 
 /// Number of bytes `MockFs::read_stream` emits per chunk.
@@ -82,6 +90,10 @@ impl MockTree {
 // MockFs
 // ---------------------------------------------------------------------------
 
+/// A counter handing out unique filesystem identifiers to each `MockFs`
+/// instance, so that two mocks are never treated as the same filesystem.
+static NEXT_FS_ID: AtomicU64 = AtomicU64::new(1);
+
 /// A read-only, in-memory `FileSystem` for tests.
 ///
 /// Build the tree with the `with_*` builder methods, then pass the instance
@@ -95,10 +107,18 @@ impl MockTree {
 ///         .with_error("/root/locked", FsError::PermissionDenied { .. }),
 /// );
 /// ```
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct MockFs {
     label: String,
+    /// Filesystem instance identifier (unique per process, not a device ID).
+    fs_id: FileSystemId<u64>,
     tree: MockTree,
+    /// Node cache: node ID → node.
+    nodes: parking_lot::RwLock<HashMap<u64, Arc<Node>>>,
+    /// Reverse lookup: absolute path → node ID.
+    path_to_id: parking_lot::RwLock<HashMap<PathBuf, u64>>,
+    /// Monotonically increasing counter for node ID generation.
+    next_id: AtomicU64,
 }
 
 impl MockFs {
@@ -106,7 +126,13 @@ impl MockFs {
     pub fn new(label: impl Into<String>) -> Self {
         Self {
             label: label.into(),
+            fs_id: FileSystemId::new(
+                NEXT_FS_ID.fetch_add(1, Ordering::Relaxed),
+            ),
             tree: MockTree::new(),
+            nodes: parking_lot::RwLock::new(HashMap::new()),
+            path_to_id: parking_lot::RwLock::new(HashMap::new()),
+            next_id: AtomicU64::new(1),
         }
     }
 
@@ -168,6 +194,39 @@ impl MockFs {
         }
     }
 
+    /// Allocate a new unique node ID.
+    fn alloc_id(&self) -> u64 {
+        self.next_id.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// Cache a node and return its ID. If the path is already cached, return
+    /// the existing ID without replacing the node.
+    fn cache_node(&self, node: Node) -> u64 {
+        let path = node.path().to_path_buf();
+        {
+            let ptid = self.path_to_id.read();
+            if let Some(&id) = ptid.get(&path) {
+                return id;
+            }
+        }
+        let id = self.alloc_id();
+        let arc_node = Arc::new(node);
+        self.nodes.write().insert(id, arc_node);
+        self.path_to_id.write().insert(path, id);
+        id
+    }
+
+    /// Lookup a node ID from a path in the cache. Returns `None` if the path
+    /// is not cached.
+    fn lookup_path(&self, path: &Path) -> Option<u64> {
+        self.path_to_id.read().get(path).copied()
+    }
+
+    /// Resolve the parent directory ID for `path`, if the parent is cached.
+    fn resolve_parent_id(&self, path: &Path) -> Option<u64> {
+        path.parent().and_then(|p| self.lookup_path(p))
+    }
+
     /// Metadata of the direct children of `dir`, in path order.
     fn children_of(&self, dir: &Path) -> Vec<DirEntryMeta> {
         self.tree
@@ -189,6 +248,21 @@ impl MockFs {
                 DirEntryMeta { name, meta }
             })
             .collect()
+    }
+}
+
+impl Clone for MockFs {
+    fn clone(&self) -> Self {
+        Self {
+            label: self.label.clone(),
+            fs_id: self.fs_id,
+            tree: self.tree.clone(),
+            nodes: parking_lot::RwLock::new(self.nodes.read().clone()),
+            path_to_id: parking_lot::RwLock::new(
+                self.path_to_id.read().clone(),
+            ),
+            next_id: AtomicU64::new(self.next_id.load(Ordering::Relaxed)),
+        }
     }
 }
 
@@ -302,6 +376,9 @@ impl FileSystem for MockFs {
         path: &Path,
         _range: Option<Range<u64>>,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<Bytes>> + Send>>> {
+        if let Some(err) = self.error_at(path) {
+            return Err(err);
+        }
         if let Some(err) = self.tree.stream_errors.get(path) {
             let stream: Pin<Box<dyn Stream<Item = Result<Bytes>> + Send>> =
                 Box::pin(futures::stream::iter([Err(err.clone())]));
@@ -358,6 +435,196 @@ impl FileSystem for MockFs {
 
     fn label(&self) -> &str {
         &self.label
+    }
+}
+
+// ---------------------------------------------------------------------------
+// NodeFileSystem implementation
+// ---------------------------------------------------------------------------
+
+#[async_trait]
+impl NodeFileSystem for MockFs {
+    type FsId = u64;
+    type Nid = u64;
+    type Error = FsError;
+
+    fn id(&self) -> FileSystemId<Self::FsId> {
+        self.fs_id
+    }
+
+    fn label_node(&self) -> &str {
+        &self.label
+    }
+
+    async fn resolve_path(&self, path: &Path) -> Result<NodeId<Self::Nid>> {
+        // Injections replace *every* operation on the key, resolution
+        // included, so callers cannot smuggle an injected path past the
+        // entry point.
+        if let Some(err) = self.error_at(path) {
+            return Err(err);
+        }
+        // Mock paths are registered verbatim, so there is no base directory
+        // to resolve relative paths against and no canonicalization to do.
+        if let Some(id) = self.lookup_path(path) {
+            let node = self.nodes.read().get(&id).cloned();
+            return match node {
+                Some(n) if n.is_deleted() => Err(FsError::StaleNode),
+                Some(_) => Ok(NodeId::new(id)),
+                None => Err(FsError::NotFound {
+                    path: path.to_path_buf(),
+                }),
+            };
+        }
+        let name = path.file_name().map(OsString::from).unwrap_or_default();
+        let parent_id = self.resolve_parent_id(path);
+        let node = match self.tree.nodes.get(path) {
+            Some(MockNode::Dir) => Node::directory(
+                name,
+                path.to_path_buf(),
+                Metadata::dir(Utc::now()),
+            )
+            .with_parent(parent_id),
+            Some(MockNode::File(data)) => Node::file(
+                name,
+                path.to_path_buf(),
+                Metadata::file(data.len() as u64, Utc::now()),
+            )
+            .with_parent(parent_id),
+            None => {
+                return Err(FsError::NotFound {
+                    path: path.to_path_buf(),
+                });
+            }
+        };
+        let id = self.cache_node(node);
+        Ok(NodeId::new(id))
+    }
+
+    async fn resolve_symlink(
+        &self,
+        _id: NodeId<Self::Nid>,
+    ) -> Result<NodeId<Self::Nid>> {
+        Err(unsupported(FsOperation::ReadLink, &PathBuf::new()))
+    }
+
+    fn get_node(&self, id: NodeId<Self::Nid>) -> Result<Arc<Node>> {
+        let nodes = self.nodes.read();
+        match nodes.get(id.get()).cloned() {
+            Some(node) if node.is_deleted() => Err(FsError::StaleNode),
+            Some(node) => Ok(node),
+            None => Err(FsError::NotFound {
+                path: PathBuf::from("(unknown node)"),
+            }),
+        }
+    }
+
+    fn node_metadata(&self, id: NodeId<Self::Nid>) -> Result<Metadata> {
+        let node = self.get_node(id)?;
+        Ok(node.metadata().clone())
+    }
+
+    fn set_node_hash(
+        &self,
+        id: NodeId<Self::Nid>,
+        hash: String,
+    ) -> Result<()> {
+        let mut nodes = self.nodes.write();
+        let Some(arc) = nodes.get_mut(id.get()) else {
+            return Err(FsError::NotFound {
+                path: PathBuf::from("(unknown node)"),
+            });
+        };
+        // Like the real providers, the mock caches hashes in memory only;
+        // the cached hash dies with the node.
+        Arc::make_mut(arc).set_cached_hash(hash);
+        Ok(())
+    }
+
+    async fn read_dir_node(&self, id: DirId<Self::Nid>) -> Result<()> {
+        let dir_node = self.get_node(id.as_node_id())?;
+        if !dir_node.kind().is_directory() {
+            return Err(FsError::WrongKind {
+                expected: "directory",
+                actual: "file",
+            });
+        }
+        // Children are static: a resolved directory is already fully
+        // resolved, so a second call is a no-op.
+        if dir_node.kind().children().is_some() {
+            return Ok(());
+        }
+        let dir_path = dir_node.path().to_path_buf();
+        let children: Vec<(PathBuf, MockNode)> = self
+            .tree
+            .nodes
+            .iter()
+            .filter(|(path, _)| path.parent() == Some(dir_path.as_path()))
+            .map(|(path, node)| (path.clone(), node.clone()))
+            .collect();
+
+        let mut child_names = Vec::with_capacity(children.len());
+        for (child_path, node) in children {
+            let name = child_path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned();
+            child_names.push(name.clone());
+            let name_os = OsString::from(&name);
+            let child = match node {
+                MockNode::Dir => Node::directory(
+                    name_os,
+                    child_path,
+                    Metadata::dir(Utc::now()),
+                ),
+                MockNode::File(data) => Node::file(
+                    name_os,
+                    child_path,
+                    Metadata::file(data.len() as u64, Utc::now()),
+                ),
+            };
+            self.cache_node(child.with_parent(Some(*id.get())));
+        }
+
+        // Mark the directory node as resolved.
+        let mut nodes = self.nodes.write();
+        if let Some(arc) = nodes.get_mut(id.get()) {
+            Arc::make_mut(arc).set_children(child_names);
+        }
+        Ok(())
+    }
+
+    async fn open_node(
+        &self,
+        id: FileId<Self::Nid>,
+        mode: OpenMode,
+    ) -> Result<Box<dyn FsFile>> {
+        let node = self.get_node(id.as_node_id())?;
+        // Delegate to the path-based API, which honours the error
+        // injections.
+        self.open(node.path(), mode).await
+    }
+
+    async fn read_node(
+        &self,
+        id: FileId<Self::Nid>,
+        range: Option<Range<u64>>,
+    ) -> Result<Bytes> {
+        let node = self.get_node(id.as_node_id())?;
+        // Delegate to the path-based API, which honours the error
+        // injections.
+        self.read(node.path(), range).await
+    }
+
+    async fn read_stream_node(
+        &self,
+        id: FileId<Self::Nid>,
+        range: Option<Range<u64>>,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<Bytes>> + Send>>> {
+        let node = self.get_node(id.as_node_id())?;
+        // Delegate to the path-based API, which honours the stream error
+        // injections.
+        self.read_stream(node.path(), range).await
     }
 }
 
@@ -556,5 +823,99 @@ mod tests {
         assert_eq!(buf, b"hello");
         // Writing through a read-only handle fails.
         assert!(handle.write_all(b"more").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn resolve_path_caches_nodes() {
+        let fs = MockFs::new("mock")
+            .with_dir("/root")
+            .with_dir("/root/sub")
+            .with_file("/root/sub/b.txt", "bravo");
+        let root = fs.resolve_path(Path::new("/root")).await.unwrap();
+        // Re-resolving the same path yields the cached node ID.
+        assert_eq!(fs.resolve_path(Path::new("/root")).await.unwrap(), root);
+        let sub = fs.resolve_path(Path::new("/root/sub")).await.unwrap();
+        let b = fs.resolve_path(Path::new("/root/sub/b.txt")).await.unwrap();
+        let node = fs.get_node(b).unwrap();
+        assert!(node.kind().is_file());
+        // Resolving a child before its cached parent links the two nodes.
+        assert_eq!(node.parent(), Some(*sub.get()));
+        assert!(matches!(
+            fs.resolve_path(Path::new("/root/missing")).await,
+            Err(FsError::NotFound { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn resolve_path_honours_injected_errors() {
+        let err = FsError::PermissionDenied {
+            operation: FsOperation::Resolve,
+            path: "/secret".into(),
+        };
+        let fs = MockFs::new("mock")
+            .with_file("/secret", "x")
+            .with_error("/secret", err);
+        assert!(matches!(
+            fs.resolve_path(Path::new("/secret")).await,
+            Err(FsError::PermissionDenied { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn read_dir_node_resolves_children() {
+        let fs = MockFs::new("mock")
+            .with_dir("/root")
+            .with_dir("/root/sub")
+            .with_file("/root/a.txt", "alpha");
+        let root = fs.resolve_path(Path::new("/root")).await.unwrap();
+        fs.read_dir_node(DirId::new(*root.get())).await.unwrap();
+        let root_node = fs.get_node(root).unwrap();
+        assert_eq!(root_node.kind().children().unwrap(), ["a.txt", "sub"]);
+        // Children are cached as nodes, linked to their parent, and
+        // addressable by ID.
+        let sub = fs.resolve_path(Path::new("/root/sub")).await.unwrap();
+        assert!(fs.get_node(sub).unwrap().kind().is_directory());
+        assert_eq!(fs.get_node(sub).unwrap().parent(), Some(*root.get()));
+        // A second call is a no-op.
+        assert!(fs.read_dir_node(DirId::new(*root.get())).await.is_ok());
+        // Directories must not be listed as files.
+        let file = fs.resolve_path(Path::new("/root/a.txt")).await.unwrap();
+        assert!(matches!(
+            fs.read_dir_node(DirId::new(*file.get())).await,
+            Err(FsError::WrongKind { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn node_reads_delegate_to_path_reads() {
+        let fs = MockFs::new("mock")
+            .with_file("/data.txt", "hello world")
+            .with_file("/stream.bin", vec![0u8; CHUNK_SIZE + 1])
+            .with_stream_error(
+                "/stream.bin",
+                FsError::Io {
+                    operation: FsOperation::Read,
+                    path: "/stream.bin".into(),
+                    message: "injected".to_string(),
+                },
+            );
+        let data = fs.resolve_path(Path::new("/data.txt")).await.unwrap();
+        let data_id = FileId::new(*data.get());
+        assert_eq!(
+            fs.read_node(data_id, Some(8..100)).await.unwrap(),
+            Bytes::from_static(b"rld")
+        );
+        let mut handle = fs.open_node(data_id, OpenMode::Read).await.unwrap();
+        let mut buf = Vec::new();
+        handle.read_to_end(&mut buf).await.unwrap();
+        assert_eq!(buf, b"hello world");
+        // The stream error injected for the path surfaces in the node-based
+        // stream as well.
+        let stream = fs.resolve_path(Path::new("/stream.bin")).await.unwrap();
+        let mut stream = fs
+            .read_stream_node(FileId::new(*stream.get()), None)
+            .await
+            .unwrap();
+        assert!(matches!(stream.next().await, Some(Err(FsError::Io { .. }))));
     }
 }
