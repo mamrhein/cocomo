@@ -23,32 +23,6 @@ fn cmd() -> Command {
     Command::cargo_bin("cocomo-cli").unwrap()
 }
 
-/// Create a temp directory with a known file structure for directory tests.
-fn create_test_dirs() -> TempDir {
-    let dir = TempDir::with_prefix("cocomo_test").unwrap();
-
-    let left = dir.path().join("left");
-    let right = dir.path().join("right");
-    fs::create_dir_all(&left).unwrap();
-    fs::create_dir_all(&right).unwrap();
-
-    // Identical file.
-    fs::write(left.join("same.txt"), "hello\n").unwrap();
-    fs::write(right.join("same.txt"), "hello\n").unwrap();
-
-    // Different content.
-    fs::write(left.join("diff.txt"), "world\n").unwrap();
-    fs::write(right.join("diff.txt"), "changed\n").unwrap();
-
-    // Left-only file.
-    fs::write(left.join("only_left.txt"), "left content\n").unwrap();
-
-    // Right-only file.
-    fs::write(right.join("only_right.txt"), "right content\n").unwrap();
-
-    dir
-}
-
 /// Create two temp text files with different content.
 fn create_diff_text_files() -> TempDir {
     let dir = TempDir::with_prefix("cocomo_text").unwrap();
@@ -138,13 +112,11 @@ mod dir_compare {
 
     #[test]
     fn format_invalid_fails() {
-        let dir = create_test_dirs();
+        let left = "/tmp/left";
+        let right = "/tmp/right";
         cmd()
             .args(["dir", "compare", "--format", "xml"])
-            .args([
-                dir.path().join("left").to_str().unwrap(),
-                dir.path().join("right").to_str().unwrap(),
-            ])
+            .args([left, right])
             .assert()
             .failure()
             .stderr(predicate::str::contains("error:"));
@@ -152,16 +124,14 @@ mod dir_compare {
 
     #[test]
     fn report_invalid_format_fails() {
-        let dir = create_test_dirs();
-        let report_path = dir.path().join("report.txt");
+        let left = "/tmp/left";
+        let right = "/tmp/right";
+        let report_path = "/tmp/report.txt";
         cmd()
             .args(["dir", "compare", "--report-format", "invalid"])
             .arg("--report")
-            .arg(&report_path)
-            .args([
-                dir.path().join("left").to_str().unwrap(),
-                dir.path().join("right").to_str().unwrap(),
-            ])
+            .arg(report_path)
+            .args([left, right])
             .assert()
             .failure();
     }
