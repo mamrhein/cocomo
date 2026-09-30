@@ -7,7 +7,8 @@
 // $Source$
 // $Revision$
 
-//! Integration tests for the COCOMO CLI parameter handling and exit codes.
+//! Integration tests for the COCOMO CLI commands run against file
+//! structures.
 
 use std::fs;
 
@@ -78,74 +79,11 @@ fn create_same_text_files() -> TempDir {
 }
 
 // ---------------------------------------------------------------------------
-// Top-level: no command, help, version
-// ---------------------------------------------------------------------------
-
-mod top_level {
-    use super::*;
-
-    #[test]
-    fn no_command_shows_help() {
-        #[cfg(windows)]
-        let exe = ".exe";
-        #[cfg(not(windows))]
-        let exe = "";
-        cmd()
-            .assert()
-            .failure()
-            .stderr(predicate::str::contains(format!(
-                "Usage: cocomo-cli{} <COMMAND>",
-                exe
-            )));
-    }
-
-    #[test]
-    fn help_flag() {
-        cmd()
-            .arg("--help")
-            .assert()
-            .success()
-            .stdout(predicate::str::contains("Commands:"))
-            .stdout(predicate::str::contains("dir"))
-            .stdout(predicate::str::contains("text"))
-            .stdout(predicate::str::contains("snapshot"));
-    }
-
-    #[test]
-    fn version_flag() {
-        cmd()
-            .arg("--version")
-            .assert()
-            .success()
-            .stdout(predicate::str::contains("0.0.1"));
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Dir compare
 // ---------------------------------------------------------------------------
 
 mod dir_compare {
     use super::*;
-
-    #[test]
-    fn help_flag() {
-        cmd()
-            .args(["dir", "compare", "--help"])
-            .assert()
-            .success()
-            .stdout(predicate::str::contains("<LEFT>"))
-            .stdout(predicate::str::contains("<RIGHT>"));
-    }
-
-    #[test]
-    fn missing_arguments_fails() {
-        cmd()
-            .args(["dir", "compare"])
-            .assert()
-            .failure()
-            .stderr(predicate::str::contains("error:"));
-    }
 
     #[test]
     fn left_missing_fails() {
@@ -257,20 +195,6 @@ mod dir_compare {
         assert_eq!(parsed["summary"]["same"], 1);
         assert_eq!(parsed["summary"]["different"], 1);
         assert_eq!(parsed["summary"]["orphans"], 2);
-    }
-
-    #[test]
-    fn format_invalid_fails() {
-        let dir = create_test_dirs();
-        cmd()
-            .args(["dir", "compare", "--format", "xml"])
-            .args([
-                dir.path().join("left").to_str().unwrap(),
-                dir.path().join("right").to_str().unwrap(),
-            ])
-            .assert()
-            .failure()
-            .stderr(predicate::str::contains("error:"));
     }
 
     #[test]
@@ -399,22 +323,6 @@ mod dir_compare {
         assert!(!content.contains("same.txt"));
         assert!(content.contains("diff.txt"));
     }
-
-    #[test]
-    fn report_invalid_format_fails() {
-        let dir = create_test_dirs();
-        let report_path = dir.path().join("report.txt");
-        cmd()
-            .args(["dir", "compare", "--report-format", "invalid"])
-            .arg("--report")
-            .arg(&report_path)
-            .args([
-                dir.path().join("left").to_str().unwrap(),
-                dir.path().join("right").to_str().unwrap(),
-            ])
-            .assert()
-            .failure();
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -423,25 +331,6 @@ mod dir_compare {
 
 mod dir_sync {
     use super::*;
-
-    #[test]
-    fn help_flag() {
-        cmd()
-            .args(["dir", "sync", "--help"])
-            .assert()
-            .success()
-            .stdout(predicate::str::contains("--mirror-left"))
-            .stdout(predicate::str::contains("--dry-run"));
-    }
-
-    #[test]
-    fn missing_arguments_fails() {
-        cmd()
-            .args(["dir", "sync"])
-            .assert()
-            .failure()
-            .stderr(predicate::str::contains("error:"));
-    }
 
     #[test]
     fn left_missing_fails() {
@@ -530,25 +419,6 @@ mod dir_sync {
 
 mod text_compare {
     use super::*;
-
-    #[test]
-    fn help_flag() {
-        cmd()
-            .args(["text", "compare", "--help"])
-            .assert()
-            .success()
-            .stdout(predicate::str::contains("--ignore-case"))
-            .stdout(predicate::str::contains("--ignore-whitespace"));
-    }
-
-    #[test]
-    fn missing_arguments_fails() {
-        cmd()
-            .args(["text", "compare"])
-            .assert()
-            .failure()
-            .stderr(predicate::str::contains("error:"));
-    }
 
     #[test]
     fn left_missing_fails() {
@@ -753,34 +623,6 @@ mod text_compare {
     }
 
     #[test]
-    fn grammar_invalid_fails() {
-        let dir = create_diff_text_files();
-        cmd()
-            .args(["text", "compare", "--grammar", "invalid"])
-            .args([
-                dir.path().join("left.txt").to_str().unwrap(),
-                dir.path().join("right.txt").to_str().unwrap(),
-            ])
-            .assert()
-            .failure()
-            .stderr(predicate::str::contains("error:"));
-    }
-
-    #[test]
-    fn ignore_whitespace_invalid_fails() {
-        let dir = create_diff_text_files();
-        cmd()
-            .args(["text", "compare", "--ignore-whitespace", "invalid"])
-            .args([
-                dir.path().join("left.txt").to_str().unwrap(),
-                dir.path().join("right.txt").to_str().unwrap(),
-            ])
-            .assert()
-            .failure()
-            .stderr(predicate::str::contains("error:"));
-    }
-
-    #[test]
     fn ignore_blank_lines_flag() {
         let dir = TempDir::with_prefix("cocomo_blank").unwrap();
         fs::write(dir.path().join("a.txt"), "line\n\nend\n").unwrap();
@@ -804,25 +646,6 @@ mod text_compare {
 
 mod text_diff {
     use super::*;
-
-    #[test]
-    fn help_flag() {
-        cmd()
-            .args(["text", "diff", "--help"])
-            .assert()
-            .success()
-            .stdout(predicate::str::contains("<LEFT>"))
-            .stdout(predicate::str::contains("<RIGHT>"));
-    }
-
-    #[test]
-    fn missing_arguments_fails() {
-        cmd()
-            .args(["text", "diff"])
-            .assert()
-            .failure()
-            .stderr(predicate::str::contains("error:"));
-    }
 
     #[test]
     fn left_missing_fails() {
@@ -876,24 +699,6 @@ mod text_diff {
 
 mod snapshot_capture {
     use super::*;
-
-    #[test]
-    fn help_flag() {
-        cmd()
-            .args(["snapshot", "capture", "--help"])
-            .assert()
-            .success()
-            .stdout(predicate::str::contains("<PATH>"));
-    }
-
-    #[test]
-    fn missing_arguments_fails() {
-        cmd()
-            .args(["snapshot", "capture"])
-            .assert()
-            .failure()
-            .stderr(predicate::str::contains("error:"));
-    }
 
     #[test]
     fn path_missing_fails() {
@@ -968,15 +773,6 @@ mod snapshot_list {
     use super::*;
 
     #[test]
-    fn help_flag() {
-        cmd()
-            .args(["snapshot", "list", "--help"])
-            .assert()
-            .success()
-            .stdout(predicate::str::contains("[DIRECTORY]"));
-    }
-
-    #[test]
     fn empty_directory_shows_none() {
         let dir = TempDir::with_prefix("cocomo_list").unwrap();
         cmd()
@@ -993,25 +789,6 @@ mod snapshot_list {
 
 mod snapshot_diff {
     use super::*;
-
-    #[test]
-    fn help_flag() {
-        cmd()
-            .args(["snapshot", "diff", "--help"])
-            .assert()
-            .success()
-            .stdout(predicate::str::contains("<LEFT>"))
-            .stdout(predicate::str::contains("<RIGHT>"));
-    }
-
-    #[test]
-    fn missing_arguments_fails() {
-        cmd()
-            .args(["snapshot", "diff"])
-            .assert()
-            .failure()
-            .stderr(predicate::str::contains("error:"));
-    }
 
     #[test]
     fn left_missing_fails() {
@@ -1085,80 +862,5 @@ mod snapshot_diff {
             .stdout(predicate::str::contains("modified"))
             .stdout(predicate::str::contains("added"))
             .stdout(predicate::str::contains("deleted"));
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Subcommand routing
-// ---------------------------------------------------------------------------
-
-mod routing {
-    use super::*;
-
-    #[test]
-    fn dir_help() {
-        cmd()
-            .args(["dir", "--help"])
-            .assert()
-            .success()
-            .stdout(predicate::str::contains("compare"))
-            .stdout(predicate::str::contains("sync"));
-    }
-
-    #[test]
-    fn text_help() {
-        cmd()
-            .args(["text", "--help"])
-            .assert()
-            .success()
-            .stdout(predicate::str::contains("compare"))
-            .stdout(predicate::str::contains("diff"));
-    }
-
-    #[test]
-    fn snapshot_help() {
-        cmd()
-            .args(["snapshot", "--help"])
-            .assert()
-            .success()
-            .stdout(predicate::str::contains("capture"))
-            .stdout(predicate::str::contains("list"))
-            .stdout(predicate::str::contains("diff"));
-    }
-
-    #[test]
-    fn unknown_subcommand_fails() {
-        cmd()
-            .arg("foobar")
-            .assert()
-            .failure()
-            .stderr(predicate::str::contains("error:"));
-    }
-
-    #[test]
-    fn unknown_dir_subcommand_fails() {
-        cmd()
-            .args(["dir", "merge"])
-            .assert()
-            .failure()
-            .stderr(predicate::str::contains("error:"));
-    }
-
-    #[test]
-    fn unknown_text_subcommand_fails() {
-        cmd()
-            .args(["text", "merge"])
-            .assert()
-            .failure()
-            .stderr(predicate::str::contains("error:"));
-    }
-
-    #[test]
-    fn unknown_snapshot_subcommand_fails() {
-        cmd()
-            .args(["snapshot", "merge"])
-            .assert()
-            .failure()
-            .stderr(predicate::str::contains("error:"));
     }
 }
