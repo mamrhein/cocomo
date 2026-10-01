@@ -22,6 +22,9 @@ use std::{
 };
 
 use clap::{Parser, Subcommand, ValueEnum};
+// TODO(step 4): drop the allow once the CLI resolves endpoints via
+// providers and `snapshot capture` migrates to `capture_snapshot_node`.
+#[allow(deprecated)]
 use cocomo_lib::{
     DirEntry, LocalFs, TextDifference,
     compare::{
@@ -1054,6 +1057,9 @@ async fn run_snapshot(cmd: &SnapshotCommand) -> Result<DiffResult, FsError> {
     }
 }
 
+// TODO(step 4): drop the allow once this migrates to
+// `capture_snapshot_node`.
+#[allow(deprecated)]
 async fn snapshot_capture(
     args: &SnapshotCaptureArgs,
 ) -> Result<DiffResult, FsError> {

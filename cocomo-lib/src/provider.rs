@@ -50,6 +50,7 @@ use crate::{
     profile::{Profile, ProfileError, ProfileStore, ProviderType},
     s3::{S3Config, S3Fs},
     secrets::{Prompter, Secrets},
+    snapshot::ProviderId,
     url::Url,
     webdav::{WebDavConfig, WebDavFs},
 };
@@ -160,6 +161,29 @@ impl Provider {
         }
     }
 
+    /// Return the provider identifier that references this instance.
+    ///
+    /// The label of the inner filesystem identifies the source the
+    /// provider was built from: providers resolved from a URL or a bare
+    /// path carry the scheme or the URL's lookup key (e.g.
+    /// `ftp:ftp.example.com:21`) as their label, while providers built
+    /// from a profile carry the profile id. A lookup key always contains
+    /// a `:` and a profile id never does, so labels equal to the bare
+    /// scheme or containing a `:` denote the default provider of their
+    /// scheme (profile `None`).
+    pub fn provider_id(&self) -> ProviderId {
+        let provider_type = self.provider_type();
+        let scheme = provider_type.scheme();
+        let label = self.label_node();
+        let profile =
+            if label.is_empty() || label == scheme || label.contains(':') {
+                None
+            } else {
+                Some(label.to_owned())
+            };
+        ProviderId::new(scheme, profile)
+    }
+
     /// Construct a provider that addresses the endpoint given by `url`.
     ///
     /// `creds` are only consulted by the remote backends that need them
@@ -184,14 +208,13 @@ impl Provider {
     /// For remote URLs the resolution order is:
     ///
     /// 1. `profile_id` given: load exactly that profile from `store` (an
-    ///    unknown or endpoint-mismatching profile is an error, never a
-    ///    silent fallback).
-    /// 2. otherwise auto-match: the first profile in `store` whose
-    ///    provider type and host (and explicit port) match the URL.
+    ///    unknown or endpoint-mismatching profile is an error, never a silent
+    ///    fallback).
+    /// 2. otherwise auto-match: the first profile in `store` whose provider
+    ///    type and host (and explicit port) match the URL.
     /// 3. otherwise `secrets` (environment, then keychain) and finally an
-    ///    interactive `prompter` prompt on a TTY; on a non-TTY (or without
-    ///    a prompter) the resolution fails with
-    ///    [`ProviderError::AuthRequired`].
+    ///    interactive `prompter` prompt on a TTY; on a non-TTY (or without a
+    ///    prompter) the resolution fails with [`ProviderError::AuthRequired`].
     ///
     /// A matching profile's `tls` key overrides the TLS default implied by
     /// the scheme (`ftps`/`webdavs`), and a profile without any secret
@@ -209,11 +232,12 @@ impl Provider {
         prompter: &dyn Prompter,
     ) -> std::result::Result<Self, ProviderError> {
         match url.scheme.as_str() {
-            Url::LOCAL_SCHEME => {
-                Self::build(url, &Credentials::default(), false, String::from(
-                    Url::LOCAL_SCHEME,
-                ))
-            }
+            Url::LOCAL_SCHEME => Self::build(
+                url,
+                &Credentials::default(),
+                false,
+                String::from(Url::LOCAL_SCHEME),
+            ),
             "ftp" | "ftps" => {
                 Self::resolve_ftp(url, store, profile_id, secrets, prompter)
             }
@@ -313,7 +337,10 @@ impl Provider {
                         host,
                         port,
                         username: creds.user().unwrap_or_default().to_owned(),
-                        password: creds.secret().unwrap_or_default().to_owned(),
+                        password: creds
+                            .secret()
+                            .unwrap_or_default()
+                            .to_owned(),
                         tls,
                         // The URL's path selects the scan root, so it must
                         // not also become the provider's root prefix.
@@ -969,13 +996,14 @@ impl Default for ProviderRegistry {
 
 #[cfg(test)]
 mod tests {
+    use tempfile::tempdir;
+
     use super::*;
     use crate::{
         profile::{Profile, ProfileStore},
         secrets::{NullPrompter, Secrets},
         url::Url,
     };
-    use tempfile::tempdir;
 
     fn local_profile() -> Profile {
         Profile::new("test-local", ProviderType::Local)
@@ -1032,6 +1060,48 @@ mod tests {
             },
         ));
         assert_eq!(s3.provider_type(), ProviderType::S3);
+    }
+
+    #[test]
+    fn provider_id_from_bare_path() {
+        let url = Url::from_path(Path::new("./src"));
+        let provider =
+            Provider::from_url(&url, &Credentials::default()).unwrap();
+        // A bare-path provider carries the bare scheme as its label, so
+        // it identifies as the default local provider.
+        assert_eq!(provider.provider_id(), ProviderId::local());
+    }
+
+    #[test]
+    fn provider_id_from_url_without_profile() {
+        let url = Url::parse("ftp://ftp.example.com:21/pub").unwrap();
+        let creds =
+            Credentials::new(Some("user".to_owned()), Some("pass".to_owned()));
+        let provider = Provider::from_url(&url, &creds).unwrap();
+        // The label is the URL's lookup key, which names the endpoint but
+        // no profile, so the provider identifies as the default ftp one.
+        assert_eq!(provider.provider_id(), ProviderId::new("ftp", None));
+    }
+
+    #[test]
+    fn provider_id_from_profile_carries_profile_id() {
+        let ftp = Provider::from_profile(&ftp_profile()).unwrap();
+        assert_eq!(
+            ftp.provider_id(),
+            ProviderId::new("ftp", Some("test-ftp".to_owned()))
+        );
+
+        let s3 = Provider::from_profile(&s3_profile()).unwrap();
+        assert_eq!(
+            s3.provider_id(),
+            ProviderId::new("s3", Some("test-s3".to_owned()))
+        );
+
+        let webdav = Provider::from_profile(&webdav_profile()).unwrap();
+        assert_eq!(
+            webdav.provider_id(),
+            ProviderId::new("webdav", Some("test-webdav".to_owned()))
+        );
     }
 
     #[test]
@@ -1266,11 +1336,9 @@ mod tests {
             "webdav://dav.example.com/share",
             "webdavs://dav.example.com/share",
         ] {
-            let error = Provider::from_url(
-                &ftp_url(input),
-                &Credentials::default(),
-            )
-            .unwrap_err();
+            let error =
+                Provider::from_url(&ftp_url(input), &Credentials::default())
+                    .unwrap_err();
             assert!(
                 matches!(error, ProviderError::Unimplemented { .. }),
                 "unexpected error for {input}: {error}"
@@ -1381,10 +1449,7 @@ mod tests {
                     &NullPrompter,
                 )
                 .unwrap_err();
-                assert!(matches!(
-                    error,
-                    ProviderError::AuthRequired { .. }
-                ));
+                assert!(matches!(error, ProviderError::AuthRequired { .. }));
                 assert!(error.to_string().contains("authentication required"));
             },
         );

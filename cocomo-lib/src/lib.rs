@@ -120,9 +120,12 @@ pub use session::{
     ProviderRef, Session, SessionConfig, SessionManager, SessionSettings,
     SessionType,
 };
+// `capture_snapshot` is deprecated in favour of `capture_snapshot_node`
+// and only stays re-exported until the CLI stops calling it.
+#[allow(deprecated)]
 pub use snapshot::{
     ProviderId, Snapshot, SnapshotEntry, SnapshotEntryStatus, SnapshotManager,
-    capture_snapshot, entry_matches_node,
+    capture_snapshot, capture_snapshot_node, entry_matches_node,
 };
 pub use sync::{
     SyncOperation, SyncResult, SyncRules, plan_sync, sync_directories,

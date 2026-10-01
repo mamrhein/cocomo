@@ -39,9 +39,11 @@ use uuid::Uuid;
 
 use crate::{
     Result,
-    fs::FileSystem,
+    fs::{FileSystem, NodeFileSystem},
     node::Node,
-    scan::{ScanConfig, ScanEntry, ScanResult, scan_directory},
+    scan::{
+        ScanConfig, ScanEntry, ScanResult, scan_directory, scan_directory_node,
+    },
 };
 
 // ---------------------------------------------------------------------------
@@ -283,6 +285,7 @@ impl Snapshot {
 /// computation is deferred: the returned snapshot entries have empty hashes.
 /// Callers that need hashes should compute them on demand when comparing
 /// against a live filesystem.
+#[deprecated(note = "use `capture_snapshot_node` instead")]
 pub async fn capture_snapshot(
     fs: &Arc<dyn FileSystem>,
     provider_id: ProviderId,
@@ -293,6 +296,36 @@ pub async fn capture_snapshot(
     // Scan the directory tree.
     let scan_result =
         scan_directory(fs, root_path, &ScanConfig::default()).await?;
+
+    // Populate snapshot entries from the scan result.
+    collect_entries_from_scan(root_path, &scan_result, &mut snapshot);
+
+    Ok(snapshot)
+}
+
+/// Capture a snapshot of a directory tree from a live node-based
+/// filesystem.
+///
+/// Scans the directory tree using the node-based [`NodeFileSystem`]
+/// API, so it works with any provider implementing that trait, including
+/// [`Provider`](crate::provider::Provider), without going through a `dyn
+/// FileSystem` trait object. Hash computation is deferred like in
+/// [`capture_snapshot`]: the returned snapshot entries have empty hashes.
+pub async fn capture_snapshot_node<N>(
+    fs: &N,
+    provider_id: ProviderId,
+    root_path: &Path,
+) -> Result<Snapshot>
+where
+    N: NodeFileSystem<Nid = u64>,
+{
+    let mut snapshot = Snapshot::new(provider_id, root_path.to_path_buf());
+
+    // Scan the directory tree. The node-based scan yields root-relative
+    // entry paths, which `collect_entries_from_scan` passes through
+    // because `strip_prefix` fails on an already-relative path.
+    let scan_result =
+        scan_directory_node(fs, root_path, &ScanConfig::default()).await?;
 
     // Populate snapshot entries from the scan result.
     collect_entries_from_scan(root_path, &scan_result, &mut snapshot);
@@ -471,7 +504,10 @@ impl SnapshotManager {
 
 #[cfg(test)]
 mod tests {
+    use tempfile::tempdir;
+
     use super::*;
+    use crate::{local::LocalFs, mockfs::MockFs};
 
     #[test]
     fn provider_id_new() {
@@ -675,5 +711,60 @@ mod tests {
         assert!(mgr.remove_snapshot(&id));
         assert!(!mgr.remove_snapshot(&id));
         assert_eq!(mgr.snapshots().len(), 0);
+    }
+
+    #[allow(deprecated)]
+    #[tokio::test]
+    async fn capture_snapshot_node_matches_path_based_capture() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("tree");
+        fs_err::create_dir_all(root.join("sub")).unwrap();
+        fs_err::write(root.join("a.txt"), b"alpha").unwrap();
+        fs_err::write(root.join("sub").join("b.txt"), b"bravo").unwrap();
+
+        let fs: Arc<dyn FileSystem> = Arc::new(LocalFs::new("test"));
+        let by_path = capture_snapshot(&fs, ProviderId::local(), &root)
+            .await
+            .unwrap();
+        let fs_node = LocalFs::new("test");
+        let by_node =
+            capture_snapshot_node(&fs_node, ProviderId::local(), &root)
+                .await
+                .unwrap();
+
+        assert_eq!(by_path.entry_count(), by_node.entry_count());
+        for entry in &by_node.entries {
+            let other = by_path.get_entry(&entry.path).unwrap_or_else(|| {
+                panic!("path-based snapshot lacks {:?}", entry.path)
+            });
+            assert_eq!(other.is_dir, entry.is_dir);
+            assert_eq!(other.size, entry.size);
+        }
+    }
+
+    #[tokio::test]
+    async fn capture_snapshot_node_on_mock_fs() {
+        let fs = MockFs::new("mock")
+            .with_dir("/root")
+            .with_file("/root/a.txt", "alpha")
+            .with_dir("/root/sub")
+            .with_file("/root/sub/b.txt", "bravo");
+
+        let snapshot = capture_snapshot_node(
+            &fs,
+            ProviderId::new("ftp", None),
+            Path::new("/root"),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(snapshot.provider_id, ProviderId::new("ftp", None));
+        assert_eq!(snapshot.entry_count(), 3);
+        for rel in ["a.txt", "sub", "sub/b.txt"] {
+            let entry = snapshot
+                .get_entry(Path::new(rel))
+                .unwrap_or_else(|| panic!("snapshot lacks {rel:?}"));
+            assert_eq!(entry.is_dir, rel == "sub");
+        }
     }
 }
