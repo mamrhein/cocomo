@@ -199,7 +199,8 @@ impl FileSystem for WebDavFs {
 
     async fn remove_all(&self, _path: &Path) -> Result<()> {
         unimplemented!(
-            "WebDavFs::remove_all — implement with recursive PROPFIND + DELETE"
+            "WebDavFs::remove_all — implement with recursive PROPFIND + \
+             DELETE"
         )
     }
 
@@ -248,7 +249,8 @@ impl NodeFileSystem for WebDavFs {
 
     async fn resolve_path(&self, _path: &Path) -> Result<NodeId<Self::Nid>> {
         unimplemented!(
-            "WebDavFs::resolve_path — implement with webdav PROPFIND and node cache"
+            "WebDavFs::resolve_path — implement with webdav PROPFIND and \
+             node cache"
         )
     }
 
@@ -282,13 +284,15 @@ impl NodeFileSystem for WebDavFs {
         _hash: String,
     ) -> Result<()> {
         unimplemented!(
-            "WebDavFs::set_node_hash — implement with Arc::make_mut on cached node"
+            "WebDavFs::set_node_hash — implement with Arc::make_mut on \
+             cached node"
         )
     }
 
     async fn read_dir_node(&self, _id: DirId<Self::Nid>) -> Result<()> {
         unimplemented!(
-            "WebDavFs::read_dir_node — implement with webdav PROPFIND and populate node cache"
+            "WebDavFs::read_dir_node — implement with webdav PROPFIND and \
+             populate node cache"
         )
     }
 
@@ -372,7 +376,8 @@ impl WritableFileSystem for WebDavFs {
 
     async fn remove_all_node(&self, _id: NodeId<Self::Nid>) -> Result<()> {
         unimplemented!(
-            "WebDavFs::remove_all_node — implement with recursive PROPFIND + DELETE"
+            "WebDavFs::remove_all_node — implement with recursive PROPFIND + \
+             DELETE"
         )
     }
 
