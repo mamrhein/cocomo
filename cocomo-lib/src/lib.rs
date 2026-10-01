@@ -45,6 +45,7 @@
 //! - [`profile`] — Connection profiles with encrypted secrets.
 //! - [`session`] — Session management for workspaces.
 //! - [`snapshot`] — Point-in-time snapshots of directory trees.
+//! - [`url`] — Credential-free remote-filesystem URL parsing.
 
 #![forbid(unsafe_code)]
 
@@ -73,6 +74,7 @@ pub mod snapshot;
 pub mod sync;
 pub mod text;
 pub mod transfer;
+pub mod url;
 pub mod webdav;
 
 // Re-exports for convenience.
@@ -129,6 +131,7 @@ pub use transfer::{
     TransferAction, TransferItem, TransferResult, execute_transfers,
     plan_transfers,
 };
+pub use url::{Url, UrlError};
 pub use webdav::{
     WebDavConfig, WebDavDirId, WebDavFileId, WebDavFs, WebDavNodeId,
 };
