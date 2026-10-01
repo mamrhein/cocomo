@@ -24,9 +24,16 @@
 //! Profiles are stored as TOML in `~/.config/cocomo/profiles.toml`. Each
 //! profile has an `[[profile]]` table containing its `id`, `provider_type`,
 //! and `settings`. Encrypted secrets are stored in the same file under the
-//! `secrets` key of each profile table.
+//! `secrets` key of each profile table. The hex-encoded master key needed
+//! to decrypt them lives in `cocomo/config.toml`, and
+//! [`ProfileStore::open_default`] loads both files from the default config
+//! directory.
 
-use std::{collections::BTreeMap, env, fmt, fs, io, path::PathBuf};
+use std::{
+    collections::BTreeMap,
+    env, fmt, fs, io,
+    path::{Path, PathBuf},
+};
 
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
 use chacha20poly1305::{
@@ -339,6 +346,15 @@ impl ProfileStore {
             store_path,
             master_key,
         }
+    }
+
+    /// Open the profile store at the default location.
+    ///
+    /// The store lives at [`default_store_path`] and its master key is
+    /// resolved via [`default_master_key`], so encrypted secrets written by
+    /// one run can be decrypted by the next.
+    pub fn open_default() -> ProfileResult<Self> {
+        Ok(Self::new(default_store_path(), default_master_key()?))
     }
 
     /// Load profiles from disk.
@@ -684,6 +700,90 @@ pub fn derive_master_key() -> ProfileResult<Vec<u8>> {
     Ok(key)
 }
 
+/// Return the default config file path (`cocomo/config.toml` next to
+/// `profiles.toml`).
+pub fn default_config_path() -> PathBuf {
+    default_store_path().with_file_name("config.toml")
+}
+
+/// Serialized form of `config.toml`.
+#[derive(Debug, Default, Deserialize, Serialize)]
+struct ConfigFile {
+    /// Hex-encoded master key for the profile store.
+    ///
+    /// The key is stored as plaintext hex protected only by owner-only
+    /// file permissions; keeping it in the OS keychain instead would
+    /// require a second secret to encrypt it, which solves nothing.
+    #[serde(default)]
+    master_key: Option<String>,
+}
+
+/// Resolve the master key for the default profile store.
+///
+/// Checks the `COCOMO_MASTER_KEY` environment variable first, then the
+/// `master_key` entry of `config.toml`, and finally generates a fresh
+/// random key that is persisted to `config.toml` (with owner-only
+/// permissions) so encrypted secrets stay decryptable on the next run.
+pub fn default_master_key() -> ProfileResult<Vec<u8>> {
+    read_master_key(&default_config_path())
+}
+
+/// Read the master key from one specific config file.
+///
+/// Falls back to a freshly generated key when neither the environment
+/// nor the file provides one. A failure to persist that fresh key (e.g.
+/// a read-only config directory) is not fatal: the store still works,
+/// its secrets just do not survive this process.
+fn read_master_key(config_path: &Path) -> ProfileResult<Vec<u8>> {
+    if let Ok(hex_key) = env::var(MASTER_KEY_ENV)
+        && let Ok(bytes) = hex::decode(&hex_key)
+        && bytes.len() >= 32
+    {
+        return Ok(bytes);
+    }
+
+    if config_path.exists() {
+        let content =
+            fs_err::read_to_string(config_path).map_err(ProfileError::Io)?;
+        let config: ConfigFile = toml::from_str(&content)
+            .map_err(|e| ProfileError::Toml(e.to_string()))?;
+        if let Some(hex_key) = config.master_key
+            && let Ok(bytes) = hex::decode(&hex_key)
+            && bytes.len() >= 32
+        {
+            return Ok(bytes);
+        }
+    }
+
+    let mut key = vec![0u8; 32];
+    SysRng.try_fill_bytes(&mut key).map_err(|e| {
+        ProfileError::EntropyUnavailable {
+            reason: e.to_string(),
+        }
+    })?;
+    let _ = write_master_key(config_path, &key);
+    Ok(key)
+}
+
+/// Persist a freshly generated master key to `config.toml`.
+fn write_master_key(config_path: &Path, key: &[u8]) -> ProfileResult<()> {
+    if let Some(parent) = config_path.parent() {
+        fs_err::create_dir_all(parent).map_err(ProfileError::Io)?;
+    }
+
+    let config = ConfigFile {
+        master_key: Some(hex::encode(key)),
+    };
+    let content = toml::to_string_pretty(&config)
+        .map_err(|e| ProfileError::Toml(e.to_string()))?;
+    fs_err::write(config_path, content).map_err(ProfileError::Io)?;
+
+    // The master key protects the encrypted secrets: keep it owner-only.
+    set_owner_only_permissions(config_path).map_err(ProfileError::Io)?;
+
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -691,6 +791,8 @@ pub fn derive_master_key() -> ProfileResult<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use std::path::Path;
+
+    use tempfile::tempdir;
 
     use super::*;
     use crate::fs::FileSystem;
@@ -1145,6 +1247,49 @@ mod tests {
             path.file_name().unwrap().to_str().unwrap(),
             "profiles.toml"
         );
+    }
+
+    #[test]
+    fn default_config_path_next_to_store_path() {
+        let config = default_config_path();
+        assert_eq!(config.file_name().unwrap(), "config.toml");
+        assert_eq!(config.parent(), default_store_path().parent());
+    }
+
+    #[test]
+    fn default_master_key_from_env() {
+        let hex_key = "aa".repeat(32);
+        temp_env::with_var(MASTER_KEY_ENV, Some(&hex_key), || {
+            let key = default_master_key().unwrap();
+            assert_eq!(key, vec![0xAAu8; 32]);
+        });
+    }
+
+    #[test]
+    fn master_key_loaded_from_config_file() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        fs_err::write(
+            &path,
+            format!("master_key = \"{}\"", hex::encode([0x42u8; 32])),
+        )
+        .unwrap();
+        assert_eq!(read_master_key(&path).unwrap(), vec![0x42u8; 32]);
+    }
+
+    #[test]
+    fn master_key_generated_and_persisted() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        temp_env::with_var_unset(MASTER_KEY_ENV, || {
+            let first = read_master_key(&path).unwrap();
+            assert_eq!(first.len(), 32);
+            // A second read must find the persisted key, not a fresh one
+            // (otherwise encrypted secrets would be unreadable next run).
+            assert_eq!(read_master_key(&path).unwrap(), first);
+            let content = fs_err::read_to_string(&path).unwrap();
+            assert!(content.contains("master_key"));
+        });
     }
 
     #[test]

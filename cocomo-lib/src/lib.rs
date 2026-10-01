@@ -43,6 +43,7 @@
 //! - [`meta`] — [`Metadata`] for files and directories.
 //! - [`file`] — [`FsFile`] trait for opened file handles.
 //! - [`profile`] — Connection profiles with encrypted secrets.
+//! - [`secrets`] — Password-safe credential lookup and interactive entry.
 //! - [`session`] — Session management for workspaces.
 //! - [`snapshot`] — Point-in-time snapshots of directory trees.
 //! - [`url`] — Credential-free remote-filesystem URL parsing.
@@ -69,6 +70,7 @@ pub mod provider;
 pub mod report;
 pub mod s3;
 pub mod scan;
+pub mod secrets;
 pub mod session;
 pub mod snapshot;
 pub mod sync;
@@ -105,13 +107,15 @@ pub use node::{Node, NodeKind, SymlinkTarget, UserPermissions};
 pub use patch::{PatchError, PatchResult, apply_patch, generate_unified_diff};
 pub use profile::{
     EncryptedSecrets, Profile, ProfileError, ProfileStore, ProviderType,
-    default_store_path, derive_master_key,
+    default_config_path, default_master_key, default_store_path,
+    derive_master_key,
 };
-pub use provider::{Provider, ProviderRegistry};
+pub use provider::{Credentials, Provider, ProviderError, ProviderRegistry};
 pub use s3::{S3Config, S3DirId, S3FileId, S3Fs, S3NodeId};
 pub use scan::{
     ScanConfig, ScanEntry, ScanResult, scan_directory, scan_directory_node,
 };
+pub use secrets::{NullPrompter, Prompter, Secrets, TtyPrompter};
 pub use session::{
     ProviderRef, Session, SessionConfig, SessionManager, SessionSettings,
     SessionType,

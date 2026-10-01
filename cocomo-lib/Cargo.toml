@@ -49,6 +49,14 @@ sha2 = "0.11"
 async_ftp = "6.0.0"
 dirs = "6"
 hex = "0.4"
+rpassword = { version = "7.5", optional = true }
+
+[features]
+default = ["keychain", "prompt"]
+# Credential lookup from the macOS keychain via `/usr/bin/security`.
+keychain = []
+# Interactive one-time credential prompts on a TTY via `rpassword`.
+prompt = ["dep:rpassword"]
 
 [dev-dependencies]
 temp-env = "0.3"
