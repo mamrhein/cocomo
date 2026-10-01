@@ -22,23 +22,23 @@ use std::{
 };
 
 use clap::{Parser, Subcommand, ValueEnum};
-// TODO(step 4): drop the allow once the CLI resolves endpoints via
-// providers and `snapshot capture` migrates to `capture_snapshot_node`.
-#[allow(deprecated)]
 use cocomo_lib::{
-    DirEntry, LocalFs, TextDifference,
+    DirEntry, FileSystem, TextDifference,
     compare::{
         CompareConfig, DirComparison, DirEntryStatus, compare_directories_node,
     },
     error::{FsError, FsOperation, wrap},
     grammar::Grammar,
+    profile::{ProfileError, ProfileStore},
+    provider::{Provider, ProviderError},
     report::{ReportConfig, ReportFormat, generate_report},
+    secrets::{Secrets, TtyPrompter},
     snapshot::{
-        ProviderId, Snapshot, SnapshotEntry, SnapshotEntryStatus,
-        capture_snapshot,
+        Snapshot, SnapshotEntry, SnapshotEntryStatus, capture_snapshot_node,
     },
     sync::{SyncOperation, SyncRules, plan_sync, sync_directories},
     text::{TextCompareSettings, TextDiff, WhitespaceMode, compare_texts},
+    url::{Url, UrlError},
 };
 
 // ---------------------------------------------------------------------------
@@ -114,10 +114,10 @@ enum SnapshotCommand {
 
 #[derive(Parser)]
 struct DirCompareArgs {
-    /// Left directory path.
-    left: PathBuf,
-    /// Right directory path.
-    right: PathBuf,
+    /// Left directory path or URL (e.g. `ftp://host/pub/src`).
+    left: String,
+    /// Right directory path or URL (e.g. `ftp://host/pub/src`).
+    right: String,
     /// Compare directory structure only (skip content hashing).
     #[arg(long)]
     structure_only: bool,
@@ -136,14 +136,17 @@ struct DirCompareArgs {
     /// Format for the report file (used with --report).
     #[arg(long, default_value = "text")]
     report_format: ReportFormatArg,
+    /// Profile id to authenticate the addressed provider(s) with.
+    #[arg(long)]
+    profile: Option<String>,
 }
 
 #[derive(Parser)]
 struct DirSyncArgs {
-    /// Left directory path.
-    left: PathBuf,
-    /// Right directory path.
-    right: PathBuf,
+    /// Left directory path or URL (e.g. `ftp://host/pub/mirror`).
+    left: String,
+    /// Right directory path or URL (e.g. `ftp://host/pub/mirror`).
+    right: String,
     /// Make right match left (copy left-only/different to right, delete
     /// right-only).
     #[arg(long, default_value_t = false)]
@@ -176,14 +179,17 @@ struct DirSyncArgs {
     /// Compare file contents. If absent, uses size/mtime only.
     #[arg(long, default_value_t = true)]
     compare_files: bool,
+    /// Profile id to authenticate the addressed provider(s) with.
+    #[arg(long)]
+    profile: Option<String>,
 }
 
 #[derive(Parser)]
 struct TextCompareArgs {
-    /// Left file path.
-    left: PathBuf,
-    /// Right file path.
-    right: PathBuf,
+    /// Left file path or URL (e.g. `ftp://host/pub/file.txt`).
+    left: String,
+    /// Right file path or URL (e.g. `ftp://host/pub/file.txt`).
+    right: String,
     /// Ignore case when comparing lines.
     #[arg(long, default_value_t = false)]
     ignore_case: bool,
@@ -199,14 +205,17 @@ struct TextCompareArgs {
     /// Grammar for syntax-aware classification.
     #[arg(long)]
     grammar: Option<GrammarArg>,
+    /// Profile id to authenticate the addressed provider(s) with.
+    #[arg(long)]
+    profile: Option<String>,
 }
 
 #[derive(Parser)]
 struct TextDiffArgs {
-    /// Left file path.
-    left: PathBuf,
-    /// Right file path.
-    right: PathBuf,
+    /// Left file path or URL (e.g. `ftp://host/pub/file.txt`).
+    left: String,
+    /// Right file path or URL (e.g. `ftp://host/pub/file.txt`).
+    right: String,
     /// Ignore case when comparing lines.
     #[arg(long, default_value_t = false)]
     ignore_case: bool,
@@ -222,14 +231,20 @@ struct TextDiffArgs {
     /// Grammar for syntax-aware classification.
     #[arg(long)]
     grammar: Option<GrammarArg>,
+    /// Profile id to authenticate the addressed provider(s) with.
+    #[arg(long)]
+    profile: Option<String>,
 }
 
 #[derive(Parser)]
 struct SnapshotCaptureArgs {
-    /// Directory path to snapshot.
-    path: PathBuf,
+    /// Directory path or URL to snapshot.
+    path: String,
     /// Output file path (default: <dirname>.snap in current directory).
     output: Option<PathBuf>,
+    /// Profile id to authenticate the addressed provider with.
+    #[arg(long)]
+    profile: Option<String>,
 }
 
 #[derive(Parser)]
@@ -335,7 +350,26 @@ enum DiffResult {
     HasDiffs,
 }
 
-async fn run(command: &Commands) -> Result<DiffResult, FsError> {
+/// Errors that can occur while resolving an endpoint or reading from a
+/// resolved provider.
+#[derive(Debug, thiserror::Error)]
+enum CliError {
+    #[error(transparent)]
+    Fs(#[from] FsError),
+    #[error(transparent)]
+    Url(#[from] UrlError),
+    #[error(transparent)]
+    Provider(#[from] ProviderError),
+    #[error(transparent)]
+    Profile(#[from] ProfileError),
+    #[error(
+        "cross-provider operations are not supported yet: `{left}` and \
+         `{right}` address different providers"
+    )]
+    CrossProvider { left: String, right: String },
+}
+
+async fn run(command: &Commands) -> Result<DiffResult, CliError> {
     match command {
         Commands::Dir(dir_args) => run_dir(&dir_args.command).await,
         Commands::Text(text_args) => run_text(&text_args.command).await,
@@ -346,18 +380,90 @@ async fn run(command: &Commands) -> Result<DiffResult, FsError> {
 }
 
 // ---------------------------------------------------------------------------
+// Endpoint resolution
+// ---------------------------------------------------------------------------
+
+/// Return the identity of the endpoint `url` addresses. Two URLs with
+/// equal identities are serviced by the same provider, so one filesystem
+/// instance can serve both sides of a comparison.
+fn endpoint_identity(url: &Url) -> (String, Option<String>, Option<u16>) {
+    (url.scheme.clone(), url.host.clone(), url.effective_port())
+}
+
+/// Resolve the provider that services `url`, letting `Provider::resolve`
+/// consult the default profile store, the environment, and the keychain.
+/// The store is only opened for remote endpoints, so local-only runs
+/// neither read nor create the profile configuration files.
+fn resolve_provider(
+    url: &Url,
+    profile_id: Option<&str>,
+) -> Result<Provider, CliError> {
+    let store = if url.scheme == Url::LOCAL_SCHEME {
+        None
+    } else {
+        Some(ProfileStore::open_default()?)
+    };
+    let secrets = Secrets::new();
+    let prompter = TtyPrompter::new();
+    let provider = Provider::resolve(
+        url,
+        store.as_ref(),
+        profile_id,
+        &secrets,
+        &prompter,
+    )?;
+    Ok(provider)
+}
+
+/// Resolve one path-like CLI argument into a provider and the path within
+/// that provider.
+fn resolve_endpoint(
+    arg: &str,
+    profile_id: Option<&str>,
+) -> Result<(Provider, PathBuf), CliError> {
+    let url = Url::parse(arg)?;
+    let provider = resolve_provider(&url, profile_id)?;
+    Ok((provider, url.path))
+}
+
+/// Resolve a pair of path-like CLI arguments into one provider plus the
+/// in-provider path of each side. A pair that addresses two different
+/// providers is refused (D1): `compare_directories_node`, `plan_sync`, and
+/// `sync_directories` all take a single filesystem shared by both sides.
+fn resolve_endpoint_pair(
+    left_arg: &str,
+    right_arg: &str,
+    profile_id: Option<&str>,
+) -> Result<(Provider, PathBuf, PathBuf), CliError> {
+    let left_url = Url::parse(left_arg)?;
+    let right_url = Url::parse(right_arg)?;
+    if endpoint_identity(&left_url) != endpoint_identity(&right_url) {
+        return Err(CliError::CrossProvider {
+            left: left_arg.to_owned(),
+            right: right_arg.to_owned(),
+        });
+    }
+    let provider = resolve_provider(&left_url, profile_id)?;
+    Ok((provider, left_url.path, right_url.path))
+}
+
+// ---------------------------------------------------------------------------
 // Directory commands
 // ---------------------------------------------------------------------------
 
-async fn run_dir(cmd: &DirCommand) -> Result<DiffResult, FsError> {
+async fn run_dir(cmd: &DirCommand) -> Result<DiffResult, CliError> {
     match cmd {
         DirCommand::Compare(args) => dir_compare(args).await,
         DirCommand::Sync(args) => dir_sync(args).await,
     }
 }
 
-async fn dir_compare(args: &DirCompareArgs) -> Result<DiffResult, FsError> {
-    let fs = LocalFs::new("local");
+async fn dir_compare(args: &DirCompareArgs) -> Result<DiffResult, CliError> {
+    let (fs, left, right) = resolve_endpoint_pair(
+        &args.left,
+        &args.right,
+        args.profile.as_deref(),
+    )?;
     let config = if args.structure_only {
         CompareConfig::structure_only()
     } else {
@@ -365,8 +471,7 @@ async fn dir_compare(args: &DirCompareArgs) -> Result<DiffResult, FsError> {
     };
 
     let comparison =
-        compare_directories_node(&fs, &args.left, &args.right, &config, None)
-            .await?;
+        compare_directories_node(&fs, &left, &right, &config, None).await?;
 
     match args.format {
         OutputFormat::Text => print_comparison_text(&comparison, args),
@@ -648,8 +753,12 @@ fn format_size(size: u64) -> String {
     }
 }
 
-async fn dir_sync(args: &DirSyncArgs) -> Result<DiffResult, FsError> {
-    let fs = LocalFs::new("local");
+async fn dir_sync(args: &DirSyncArgs) -> Result<DiffResult, CliError> {
+    let (fs, left, right) = resolve_endpoint_pair(
+        &args.left,
+        &args.right,
+        args.profile.as_deref(),
+    )?;
 
     // Determine sync operation from flags. Default to MirrorLeft.
     let operation = if args.mirror_left {
@@ -680,9 +789,9 @@ async fn dir_sync(args: &DirSyncArgs) -> Result<DiffResult, FsError> {
     };
 
     let result = if args.dry_run {
-        plan_sync(&fs, &args.left, &args.right, &rules).await?
+        plan_sync(&fs, &left, &right, &rules).await?
     } else {
-        sync_directories(&fs, &args.left, &args.right, &rules).await?
+        sync_directories(&fs, &left, &right, &rules).await?
     };
 
     // Print planned items.
@@ -719,7 +828,7 @@ async fn dir_sync(args: &DirSyncArgs) -> Result<DiffResult, FsError> {
 // Text commands
 // ---------------------------------------------------------------------------
 
-async fn run_text(cmd: &TextCommand) -> Result<DiffResult, FsError> {
+async fn run_text(cmd: &TextCommand) -> Result<DiffResult, CliError> {
     match cmd {
         TextCommand::Compare(args) => text_compare(args).await,
         TextCommand::Diff(args) => text_diff(args).await,
@@ -744,15 +853,15 @@ fn build_text_settings(
     settings
 }
 
-async fn read_file_content(path: &PathBuf) -> Result<String, FsError> {
-    tokio::fs::read_to_string(path)
-        .await
-        .map_err(|e| wrap(e, FsOperation::Read, path.clone()))
-}
-
-async fn text_compare(args: &TextCompareArgs) -> Result<DiffResult, FsError> {
-    let left_content = read_file_content(&args.left).await?;
-    let right_content = read_file_content(&args.right).await?;
+async fn text_compare(args: &TextCompareArgs) -> Result<DiffResult, CliError> {
+    let (left_fs, left_path) =
+        resolve_endpoint(&args.left, args.profile.as_deref())?;
+    let (right_fs, right_path) =
+        resolve_endpoint(&args.right, args.profile.as_deref())?;
+    let left_bytes = left_fs.read(&left_path, None).await?;
+    let right_bytes = right_fs.read(&right_path, None).await?;
+    let left_content = String::from_utf8_lossy(&left_bytes);
+    let right_content = String::from_utf8_lossy(&right_bytes);
 
     let settings = build_text_settings(
         args.ignore_case,
@@ -865,9 +974,15 @@ fn truncate(s: &str, max: usize) -> String {
     }
 }
 
-async fn text_diff(args: &TextDiffArgs) -> Result<DiffResult, FsError> {
-    let left_content = read_file_content(&args.left).await?;
-    let right_content = read_file_content(&args.right).await?;
+async fn text_diff(args: &TextDiffArgs) -> Result<DiffResult, CliError> {
+    let (left_fs, left_path) =
+        resolve_endpoint(&args.left, args.profile.as_deref())?;
+    let (right_fs, right_path) =
+        resolve_endpoint(&args.right, args.profile.as_deref())?;
+    let left_bytes = left_fs.read(&left_path, None).await?;
+    let right_bytes = right_fs.read(&right_path, None).await?;
+    let left_content = String::from_utf8_lossy(&left_bytes);
+    let right_content = String::from_utf8_lossy(&right_bytes);
 
     let settings = build_text_settings(
         args.ignore_case,
@@ -885,8 +1000,8 @@ async fn text_diff(args: &TextDiffArgs) -> Result<DiffResult, FsError> {
 
     // Generate unified diff from the TextDiff result.
     let unified = generate_unified_diff(
-        &args.left,
-        &args.right,
+        Path::new(&args.left),
+        Path::new(&args.right),
         &left_content,
         &right_content,
         &diff,
@@ -1049,7 +1164,7 @@ fn generate_unified_diff(
 // Snapshot commands
 // ---------------------------------------------------------------------------
 
-async fn run_snapshot(cmd: &SnapshotCommand) -> Result<DiffResult, FsError> {
+async fn run_snapshot(cmd: &SnapshotCommand) -> Result<DiffResult, CliError> {
     match cmd {
         SnapshotCommand::Capture(args) => snapshot_capture(args).await,
         SnapshotCommand::List(args) => snapshot_list(args).await,
@@ -1057,26 +1172,20 @@ async fn run_snapshot(cmd: &SnapshotCommand) -> Result<DiffResult, FsError> {
     }
 }
 
-// TODO(step 4): drop the allow once this migrates to
-// `capture_snapshot_node`.
-#[allow(deprecated)]
 async fn snapshot_capture(
     args: &SnapshotCaptureArgs,
-) -> Result<DiffResult, FsError> {
-    let fs: std::sync::Arc<dyn cocomo_lib::FileSystem> =
-        std::sync::Arc::new(LocalFs::new("local"));
-    let provider_id = ProviderId::local();
-
-    let snapshot = capture_snapshot(&fs, provider_id, &args.path).await?;
+) -> Result<DiffResult, CliError> {
+    let (fs, in_path) = resolve_endpoint(&args.path, args.profile.as_deref())?;
+    let snapshot =
+        capture_snapshot_node(&fs, fs.provider_id(), &in_path).await?;
 
     let output_path = args.output.clone().unwrap_or_else(|| {
-        let dir_name = args
-            .path
+        let dir_name = in_path
             .file_name()
             .unwrap_or_default()
             .to_string_lossy()
             .to_string();
-        PathBuf::from(format!("{}.snap", dir_name))
+        PathBuf::from(format!("{dir_name}.snap"))
     });
 
     snapshot.save_to_file(&output_path).await?;
@@ -1092,7 +1201,7 @@ async fn snapshot_capture(
 
 async fn snapshot_list(
     args: &SnapshotListArgs,
-) -> Result<DiffResult, FsError> {
+) -> Result<DiffResult, CliError> {
     let entries = tokio::fs::read_dir(&args.directory)
         .await
         .map_err(|e| wrap(e, FsOperation::ReadDir, args.directory.clone()))?;
@@ -1134,7 +1243,7 @@ async fn snapshot_list(
 
 async fn snapshot_diff(
     args: &SnapshotDiffArgs,
-) -> Result<DiffResult, FsError> {
+) -> Result<DiffResult, CliError> {
     let left_snap = Snapshot::load_from_file(&args.left).await?;
     let right_snap = Snapshot::load_from_file(&args.right).await?;
 
