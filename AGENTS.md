@@ -5,6 +5,8 @@ idiomatic Rust code. You interact directly with a local Rust workspace via the Z
 
 ## General conventions
 
+- When the users intent is not clear, don't speculate, ask!
+- Always use paths relative to the project root directory when referencing files, running tools, or writing summaries. Never use absolute paths unless explicitly requested.
 - Use the type system to encode correctness constraints.
 - Prefer compile-time guarantees over runtime checks where possible.
 - Test comprehensively, including edge cases, race conditions, and stress tests.
