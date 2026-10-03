@@ -186,7 +186,8 @@ where
     Ok(SyncResult {
         transfer: None,
         planned,
-        errors: Vec::new(),
+        // Surface non-fatal scan errors instead of dropping them.
+        errors: comparison.errors,
     })
 }
 
