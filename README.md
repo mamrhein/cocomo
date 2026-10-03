@@ -19,9 +19,12 @@ URL.
   reserved URL shapes; the backends are not implemented yet, so these
   currently fail with an error.
 
-`dir compare` and `dir sync` require both endpoints to address the same
-provider (same URL scheme, host and port); a mixed pair such as
-`ftp://host/pub/src` vs. `./src` is refused before any file is touched.
+`dir compare` and `dir sync` accept mixed pairs such as
+`ftp://host/pub/src` vs. `./src`: endpoints that share an identity (same
+URL scheme, host and port) are serviced by one provider — one connection
+for both sides — while different endpoints each resolve their own
+provider. Cross-boundary copies stream the content between the two
+providers, and cross-boundary moves run as copy + delete (non-atomic).
 `text compare` and `text diff` resolve each side on its own, so a remote
 file can be compared with a local one.
 

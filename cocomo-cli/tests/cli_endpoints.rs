@@ -9,10 +9,10 @@
 
 //! Integration tests for endpoint resolution in the COCOMO CLI: endpoint
 //! URL and bare-path formats are parsed at the argument level, mixed
-//! (cross-provider) pairs are refused (D1), the scaffolding `s3` and
-//! `webdav` schemes are gated with a clean error instead of a panic, and
-//! remote endpoints without credentials fail rather than resolving
-//! anonymously (OQ3).
+//! (cross-provider) pairs resolve per side and reach I/O, the
+//! scaffolding `s3` and `webdav` schemes are gated with a clean error
+//! instead of a panic, and remote endpoints without credentials fail
+//! rather than resolving anonymously (OQ3).
 
 use std::{env, fs, path::Path, time::Duration};
 
@@ -68,26 +68,37 @@ fn create_same_text_files() -> TempDir {
 }
 
 // ---------------------------------------------------------------------------
-// Mixed pairs (D1): pairs that address two providers are refused
+// Cross-provider pairs: mixed pairs resolve per side and reach I/O
 // ---------------------------------------------------------------------------
 
-mod mixed_pairs {
+mod cross_provider_pairs {
     use super::*;
 
     #[test]
-    fn local_vs_remote_pair_is_refused() {
+    fn local_vs_remote_pair_reaches_remote_auth() {
+        // The mixed pair passes the endpoint check and resolves per
+        // side; the remote side fails credential resolution (no TTY, no
+        // secret) instead of a cross-provider refusal. The `.invalid`
+        // host is unreachable by design (RFC 6761), which keeps the run
+        // bounded even if the environment does supply a
+        // `COCOMO_FTP_PASSWORD`.
         cmd()
+            .env_remove("COCOMO_FTP_USER")
+            .env_remove("COCOMO_FTP_PASSWORD")
+            .timeout(Duration::from_secs(30))
             .args(["dir", "compare", "./src", "ftp://ftp.invalid/pub/src"])
             .assert()
             .code(2)
-            .stderr(predicate::str::contains(
-                "cross-provider operations are not supported yet",
-            ));
+            .stderr(predicate::str::contains("authentication required"))
+            .stderr(predicate::str::contains("cross-provider").not());
     }
 
     #[test]
-    fn remote_vs_local_pair_is_refused() {
+    fn remote_vs_local_sync_reaches_remote_auth() {
         cmd()
+            .env_remove("COCOMO_FTP_USER")
+            .env_remove("COCOMO_FTP_PASSWORD")
+            .timeout(Duration::from_secs(30))
             .args([
                 "dir",
                 "sync",
@@ -97,13 +108,19 @@ mod mixed_pairs {
             ])
             .assert()
             .code(2)
-            .stderr(predicate::str::contains("cross-provider"));
+            .stderr(predicate::str::contains("authentication required"))
+            .stderr(predicate::str::contains("cross-provider").not());
     }
 
     #[test]
-    fn two_remote_hosts_are_refused() {
-        // Different hosts address two providers, even under one scheme.
+    fn two_remote_hosts_resolve_per_side() {
+        // Different hosts address two providers, even under one scheme;
+        // each side resolves on its own and the first fails credential
+        // resolution.
         cmd()
+            .env_remove("COCOMO_FTP_USER")
+            .env_remove("COCOMO_FTP_PASSWORD")
+            .timeout(Duration::from_secs(30))
             .args([
                 "dir",
                 "compare",
@@ -112,16 +129,15 @@ mod mixed_pairs {
             ])
             .assert()
             .code(2)
-            .stderr(predicate::str::contains("different providers"));
+            .stderr(predicate::str::contains("authentication required"))
+            .stderr(predicate::str::contains("different providers").not());
     }
 
     #[test]
-    fn same_host_pair_is_not_a_mixed_pair() {
-        // Both URLs address one provider, so the D1 guard must not fire.
-        // The run fails on the credential resolution instead (no TTY, no
-        // secret), never on a mixed-pair refusal. The `.invalid` host is
-        // unreachable by design (RFC 6761), which keeps the run bounded
-        // even if the environment does supply a `COCOMO_FTP_PASSWORD`.
+    fn same_host_pair_shares_one_provider() {
+        // Both URLs share an endpoint identity, so one provider instance
+        // services both sides; the run fails on the credential resolution
+        // instead (no TTY, no secret), never on a provider-count refusal.
         cmd()
             .env_remove("COCOMO_FTP_USER")
             .env_remove("COCOMO_FTP_PASSWORD")
@@ -134,6 +150,7 @@ mod mixed_pairs {
             ])
             .assert()
             .code(2)
+            .stderr(predicate::str::contains("authentication required"))
             .stderr(predicate::str::contains("cross-provider").not());
     }
 

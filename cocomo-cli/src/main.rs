@@ -25,7 +25,8 @@ use clap::{Parser, Subcommand, ValueEnum};
 use cocomo_lib::{
     DirEntry, FileSystem, TextDifference,
     compare::{
-        CompareConfig, DirComparison, DirEntryStatus, compare_directories_node,
+        CompareConfig, DirComparison, DirEntryStatus,
+        compare_directories_node, compare_directories_pair_node,
     },
     error::{FsError, FsOperation, wrap},
     grammar::Grammar,
@@ -36,8 +37,12 @@ use cocomo_lib::{
     snapshot::{
         Snapshot, SnapshotEntry, SnapshotEntryStatus, capture_snapshot_node,
     },
-    sync::{SyncOperation, SyncRules, plan_sync, sync_directories},
+    sync::{
+        SyncOperation, SyncRules, plan_sync, plan_sync_pair, sync_directories,
+        sync_directories_pair,
+    },
     text::{TextCompareSettings, TextDiff, WhitespaceMode, compare_texts},
+    transfer::FsPair,
     url::{Url, UrlError},
 };
 
@@ -362,11 +367,6 @@ enum CliError {
     Provider(#[from] ProviderError),
     #[error(transparent)]
     Profile(#[from] ProfileError),
-    #[error(
-        "cross-provider operations are not supported yet: `{left}` and \
-         `{right}` address different providers"
-    )]
-    CrossProvider { left: String, right: String },
 }
 
 async fn run(command: &Commands) -> Result<DiffResult, CliError> {
@@ -426,25 +426,49 @@ fn resolve_endpoint(
     Ok((provider, url.path))
 }
 
-/// Resolve a pair of path-like CLI arguments into one provider plus the
-/// in-provider path of each side. A pair that addresses two different
-/// providers is refused (D1): `compare_directories_node`, `plan_sync`, and
-/// `sync_directories` all take a single filesystem shared by both sides.
+/// The provider(s) addressing the two sides of a pair command.
+///
+/// `Provider` is large (it holds a live backend connection) and the
+/// variants differ in arity, so the single-provider case is padded to
+/// twice its size. That padding is irrelevant for a short-lived CLI
+/// process, and boxing would only buy it back with allocations and
+/// deref noise at every call site.
+#[allow(clippy::large_enum_variant)]
+enum EndpointPair {
+    /// One provider instance addressing both sides: the endpoints share
+    /// an identity, so one connection services both and cross-boundary
+    /// transfers keep the same-provider fast path.
+    Shared(Provider),
+    /// Two distinct provider instances: the endpoints address different
+    /// providers, so each side resolves and connects on its own.
+    Separate(Provider, Provider),
+}
+
+/// Resolve a pair of path-like CLI arguments into the provider(s) that
+/// service them plus the in-provider path of each side. Endpoints with
+/// equal identities share one provider instance (one connection); equal
+/// identities resolved per side would give two providers with the same
+/// label, aliasing the shared `ContentCache` keys. Different identities
+/// resolve to one provider per side, so a mixed pair such as
+/// `ftp://host/pub` vs. `./src` is accepted and each side runs against
+/// its own backend.
 fn resolve_endpoint_pair(
     left_arg: &str,
     right_arg: &str,
     profile_id: Option<&str>,
-) -> Result<(Provider, PathBuf, PathBuf), CliError> {
+) -> Result<(EndpointPair, PathBuf, PathBuf), CliError> {
     let left_url = Url::parse(left_arg)?;
     let right_url = Url::parse(right_arg)?;
-    if endpoint_identity(&left_url) != endpoint_identity(&right_url) {
-        return Err(CliError::CrossProvider {
-            left: left_arg.to_owned(),
-            right: right_arg.to_owned(),
-        });
-    }
-    let provider = resolve_provider(&left_url, profile_id)?;
-    Ok((provider, left_url.path, right_url.path))
+    let pair = if endpoint_identity(&left_url) == endpoint_identity(&right_url)
+    {
+        let provider = resolve_provider(&left_url, profile_id)?;
+        EndpointPair::Shared(provider)
+    } else {
+        let left = resolve_provider(&left_url, profile_id)?;
+        let right = resolve_provider(&right_url, profile_id)?;
+        EndpointPair::Separate(left, right)
+    };
+    Ok((pair, left_url.path, right_url.path))
 }
 
 // ---------------------------------------------------------------------------
@@ -459,7 +483,7 @@ async fn run_dir(cmd: &DirCommand) -> Result<DiffResult, CliError> {
 }
 
 async fn dir_compare(args: &DirCompareArgs) -> Result<DiffResult, CliError> {
-    let (fs, left, right) = resolve_endpoint_pair(
+    let (pair, left, right) = resolve_endpoint_pair(
         &args.left,
         &args.right,
         args.profile.as_deref(),
@@ -470,8 +494,17 @@ async fn dir_compare(args: &DirCompareArgs) -> Result<DiffResult, CliError> {
         CompareConfig::full()
     };
 
-    let comparison =
-        compare_directories_node(&fs, &left, &right, &config, None).await?;
+    let comparison = match pair {
+        EndpointPair::Shared(fs) => {
+            compare_directories_node(&fs, &left, &right, &config, None).await?
+        }
+        EndpointPair::Separate(left_fs, right_fs) => {
+            compare_directories_pair_node(
+                &left_fs, &right_fs, &left, &right, &config, None,
+            )
+            .await?
+        }
+    };
 
     match args.format {
         OutputFormat::Text => print_comparison_text(&comparison, args),
@@ -754,7 +787,7 @@ fn format_size(size: u64) -> String {
 }
 
 async fn dir_sync(args: &DirSyncArgs) -> Result<DiffResult, CliError> {
-    let (fs, left, right) = resolve_endpoint_pair(
+    let (pair, left, right) = resolve_endpoint_pair(
         &args.left,
         &args.right,
         args.profile.as_deref(),
@@ -788,10 +821,22 @@ async fn dir_sync(args: &DirSyncArgs) -> Result<DiffResult, CliError> {
         compare_files: args.compare_files,
     };
 
-    let result = if args.dry_run {
-        plan_sync(&fs, &left, &right, &rules).await?
-    } else {
-        sync_directories(&fs, &left, &right, &rules).await?
+    let result = match pair {
+        EndpointPair::Shared(fs) => {
+            if args.dry_run {
+                plan_sync(&fs, &left, &right, &rules).await?
+            } else {
+                sync_directories(&fs, &left, &right, &rules).await?
+            }
+        }
+        EndpointPair::Separate(left_fs, right_fs) => {
+            let pair = FsPair::Separate(&left_fs, &right_fs);
+            if args.dry_run {
+                plan_sync_pair(pair, &left, &right, &rules).await?
+            } else {
+                sync_directories_pair(pair, &left, &right, &rules).await?
+            }
+        }
     };
 
     // Print planned items.
