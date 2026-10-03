@@ -345,15 +345,10 @@ fn compare_children<'a>(
 // Node-based comparison
 // ---------------------------------------------------------------------------
 
-/// Compare two directory trees using the node-based `NodeFileSystem` API.
+/// Compare two directory trees that live on the same filesystem provider.
 ///
-/// Both paths are resolved to node identifiers and scanned once with
-/// [`scan_directory_node`], then the two scanned trees are merged in a
-/// single recursive walk over the `children` of each `ScanEntry`; no
-/// subdirectory is ever re-scanned. When `compare_files` is enabled,
-/// content hashes are computed via node-based reads and cached on the
-/// provider node. The optional `cache` provides a secondary LRU layer
-/// across provider instances.
+/// Thin wrapper around [`compare_directories_pair_node`] that addresses
+/// both sides with the same provider instance.
 pub async fn compare_directories_node<N>(
     fs: &N,
     left_path: &Path,
@@ -364,17 +359,55 @@ pub async fn compare_directories_node<N>(
 where
     N: NodeFileSystem<Nid = u64>,
 {
+    compare_directories_pair_node(fs, fs, left_path, right_path, config, cache)
+        .await
+}
+
+/// Compare two directory trees that may live on two different filesystem
+/// providers.
+///
+/// Each side is scanned once on its own provider with
+/// [`scan_directory_node`], then the two scanned trees are merged in a
+/// single recursive walk over the `children` of each `ScanEntry`; no
+/// subdirectory is ever re-scanned. The two providers are *positional*
+/// (left and right), not source and destination: a file pair is hashed
+/// with the left entry on `left_fs` and the right entry on `right_fs`
+/// within one call, so neither parameter can be pinned as "the source".
+/// When both parameters address the same provider instance the pipeline
+/// behaves exactly like [`compare_directories_node`].
+///
+/// When `compare_files` is enabled, content hashes are computed via
+/// node-based reads and cached on the node of the side being hashed.
+/// The optional `cache` is shared across the sides; its `(label, path)`
+/// keys identify the provider instance through the label, which stays
+/// correct while the labels of the two sides are unique per provider
+/// instance (equal endpoint identities share one provider, different
+/// ones resolve to different lookup keys, hence different labels).
+pub async fn compare_directories_pair_node<L, R>(
+    left_fs: &L,
+    right_fs: &R,
+    left_path: &Path,
+    right_path: &Path,
+    config: &CompareConfig,
+    cache: Option<&ContentCache>,
+) -> Result<DirComparison>
+where
+    L: NodeFileSystem<Nid = u64>,
+    R: NodeFileSystem<Nid = u64>,
+{
     let scan_config = ScanConfig {
         follow_symlinks: config.follow_symlinks,
         max_depth: config.max_depth,
     };
 
-    let left_result = scan_directory_node(fs, left_path, &scan_config).await?;
+    let left_result =
+        scan_directory_node(left_fs, left_path, &scan_config).await?;
     let right_result =
-        scan_directory_node(fs, right_path, &scan_config).await?;
+        scan_directory_node(right_fs, right_path, &scan_config).await?;
 
     let mut comparison = compare_children_node(
-        fs,
+        left_fs,
+        right_fs,
         &left_result.entries,
         &right_result.entries,
         left_path,
@@ -393,8 +426,15 @@ where
 
 /// Node-aware version of [`compare_children`], mirroring the recursive
 /// tree walk of the path-based pipeline.
-fn compare_children_node<'a, N>(
-    fs: &'a N,
+///
+/// `left_fs` and `right_fs` address the left and right side of the
+/// comparison; a file pair is hashed on the provider that owns it.
+// The side parameters are positional by design (left and right, not
+// source and destination), so threading them costs an argument.
+#[allow(clippy::too_many_arguments)]
+fn compare_children_node<'a, L, R>(
+    left_fs: &'a L,
+    right_fs: &'a R,
     left: &'a [ScanEntry],
     right: &'a [ScanEntry],
     left_root: &'a Path,
@@ -403,7 +443,8 @@ fn compare_children_node<'a, N>(
     cache: Option<&'a ContentCache>,
 ) -> BoxFuture<'a, DirComparison>
 where
-    N: NodeFileSystem<Nid = u64>,
+    L: NodeFileSystem<Nid = u64>,
+    R: NodeFileSystem<Nid = u64>,
 {
     Box::pin(async move {
         let mut comparison = DirComparison::default();
@@ -427,7 +468,8 @@ where
             let right_entry = right_map.get(name).copied();
 
             let mut entry = match merge_entry_sync_node(
-                fs,
+                left_fs,
+                right_fs,
                 left_root,
                 left_entry,
                 right_root,
@@ -454,7 +496,8 @@ where
                 let rc = right_entry.and_then(|e| e.children()).unwrap_or(&[]);
 
                 let sub = compare_children_node(
-                    fs, lc, rc, left_root, right_root, config, cache,
+                    left_fs, right_fs, lc, rc, left_root, right_root, config,
+                    cache,
                 )
                 .await;
 
@@ -473,9 +516,12 @@ where
     })
 }
 
-/// Node-aware version of `merge_entry_sync`.
-async fn merge_entry_sync_node<N>(
-    fs: &N,
+/// Node-aware version of `merge_entry_sync`. The side parameters decide
+/// which provider a file pair is hashed on.
+#[allow(clippy::too_many_arguments)]
+async fn merge_entry_sync_node<L, R>(
+    left_fs: &L,
+    right_fs: &R,
     left_root: &Path,
     left: Option<&ScanEntry>,
     right_root: &Path,
@@ -484,7 +530,8 @@ async fn merge_entry_sync_node<N>(
     cache: Option<&ContentCache>,
 ) -> Result<DirEntry>
 where
-    N: NodeFileSystem<Nid = u64>,
+    L: NodeFileSystem<Nid = u64>,
+    R: NodeFileSystem<Nid = u64>,
 {
     let name = left
         .map(|e| e.name.as_str())
@@ -502,7 +549,8 @@ where
             DirEntryStatus::Same // placeholder; refined by caller
         } else {
             compare_file_status_node(
-                fs, left_root, le, right_root, re, config, cache,
+                left_fs, right_fs, left_root, le, right_root, re, config,
+                cache,
             )
             .await?
         }
@@ -522,9 +570,13 @@ where
     })
 }
 
-/// Node-aware file comparison. Uses node IDs for hashing instead of paths.
-async fn compare_file_status_node<N>(
-    fs: &N,
+/// Node-aware file comparison. Uses node IDs for hashing instead of
+/// paths, querying each side's own provider: the left hash is computed
+/// on `left_fs`, the right hash on `right_fs`.
+#[allow(clippy::too_many_arguments)]
+async fn compare_file_status_node<L, R>(
+    left_fs: &L,
+    right_fs: &R,
     left_root: &Path,
     left: &ScanEntry,
     right_root: &Path,
@@ -533,7 +585,8 @@ async fn compare_file_status_node<N>(
     cache: Option<&ContentCache>,
 ) -> Result<DirEntryStatus>
 where
-    N: NodeFileSystem<Nid = u64>,
+    L: NodeFileSystem<Nid = u64>,
+    R: NodeFileSystem<Nid = u64>,
 {
     if !config.compare_files {
         return if left.meta.size == right.meta.size {
@@ -560,18 +613,21 @@ where
         return Ok(DirEntryStatus::Different);
     }
 
-    // Same size — resolve to node IDs and compare hashes.
+    // Same size — resolve to node IDs and compare hashes, each side on
+    // its own provider.
     let left_path = left_root.join(&left.path);
     let right_path = right_root.join(&right.path);
-    let label = fs.label_node();
+    let left_label = left_fs.label_node();
+    let right_label = right_fs.label_node();
 
-    let left_id = fs.resolve_path(&left_path).await.ok();
-    let right_id = fs.resolve_path(&right_path).await.ok();
+    let left_id = left_fs.resolve_path(&left_path).await.ok();
+    let right_id = right_fs.resolve_path(&right_path).await.ok();
 
-    // Check the optional global cache first.
+    // Check the optional global cache first. Labels are taken per side,
+    // but the cache itself is shared across the sides.
     if let Some(c) = cache {
-        let left_cid = c.get(label, &left_path);
-        let right_cid = c.get(label, &right_path);
+        let left_cid = c.get(left_label, &left_path);
+        let right_cid = c.get(right_label, &right_path);
         if matches!(
             (&left_cid, &right_cid),
             (Some(lc), Some(rc)) if lc.hash == rc.hash
@@ -580,8 +636,8 @@ where
         }
     }
 
-    // Helper: get the hash for a file, checking node cache first,
-    // then computing and caching.
+    // Helper: get the hash for a file on its side's provider, checking
+    // the node cache first, then computing and caching.
     async fn get_hash<N>(
         fs: &N,
         id: NodeId<u64>,
@@ -601,14 +657,23 @@ where
             .ok()
     }
 
-    let left_hash = match (left_id, fs.get_node(left_id.unwrap())) {
-        (Some(id), Ok(node)) => get_hash(fs, id, &node).await,
-        _ => None,
+    // A side whose node cannot be resolved or read stays without a
+    // hash, which classifies the pair as `Different` — unknown content
+    // is never assumed equal.
+    let left_hash = match left_id {
+        Some(id) => match left_fs.get_node(id) {
+            Ok(node) => get_hash(left_fs, id, &node).await,
+            Err(_) => None,
+        },
+        None => None,
     };
 
-    let right_hash = match (right_id, fs.get_node(right_id.unwrap())) {
-        (Some(id), Ok(node)) => get_hash(fs, id, &node).await,
-        _ => None,
+    let right_hash = match right_id {
+        Some(id) => match right_fs.get_node(id) {
+            Ok(node) => get_hash(right_fs, id, &node).await,
+            Err(_) => None,
+        },
+        None => None,
     };
 
     let (Some(lh), Some(rh)) = (left_hash, right_hash) else {
@@ -619,8 +684,8 @@ where
     if let Some(c) = cache {
         let left_cid = ContentId::from_blake3(&left.meta, &lh);
         let right_cid = ContentId::from_blake3(&right.meta, &rh);
-        c.insert(label, &left_path, left_cid);
-        c.insert(label, &right_path, right_cid);
+        c.insert(left_label, &left_path, left_cid);
+        c.insert(right_label, &right_path, right_cid);
     }
 
     if lh == rh {
@@ -768,10 +833,10 @@ fn scan_entry_to_info(entry: &ScanEntry) -> EntryInfo {
 
 #[cfg(test)]
 mod tests {
-    use std::env;
+    use std::{env, path::Path};
 
     use super::*;
-    use crate::local::LocalFs;
+    use crate::{FsError, FsOperation, local::LocalFs, mockfs::MockFs};
 
     fn make_test_dirs() -> (std::path::PathBuf, std::path::PathBuf) {
         let base = env::temp_dir()
@@ -987,5 +1052,223 @@ mod tests {
         check_nested_differences(&result);
 
         fs_err::remove_dir_all(left.parent().unwrap()).ok();
+    }
+
+    // -----------------------------------------------------------------------
+    // Pair (two-provider) compare tests
+    // -----------------------------------------------------------------------
+
+    /// Recursively collect `(path, status)` pairs, joining entry names
+    /// with `/`.
+    fn flat_statuses(
+        comp: &DirComparison,
+        prefix: &str,
+        out: &mut Vec<(String, DirEntryStatus)>,
+    ) {
+        for entry in &comp.entries {
+            let path = if prefix.is_empty() {
+                entry.name.clone()
+            } else {
+                format!("{prefix}/{}", entry.name)
+            };
+            out.push((path.clone(), entry.status));
+            if let Some(sub) = &entry.sub_entries {
+                flat_statuses(sub, &path, out);
+            }
+        }
+    }
+
+    /// Look up the status of an entry by its `/`-separated relative path.
+    fn status_of(comp: &DirComparison, path: &str) -> Option<DirEntryStatus> {
+        let parts: Vec<&str> = path.split('/').collect();
+        let mut comp = comp;
+        for (i, part) in parts.iter().enumerate() {
+            let entry = comp.entries.iter().find(|e| e.name == *part)?;
+            if i + 1 == parts.len() {
+                return Some(entry.status);
+            }
+            comp = &**entry.sub_entries.as_ref()?;
+        }
+        None
+    }
+
+    /// Build a fixture pair `(left, right)` under a fresh temp dir: an
+    /// equal file, a same-size different-content file, a within-tolerance
+    /// size pair, one orphan per side, and a nested directory pair whose
+    /// child differs.
+    fn make_pair_fixture() -> (std::path::PathBuf, std::path::PathBuf) {
+        let base = env::temp_dir()
+            .join(format!("cocomo_pair_parity_{}", std::process::id()));
+        let _ = fs_err::remove_dir_all(&base);
+
+        let left = base.join("left");
+        let right = base.join("right");
+
+        fs_err::create_dir_all(left.join("common")).unwrap();
+        fs_err::create_dir_all(right.join("common")).unwrap();
+        fs_err::write(left.join("same.txt"), "hello").unwrap();
+        fs_err::write(right.join("same.txt"), "hello").unwrap();
+        fs_err::write(left.join("diff.txt"), "version 1").unwrap();
+        fs_err::write(right.join("diff.txt"), "version 2").unwrap();
+        fs_err::write(left.join("tol.txt"), [b'x'; 10]).unwrap();
+        fs_err::write(right.join("tol.txt"), [b'x'; 11]).unwrap();
+        fs_err::write(left.join("l-only.txt"), "only left").unwrap();
+        fs_err::write(right.join("r-only.txt"), "only right").unwrap();
+        fs_err::write(left.join("common/inner.txt"), "aaaaaaaaaa").unwrap();
+        fs_err::write(right.join("common/inner.txt"), "bbbbbbbbbb").unwrap();
+
+        (left, right)
+    }
+
+    /// A compare across two provider instances must yield exactly the
+    /// same (path, status) pairs as the same compare on one shared
+    /// provider, including entries nested in subdirectories.
+    #[tokio::test]
+    async fn pair_compare_matches_single_fs_compare() {
+        let (left, right) = make_pair_fixture();
+        let config = CompareConfig::full();
+
+        let single_fs = LocalFs::new("single");
+        let single_cache = ContentCache::default_config();
+        let single = compare_directories_node(
+            &single_fs,
+            &left,
+            &right,
+            &config,
+            Some(&single_cache),
+        )
+        .await
+        .unwrap();
+
+        let left_fs = LocalFs::new("left");
+        let right_fs = LocalFs::new("right");
+        let pair_cache = ContentCache::default_config();
+        let pair = compare_directories_pair_node(
+            &left_fs,
+            &right_fs,
+            &left,
+            &right,
+            &config,
+            Some(&pair_cache),
+        )
+        .await
+        .unwrap();
+
+        let mut single_flat = Vec::new();
+        flat_statuses(&single, "", &mut single_flat);
+        let mut pair_flat = Vec::new();
+        flat_statuses(&pair, "", &mut pair_flat);
+        assert_eq!(single_flat, pair_flat);
+
+        assert!(pair.errors.is_empty(), "errors: {:?}", pair.errors);
+        assert!(pair.same_count() > 0);
+        assert!(pair.different_count() > 0);
+        assert!(pair.orphan_count() > 0);
+
+        fs_err::remove_dir_all(left.parent().unwrap()).ok();
+    }
+
+    /// A pair compare with the right side on a `MockFs` tree must
+    /// classify every pair on its own provider, and an injected stream
+    /// error on the right side must degrade to `Different` instead of
+    /// panicking.
+    #[tokio::test]
+    async fn pair_compare_cross_provider_mockfs_vs_localfs() {
+        let base = env::temp_dir()
+            .join(format!("cocomo_pair_cross_{}", std::process::id()));
+        let _ = fs_err::remove_dir_all(&base);
+
+        let left = base.join("local");
+        fs_err::create_dir_all(left.join("d")).unwrap();
+        fs_err::write(left.join("same.txt"), "hello").unwrap();
+        fs_err::write(left.join("diff.txt"), "version 1").unwrap();
+        fs_err::write(left.join("tol.txt"), [b'x'; 10]).unwrap();
+        fs_err::write(left.join("l-only.txt"), "only left").unwrap();
+        fs_err::write(left.join("d/inner.txt"), "aaaaaaaaaa").unwrap();
+
+        let mirror = MockFs::new("mirror")
+            .with_dir("/mirror")
+            .with_file("/mirror/same.txt", "hello")
+            .with_file("/mirror/diff.txt", "version 2")
+            .with_file("/mirror/tol.txt", [b'x'; 11])
+            .with_file("/mirror/r-only.txt", "only right")
+            .with_dir("/mirror/d")
+            .with_file("/mirror/d/inner.txt", "bbbbbbbbbb");
+
+        let left_fs = LocalFs::new("local");
+        let config = CompareConfig::full();
+
+        let result = compare_directories_pair_node(
+            &left_fs,
+            &mirror,
+            &left,
+            Path::new("/mirror"),
+            &config,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        assert_eq!(status_of(&result, "same.txt"), Some(DirEntryStatus::Same));
+        assert_eq!(
+            status_of(&result, "diff.txt"),
+            Some(DirEntryStatus::Different)
+        );
+        assert_eq!(
+            status_of(&result, "tol.txt"),
+            Some(DirEntryStatus::Similar)
+        );
+        assert_eq!(
+            status_of(&result, "l-only.txt"),
+            Some(DirEntryStatus::LeftOnly)
+        );
+        assert_eq!(
+            status_of(&result, "r-only.txt"),
+            Some(DirEntryStatus::RightOnly)
+        );
+        assert_eq!(
+            status_of(&result, "d/inner.txt"),
+            Some(DirEntryStatus::Different)
+        );
+
+        // The same tree, but with a stream error injected on the equal
+        // file: its hash cannot be computed on the right provider, so the
+        // pair must degrade to `Different` instead of panicking.
+        let mirror_err = MockFs::new("mirror-err")
+            .with_dir("/mirror")
+            .with_file("/mirror/same.txt", "hello")
+            .with_file("/mirror/diff.txt", "version 2")
+            .with_file("/mirror/tol.txt", [b'x'; 11])
+            .with_file("/mirror/r-only.txt", "only right")
+            .with_dir("/mirror/d")
+            .with_file("/mirror/d/inner.txt", "bbbbbbbbbb")
+            .with_stream_error(
+                "/mirror/same.txt",
+                FsError::Io {
+                    operation: FsOperation::Read,
+                    path: "/mirror/same.txt".into(),
+                    message: "injected read failure".to_owned(),
+                },
+            );
+
+        let result2 = compare_directories_pair_node(
+            &left_fs,
+            &mirror_err,
+            &left,
+            Path::new("/mirror"),
+            &config,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert!(result2.errors.is_empty(), "errors: {:?}", result2.errors);
+        assert_eq!(
+            status_of(&result2, "same.txt"),
+            Some(DirEntryStatus::Different)
+        );
+
+        fs_err::remove_dir_all(&base).ok();
     }
 }

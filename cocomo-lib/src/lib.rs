@@ -83,6 +83,7 @@ pub mod webdav;
 pub use compare::{
     CompareConfig, DirComparison, DirEntry, DirEntryStatus, EntryInfo,
     compare_directories, compare_directories_node,
+    compare_directories_pair_node,
 };
 pub use error::{FsError, FsOperation, Result};
 pub use file::FsFile;
