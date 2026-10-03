@@ -12,7 +12,9 @@
 //!
 //! A [`SyncOperation`] defines the strategy (mirror, update newer, etc.).
 //! The engine compares two directory trees, plans the necessary transfers,
-//! and executes them using the node-based API.
+//! and executes them using the node-based API. Both the comparison and
+//! the executor address the two sides through an [`FsPair`]: one
+//! provider instance shared by both sides, or two distinct instances.
 //!
 //! # Dry-run mode
 //!
@@ -24,9 +26,10 @@ use std::path::Path;
 
 use crate::{
     CompareConfig, DirComparison, DirEntryStatus,
-    compare::compare_directories_node,
+    compare::{compare_directories_node, compare_directories_pair_node},
     transfer::{
-        TransferAction, TransferItem, TransferResult, execute_transfers,
+        FsPair, TransferAction, TransferItem, TransferResult,
+        execute_transfers,
     },
 };
 // Used in tests via `use super::*`.
@@ -123,21 +126,25 @@ impl SyncResult {
 }
 
 // ---------------------------------------------------------------------------
-// Sync planning
+// Sync pipeline
 // ---------------------------------------------------------------------------
 
-/// Plan all transfers for a given sync operation without executing them.
+/// Plan all transfers for a pair of filesystem providers without executing
+/// them.
 ///
 /// Compares the two directory trees and returns a [`SyncResult`] with the
-/// planned actions. No I/O is performed beyond the comparison scan.
-pub async fn plan_sync<N>(
-    fs: &N,
+/// planned actions. No I/O is performed beyond the comparison scan. With a
+/// [`FsPair::Separate`] pair each side is scanned on its own provider;
+/// [`plan_sync`] is the thin single-provider wrapper around this function.
+pub async fn plan_sync_pair<L, R>(
+    pair: FsPair<'_, L, R>,
     left_path: &Path,
     right_path: &Path,
     rules: &SyncRules,
 ) -> crate::Result<SyncResult>
 where
-    N: crate::NodeFileSystem<Nid = u64>,
+    L: crate::NodeFileSystem<Nid = u64>,
+    R: crate::NodeFileSystem<Nid = u64>,
 {
     let cache = crate::hash::ContentCache::default_config();
     let compare_config = CompareConfig {
@@ -148,14 +155,31 @@ where
         size_tolerance: 0.1,
     };
 
-    let comparison = compare_directories_node(
-        fs,
-        left_path,
-        right_path,
-        &compare_config,
-        Some(&cache),
-    )
-    .await?;
+    let comparison = match pair {
+        // One provider instance addresses both sides.
+        FsPair::Shared(fs) => {
+            compare_directories_node(
+                fs,
+                left_path,
+                right_path,
+                &compare_config,
+                Some(&cache),
+            )
+            .await?
+        }
+        // Two distinct provider instances, one per side.
+        FsPair::Separate(left_fs, right_fs) => {
+            compare_directories_pair_node(
+                left_fs,
+                right_fs,
+                left_path,
+                right_path,
+                &compare_config,
+                Some(&cache),
+            )
+            .await?
+        }
+    };
 
     let planned = plan_sync_items(&comparison, rules.operation);
 
@@ -166,11 +190,62 @@ where
     })
 }
 
-/// Plan all transfers and execute them.
+/// Plan all transfers for a given sync operation without executing them.
+///
+/// Thin wrapper around [`plan_sync_pair`] that addresses both sides with
+/// the same provider instance.
+pub async fn plan_sync<N>(
+    fs: &N,
+    left_path: &Path,
+    right_path: &Path,
+    rules: &SyncRules,
+) -> crate::Result<SyncResult>
+where
+    N: crate::NodeFileSystem<Nid = u64>,
+{
+    plan_sync_pair(FsPair::shared(fs), left_path, right_path, rules).await
+}
+
+/// Plan all transfers for a pair of filesystem providers and execute them.
 ///
 /// This is the main entry point for synchronization. It compares the two
 /// directory trees, plans the necessary transfers, and executes them if
-/// `dry_run` is `false`.
+/// `dry_run` is `false`. Cross-boundary copies and moves in a
+/// [`FsPair::Separate`] pair are refused by the executor (until
+/// cross-boundary streaming lands in migration step 6c); same-fs and
+/// single-provider operations are unaffected.
+pub async fn sync_directories_pair<L, R>(
+    pair: FsPair<'_, L, R>,
+    left_path: &Path,
+    right_path: &Path,
+    rules: &SyncRules,
+) -> crate::Result<SyncResult>
+where
+    L: crate::fs::WritableFileSystem<Nid = u64>,
+    R: crate::fs::WritableFileSystem<Nid = u64>,
+{
+    // Plan the sync.
+    let mut result =
+        plan_sync_pair(pair, left_path, right_path, rules).await?;
+
+    if rules.dry_run || result.planned.is_empty() {
+        result.transfer = Some(TransferResult::default());
+        return Ok(result);
+    }
+
+    // Execute the planned transfers.
+    let transfer_result =
+        execute_transfers(&result.planned, left_path, right_path, pair).await;
+
+    result.transfer = Some(transfer_result);
+    Ok(result)
+}
+
+/// Plan all transfers and execute them with a single filesystem shared by
+/// both sides.
+///
+/// Thin wrapper around [`sync_directories_pair`] that addresses both sides
+/// with the same provider instance.
 pub async fn sync_directories<N>(
     fs: &N,
     left_path: &Path,
@@ -180,21 +255,8 @@ pub async fn sync_directories<N>(
 where
     N: crate::fs::WritableFileSystem<Nid = u64>,
 {
-    // Plan the sync.
-    let mut result = plan_sync(fs, left_path, right_path, rules).await?;
-
-    if rules.dry_run || result.planned.is_empty() {
-        result.transfer = Some(TransferResult::default());
-        return Ok(result);
-    }
-
-    // Execute the planned transfers.
-    let transfer_result =
-        execute_transfers(&result.planned, left_path, right_path, fs, fs)
-            .await;
-
-    result.transfer = Some(transfer_result);
-    Ok(result)
+    sync_directories_pair(FsPair::shared(fs), left_path, right_path, rules)
+        .await
 }
 
 // ---------------------------------------------------------------------------
@@ -522,7 +584,13 @@ fn parse_mtime(mtime_str: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use std::{env, path::PathBuf, process};
+    use std::{
+        env,
+        path::{Path, PathBuf},
+        process,
+    };
+
+    use tempfile::TempDir;
 
     use super::*;
     use crate::LocalFs;
@@ -569,6 +637,33 @@ mod tests {
         fs_err::write(right.join("file.txt"), "version 2").unwrap();
 
         (left, right)
+    }
+
+    /// Build a `left`/`right` directory pair under `base`: one file on
+    /// the left side only, one on the right side only, and one
+    /// identical file on both sides.
+    fn make_sync_dirs_at(base: &Path) -> (PathBuf, PathBuf) {
+        let left = base.join("left");
+        let right = base.join("right");
+
+        fs_err::create_dir_all(&left).unwrap();
+        fs_err::create_dir_all(&right).unwrap();
+
+        fs_err::write(left.join("left_only.txt"), "left").unwrap();
+        fs_err::write(right.join("right_only.txt"), "right").unwrap();
+        fs_err::write(left.join("same.txt"), "identical").unwrap();
+        fs_err::write(right.join("same.txt"), "identical").unwrap();
+
+        (left, right)
+    }
+
+    /// Flatten a plan into `(action label, name)` pairs, so single-`fs`
+    /// and pair plans can be compared for equality.
+    fn flatten_plan(items: &[TransferItem]) -> Vec<(&'static str, String)> {
+        items
+            .iter()
+            .map(|item| (item.action.label(), item.name.clone()))
+            .collect()
     }
 
     #[test]
@@ -823,5 +918,187 @@ mod tests {
         assert_eq!(result.planned_count(), 0);
 
         fs_err::remove_dir_all(&base).ok();
+    }
+
+    #[tokio::test]
+    async fn sync_pair_mirror_left_parity() {
+        let base1 = TempDir::new().unwrap();
+        let base2 = TempDir::new().unwrap();
+        let (left1, right1) = make_sync_dirs_at(base1.path());
+        let (left2, right2) = make_sync_dirs_at(base2.path());
+
+        let rules = SyncRules {
+            operation: SyncOperation::MirrorLeft,
+            dry_run: false,
+            ..Default::default()
+        };
+
+        // Single-`fs` reference run.
+        let fs1 = LocalFs::new("left-parity-1");
+        let result1 = sync_directories(&fs1, &left1, &right1, &rules)
+            .await
+            .unwrap();
+
+        // Pair run: one provider instance, addressed as `Shared`.
+        let fs2 = LocalFs::new("left-parity-2");
+        let result2 = sync_directories_pair(
+            FsPair::shared(&fs2),
+            &left2,
+            &right2,
+            &rules,
+        )
+        .await
+        .unwrap();
+
+        let transfer1 = result1.transfer.unwrap();
+        let transfer2 = result2.transfer.unwrap();
+        assert!(
+            transfer1.is_ok() && transfer2.is_ok(),
+            "syncs should succeed: {:?} / {:?}",
+            transfer1.errors,
+            transfer2.errors
+        );
+        // Parity: the pair pipeline plans and executes exactly what
+        // the single-`fs` wrapper plans and executes...
+        assert_eq!(
+            flatten_plan(&result1.planned),
+            flatten_plan(&result2.planned)
+        );
+        assert_eq!(transfer1.succeeded, transfer2.succeeded);
+        // ...and the same file outcome on both trees.
+        assert!(right2.join("left_only.txt").exists());
+        assert!(!right2.join("right_only.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn sync_pair_mirror_right_parity() {
+        let base1 = TempDir::new().unwrap();
+        let base2 = TempDir::new().unwrap();
+        let (left1, right1) = make_sync_dirs_at(base1.path());
+        let (left2, right2) = make_sync_dirs_at(base2.path());
+
+        let rules = SyncRules {
+            operation: SyncOperation::MirrorRight,
+            dry_run: false,
+            ..Default::default()
+        };
+
+        // Single-`fs` reference run.
+        let fs1 = LocalFs::new("right-parity-1");
+        let result1 = sync_directories(&fs1, &left1, &right1, &rules)
+            .await
+            .unwrap();
+
+        // Pair run: one provider instance, addressed as `Shared`.
+        let fs2 = LocalFs::new("right-parity-2");
+        let result2 = sync_directories_pair(
+            FsPair::shared(&fs2),
+            &left2,
+            &right2,
+            &rules,
+        )
+        .await
+        .unwrap();
+
+        let transfer1 = result1.transfer.unwrap();
+        let transfer2 = result2.transfer.unwrap();
+        assert!(
+            transfer1.is_ok() && transfer2.is_ok(),
+            "syncs should succeed: {:?} / {:?}",
+            transfer1.errors,
+            transfer2.errors
+        );
+        assert_eq!(
+            flatten_plan(&result1.planned),
+            flatten_plan(&result2.planned)
+        );
+        assert_eq!(transfer1.succeeded, transfer2.succeeded);
+        // Mirror right → left: `right_only.txt` was copied to the
+        // left side, `left_only.txt` was deleted from it.
+        assert!(left2.join("right_only.txt").exists());
+        assert!(!left2.join("left_only.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn sync_pair_separate_dry_run() {
+        let base1 = TempDir::new().unwrap();
+        let base2 = TempDir::new().unwrap();
+        let (left1, right1) = make_sync_dirs_at(base1.path());
+        let (left2, right2) = make_sync_dirs_at(base2.path());
+
+        let rules = SyncRules {
+            operation: SyncOperation::MirrorLeft,
+            dry_run: true,
+            ..Default::default()
+        };
+
+        let fs1 = LocalFs::new("dry-1");
+        let result1 = plan_sync(&fs1, &left1, &right1, &rules).await.unwrap();
+
+        // Two provider instances, one per side.
+        let fs_left = LocalFs::new("dry-left");
+        let fs_right = LocalFs::new("dry-right");
+        let result2 = plan_sync_pair(
+            FsPair::Separate(&fs_left, &fs_right),
+            &left2,
+            &right2,
+            &rules,
+        )
+        .await
+        .unwrap();
+
+        // Dry-run planning must not execute anything...
+        assert!(result1.is_dry_run() && result2.is_dry_run());
+        // ...and the pair pipeline plans what the single-`fs` wrapper
+        // plans.
+        assert_eq!(
+            flatten_plan(&result1.planned),
+            flatten_plan(&result2.planned)
+        );
+        // Nothing was executed, so tree 2 keeps its original
+        // content on both sides.
+        assert!(left2.join("left_only.txt").exists());
+        assert!(left2.join("same.txt").exists());
+        assert!(right2.join("right_only.txt").exists());
+        assert!(right2.join("same.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn sync_pair_separate_cross_boundary() {
+        let base = TempDir::new().unwrap();
+        let (left, right) = make_sync_dirs_at(base.path());
+
+        let rules = SyncRules {
+            operation: SyncOperation::MirrorLeft,
+            dry_run: false,
+            ..Default::default()
+        };
+
+        let fs_left = LocalFs::new("sep-left");
+        let fs_right = LocalFs::new("sep-right");
+        let result = sync_directories_pair(
+            FsPair::Separate(&fs_left, &fs_right),
+            &left,
+            &right,
+            &rules,
+        )
+        .await
+        .unwrap();
+
+        let transfer = result.transfer.unwrap();
+        // The cross-boundary copy (left → right) is refused until
+        // cross-boundary streaming lands in migration step 6c, while
+        // the orphan delete runs on the provider addressing its side.
+        assert_eq!(transfer.succeeded, 1);
+        assert_eq!(transfer.failed, 1);
+        assert!(
+            transfer.errors.iter().any(|e| e
+                .to_string()
+                .contains("cross-filesystem transfers are not supported yet")),
+            "expected a cross-boundary refusal: {:?}",
+            transfer.errors
+        );
+        assert!(!right.join("left_only.txt").exists());
+        assert!(!right.join("right_only.txt").exists());
     }
 }

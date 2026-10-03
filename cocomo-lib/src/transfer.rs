@@ -12,7 +12,9 @@
 //! A [`TransferAction`] describes a single copy, move, or delete operation.
 //! Actions are collected into a batch and executed via
 //! [`execute_transfers`], which uses the node-based [`WritableFileSystem`]
-//! API to perform all I/O through opaque node identifiers.
+//! API to perform all I/O through opaque node identifiers. The
+//! provider(s) addressing the two sides arrive as an [`FsPair`]: one
+//! provider instance shared by both sides, or two distinct instances.
 //!
 //! # Design
 //!
@@ -204,6 +206,49 @@ fn collect_transfer_items(
 }
 
 // ---------------------------------------------------------------------------
+// Filesystem pairs
+// ---------------------------------------------------------------------------
+
+/// The filesystem provider(s) addressed by one compare or sync run.
+///
+/// Node ids are provider-instance local, so the pipeline must know
+/// statically whether the two sides share one provider instance or
+/// address two distinct ones: a destination `DirId` resolved on a
+/// provider other than the one executing the write would silently
+/// address the wrong tree. Provider identity (`NodeFileSystem::id`)
+/// cannot express this distinction — two `LocalFs` instances on the
+/// same volume share a device-id `FileSystemId` while their node
+/// caches stay per-instance — so the caller states it explicitly.
+///
+/// `Clone`/`Copy` are implemented manually (instead of derived) so they
+/// do not constrain `L` and `R`: a pair is a pair of *references*, and
+/// copying one must stay cheap regardless of the addressed providers.
+pub enum FsPair<'a, L, R> {
+    /// One provider instance addressing both sides (same-fs fast path).
+    Shared(&'a L),
+    /// Two distinct provider instances (left, right).
+    Separate(&'a L, &'a R),
+}
+
+// Manual impls without `L: Clone`/`R: Clone` bounds (a derived `Copy`
+// would add implicit bounds on *all* type parameters, which breaks
+// reusing one pair across the compare and execute phases).
+impl<L, R> Clone for FsPair<'_, L, R> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<L, R> Copy for FsPair<'_, L, R> {}
+
+impl<'a, N> FsPair<'a, N, N> {
+    /// Address both sides with one shared provider instance.
+    pub fn shared(fs: &'a N) -> Self {
+        Self::Shared(fs)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Transfer execution
 // ---------------------------------------------------------------------------
 
@@ -218,30 +263,25 @@ fn collect_transfer_items(
 /// * `items` - The transfer items to execute.
 /// * `left_path` - Root path of the left side.
 /// * `right_path` - Root path of the right side.
-/// * `src_fs` - The source filesystem (where files are read from).
-/// * `dst_fs` - The destination filesystem (where files are written).
-///
-/// # Note
-///
-/// For same-provider operations (e.g., left and right are the same
-/// `LocalFs` instance), `src_fs` and `dst_fs` should be the same reference.
-pub async fn execute_transfers<N>(
+/// * `pair` - The provider(s) addressing the two sides. With a
+///   [`FsPair::Separate`] pair, cross-boundary copies and moves are not
+///   executed but reported as errors (cross-boundary streaming arrives with
+///   migration step 6c); single-side operations still run against the provider
+///   addressing their side.
+pub async fn execute_transfers<L, R>(
     items: &[TransferItem],
     left_path: &Path,
     right_path: &Path,
-    src_fs: &N,
-    dst_fs: &N,
+    pair: FsPair<'_, L, R>,
 ) -> TransferResult
 where
-    N: crate::fs::WritableFileSystem<Nid = u64>,
+    L: crate::fs::WritableFileSystem<Nid = u64>,
+    R: crate::fs::WritableFileSystem<Nid = u64>,
 {
     let mut result = TransferResult::default();
 
     for item in items {
-        match execute_single_transfer(
-            item, left_path, right_path, src_fs, dst_fs,
-        )
-        .await
+        match execute_single_transfer(item, left_path, right_path, pair).await
         {
             Ok(()) => result.succeeded += 1,
             Err(e) => {
@@ -254,75 +294,120 @@ where
     result
 }
 
-async fn execute_single_transfer<N>(
+/// Execute a single transfer item against the provider pair.
+async fn execute_single_transfer<L, R>(
     item: &TransferItem,
     left_path: &Path,
     right_path: &Path,
-    src_fs: &N,
-    dst_fs: &N,
+    pair: FsPair<'_, L, R>,
 ) -> Result<(), FsError>
 where
-    N: crate::fs::WritableFileSystem<Nid = u64>,
+    L: crate::fs::WritableFileSystem<Nid = u64>,
+    R: crate::fs::WritableFileSystem<Nid = u64>,
 {
-    match item.action {
-        TransferAction::CopyLeft => {
-            // Copy from right to left.
-            copy_entry(
-                src_fs,
-                right_path,
-                &item.name,
-                item.is_dir,
-                dst_fs,
-                left_path,
-                &item.name,
-            )
-            .await
-        }
-        TransferAction::CopyRight => {
-            // Copy from left to right.
-            copy_entry(
-                src_fs,
-                left_path,
-                &item.name,
-                item.is_dir,
-                dst_fs,
-                right_path,
-                &item.name,
-            )
-            .await
-        }
-        TransferAction::CopyCenter => {
-            // Not supported in 2-way mode — requires center path.
-            Err(FsError::InvalidArgument {
-                operation: FsOperation::Copy,
-                path: item.rel_path.clone().into(),
-                message: "center copy requires 3-way comparison".into(),
-            })
-        }
-        TransferAction::DeleteLeft => {
-            delete_entry(dst_fs, left_path, &item.name, item.is_dir).await
-        }
-        TransferAction::DeleteRight => {
-            delete_entry(dst_fs, right_path, &item.name, item.is_dir).await
-        }
-        TransferAction::MoveLeft => {
-            // Move from right to left.
-            move_entry(
-                src_fs, right_path, &item.name, dst_fs, left_path, &item.name,
-            )
-            .await
-        }
-        TransferAction::MoveRight => {
-            // Move from left to right.
-            move_entry(
-                src_fs, left_path, &item.name, dst_fs, right_path, &item.name,
-            )
-            .await
-        }
+    match pair {
+        // One provider instance addresses both sides, so node IDs
+        // resolved on one side are valid on the other and the
+        // same-filesystem helpers apply unchanged.
+        FsPair::Shared(fs) => match item.action {
+            TransferAction::CopyLeft => {
+                // Copy from right to left.
+                copy_entry(
+                    fs,
+                    right_path,
+                    &item.name,
+                    item.is_dir,
+                    fs,
+                    left_path,
+                    &item.name,
+                )
+                .await
+            }
+            TransferAction::CopyRight => {
+                // Copy from left to right.
+                copy_entry(
+                    fs,
+                    left_path,
+                    &item.name,
+                    item.is_dir,
+                    fs,
+                    right_path,
+                    &item.name,
+                )
+                .await
+            }
+            TransferAction::CopyCenter => Err(center_copy_error(item)),
+            TransferAction::DeleteLeft => {
+                delete_entry(fs, left_path, &item.name, item.is_dir).await
+            }
+            TransferAction::DeleteRight => {
+                delete_entry(fs, right_path, &item.name, item.is_dir).await
+            }
+            TransferAction::MoveLeft => {
+                // Move from right to left.
+                move_entry(
+                    fs, right_path, &item.name, fs, left_path, &item.name,
+                )
+                .await
+            }
+            TransferAction::MoveRight => {
+                // Move from left to right.
+                move_entry(
+                    fs, left_path, &item.name, fs, right_path, &item.name,
+                )
+                .await
+            }
+        },
+        // Two distinct provider instances. `copy_node` and `move_node`
+        // execute *within* one provider and the helpers would resolve
+        // the destination directory on the opposite side's provider,
+        // which addresses a different node cache — so cross-boundary
+        // copies and moves are refused until cross-boundary streaming
+        // lands (migration step 6c). Deletes only ever touch one side
+        // and run against the provider addressing that side.
+        FsPair::Separate(left_fs, right_fs) => match item.action {
+            TransferAction::CopyLeft | TransferAction::CopyRight => {
+                Err(cross_fs_error(FsOperation::Copy, item))
+            }
+            TransferAction::CopyCenter => Err(center_copy_error(item)),
+            TransferAction::DeleteLeft => {
+                delete_entry(left_fs, left_path, &item.name, item.is_dir).await
+            }
+            TransferAction::DeleteRight => {
+                delete_entry(right_fs, right_path, &item.name, item.is_dir)
+                    .await
+            }
+            TransferAction::MoveLeft | TransferAction::MoveRight => {
+                Err(cross_fs_error(FsOperation::Move, item))
+            }
+        },
+    }
+}
+
+/// The error for center copies, which need a 3-way comparison.
+fn center_copy_error(item: &TransferItem) -> FsError {
+    FsError::InvalidArgument {
+        operation: FsOperation::Copy,
+        path: item.rel_path.clone().into(),
+        message: "center copy requires 3-way comparison".into(),
+    }
+}
+
+/// The error for transfers that would read one provider and write the
+/// other.
+fn cross_fs_error(op: FsOperation, item: &TransferItem) -> FsError {
+    FsError::Io {
+        operation: op,
+        path: item.rel_path.clone().into(),
+        message: "cross-filesystem transfers are not supported yet".into(),
     }
 }
 
 /// Copy a file or directory from source to destination.
+///
+/// Only reached for [`FsPair::Shared`] pairs: `copy_node` and the file
+/// streaming path address one provider instance. Cross-boundary file
+/// streaming is added with migration step 6c.
 async fn copy_entry<N>(
     src_fs: &N,
     src_root: &Path,
@@ -697,7 +782,9 @@ mod tests {
             left.join("left_only.txt").to_string_lossy().into_owned(),
         )];
 
-        let result = execute_transfers(&items, &left, &right, &fs, &fs).await;
+        let result =
+            execute_transfers(&items, &left, &right, FsPair::shared(&fs))
+                .await;
 
         assert!(
             result.is_ok(),
@@ -722,7 +809,9 @@ mod tests {
             left.join("left_only.txt").to_string_lossy().into_owned(),
         )];
 
-        let result = execute_transfers(&items, &left, &right, &fs, &fs).await;
+        let result =
+            execute_transfers(&items, &left, &right, FsPair::shared(&fs))
+                .await;
 
         assert!(
             result.is_ok(),
@@ -748,7 +837,9 @@ mod tests {
             left.join("subdir").to_string_lossy().into_owned(),
         )];
 
-        let result = execute_transfers(&items, &left, &right, &fs, &fs).await;
+        let result =
+            execute_transfers(&items, &left, &right, FsPair::shared(&fs))
+                .await;
 
         assert!(
             result.is_ok(),
@@ -777,7 +868,8 @@ mod tests {
             base.join("nonexistent.txt").to_string_lossy().into_owned(),
         )];
 
-        let result = execute_transfers(&items, &base, &base, &fs, &fs).await;
+        let result =
+            execute_transfers(&items, &base, &base, FsPair::shared(&fs)).await;
 
         assert!(!result.is_ok());
         assert_eq!(result.failed, 1);
@@ -809,7 +901,9 @@ mod tests {
         assert_eq!(items[0].name, "right_only.txt");
 
         // Execute.
-        let result = execute_transfers(&items, &left, &right, &fs, &fs).await;
+        let result =
+            execute_transfers(&items, &left, &right, FsPair::shared(&fs))
+                .await;
         assert!(
             result.is_ok(),
             "transfer should succeed: {:?}",
@@ -818,6 +912,68 @@ mod tests {
 
         // Verify: right_only.txt now exists on left.
         assert!(left.join("right_only.txt").exists());
+
+        fs_err::remove_dir_all(left.parent().unwrap()).ok();
+    }
+
+    #[tokio::test]
+    async fn execute_separate_pair_copy_errors() {
+        let (left, right) = make_test_dirs();
+        let left_fs = LocalFs::new("left");
+        let right_fs = LocalFs::new("right");
+
+        // CopyRight reads from the left and writes to the right side;
+        // across two distinct providers it is refused (until
+        // cross-boundary streaming lands in migration step 6c), not
+        // executed on a mis-resolved destination node.
+        let items = vec![TransferItem::new(
+            TransferAction::CopyRight,
+            "left_only.txt".to_string(),
+            false,
+            left.join("left_only.txt").to_string_lossy().into_owned(),
+        )];
+
+        let result = execute_transfers(
+            &items,
+            &left,
+            &right,
+            FsPair::Separate(&left_fs, &right_fs),
+        )
+        .await;
+
+        assert!(!result.is_ok());
+        assert_eq!(result.failed, 1);
+        // The file must not have been written to the right side.
+        assert!(!right.join("left_only.txt").exists());
+
+        fs_err::remove_dir_all(left.parent().unwrap()).ok();
+    }
+
+    #[tokio::test]
+    async fn execute_separate_pair_delete_succeeds() {
+        let (left, right) = make_test_dirs();
+        let left_fs = LocalFs::new("left");
+        let right_fs = LocalFs::new("right");
+
+        // DeleteLeft only ever touches the left side, so it runs
+        // against the left provider even for a separate pair.
+        let items = vec![TransferItem::new(
+            TransferAction::DeleteLeft,
+            "left_only.txt".to_string(),
+            false,
+            left.join("left_only.txt").to_string_lossy().into_owned(),
+        )];
+
+        let result = execute_transfers(
+            &items,
+            &left,
+            &right,
+            FsPair::Separate(&left_fs, &right_fs),
+        )
+        .await;
+
+        assert!(result.is_ok(), "delete should succeed: {:?}", result.errors);
+        assert!(!left.join("left_only.txt").exists());
 
         fs_err::remove_dir_all(left.parent().unwrap()).ok();
     }

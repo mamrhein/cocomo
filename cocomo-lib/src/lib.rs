@@ -129,14 +129,15 @@ pub use snapshot::{
     capture_snapshot, capture_snapshot_node, entry_matches_node,
 };
 pub use sync::{
-    SyncOperation, SyncResult, SyncRules, plan_sync, sync_directories,
+    SyncOperation, SyncResult, SyncRules, plan_sync, plan_sync_pair,
+    sync_directories, sync_directories_pair,
 };
 pub use text::{
     AlignmentMode, LineInfo, TextCompareSettings, TextDiff, TextDifference,
     Token, WhitespaceMode, compare_texts, lines_equal,
 };
 pub use transfer::{
-    TransferAction, TransferItem, TransferResult, execute_transfers,
+    FsPair, TransferAction, TransferItem, TransferResult, execute_transfers,
     plan_transfers,
 };
 pub use url::{Url, UrlError};
