@@ -14,7 +14,8 @@
 //!
 //! All filesystem I/O is async behind the [`FileSystem`] trait. Built-in
 //! providers include [`LocalFs`] for the local filesystem, [`S3Fs`] for
-//! Amazon S3, [`FtpFs`] for FTP/FTPS, and [`WebDavFs`] for WebDAV. Front-ends
+//! Amazon S3, [`FtpFs`] for FTP/FTPS, [`SftpFs`] for SFTP, and [`WebDavFs`]
+//! for WebDAV. Front-ends
 //! (TUI, GUI, CLI) await on the same abstractions, keeping the library as the
 //! single source of business logic.
 //!
@@ -26,6 +27,7 @@
 //! - [`local`] — [`LocalFs`], the local filesystem provider.
 //! - [`s3`] — [`S3Fs`], the Amazon S3 provider.
 //! - [`ftp`] — [`FtpFs`], the FTP/FTPS provider.
+//! - [`sftp`] — [`SftpFs`], the SFTP (SSH file transfer) provider.
 //! - [`webdav`] — [`WebDavFs`], the WebDAV provider.
 //! - [`provider`] — [`Provider`] enum and [`ProviderRegistry`] for unified
 //!   access to all backends.
@@ -72,6 +74,7 @@ pub mod s3;
 pub mod scan;
 pub mod secrets;
 pub mod session;
+pub mod sftp;
 pub mod snapshot;
 pub mod sync;
 pub mod text;
@@ -121,6 +124,7 @@ pub use session::{
     ProviderRef, Session, SessionConfig, SessionManager, SessionSettings,
     SessionType,
 };
+pub use sftp::{SftpConfig, SftpDirId, SftpFileId, SftpFs, SftpNodeId};
 // `capture_snapshot` is deprecated in favour of `capture_snapshot_node`
 // and only stays re-exported until the CLI stops calling it.
 #[allow(deprecated)]

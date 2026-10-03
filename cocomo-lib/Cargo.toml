@@ -50,6 +50,8 @@ async_ftp = "6.0.0"
 dirs = "6"
 hex = "0.4"
 rpassword = { version = "7.5", optional = true }
+russh-sftp = "3.0.1"
+russh = "0.63.3"
 
 [features]
 default = ["keychain", "prompt"]

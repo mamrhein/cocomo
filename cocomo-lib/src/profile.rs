@@ -105,6 +105,8 @@ pub enum ProviderType {
     Local,
     /// FTP / FTPS.
     Ftp,
+    /// SFTP (SSH file transfer).
+    Sftp,
     /// Amazon S3.
     S3,
     /// WebDAV.
@@ -117,6 +119,7 @@ impl ProviderType {
         match self {
             Self::Local => "file",
             Self::Ftp => "ftp",
+            Self::Sftp => "sftp",
             Self::S3 => "s3",
             Self::WebDav => "webdav",
         }
@@ -128,6 +131,7 @@ impl fmt::Display for ProviderType {
         match self {
             Self::Local => write!(f, "local"),
             Self::Ftp => write!(f, "ftp"),
+            Self::Sftp => write!(f, "sftp"),
             Self::S3 => write!(f, "s3"),
             Self::WebDav => write!(f, "webdav"),
         }
@@ -814,6 +818,7 @@ mod tests {
     fn provider_type_scheme() {
         assert_eq!(ProviderType::Local.scheme(), "file");
         assert_eq!(ProviderType::Ftp.scheme(), "ftp");
+        assert_eq!(ProviderType::Sftp.scheme(), "sftp");
         assert_eq!(ProviderType::S3.scheme(), "s3");
         assert_eq!(ProviderType::WebDav.scheme(), "webdav");
     }
@@ -822,6 +827,7 @@ mod tests {
     fn provider_type_display() {
         assert_eq!(format!("{}", ProviderType::Local), "local");
         assert_eq!(format!("{}", ProviderType::Ftp), "ftp");
+        assert_eq!(format!("{}", ProviderType::Sftp), "sftp");
         assert_eq!(format!("{}", ProviderType::S3), "s3");
         assert_eq!(format!("{}", ProviderType::WebDav), "webdav");
     }

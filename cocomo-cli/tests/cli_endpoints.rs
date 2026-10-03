@@ -442,3 +442,52 @@ mod remote_endpoints {
             .stdout(predicate::str::contains("Snapshot captured"));
     }
 }
+
+/// End-to-end runs against a real SFTP server. Run them manually, with a
+/// reachable server whose host key is in `~/.ssh/known_hosts` and working
+/// credentials, via
+///
+/// ```text
+/// COCOMO_TEST_SFTP_URL=sftp://127.0.0.1/pub \
+/// COCOMO_SFTP_USER=user COCOMO_SFTP_PASSWORD=secret \
+///     cargo nextest run --run-ignored all --test cli_endpoints
+/// ```
+mod remote_sftp_endpoints {
+    use super::*;
+
+    /// URL of a readable directory on a reachable SFTP server.
+    const SFTP_URL_ENV: &str = "COCOMO_TEST_SFTP_URL";
+
+    fn sftp_url() -> Option<String> {
+        env::var(SFTP_URL_ENV).ok().filter(|url| !url.is_empty())
+    }
+
+    #[test]
+    #[ignore = "requires a reachable SFTP server in COCOMO_TEST_SFTP_URL"]
+    fn dir_compare_of_identical_remote_dirs_exits_with_zero() {
+        let Some(url) = sftp_url() else {
+            eprintln!("skipping: {SFTP_URL_ENV} is not set");
+            return;
+        };
+        // Comparing the directory with itself exercises connect, auth,
+        // listing, and hashing on one provider and must find no
+        // differences.
+        cmd().args(["dir", "compare", &url, &url]).assert().code(0);
+    }
+
+    #[test]
+    #[ignore = "requires a reachable SFTP server in COCOMO_TEST_SFTP_URL"]
+    fn snapshot_capture_from_remote_url() {
+        let Some(url) = sftp_url() else {
+            eprintln!("skipping: {SFTP_URL_ENV} is not set");
+            return;
+        };
+        let dir = TempDir::with_prefix("cocomo_ep_remote").unwrap();
+        let out = dir.path().join("remote.snap");
+        cmd()
+            .args(["snapshot", "capture", &url, out.to_str().unwrap()])
+            .assert()
+            .code(0)
+            .stdout(predicate::str::contains("Snapshot captured"));
+    }
+}

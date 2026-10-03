@@ -10,7 +10,8 @@
 //! Provider enum and registry that unify all filesystem backends.
 //!
 //! The [`Provider`] enum wraps every concrete filesystem implementation
-//! ([`LocalFs`], [`FtpFs`], [`S3Fs`], [`WebDavFs`]) behind a single type.
+//! ([`LocalFs`], [`FtpFs`], [`SftpFs`], [`S3Fs`], [`WebDavFs`]) behind a
+//! single type.
 //! This enables the [`ProviderRegistry`] to store heterogeneous providers
 //! and resolve them from connection profiles.
 //!
@@ -50,6 +51,7 @@ use crate::{
     profile::{Profile, ProfileError, ProfileStore, ProviderType},
     s3::{S3Config, S3Fs},
     secrets::{Prompter, Secrets},
+    sftp::{SftpConfig, SftpFs},
     snapshot::ProviderId,
     url::Url,
     webdav::{WebDavConfig, WebDavFs},
@@ -69,6 +71,8 @@ pub enum Provider {
     Local(LocalFs),
     /// FTP / FTPS.
     Ftp(FtpFs),
+    /// SFTP (SSH file transfer).
+    Sftp(SftpFs),
     /// Amazon S3.
     S3(S3Fs),
     /// WebDAV.
@@ -156,6 +160,7 @@ impl Provider {
         match self {
             Self::Local(_) => ProviderType::Local,
             Self::Ftp(_) => ProviderType::Ftp,
+            Self::Sftp(_) => ProviderType::Sftp,
             Self::S3(_) => ProviderType::S3,
             Self::WebDav(_) => ProviderType::WebDav,
         }
@@ -241,6 +246,9 @@ impl Provider {
             "ftp" | "ftps" => {
                 Self::resolve_ftp(url, store, profile_id, secrets, prompter)
             }
+            "sftp" => {
+                Self::resolve_sftp(url, store, profile_id, secrets, prompter)
+            }
             scheme => Err(ProviderError::Unimplemented {
                 scheme: scheme.to_owned(),
             }),
@@ -318,6 +326,102 @@ impl Provider {
         Self::build(url, &creds, tls, label)
     }
 
+    /// Resolve an SFTP URL: profile store first, then secrets, then prompt
+    /// (see [`Provider::resolve`]).
+    ///
+    /// Authentication is key-based when a `key_file` setting (profile) or
+    /// secret resolves, with a password fallback. Neither implicit
+    /// anonymous access nor implicit ssh-agent/default-identity access is
+    /// attempted (OQ3).
+    fn resolve_sftp(
+        url: &Url,
+        store: Option<&ProfileStore>,
+        profile_id: Option<&str>,
+        secrets: &Secrets,
+        prompter: &dyn Prompter,
+    ) -> std::result::Result<Self, ProviderError> {
+        let endpoint = url.to_string();
+        // Step 1: locate the profile that supplies the credentials. An
+        // explicit profile that does not describe the endpoint is refused
+        // outright instead of silently connecting elsewhere.
+        let profile = match (store, profile_id) {
+            (Some(store), Some(id)) => match store.get_decrypted(id)? {
+                None => {
+                    return Err(ProviderError::Profile(
+                        ProfileError::NotFound(id.to_owned()),
+                    ));
+                }
+                Some(profile) if profile_matches_endpoint(&profile, url) => {
+                    Some(profile)
+                }
+                Some(_) => {
+                    return Err(ProviderError::ProfileMismatch {
+                        profile: id.to_owned(),
+                        endpoint,
+                    });
+                }
+            },
+            (Some(store), None) => store
+                .list_decrypted()?
+                .into_iter()
+                .find(|p| profile_matches_endpoint(p, url)),
+            (None, _) => None,
+        };
+        // Step 2: collect credentials and the key file. SSH encrypts its
+        // own transport, so there is no TLS flag to resolve.
+        let mut user = None;
+        let mut secret = None;
+        let mut key_file = None;
+        if let Some(profile) = &profile {
+            user = profile.setting("username").map(str::to_owned);
+            secret = profile.secrets.get("password").map(str::to_owned);
+            key_file = profile.setting("key_file").map(PathBuf::from);
+        }
+        if profile.is_none() {
+            // Step 3: environment/keychain fallback, then a one-time TTY
+            // prompt. Without a secret or key file there is no
+            // authentication to attempt, and anonymous access would be
+            // implicit (OQ3).
+            user = secrets.get(&url.scheme, "user");
+            secret = secrets.get(&url.scheme, "password");
+            if secret.is_none() && prompter.is_tty() {
+                if user.is_none() {
+                    user = prompter.prompt_user(&endpoint);
+                }
+                secret = prompter.prompt_secret(&endpoint);
+            }
+        }
+        if secret.is_none() && key_file.is_none() {
+            return Err(ProviderError::AuthRequired { endpoint });
+        }
+        let label = profile
+            .as_ref()
+            .map_or_else(|| url.lookup_key(), |p| p.id.clone());
+        Ok(Self::Sftp(SftpFs::new(
+            label,
+            Self::sftp_config_from_url(url, user.as_deref(), secret, key_file),
+        )))
+    }
+
+    /// Build an [`SftpConfig`] from a URL and resolved credentials.
+    fn sftp_config_from_url(
+        url: &Url,
+        user: Option<&str>,
+        secret: Option<String>,
+        key_file: Option<PathBuf>,
+    ) -> SftpConfig {
+        SftpConfig {
+            host: url.host.clone().unwrap_or_default(),
+            port: url.effective_port().unwrap_or(22),
+            username: user.unwrap_or_default().to_owned(),
+            password: secret,
+            key_file,
+            // The URL's path selects the scan root, so it must not also
+            // become the provider's root prefix.
+            root_path: None,
+        }
+    }
+
     /// Construct a provider for `url` with the given credentials and TLS
     /// flag; `label` identifies the provider instance.
     fn build(
@@ -348,6 +452,15 @@ impl Provider {
                     },
                 )))
             }
+            "sftp" => Ok(Self::Sftp(SftpFs::new(
+                label,
+                Self::sftp_config_from_url(
+                    url,
+                    creds.user(),
+                    creds.secret().map(str::to_owned),
+                    None,
+                ),
+            ))),
             scheme => Err(ProviderError::Unimplemented {
                 scheme: scheme.to_owned(),
             }),
@@ -402,6 +515,36 @@ impl Provider {
                         username,
                         password,
                         tls,
+                        root_path,
+                    },
+                )))
+            }
+            ProviderType::Sftp => {
+                let host = profile
+                    .setting("host")
+                    .ok_or_else(|| ProfileError::NotFound(profile.id.clone()))?
+                    .to_string();
+                let port: u16 = profile
+                    .setting("port")
+                    .unwrap_or("22")
+                    .parse::<u16>()
+                    .map_err(|e| ProfileError::Toml(e.to_string()))?;
+                let username =
+                    profile.setting("username").unwrap_or("").to_string();
+                let password =
+                    profile.secrets.get("password").map(String::from);
+                let key_file = profile.setting("key_file").map(PathBuf::from);
+                let root_path =
+                    profile.setting("root_path").map(PathBuf::from);
+
+                Ok(Self::Sftp(SftpFs::new(
+                    label,
+                    SftpConfig {
+                        host,
+                        port,
+                        username,
+                        password,
+                        key_file,
                         root_path,
                     },
                 )))
@@ -461,6 +604,7 @@ impl std::fmt::Debug for Provider {
         match self {
             Self::Local(_) => f.debug_tuple("Provider::Local").finish(),
             Self::Ftp(_) => f.debug_tuple("Provider::Ftp").finish(),
+            Self::Sftp(_) => f.debug_tuple("Provider::Sftp").finish(),
             Self::S3(_) => f.debug_tuple("Provider::S3").finish(),
             Self::WebDav(_) => f.debug_tuple("Provider::WebDav").finish(),
         }
@@ -476,6 +620,7 @@ impl std::fmt::Debug for Provider {
 fn profile_matches_endpoint(profile: &Profile, url: &Url) -> bool {
     let type_ok = match url.scheme.as_str() {
         "ftp" | "ftps" => matches!(profile.provider_type, ProviderType::Ftp),
+        "sftp" => matches!(profile.provider_type, ProviderType::Sftp),
         "s3" => matches!(profile.provider_type, ProviderType::S3),
         "webdav" | "webdavs" => {
             matches!(profile.provider_type, ProviderType::WebDav)
@@ -507,6 +652,7 @@ impl FileSystem for Provider {
         match self {
             Self::Local(p) => p.metadata(path).await,
             Self::Ftp(p) => p.metadata(path).await,
+            Self::Sftp(p) => p.metadata(path).await,
             Self::S3(p) => p.metadata(path).await,
             Self::WebDav(p) => p.metadata(path).await,
         }
@@ -516,6 +662,7 @@ impl FileSystem for Provider {
         match self {
             Self::Local(p) => p.read_dir(path).await,
             Self::Ftp(p) => p.read_dir(path).await,
+            Self::Sftp(p) => p.read_dir(path).await,
             Self::S3(p) => p.read_dir(path).await,
             Self::WebDav(p) => p.read_dir(path).await,
         }
@@ -529,6 +676,7 @@ impl FileSystem for Provider {
         match self {
             Self::Local(p) => p.open(path, mode).await,
             Self::Ftp(p) => p.open(path, mode).await,
+            Self::Sftp(p) => p.open(path, mode).await,
             Self::S3(p) => p.open(path, mode).await,
             Self::WebDav(p) => p.open(path, mode).await,
         }
@@ -542,6 +690,7 @@ impl FileSystem for Provider {
         match self {
             Self::Local(p) => p.read(path, range).await,
             Self::Ftp(p) => p.read(path, range).await,
+            Self::Sftp(p) => p.read(path, range).await,
             Self::S3(p) => p.read(path, range).await,
             Self::WebDav(p) => p.read(path, range).await,
         }
@@ -555,6 +704,7 @@ impl FileSystem for Provider {
         match self {
             Self::Local(p) => p.read_stream(path, range).await,
             Self::Ftp(p) => p.read_stream(path, range).await,
+            Self::Sftp(p) => p.read_stream(path, range).await,
             Self::S3(p) => p.read_stream(path, range).await,
             Self::WebDav(p) => p.read_stream(path, range).await,
         }
@@ -564,6 +714,7 @@ impl FileSystem for Provider {
         match self {
             Self::Local(p) => p.write(path, data).await,
             Self::Ftp(p) => p.write(path, data).await,
+            Self::Sftp(p) => p.write(path, data).await,
             Self::S3(p) => p.write(path, data).await,
             Self::WebDav(p) => p.write(path, data).await,
         }
@@ -573,6 +724,7 @@ impl FileSystem for Provider {
         match self {
             Self::Local(p) => p.create_dir(path).await,
             Self::Ftp(p) => p.create_dir(path).await,
+            Self::Sftp(p) => p.create_dir(path).await,
             Self::S3(p) => p.create_dir(path).await,
             Self::WebDav(p) => p.create_dir(path).await,
         }
@@ -582,6 +734,7 @@ impl FileSystem for Provider {
         match self {
             Self::Local(p) => p.remove(path).await,
             Self::Ftp(p) => p.remove(path).await,
+            Self::Sftp(p) => p.remove(path).await,
             Self::S3(p) => p.remove(path).await,
             Self::WebDav(p) => p.remove(path).await,
         }
@@ -591,6 +744,7 @@ impl FileSystem for Provider {
         match self {
             Self::Local(p) => p.remove_all(path).await,
             Self::Ftp(p) => p.remove_all(path).await,
+            Self::Sftp(p) => p.remove_all(path).await,
             Self::S3(p) => p.remove_all(path).await,
             Self::WebDav(p) => p.remove_all(path).await,
         }
@@ -600,6 +754,7 @@ impl FileSystem for Provider {
         match self {
             Self::Local(p) => p.rename(src, dst).await,
             Self::Ftp(p) => p.rename(src, dst).await,
+            Self::Sftp(p) => p.rename(src, dst).await,
             Self::S3(p) => p.rename(src, dst).await,
             Self::WebDav(p) => p.rename(src, dst).await,
         }
@@ -609,6 +764,7 @@ impl FileSystem for Provider {
         match self {
             Self::Local(p) => p.copy(src, dst).await,
             Self::Ftp(p) => p.copy(src, dst).await,
+            Self::Sftp(p) => p.copy(src, dst).await,
             Self::S3(p) => p.copy(src, dst).await,
             Self::WebDav(p) => p.copy(src, dst).await,
         }
@@ -618,6 +774,7 @@ impl FileSystem for Provider {
         match self {
             Self::Local(p) => p.read_link(path).await,
             Self::Ftp(p) => p.read_link(path).await,
+            Self::Sftp(p) => p.read_link(path).await,
             Self::S3(p) => p.read_link(path).await,
             Self::WebDav(p) => p.read_link(path).await,
         }
@@ -627,6 +784,7 @@ impl FileSystem for Provider {
         match self {
             Self::Local(p) => p.symlink(target, link).await,
             Self::Ftp(p) => p.symlink(target, link).await,
+            Self::Sftp(p) => p.symlink(target, link).await,
             Self::S3(p) => p.symlink(target, link).await,
             Self::WebDav(p) => p.symlink(target, link).await,
         }
@@ -636,6 +794,7 @@ impl FileSystem for Provider {
         match self {
             Self::Local(p) => p.label(),
             Self::Ftp(p) => p.label(),
+            Self::Sftp(p) => p.label(),
             Self::S3(p) => p.label(),
             Self::WebDav(p) => p.label(),
         }
@@ -656,6 +815,7 @@ impl NodeFileSystem for Provider {
         match self {
             Self::Local(p) => p.id(),
             Self::Ftp(p) => p.id(),
+            Self::Sftp(p) => p.id(),
             Self::S3(p) => p.id(),
             Self::WebDav(p) => p.id(),
         }
@@ -665,6 +825,7 @@ impl NodeFileSystem for Provider {
         match self {
             Self::Local(p) => p.label_node(),
             Self::Ftp(p) => p.label_node(),
+            Self::Sftp(p) => p.label_node(),
             Self::S3(p) => p.label_node(),
             Self::WebDav(p) => p.label_node(),
         }
@@ -674,6 +835,7 @@ impl NodeFileSystem for Provider {
         match self {
             Self::Local(p) => p.resolve_path(path).await,
             Self::Ftp(p) => p.resolve_path(path).await,
+            Self::Sftp(p) => p.resolve_path(path).await,
             Self::S3(p) => p.resolve_path(path).await,
             Self::WebDav(p) => p.resolve_path(path).await,
         }
@@ -686,6 +848,7 @@ impl NodeFileSystem for Provider {
         match self {
             Self::Local(p) => p.resolve_symlink(id).await,
             Self::Ftp(p) => p.resolve_symlink(id).await,
+            Self::Sftp(p) => p.resolve_symlink(id).await,
             Self::S3(p) => p.resolve_symlink(id).await,
             Self::WebDav(p) => p.resolve_symlink(id).await,
         }
@@ -695,6 +858,7 @@ impl NodeFileSystem for Provider {
         match self {
             Self::Local(p) => p.get_node(id),
             Self::Ftp(p) => p.get_node(id),
+            Self::Sftp(p) => p.get_node(id),
             Self::S3(p) => p.get_node(id),
             Self::WebDav(p) => p.get_node(id),
         }
@@ -704,6 +868,7 @@ impl NodeFileSystem for Provider {
         match self {
             Self::Local(p) => p.node_metadata(id),
             Self::Ftp(p) => p.node_metadata(id),
+            Self::Sftp(p) => p.node_metadata(id),
             Self::S3(p) => p.node_metadata(id),
             Self::WebDav(p) => p.node_metadata(id),
         }
@@ -717,6 +882,7 @@ impl NodeFileSystem for Provider {
         match self {
             Self::Local(p) => p.set_node_hash(id, hash),
             Self::Ftp(p) => p.set_node_hash(id, hash),
+            Self::Sftp(p) => p.set_node_hash(id, hash),
             Self::S3(p) => p.set_node_hash(id, hash),
             Self::WebDav(p) => p.set_node_hash(id, hash),
         }
@@ -726,6 +892,7 @@ impl NodeFileSystem for Provider {
         match self {
             Self::Local(p) => p.read_dir_node(id).await,
             Self::Ftp(p) => p.read_dir_node(id).await,
+            Self::Sftp(p) => p.read_dir_node(id).await,
             Self::S3(p) => p.read_dir_node(id).await,
             Self::WebDav(p) => p.read_dir_node(id).await,
         }
@@ -739,6 +906,7 @@ impl NodeFileSystem for Provider {
         match self {
             Self::Local(p) => p.open_node(id, mode).await,
             Self::Ftp(p) => p.open_node(id, mode).await,
+            Self::Sftp(p) => p.open_node(id, mode).await,
             Self::S3(p) => p.open_node(id, mode).await,
             Self::WebDav(p) => p.open_node(id, mode).await,
         }
@@ -752,6 +920,7 @@ impl NodeFileSystem for Provider {
         match self {
             Self::Local(p) => p.read_node(id, range).await,
             Self::Ftp(p) => p.read_node(id, range).await,
+            Self::Sftp(p) => p.read_node(id, range).await,
             Self::S3(p) => p.read_node(id, range).await,
             Self::WebDav(p) => p.read_node(id, range).await,
         }
@@ -765,6 +934,7 @@ impl NodeFileSystem for Provider {
         match self {
             Self::Local(p) => p.read_stream_node(id, range).await,
             Self::Ftp(p) => p.read_stream_node(id, range).await,
+            Self::Sftp(p) => p.read_stream_node(id, range).await,
             Self::S3(p) => p.read_stream_node(id, range).await,
             Self::WebDav(p) => p.read_stream_node(id, range).await,
         }
@@ -785,6 +955,7 @@ impl WritableFileSystem for Provider {
         match self {
             Self::Local(p) => p.create_file(parent, name).await,
             Self::Ftp(p) => p.create_file(parent, name).await,
+            Self::Sftp(p) => p.create_file(parent, name).await,
             Self::S3(p) => p.create_file(parent, name).await,
             Self::WebDav(p) => p.create_file(parent, name).await,
         }
@@ -798,6 +969,7 @@ impl WritableFileSystem for Provider {
         match self {
             Self::Local(p) => p.create_dir_node(parent, name).await,
             Self::Ftp(p) => p.create_dir_node(parent, name).await,
+            Self::Sftp(p) => p.create_dir_node(parent, name).await,
             Self::S3(p) => p.create_dir_node(parent, name).await,
             Self::WebDav(p) => p.create_dir_node(parent, name).await,
         }
@@ -812,6 +984,7 @@ impl WritableFileSystem for Provider {
         match self {
             Self::Local(p) => p.create_symlink(parent, name, target).await,
             Self::Ftp(p) => p.create_symlink(parent, name, target).await,
+            Self::Sftp(p) => p.create_symlink(parent, name, target).await,
             Self::S3(p) => p.create_symlink(parent, name, target).await,
             Self::WebDav(p) => p.create_symlink(parent, name, target).await,
         }
@@ -825,6 +998,7 @@ impl WritableFileSystem for Provider {
         match self {
             Self::Local(p) => p.write_node(id, data).await,
             Self::Ftp(p) => p.write_node(id, data).await,
+            Self::Sftp(p) => p.write_node(id, data).await,
             Self::S3(p) => p.write_node(id, data).await,
             Self::WebDav(p) => p.write_node(id, data).await,
         }
@@ -834,6 +1008,7 @@ impl WritableFileSystem for Provider {
         match self {
             Self::Local(p) => p.flush_node(id).await,
             Self::Ftp(p) => p.flush_node(id).await,
+            Self::Sftp(p) => p.flush_node(id).await,
             Self::S3(p) => p.flush_node(id).await,
             Self::WebDav(p) => p.flush_node(id).await,
         }
@@ -843,6 +1018,7 @@ impl WritableFileSystem for Provider {
         match self {
             Self::Local(p) => p.remove_node(id).await,
             Self::Ftp(p) => p.remove_node(id).await,
+            Self::Sftp(p) => p.remove_node(id).await,
             Self::S3(p) => p.remove_node(id).await,
             Self::WebDav(p) => p.remove_node(id).await,
         }
@@ -852,6 +1028,7 @@ impl WritableFileSystem for Provider {
         match self {
             Self::Local(p) => p.remove_all_node(id).await,
             Self::Ftp(p) => p.remove_all_node(id).await,
+            Self::Sftp(p) => p.remove_all_node(id).await,
             Self::S3(p) => p.remove_all_node(id).await,
             Self::WebDav(p) => p.remove_all_node(id).await,
         }
@@ -865,6 +1042,7 @@ impl WritableFileSystem for Provider {
         match self {
             Self::Local(p) => p.rename_node(id, new_name).await,
             Self::Ftp(p) => p.rename_node(id, new_name).await,
+            Self::Sftp(p) => p.rename_node(id, new_name).await,
             Self::S3(p) => p.rename_node(id, new_name).await,
             Self::WebDav(p) => p.rename_node(id, new_name).await,
         }
@@ -878,6 +1056,7 @@ impl WritableFileSystem for Provider {
         match self {
             Self::Local(p) => p.copy_node(src, dst).await,
             Self::Ftp(p) => p.copy_node(src, dst).await,
+            Self::Sftp(p) => p.copy_node(src, dst).await,
             Self::S3(p) => p.copy_node(src, dst).await,
             Self::WebDav(p) => p.copy_node(src, dst).await,
         }
@@ -891,6 +1070,7 @@ impl WritableFileSystem for Provider {
         match self {
             Self::Local(p) => p.move_node(src, dst).await,
             Self::Ftp(p) => p.move_node(src, dst).await,
+            Self::Sftp(p) => p.move_node(src, dst).await,
             Self::S3(p) => p.move_node(src, dst).await,
             Self::WebDav(p) => p.move_node(src, dst).await,
         }
@@ -1018,6 +1198,15 @@ mod tests {
         profile
     }
 
+    fn sftp_profile() -> Profile {
+        let mut profile = Profile::new("test-sftp", ProviderType::Sftp);
+        profile.set_setting("host".into(), "sftp.example.com".into());
+        profile.set_setting("port".into(), "22".into());
+        profile.set_setting("username".into(), "user".into());
+        profile.secrets.set("password".into(), "pass".into());
+        profile
+    }
+
     fn s3_profile() -> Profile {
         let mut profile = Profile::new("test-s3", ProviderType::S3);
         profile.set_setting("region".into(), "us-east-1".into());
@@ -1050,6 +1239,19 @@ mod tests {
             },
         ));
         assert_eq!(ftp.provider_type(), ProviderType::Ftp);
+
+        let sftp = Provider::Sftp(SftpFs::new(
+            "test",
+            SftpConfig {
+                host: "host".into(),
+                port: 22,
+                username: "u".into(),
+                password: Some("p".into()),
+                key_file: None,
+                root_path: None,
+            },
+        ));
+        assert_eq!(sftp.provider_type(), ProviderType::Sftp);
 
         let s3 = Provider::S3(S3Fs::new(
             "test",
@@ -1091,6 +1293,12 @@ mod tests {
             ProviderId::new("ftp", Some("test-ftp".to_owned()))
         );
 
+        let sftp = Provider::from_profile(&sftp_profile()).unwrap();
+        assert_eq!(
+            sftp.provider_id(),
+            ProviderId::new("sftp", Some("test-sftp".to_owned()))
+        );
+
         let s3 = Provider::from_profile(&s3_profile()).unwrap();
         assert_eq!(
             s3.provider_id(),
@@ -1121,6 +1329,14 @@ mod tests {
     }
 
     #[test]
+    fn from_profile_sftp() {
+        let profile = sftp_profile();
+        let provider = Provider::from_profile(&profile).unwrap();
+        assert_eq!(provider.provider_type(), ProviderType::Sftp);
+        assert_eq!(provider.label(), "test-sftp");
+    }
+
+    #[test]
     fn from_profile_s3() {
         let profile = s3_profile();
         let provider = Provider::from_profile(&profile).unwrap();
@@ -1139,6 +1355,13 @@ mod tests {
     #[test]
     fn from_profile_ftp_missing_host_fails() {
         let profile = Profile::new("bad-ftp", ProviderType::Ftp);
+        let result = Provider::from_profile(&profile);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn from_profile_sftp_missing_host_fails() {
+        let profile = Profile::new("bad-sftp", ProviderType::Sftp);
         let result = Provider::from_profile(&profile);
         assert!(result.is_err());
     }
@@ -1289,6 +1512,13 @@ mod tests {
         }
     }
 
+    fn sftp_config(provider: &Provider) -> &SftpConfig {
+        match provider {
+            Provider::Sftp(fs) => fs.config(),
+            other => panic!("expected an SFTP provider, got {other:?}"),
+        }
+    }
+
     #[test]
     fn from_url_local() {
         let provider =
@@ -1325,6 +1555,34 @@ mod tests {
         let config = ftp_config(&provider);
         assert_eq!(config.port, 990);
         assert!(config.tls);
+    }
+
+    #[test]
+    fn from_url_sftp_keeps_url_details() {
+        let provider = Provider::from_url(
+            &ftp_url("sftp://files.example.com:2222/pub/src"),
+            &Credentials::new(Some("alice".into()), Some("s3cret".into())),
+        )
+        .unwrap();
+        let config = sftp_config(&provider);
+        assert_eq!(config.host, "files.example.com");
+        assert_eq!(config.port, 2222);
+        assert_eq!(config.username, "alice");
+        assert_eq!(config.password.as_deref(), Some("s3cret"));
+        assert!(config.key_file.is_none());
+        // The URL path selects the scan root, so it must not also
+        // prefix every resolved path a second time.
+        assert!(config.root_path.is_none());
+    }
+
+    #[test]
+    fn from_url_sftp_defaults_port() {
+        let provider = Provider::from_url(
+            &ftp_url("sftp://files.example.com/pub"),
+            &Credentials::default(),
+        )
+        .unwrap();
+        assert_eq!(sftp_config(&provider).port, 22);
     }
 
     #[test]
@@ -1476,6 +1734,118 @@ mod tests {
                 assert_eq!(config.password, "envpass");
             },
         );
+    }
+
+    #[test]
+    fn resolve_sftp_explicit_profile_supplies_credentials() {
+        let dir = tempdir().unwrap();
+        let store = temp_store(dir.path());
+        store.add(sftp_profile()).unwrap();
+        let provider = Provider::resolve(
+            &ftp_url("sftp://sftp.example.com/pub/src"),
+            Some(&store),
+            Some("test-sftp"),
+            &Secrets::with_keychain(false),
+            &NullPrompter,
+        )
+        .unwrap();
+        let config = sftp_config(&provider);
+        assert_eq!(config.username, "user");
+        assert_eq!(config.password.as_deref(), Some("pass"));
+        assert_eq!(provider.label(), "test-sftp");
+    }
+
+    #[test]
+    fn resolve_sftp_profile_key_file_is_used() {
+        let dir = tempdir().unwrap();
+        let store = temp_store(dir.path());
+        let mut profile = Profile::new("key-sftp", ProviderType::Sftp);
+        profile.set_setting("host".into(), "sftp.example.com".into());
+        profile.set_setting("username".into(), "user".into());
+        profile.set_setting(
+            "key_file".into(),
+            "/home/user/.ssh/id_ed25519".to_string(),
+        );
+        store.add(profile).unwrap();
+        // A key file alone satisfies the authentication requirement; no
+        // password is needed.
+        let provider = Provider::resolve(
+            &ftp_url("sftp://sftp.example.com/pub/src"),
+            Some(&store),
+            None,
+            &Secrets::with_keychain(false),
+            &NullPrompter,
+        )
+        .unwrap();
+        let config = sftp_config(&provider);
+        assert_eq!(
+            config.key_file.as_deref(),
+            Some(Path::new("/home/user/.ssh/id_ed25519")),
+        );
+        assert!(config.password.is_none());
+    }
+
+    #[test]
+    fn resolve_sftp_without_credentials_fails_on_non_tty() {
+        // `with_vars` also guarantees the fallback variables are unset
+        // for this assertion (the mutex serializes env mutations).
+        temp_env::with_vars(
+            vec![
+                ("COCOMO_SFTP_USER", None::<&str>),
+                ("COCOMO_SFTP_PASSWORD", None::<&str>),
+            ],
+            || {
+                let error = Provider::resolve(
+                    &ftp_url("sftp://sftp.example.com/pub/src"),
+                    None,
+                    None,
+                    &Secrets::with_keychain(false),
+                    &NullPrompter,
+                )
+                .unwrap_err();
+                assert!(matches!(error, ProviderError::AuthRequired { .. }));
+            },
+        );
+    }
+
+    #[test]
+    fn resolve_sftp_falls_back_to_environment_credentials() {
+        temp_env::with_vars(
+            vec![
+                ("COCOMO_SFTP_USER", Some("bob")),
+                ("COCOMO_SFTP_PASSWORD", Some("envpass")),
+            ],
+            || {
+                let provider = Provider::resolve(
+                    &ftp_url("sftp://sftp.example.com/pub/src"),
+                    None,
+                    None,
+                    &Secrets::with_keychain(false),
+                    &NullPrompter,
+                )
+                .unwrap();
+                let config = sftp_config(&provider);
+                assert_eq!(config.username, "bob");
+                assert_eq!(config.password.as_deref(), Some("envpass"));
+            },
+        );
+    }
+
+    #[test]
+    fn resolve_sftp_profile_endpoint_mismatch_fails() {
+        let dir = tempdir().unwrap();
+        let store = temp_store(dir.path());
+        // `test-sftp` addresses sftp.example.com, not other.example.com.
+        store.add(sftp_profile()).unwrap();
+        let error = Provider::resolve(
+            &ftp_url("sftp://other.example.com/pub/src"),
+            Some(&store),
+            Some("test-sftp"),
+            &Secrets::with_keychain(false),
+            &NullPrompter,
+        )
+        .unwrap_err();
+        assert!(matches!(error, ProviderError::ProfileMismatch { .. }));
     }
 
     #[test]

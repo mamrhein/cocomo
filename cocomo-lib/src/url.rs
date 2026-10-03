@@ -17,6 +17,8 @@
 //!
 //! - `ftp://host[:port]/path` and `ftps://host[:port]/path` (TLS implied by
 //!   `ftps`).
+//! - `sftp://host[:port]/path` — SSH file transfer (the transport is encrypted
+//!   by SSH itself, so there is no TLS variant).
 //! - `s3://bucket[/prefix…]/path` — the bucket name occupies the authority
 //!   position, the remainder is the path within the bucket.
 //! - `webdav://host[:port]/path` and `webdavs://…` (TLS implied by `webdavs`).
@@ -47,8 +49,8 @@ pub enum UrlError {
     #[error("empty URL")]
     Empty,
 
-    /// The input uses a scheme other than `file`, `ftp`, `ftps`, `s3`,
-    /// `webdav`, or `webdavs`.
+    /// The input uses a scheme other than `file`, `ftp`, `ftps`, `sftp`,
+    /// `s3`, `webdav`, or `webdavs`.
     #[error("unsupported URL scheme \"{scheme}\" in \"{url}\"")]
     UnsupportedScheme {
         /// The offending URL as typed by the user.
@@ -116,7 +118,8 @@ pub enum UrlError {
 /// ```
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Url {
-    /// URL scheme, one of `file`, `ftp`, `ftps`, `s3`, `webdav`, `webdavs`.
+    /// URL scheme, one of `file`, `ftp`, `ftps`, `sftp`, `s3`, `webdav`,
+    /// `webdavs`.
     pub scheme: String,
     /// Authority host (or S3 bucket name). `None` for local URLs.
     pub host: Option<String>,
@@ -134,8 +137,13 @@ impl Url {
     pub const LOCAL_SCHEME: &'static str = "file";
 
     /// The port a remote scheme uses when the URL does not name one.
-    pub const DEFAULT_PORTS: &'static [(&'static str, u16)] =
-        &[("ftp", 21), ("ftps", 990), ("webdav", 80), ("webdavs", 443)];
+    pub const DEFAULT_PORTS: &'static [(&'static str, u16)] = &[
+        ("ftp", 21),
+        ("ftps", 990),
+        ("sftp", 22),
+        ("webdav", 80),
+        ("webdavs", 443),
+    ];
 
     /// Parse a URL or bare path.
     ///
@@ -217,7 +225,7 @@ impl Url {
         }
         if !matches!(
             scheme.as_str(),
-            "ftp" | "ftps" | "s3" | "webdav" | "webdavs"
+            "ftp" | "ftps" | "sftp" | "s3" | "webdav" | "webdavs"
         ) {
             return Err(UrlError::UnsupportedScheme {
                 url: input.to_owned(),
@@ -409,6 +417,19 @@ mod tests {
         assert_eq!(url.effective_port(), Some(990));
         let plain = Url::parse("ftp://files.example.com/pub").unwrap();
         assert!(!plain.uses_tls_by_default());
+    }
+
+    #[test]
+    fn parse_sftp_url() {
+        let url = Url::parse("sftp://files.example.com:2222/pub").unwrap();
+        assert_eq!(url.scheme, "sftp");
+        assert_eq!(url.host.as_deref(), Some("files.example.com"));
+        assert_eq!(url.port, Some(2222));
+        assert_eq!(url.path, Path::new("pub"));
+        // SSH encrypts its own transport, so no TLS default is implied.
+        assert!(!url.uses_tls_by_default());
+        let no_port = Url::parse("sftp://files.example.com/pub").unwrap();
+        assert_eq!(no_port.effective_port(), Some(22));
     }
 
     #[test]
