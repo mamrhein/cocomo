@@ -211,9 +211,9 @@ where
 /// This is the main entry point for synchronization. It compares the two
 /// directory trees, plans the necessary transfers, and executes them if
 /// `dry_run` is `false`. Cross-boundary copies and moves in a
-/// [`FsPair::Separate`] pair are refused by the executor (until
-/// cross-boundary streaming lands in migration step 6c); same-fs and
-/// single-provider operations are unaffected.
+/// [`FsPair::Separate`] pair stream the source content into a freshly
+/// created destination entry (directories are mirrored recursively, moves
+/// run as copy + delete).
 pub async fn sync_directories_pair<L, R>(
     pair: FsPair<'_, L, R>,
     left_path: &Path,
@@ -593,7 +593,12 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-    use crate::LocalFs;
+    use crate::{LocalFs, MockFs, fs::FileSystem};
+
+    /// Read a file's content from a `MockFs` tree.
+    async fn mock_content(fs: &MockFs, path: &str) -> Vec<u8> {
+        fs.read(Path::new(path), None).await.unwrap().to_vec()
+    }
 
     fn make_sync_dirs() -> (PathBuf, PathBuf) {
         let base =
@@ -1086,19 +1091,82 @@ mod tests {
         .unwrap();
 
         let transfer = result.transfer.unwrap();
-        // The cross-boundary copy (left → right) is refused until
-        // cross-boundary streaming lands in migration step 6c, while
-        // the orphan delete runs on the provider addressing its side.
-        assert_eq!(transfer.succeeded, 1);
-        assert_eq!(transfer.failed, 1);
+        // The cross-boundary copy (left → right) streams the content
+        // into a freshly created destination file, and the orphan delete
+        // runs on the provider addressing its side.
         assert!(
-            transfer.errors.iter().any(|e| e
-                .to_string()
-                .contains("cross-filesystem transfers are not supported yet")),
-            "expected a cross-boundary refusal: {:?}",
+            transfer.is_ok(),
+            "sync should succeed: {:?}",
             transfer.errors
         );
-        assert!(!right.join("left_only.txt").exists());
+        assert!(right.join("left_only.txt").exists());
         assert!(!right.join("right_only.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn sync_pair_separate_mockfs_cross_provider() {
+        // Two independent `MockFs` trees: the left side has an extra
+        // file and a directory, the right side has an orphan.
+        let left_fs = MockFs::new("mock-left")
+            .with_dir("/left")
+            .with_file("/left/left_only.txt", "only left")
+            .with_file("/left/same.txt", "identical")
+            .with_dir("/left/shared")
+            .with_file("/left/shared/nested.txt", "nested");
+        let right_fs = MockFs::new("mock-right")
+            .with_dir("/right")
+            .with_file("/right/right_only.txt", "only right")
+            .with_file("/right/same.txt", "identical");
+
+        // `compare_files` must be enabled: the mock's mtimes are
+        // non-deterministic, so a size/mtime-only comparison would
+        // misclassify the identical file.
+        let rules = SyncRules {
+            operation: SyncOperation::MirrorLeft,
+            dry_run: false,
+            compare_files: true,
+            ..Default::default()
+        };
+
+        let result = sync_directories_pair(
+            FsPair::Separate(&left_fs, &right_fs),
+            Path::new("/left"),
+            Path::new("/right"),
+            &rules,
+        )
+        .await
+        .unwrap();
+
+        // The identical file was classified as Same, so the plan only
+        // covers the left-only entries and the right-side orphan.
+        assert!(
+            !result.planned.iter().any(|i| i.name == "same.txt"),
+            "plan should not touch same.txt: {:?}",
+            result.planned
+        );
+        assert_eq!(result.planned_count(), 3);
+
+        let transfer = result.transfer.unwrap();
+        assert!(
+            transfer.is_ok(),
+            "sync should succeed: {:?}",
+            transfer.errors
+        );
+        // Mirror left → right: the left-only file and directory were
+        // mirrored across the boundary, the orphan was deleted.
+        assert_eq!(
+            mock_content(&right_fs, "/right/left_only.txt").await,
+            b"only left"
+        );
+        assert_eq!(
+            mock_content(&right_fs, "/right/shared/nested.txt").await,
+            b"nested"
+        );
+        assert!(
+            right_fs
+                .read(Path::new("/right/right_only.txt"), None)
+                .await
+                .is_err()
+        );
     }
 }

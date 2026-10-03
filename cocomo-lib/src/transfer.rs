@@ -27,6 +27,8 @@ use std::path::Path;
 #[allow(unused_imports)]
 use std::sync::Arc;
 
+use futures::future::BoxFuture;
+
 use crate::{DirComparison, DirEntryStatus, FsError, FsOperation};
 
 // ---------------------------------------------------------------------------
@@ -264,10 +266,10 @@ impl<'a, N> FsPair<'a, N, N> {
 /// * `left_path` - Root path of the left side.
 /// * `right_path` - Root path of the right side.
 /// * `pair` - The provider(s) addressing the two sides. With a
-///   [`FsPair::Separate`] pair, cross-boundary copies and moves are not
-///   executed but reported as errors (cross-boundary streaming arrives with
-///   migration step 6c); single-side operations still run against the provider
-///   addressing their side.
+///   [`FsPair::Separate`] pair, cross-boundary copies stream the source
+///   content into a freshly created destination entry (directories are
+///   mirrored recursively) and cross-boundary moves run as copy + delete;
+///   single-side operations run against the provider addressing their side.
 pub async fn execute_transfers<L, R>(
     items: &[TransferItem],
     left_path: &Path,
@@ -359,15 +361,35 @@ where
             }
         },
         // Two distinct provider instances. `copy_node` and `move_node`
-        // execute *within* one provider and the helpers would resolve
-        // the destination directory on the opposite side's provider,
-        // which addresses a different node cache — so cross-boundary
-        // copies and moves are refused until cross-boundary streaming
-        // lands (migration step 6c). Deletes only ever touch one side
-        // and run against the provider addressing that side.
+        // execute *within* one provider, so cross-boundary copies stream
+        // the source content into a freshly created destination entry and
+        // cross-boundary moves run as copy + delete. Deletes only ever
+        // touch one side and run against the provider addressing that
+        // side.
         FsPair::Separate(left_fs, right_fs) => match item.action {
-            TransferAction::CopyLeft | TransferAction::CopyRight => {
-                Err(cross_fs_error(FsOperation::Copy, item))
+            TransferAction::CopyLeft => {
+                // Copy from right to left.
+                copy_entry_cross(
+                    right_fs,
+                    right_path,
+                    &item.name,
+                    item.is_dir,
+                    left_fs,
+                    left_path,
+                )
+                .await
+            }
+            TransferAction::CopyRight => {
+                // Copy from left to right.
+                copy_entry_cross(
+                    left_fs,
+                    left_path,
+                    &item.name,
+                    item.is_dir,
+                    right_fs,
+                    right_path,
+                )
+                .await
             }
             TransferAction::CopyCenter => Err(center_copy_error(item)),
             TransferAction::DeleteLeft => {
@@ -377,8 +399,29 @@ where
                 delete_entry(right_fs, right_path, &item.name, item.is_dir)
                     .await
             }
-            TransferAction::MoveLeft | TransferAction::MoveRight => {
-                Err(cross_fs_error(FsOperation::Move, item))
+            TransferAction::MoveLeft => {
+                // Move from right to left.
+                move_entry_cross(
+                    right_fs,
+                    right_path,
+                    &item.name,
+                    item.is_dir,
+                    left_fs,
+                    left_path,
+                )
+                .await
+            }
+            TransferAction::MoveRight => {
+                // Move from left to right.
+                move_entry_cross(
+                    left_fs,
+                    left_path,
+                    &item.name,
+                    item.is_dir,
+                    right_fs,
+                    right_path,
+                )
+                .await
             }
         },
     }
@@ -393,21 +436,38 @@ fn center_copy_error(item: &TransferItem) -> FsError {
     }
 }
 
-/// The error for transfers that would read one provider and write the
-/// other.
-fn cross_fs_error(op: FsOperation, item: &TransferItem) -> FsError {
-    FsError::Io {
-        operation: op,
-        path: item.rel_path.clone().into(),
-        message: "cross-filesystem transfers are not supported yet".into(),
+/// Stream a source file's content into an already created destination
+/// file, across (or within) provider instances.
+async fn stream_file_content<S, D>(
+    src_fs: &S,
+    src_file_id: crate::FileId<u64>,
+    src_path: &Path,
+    dst_fs: &D,
+    dst_file_id: crate::FileId<u64>,
+) -> Result<(), FsError>
+where
+    S: crate::fs::WritableFileSystem<Nid = u64>,
+    D: crate::fs::WritableFileSystem<Nid = u64>,
+{
+    let mut stream = src_fs.read_stream_node(src_file_id, None).await?;
+    use futures::StreamExt;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| FsError::Io {
+            operation: FsOperation::Read,
+            path: src_path.to_path_buf(),
+            message: format!("stream error: {e}"),
+        })?;
+        dst_fs.write_node(dst_file_id, chunk).await?;
     }
+
+    Ok(())
 }
 
 /// Copy a file or directory from source to destination.
 ///
 /// Only reached for [`FsPair::Shared`] pairs: `copy_node` and the file
-/// streaming path address one provider instance. Cross-boundary file
-/// streaming is added with migration step 6c.
+/// streaming path address one provider instance. Cross-boundary copies go
+/// through [`copy_entry_cross`] instead.
 async fn copy_entry<N>(
     src_fs: &N,
     src_root: &Path,
@@ -440,18 +500,14 @@ where
             .await?;
 
         // Stream content from source to destination.
-        let mut stream = src_fs
-            .read_stream_node(crate::FileId::new(*src_node_id.get()), None)
-            .await?;
-        use futures::StreamExt;
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|e| FsError::Io {
-                operation: FsOperation::Read,
-                path: src_node.path().to_path_buf(),
-                message: format!("stream error: {e}"),
-            })?;
-            dst_fs.write_node(new_file_id, chunk).await?;
-        }
+        stream_file_content(
+            src_fs,
+            crate::FileId::new(*src_node_id.get()),
+            src_node.path(),
+            dst_fs,
+            new_file_id,
+        )
+        .await?;
     }
 
     Ok(())
@@ -496,6 +552,128 @@ where
     Ok(())
 }
 
+/// Copy a file or directory across two distinct provider instances.
+///
+/// `copy_node` executes *within* the provider it is called on, so the
+/// destination entry is created on the destination side and the source
+/// content is streamed (files) or mirrored recursively (directories)
+/// across the boundary. Symlinks and other special entries are skipped:
+/// their targets are provider-local and would dangle on the destination
+/// side.
+async fn copy_entry_cross<S, D>(
+    src_fs: &S,
+    src_root: &Path,
+    name: &str,
+    is_dir: bool,
+    dst_fs: &D,
+    dst_root: &Path,
+) -> Result<(), FsError>
+where
+    S: crate::fs::WritableFileSystem<Nid = u64>,
+    D: crate::fs::WritableFileSystem<Nid = u64>,
+{
+    let dst_node_id = resolve_dir_for_copy(dst_fs, dst_root, name).await?;
+    let dst_dir_id = crate::DirId::new(*dst_node_id.get());
+
+    // Resolve the source node.
+    let src_path = src_root.join(name);
+    let src_node_id = src_fs.resolve_path(&src_path).await?;
+    let src_node = src_fs.get_node(src_node_id)?;
+
+    if is_dir {
+        // Create the top-level directory on the destination side, then
+        // mirror its contents into it.
+        let new_dir_id =
+            dst_fs.create_dir_node(dst_dir_id, src_node.name()).await?;
+        mirror_directory_tree(src_fs, src_node_id, dst_fs, new_dir_id).await?;
+    } else {
+        let new_file_id =
+            dst_fs.create_file(dst_dir_id, src_node.name()).await?;
+        stream_file_content(
+            src_fs,
+            crate::FileId::new(*src_node_id.get()),
+            src_node.path(),
+            dst_fs,
+            new_file_id,
+        )
+        .await?;
+    }
+
+    Ok(())
+}
+
+/// Mirror the contents of a source directory into an already created
+/// destination directory on another provider instance.
+fn mirror_directory_tree<'a, S, D>(
+    src_fs: &'a S,
+    src_dir_id: crate::NodeId<u64>,
+    dst_fs: &'a D,
+    dst_dir_id: crate::DirId<u64>,
+) -> BoxFuture<'a, Result<(), FsError>>
+where
+    S: crate::fs::WritableFileSystem<Nid = u64>,
+    D: crate::fs::WritableFileSystem<Nid = u64>,
+{
+    Box::pin(async move {
+        // Populate the source directory's children, then walk them.
+        src_fs
+            .read_dir_node(crate::DirId::new(*src_dir_id.get()))
+            .await?;
+        let src_dir = src_fs.get_node(src_dir_id)?;
+
+        for child_name in src_dir.kind().children().into_iter().flatten() {
+            let child_id = src_fs
+                .resolve_path(&src_dir.path().join(child_name))
+                .await?;
+            let child = src_fs.get_node(child_id)?;
+
+            if child.kind().is_directory() {
+                let new_dir_id =
+                    dst_fs.create_dir_node(dst_dir_id, child.name()).await?;
+                mirror_directory_tree(src_fs, child_id, dst_fs, new_dir_id)
+                    .await?;
+            } else if child.kind().is_file() {
+                let new_file_id =
+                    dst_fs.create_file(dst_dir_id, child.name()).await?;
+                stream_file_content(
+                    src_fs,
+                    crate::FileId::new(*child_id.get()),
+                    child.path(),
+                    dst_fs,
+                    new_file_id,
+                )
+                .await?;
+            }
+            // Symlinks and other special entries are skipped: their
+            // targets are provider-local and would dangle on the
+            // destination side.
+        }
+
+        Ok(())
+    })
+}
+
+/// Move a file or directory across two distinct provider instances.
+///
+/// Implemented as copy + delete: there is no atomic cross-provider move,
+/// so if the copy succeeds but the delete fails, the entry exists on both
+/// sides (no data loss, but a duplicate to clean up).
+async fn move_entry_cross<S, D>(
+    src_fs: &S,
+    src_root: &Path,
+    name: &str,
+    is_dir: bool,
+    dst_fs: &D,
+    dst_root: &Path,
+) -> Result<(), FsError>
+where
+    S: crate::fs::WritableFileSystem<Nid = u64>,
+    D: crate::fs::WritableFileSystem<Nid = u64>,
+{
+    copy_entry_cross(src_fs, src_root, name, is_dir, dst_fs, dst_root).await?;
+    delete_entry(src_fs, src_root, name, is_dir).await
+}
+
 /// Resolve the destination directory for a copy/move operation. Returns the
 /// node ID of the root directory, which the caller uses to construct a
 /// [`crate::DirId`].
@@ -531,9 +709,14 @@ mod tests {
 
     use super::*;
     use crate::{
-        CompareConfig, DirEntry, DirEntryStatus, EntryInfo, LocalFs,
-        compare::compare_directories_node, hash::ContentCache,
+        CompareConfig, DirEntry, DirEntryStatus, EntryInfo, LocalFs, MockFs,
+        compare::compare_directories_node, fs::FileSystem, hash::ContentCache,
     };
+
+    /// Read a file's content from a `MockFs` tree.
+    async fn mock_content(fs: &MockFs, path: &str) -> Vec<u8> {
+        fs.read(Path::new(path), None).await.unwrap().to_vec()
+    }
 
     fn make_test_dirs() -> (PathBuf, PathBuf) {
         let base =
@@ -917,15 +1100,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn execute_separate_pair_copy_errors() {
+    async fn execute_separate_pair_copy_succeeds() {
         let (left, right) = make_test_dirs();
         let left_fs = LocalFs::new("left");
         let right_fs = LocalFs::new("right");
 
         // CopyRight reads from the left and writes to the right side;
-        // across two distinct providers it is refused (until
-        // cross-boundary streaming lands in migration step 6c), not
-        // executed on a mis-resolved destination node.
+        // across two distinct providers the content is streamed into a
+        // freshly created destination file.
         let items = vec![TransferItem::new(
             TransferAction::CopyRight,
             "left_only.txt".to_string(),
@@ -941,10 +1123,17 @@ mod tests {
         )
         .await;
 
-        assert!(!result.is_ok());
-        assert_eq!(result.failed, 1);
-        // The file must not have been written to the right side.
-        assert!(!right.join("left_only.txt").exists());
+        assert!(
+            result.is_ok(),
+            "transfer should succeed: {:?}",
+            result.errors
+        );
+        // The file was copied across the boundary with its content.
+        assert!(right.join("left_only.txt").exists());
+        assert_eq!(
+            fs_err::read_to_string(right.join("left_only.txt")).unwrap(),
+            "only on left"
+        );
 
         fs_err::remove_dir_all(left.parent().unwrap()).ok();
     }
@@ -976,5 +1165,227 @@ mod tests {
         assert!(!left.join("left_only.txt").exists());
 
         fs_err::remove_dir_all(left.parent().unwrap()).ok();
+    }
+
+    #[tokio::test]
+    async fn execute_separate_pair_copy_directory_cross() {
+        let src = MockFs::new("src")
+            .with_dir("/src")
+            .with_dir("/src/tree")
+            .with_file("/src/tree/a.txt", "alpha")
+            .with_dir("/src/tree/sub")
+            .with_file("/src/tree/sub/b.txt", "bravo");
+        let dst = MockFs::new("dst").with_dir("/dst");
+
+        let items = vec![TransferItem::new(
+            TransferAction::CopyRight,
+            "tree".to_string(),
+            true,
+            "/src/tree".to_string(),
+        )];
+
+        let result = execute_transfers(
+            &items,
+            Path::new("/src"),
+            Path::new("/dst"),
+            FsPair::Separate(&src, &dst),
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "transfer should succeed: {:?}",
+            result.errors
+        );
+        // The directory tree was mirrored across the boundary.
+        assert_eq!(mock_content(&dst, "/dst/tree/a.txt").await, b"alpha");
+        assert_eq!(mock_content(&dst, "/dst/tree/sub/b.txt").await, b"bravo");
+    }
+
+    #[tokio::test]
+    async fn execute_separate_pair_move_cross() {
+        let src = MockFs::new("src")
+            .with_dir("/src")
+            .with_file("/src/moved.txt", "payload");
+        let dst = MockFs::new("dst").with_dir("/dst");
+
+        let items = vec![TransferItem::new(
+            TransferAction::MoveRight,
+            "moved.txt".to_string(),
+            false,
+            "/src/moved.txt".to_string(),
+        )];
+
+        let result = execute_transfers(
+            &items,
+            Path::new("/src"),
+            Path::new("/dst"),
+            FsPair::Separate(&src, &dst),
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "transfer should succeed: {:?}",
+            result.errors
+        );
+        // The entry was copied across and removed from the source side.
+        assert_eq!(mock_content(&dst, "/dst/moved.txt").await, b"payload");
+        assert!(src.read(Path::new("/src/moved.txt"), None).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn execute_separate_pair_copy_stream_error() {
+        let src = MockFs::new("src")
+            .with_dir("/src")
+            .with_file("/src/broken.txt", "payload")
+            .with_stream_error(
+                "/src/broken.txt",
+                FsError::Io {
+                    operation: FsOperation::Read,
+                    path: "/src/broken.txt".into(),
+                    message: "injected read failure".to_owned(),
+                },
+            );
+        let dst = MockFs::new("dst").with_dir("/dst");
+
+        let items = vec![TransferItem::new(
+            TransferAction::CopyRight,
+            "broken.txt".to_string(),
+            false,
+            "/src/broken.txt".to_string(),
+        )];
+
+        let result = execute_transfers(
+            &items,
+            Path::new("/src"),
+            Path::new("/dst"),
+            FsPair::Separate(&src, &dst),
+        )
+        .await;
+
+        assert_eq!(result.failed, 1);
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.to_string().contains("stream error")),
+            "expected a stream error: {:?}",
+            result.errors
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_separate_pair_copy_dir_walk_error() {
+        let src = MockFs::new("src")
+            .with_dir("/src")
+            .with_dir("/src/tree")
+            .with_file("/src/tree/blocked.txt", "bravo")
+            .with_error(
+                "/src/tree/blocked.txt",
+                FsError::PermissionDenied {
+                    operation: FsOperation::Read,
+                    path: "/src/tree/blocked.txt".into(),
+                },
+            )
+            .with_file("/src/tree/ok.txt", "alpha");
+        let dst = MockFs::new("dst").with_dir("/dst");
+
+        let items = vec![TransferItem::new(
+            TransferAction::CopyRight,
+            "tree".to_string(),
+            true,
+            "/src/tree".to_string(),
+        )];
+
+        let result = execute_transfers(
+            &items,
+            Path::new("/src"),
+            Path::new("/dst"),
+            FsPair::Separate(&src, &dst),
+        )
+        .await;
+
+        // The walk fails on the injected child, so the whole directory
+        // copy is collected as one error.
+        assert_eq!(result.failed, 1);
+    }
+
+    #[tokio::test]
+    async fn execute_separate_pair_move_copy_failure_keeps_source() {
+        let src = MockFs::new("src")
+            .with_dir("/src")
+            .with_file("/src/moved.txt", "payload");
+        // The destination refuses the creation, so the copy fails before
+        // the delete can run.
+        let dst = MockFs::new("dst").with_dir("/dst").with_error(
+            "/dst/moved.txt",
+            FsError::PermissionDenied {
+                operation: FsOperation::CreateFile,
+                path: "/dst/moved.txt".into(),
+            },
+        );
+
+        let items = vec![TransferItem::new(
+            TransferAction::MoveRight,
+            "moved.txt".to_string(),
+            false,
+            "/src/moved.txt".to_string(),
+        )];
+
+        let result = execute_transfers(
+            &items,
+            Path::new("/src"),
+            Path::new("/dst"),
+            FsPair::Separate(&src, &dst),
+        )
+        .await;
+
+        assert_eq!(result.failed, 1);
+        // The source entry must survive a failed cross-boundary move.
+        assert_eq!(mock_content(&src, "/src/moved.txt").await, b"payload");
+    }
+
+    #[tokio::test]
+    async fn execute_separate_pair_mockfs_to_localfs() {
+        let base = env::temp_dir()
+            .join(format!("cocomo_transfer_hetero_{}", process::id()));
+        let _ = fs_err::remove_dir_all(&base);
+        let dst_root = base.join("dst");
+        fs_err::create_dir_all(&dst_root).unwrap();
+
+        // Heterogeneous pair: the source side is a `MockFs` tree, the
+        // destination side a real `LocalFs`.
+        let src = MockFs::new("src")
+            .with_dir("/src")
+            .with_file("/src/hetero.txt", "cross backend");
+        let dst_fs = LocalFs::new("dst");
+
+        let items = vec![TransferItem::new(
+            TransferAction::CopyRight,
+            "hetero.txt".to_string(),
+            false,
+            "/src/hetero.txt".to_string(),
+        )];
+
+        let result = execute_transfers(
+            &items,
+            Path::new("/src"),
+            &dst_root,
+            FsPair::Separate(&src, &dst_fs),
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "transfer should succeed: {:?}",
+            result.errors
+        );
+        assert_eq!(
+            fs_err::read_to_string(dst_root.join("hetero.txt")).unwrap(),
+            "cross backend"
+        );
+
+        fs_err::remove_dir_all(&base).ok();
     }
 }
