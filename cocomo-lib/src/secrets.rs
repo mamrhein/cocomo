@@ -25,15 +25,18 @@
 //!   non-interactive runs and for tests); [`TtyPrompter`] reads from the
 //!   terminal when the `prompt` feature is enabled.
 
+use std::env;
 #[cfg(feature = "prompt")]
 use std::io::{self, BufRead, IsTerminal, Write};
-use std::{env, process::Command};
+#[cfg(all(feature = "keychain", target_os = "macos"))]
+use std::process::Command;
 
 /// A read-only password safe backed by environment variables and, on macOS
 /// with the `keychain` feature, the macOS keychain.
 #[derive(Clone, Debug)]
 pub struct Secrets {
     /// Whether the platform keychain is consulted after the environment.
+    #[cfg(all(feature = "keychain", target_os = "macos"))]
     use_keychain: bool,
 }
 
