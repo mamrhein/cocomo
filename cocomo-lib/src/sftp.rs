@@ -29,8 +29,10 @@
 //!
 //! # Authentication
 //!
-//! Key-based authentication is used when a key file is configured, with a
-//! password fallback otherwise.
+//! Methods are tried in order, mirroring `ssh`: the configured key file,
+//! identities held by an ssh-agent (`SSH_AUTH_SOCK`), the default identity
+//! files in `~/.ssh` (`id_ed25519`, `id_ecdsa`, `id_rsa`), and a password.
+//! An empty username falls back to the local user, as with `ssh`.
 
 use std::{
     collections::{HashMap, hash_map::DefaultHasher},
@@ -55,7 +57,10 @@ use chrono::{DateTime, Utc};
 use futures::Stream;
 use russh::{
     client::{self as ssh_client, Handler as SshHandler},
-    keys::{PrivateKeyWithHashAlg, PublicKeyOrCertificate},
+    keys::{
+        PrivateKeyWithHashAlg, PublicKeyOrCertificate,
+        agent::client::AgentClient,
+    },
 };
 use russh_sftp::{
     client::{SftpSession, error::Error as SftpError, fs::File as SftpHandle},
@@ -104,7 +109,8 @@ pub struct SftpConfig {
     pub host: String,
     /// Server port (default 22).
     pub port: u16,
-    /// Username for authentication.
+    /// Username for authentication. If empty, the local user is used,
+    /// as with `ssh`.
     pub username: String,
     /// Password for authentication. Should be loaded from a secure store.
     pub password: Option<String>,
@@ -405,37 +411,7 @@ impl SftpFs {
         .await
         .map_err(|e| self.conn_error(e.to_string()))?;
 
-        // Authenticate: key-based first, password as the fallback.
-        let auth = match (&cfg.key_file, &cfg.password) {
-            (Some(key_file), _) => {
-                let pem = fs_err::read_to_string(key_file)
-                    .map_err(|e| self.conn_error(e.to_string()))?;
-                let key = russh::keys::decode_secret_key(&pem, None)
-                    .map_err(|e| self.conn_error(e.to_string()))?;
-                handle
-                    .authenticate_publickey(
-                        &cfg.username,
-                        PrivateKeyWithHashAlg::new(Arc::new(key), None),
-                    )
-                    .await
-                    .map_err(|e| self.conn_error(e.to_string()))?
-            }
-            (None, Some(password)) => handle
-                .authenticate_password(&cfg.username, password)
-                .await
-                .map_err(|e| self.conn_error(e.to_string()))?,
-            (None, None) => {
-                return Err(self.conn_error(
-                    "no credentials configured for SFTP connection".into(),
-                ));
-            }
-        };
-        if !auth.success() {
-            return Err(self.conn_error(format!(
-                "authentication failed for user `{}`",
-                cfg.username
-            )));
-        }
+        self.authenticate(&mut handle).await?;
 
         // Open the sftp subsystem on a session channel. The channel stream
         // keeps the SSH connection alive; the handle itself can be dropped.
@@ -452,6 +428,129 @@ impl SftpFs {
         SftpSession::new(stream)
             .await
             .map_err(|e| self.conn_error(e.to_string()))
+    }
+
+    /// Authenticate `handle`, trying in order: the configured key file,
+    /// identities held by an ssh-agent (`SSH_AUTH_SOCK`), the default
+    /// identity files in `~/.ssh`, and a password. Each step is
+    /// best-effort and the first success wins, mirroring `ssh`'s own
+    /// fallback behaviour. Fails only when every available method is
+    /// rejected or none is available at all.
+    async fn authenticate(
+        &self,
+        handle: &mut ssh_client::Handle<HostKeyHandler>,
+    ) -> Result<()> {
+        let cfg = &self.config;
+        // An empty username means "the local user", as with `ssh`.
+        let username = if cfg.username.is_empty() {
+            local_username().unwrap_or_default()
+        } else {
+            cfg.username.clone()
+        };
+
+        // 1. The explicitly configured key file. A missing or undecodable file
+        //    is a hard error: the user pointed at it deliberately.
+        if let Some(key_file) = &cfg.key_file
+            && self.try_key_file(handle, &username, key_file).await?
+        {
+            return Ok(());
+        }
+
+        // 2. Identities held by an ssh-agent, if one is reachable.
+        if self.try_agent(handle, &username).await {
+            return Ok(());
+        }
+
+        // 3. Default identity files in ~/.ssh, in OpenSSH's order. Unreadable
+        //    or undecodable files are skipped: they may belong to another tool
+        //    or user.
+        for key_file in default_identity_files() {
+            if matches!(
+                self.try_key_file(handle, &username, &key_file).await,
+                Ok(true)
+            ) {
+                return Ok(());
+            }
+        }
+
+        // 4. Password fallback.
+        if let Some(password) = &cfg.password {
+            let auth = handle
+                .authenticate_password(&username, password)
+                .await
+                .map_err(|e| self.conn_error(e.to_string()))?;
+            if auth.success() {
+                return Ok(());
+            }
+        }
+
+        Err(self.conn_error(format!(
+            "authentication failed for user `{username}`: no key file, agent \
+             identity, default identity, or password was accepted"
+        )))
+    }
+
+    /// Try publickey authentication with the private key in `key_file`.
+    ///
+    /// Returns `Ok(true)` on success, `Ok(false)` if the server rejected
+    /// the key, and an error if the key could not be read or decoded.
+    async fn try_key_file(
+        &self,
+        handle: &mut ssh_client::Handle<HostKeyHandler>,
+        username: &str,
+        key_file: &Path,
+    ) -> Result<bool> {
+        let pem = fs_err::read_to_string(key_file)
+            .map_err(|e| self.conn_error(e.to_string()))?;
+        let key = russh::keys::decode_secret_key(&pem, None)
+            .map_err(|e| self.conn_error(e.to_string()))?;
+        let auth = handle
+            .authenticate_publickey(
+                username,
+                PrivateKeyWithHashAlg::new(Arc::new(key), None),
+            )
+            .await
+            .map_err(|e| self.conn_error(e.to_string()))?;
+        Ok(auth.success())
+    }
+
+    /// Try publickey authentication with each identity held by the session
+    /// ssh-agent (unix: `SSH_AUTH_SOCK`, windows: pageant). Returns `false`
+    /// when no agent is reachable or none of its identities is accepted.
+    async fn try_agent(
+        &self,
+        handle: &mut ssh_client::Handle<HostKeyHandler>,
+        username: &str,
+    ) -> bool {
+        #[cfg(unix)]
+        let Ok(agent) = AgentClient::connect_env().await else {
+            return false;
+        };
+        #[cfg(windows)]
+        let Ok(agent) = AgentClient::connect_pageant().await else {
+            return false;
+        };
+        // Box the platform-specific stream so the rest of the function is
+        // shared between platforms.
+        let mut agent = agent.dynamic();
+
+        let Ok(identities) = agent.request_identities().await else {
+            return false;
+        };
+        for identity in identities {
+            let key = identity.public_key().into_owned();
+            match handle
+                .authenticate_publickey_with(username, key, None, &mut agent)
+                .await
+            {
+                Ok(auth) if auth.success() => return true,
+                // The server rejected this identity; try the next one.
+                Ok(_) => {}
+                // The agent refused to sign (e.g. locked); stop here.
+                Err(_) => return false,
+            }
+        }
+        false
     }
 
     /// Build a connection-phase error addressed to the server host.
@@ -615,6 +714,36 @@ impl SftpFs {
         }
         Ok(entries)
     }
+}
+
+// ---------------------------------------------------------------------------
+// Default identity discovery
+// ---------------------------------------------------------------------------
+
+/// The identity file names `ssh` tries by default, in that order.
+const DEFAULT_IDENTITY_FILES: [&str; 3] = ["id_ed25519", "id_ecdsa", "id_rsa"];
+
+/// The default identity files in `~/.ssh`, in OpenSSH's try order.
+///
+/// Returns an empty list when the home directory cannot be determined.
+fn default_identity_files() -> Vec<PathBuf> {
+    let Some(home) = dirs::home_dir() else {
+        return Vec::new();
+    };
+    let ssh_dir = home.join(".ssh");
+    DEFAULT_IDENTITY_FILES
+        .iter()
+        .map(|name| ssh_dir.join(name))
+        .collect()
+}
+
+/// The local user name, as `ssh` uses it when no user is given.
+fn local_username() -> Option<String> {
+    #[cfg(unix)]
+    let name = std::env::var("USER");
+    #[cfg(windows)]
+    let name = std::env::var("USERNAME");
+    name.ok().filter(|name| !name.is_empty())
 }
 
 /// Convert SFTP file attributes into our [`Metadata`].
@@ -1641,5 +1770,42 @@ mod tests {
         let meta = attrs_to_metadata(&file);
         assert!(meta.is_file());
         assert_eq!(meta.size, 7);
+    }
+
+    #[test]
+    fn default_identity_files_follow_openssh_order() {
+        let dir = tempfile::tempdir().unwrap();
+        temp_env::with_var("HOME", Some(dir.path()), || {
+            let files = default_identity_files();
+            // OpenSSH's try order, all under the home .ssh directory.
+            let ssh_dir = dir.path().join(".ssh");
+            assert_eq!(files[0], ssh_dir.join("id_ed25519"));
+            assert_eq!(files[1], ssh_dir.join("id_ecdsa"));
+            assert_eq!(files[2], ssh_dir.join("id_rsa"));
+        });
+    }
+
+    #[test]
+    fn local_username_reads_env() {
+        #[cfg(unix)]
+        temp_env::with_var("USER", Some("testuser"), || {
+            assert_eq!(local_username().as_deref(), Some("testuser"))
+        });
+        #[cfg(windows)]
+        temp_env::with_var("USERNAME", Some("testuser"), || {
+            assert_eq!(local_username().as_deref(), Some("testuser"))
+        });
+    }
+
+    #[test]
+    fn local_username_empty_env_is_none() {
+        #[cfg(unix)]
+        temp_env::with_var("USER", Some(""), || {
+            assert_eq!(local_username(), None)
+        });
+        #[cfg(windows)]
+        temp_env::with_var("USERNAME", Some(""), || {
+            assert_eq!(local_username(), None)
+        });
     }
 }

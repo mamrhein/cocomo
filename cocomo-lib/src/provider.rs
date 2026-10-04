@@ -219,7 +219,9 @@ impl Provider {
     ///    type and host (and explicit port) match the URL.
     /// 3. otherwise `secrets` (environment, then keychain) and finally an
     ///    interactive `prompter` prompt on a TTY; on a non-TTY (or without a
-    ///    prompter) the resolution fails with [`ProviderError::AuthRequired`].
+    ///    prompter) the resolution fails with [`ProviderError::AuthRequired`],
+    ///    except for `sftp`, which can still authenticate at connect time via
+    ///    an ssh-agent or the default identity files in `~/.ssh`.
     ///
     /// A matching profile's `tls` key overrides the TLS default implied by
     /// the scheme (`ftps`/`webdavs`), and a profile without any secret
@@ -330,9 +332,9 @@ impl Provider {
     /// (see [`Provider::resolve`]).
     ///
     /// Authentication is key-based when a `key_file` setting (profile) or
-    /// secret resolves, with a password fallback. Neither implicit
-    /// anonymous access nor implicit ssh-agent/default-identity access is
-    /// attempted (OQ3).
+    /// secret resolves, with a password fallback. When neither is available
+    /// the resolution still succeeds: at connect time `SftpFs` falls back
+    /// to ssh-agent identities and the default identity files in `~/.ssh`.
     fn resolve_sftp(
         url: &Url,
         store: Option<&ProfileStore>,
@@ -379,9 +381,9 @@ impl Provider {
         }
         if profile.is_none() {
             // Step 3: environment/keychain fallback, then a one-time TTY
-            // prompt. Without a secret or key file there is no
-            // authentication to attempt, and anonymous access would be
-            // implicit (OQ3).
+            // prompt. Without a secret or key file the resolution still
+            // succeeds: SftpFs falls back to ssh-agent identities and the
+            // default identity files in ~/.ssh at connect time.
             user = secrets.get(&url.scheme, "user");
             secret = secrets.get(&url.scheme, "password");
             if secret.is_none() && prompter.is_tty() {
@@ -390,9 +392,6 @@ impl Provider {
                 }
                 secret = prompter.prompt_secret(&endpoint);
             }
-        }
-        if secret.is_none() && key_file.is_none() {
-            return Err(ProviderError::AuthRequired { endpoint });
         }
         let label = profile
             .as_ref()
@@ -1786,7 +1785,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_sftp_without_credentials_fails_on_non_tty() {
+    fn resolve_sftp_without_credentials_resolves_on_non_tty() {
         // `with_vars` also guarantees the fallback variables are unset
         // for this assertion (the mutex serializes env mutations).
         temp_env::with_vars(
@@ -1795,15 +1794,21 @@ mod tests {
                 ("COCOMO_SFTP_PASSWORD", None::<&str>),
             ],
             || {
-                let error = Provider::resolve(
+                // Without credentials the resolution still succeeds: the
+                // connection may authenticate at connect time via an
+                // ssh-agent or the default identity files in ~/.ssh.
+                let provider = Provider::resolve(
                     &ftp_url("sftp://sftp.example.com/pub/src"),
                     None,
                     None,
                     &Secrets::with_keychain(false),
                     &NullPrompter,
                 )
-                .unwrap_err();
-                assert!(matches!(error, ProviderError::AuthRequired { .. }));
+                .unwrap();
+                let config = sftp_config(&provider);
+                assert_eq!(config.username, "");
+                assert!(config.password.is_none());
+                assert!(config.key_file.is_none());
             },
         );
     }
