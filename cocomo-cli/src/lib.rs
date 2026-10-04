@@ -367,6 +367,20 @@ pub enum CliError {
     FsErrors(Vec<FsError>),
 }
 
+/// Convert a filesystem error into a [`CliError`], printing the individual
+/// errors of an incomplete operation to stderr before returning them.
+fn fs_error_to_cli(e: FsError) -> CliError {
+    match e {
+        FsError::Incomplete { errors } => {
+            for err in &errors {
+                eprintln!("error: {err}");
+            }
+            CliError::FsErrors(errors)
+        }
+        other => CliError::Fs(other),
+    }
+}
+
 /// Maps CLI endpoint arguments (paths or URLs) to filesystem instances.
 ///
 /// The production binary resolves endpoints to live [`Provider`] instances
@@ -892,17 +906,25 @@ async fn dir_sync<R: EndpointResolver>(
     let result = match pair {
         EndpointPair::Shared(fs) => {
             if args.dry_run {
-                plan_sync(&*fs, &left, &right, &rules).await?
+                plan_sync(&*fs, &left, &right, &rules)
+                    .await
+                    .map_err(fs_error_to_cli)?
             } else {
-                sync_directories(&*fs, &left, &right, &rules).await?
+                sync_directories(&*fs, &left, &right, &rules)
+                    .await
+                    .map_err(fs_error_to_cli)?
             }
         }
         EndpointPair::Separate(left_fs, right_fs) => {
             let pair = FsPair::Separate(&*left_fs, &*right_fs);
             if args.dry_run {
-                plan_sync_pair(pair, &left, &right, &rules).await?
+                plan_sync_pair(pair, &left, &right, &rules)
+                    .await
+                    .map_err(fs_error_to_cli)?
             } else {
-                sync_directories_pair(pair, &left, &right, &rules).await?
+                sync_directories_pair(pair, &left, &right, &rules)
+                    .await
+                    .map_err(fs_error_to_cli)?
             }
         }
     };
@@ -1316,7 +1338,8 @@ async fn snapshot_capture<R: EndpointResolver>(
         resolve_endpoint(resolver, &args.path, args.profile.as_deref())?;
     let snapshot =
         capture_snapshot_node(&*fs, resolver.provider_id(&*fs), &in_path)
-            .await?;
+            .await
+            .map_err(fs_error_to_cli)?;
 
     let output_path = args.output.clone().unwrap_or_else(|| {
         let dir_name = in_path

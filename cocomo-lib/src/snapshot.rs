@@ -38,7 +38,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
-    Result,
+    FsError, Result,
     fs::{FileSystem, NodeFileSystem},
     node::Node,
     scan::{
@@ -297,6 +297,14 @@ pub async fn capture_snapshot(
     let scan_result =
         scan_directory(fs, root_path, &ScanConfig::default()).await?;
 
+    // A partial scan would produce a misleading snapshot; refuse to capture
+    // one that is missing entries.
+    if !scan_result.errors.is_empty() {
+        return Err(FsError::Incomplete {
+            errors: scan_result.errors,
+        });
+    }
+
     // Populate snapshot entries from the scan result.
     collect_entries_from_scan(root_path, &scan_result, &mut snapshot);
 
@@ -326,6 +334,14 @@ where
     // because `strip_prefix` fails on an already-relative path.
     let scan_result =
         scan_directory_node(fs, root_path, &ScanConfig::default()).await?;
+
+    // A partial scan would produce a misleading snapshot; refuse to capture
+    // one that is missing entries.
+    if !scan_result.errors.is_empty() {
+        return Err(FsError::Incomplete {
+            errors: scan_result.errors,
+        });
+    }
 
     // Populate snapshot entries from the scan result.
     collect_entries_from_scan(root_path, &scan_result, &mut snapshot);
@@ -507,7 +523,7 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
-    use crate::{local::LocalFs, mockfs::MockFs};
+    use crate::{FsOperation, local::LocalFs, mockfs::MockFs};
 
     #[test]
     fn provider_id_new() {
@@ -765,6 +781,66 @@ mod tests {
                 .get_entry(Path::new(rel))
                 .unwrap_or_else(|| panic!("snapshot lacks {rel:?}"));
             assert_eq!(entry.is_dir, rel == "sub");
+        }
+    }
+
+    #[tokio::test]
+    async fn capture_snapshot_node_with_scan_errors_returns_incomplete() {
+        let fs = MockFs::new("mock")
+            .with_dir("/root")
+            .with_file("/root/a.txt", "alpha")
+            .with_dir("/root/sub")
+            .with_error(
+                "/root/sub",
+                FsError::PermissionDenied {
+                    operation: FsOperation::ReadDir,
+                    path: PathBuf::from("/root/sub"),
+                },
+            );
+
+        let result = capture_snapshot_node(
+            &fs,
+            ProviderId::local(),
+            Path::new("/root"),
+        )
+        .await;
+
+        match result {
+            Err(FsError::Incomplete { errors }) => {
+                assert_eq!(errors.len(), 1);
+                assert!(matches!(errors[0], FsError::PermissionDenied { .. }));
+            }
+            other => panic!("expected Err(Incomplete), got {other:?}"),
+        }
+    }
+
+    #[allow(deprecated)]
+    #[tokio::test]
+    async fn capture_snapshot_with_scan_errors_returns_incomplete() {
+        let fs: Arc<dyn FileSystem> = Arc::new(
+            MockFs::new("mock")
+                .with_dir("/root")
+                .with_file("/root/a.txt", "alpha")
+                .with_dir("/root/sub")
+                .with_error(
+                    "/root/sub",
+                    FsError::PermissionDenied {
+                        operation: FsOperation::ReadDir,
+                        path: PathBuf::from("/root/sub"),
+                    },
+                ),
+        );
+
+        let result =
+            capture_snapshot(&fs, ProviderId::local(), Path::new("/root"))
+                .await;
+
+        match result {
+            Err(FsError::Incomplete { errors }) => {
+                assert_eq!(errors.len(), 1);
+                assert!(matches!(errors[0], FsError::PermissionDenied { .. }));
+            }
+            other => panic!("expected Err(Incomplete), got {other:?}"),
         }
     }
 }

@@ -130,6 +130,11 @@ pub async fn scan_directory(
         let mut dir_stream = match fs.read_dir(&dir_path).await {
             Ok(s) => s,
             Err(e) => {
+                // A root that cannot be listed means the endpoint is
+                // unusable; abort instead of returning an empty result.
+                if depth == 0 {
+                    return Err(e);
+                }
                 result.errors.push(e);
                 continue;
             }
@@ -275,6 +280,11 @@ where
         // Populate children via the node API.
         let dir_id_typed = crate::identity::DirId::<u64>::new(*dir_id.get());
         if let Err(e) = fs.read_dir_node(dir_id_typed).await {
+            // A root that cannot be listed means the endpoint is unusable;
+            // abort instead of returning an empty result.
+            if depth == 0 {
+                return Err(e);
+            }
             result.errors.push(e);
             continue;
         }
@@ -440,10 +450,17 @@ fn build_tree(flat: Vec<ScanEntry>) -> Vec<ScanEntry> {
 
 #[cfg(test)]
 mod tests {
-    use std::{env, process};
+    use std::{env, ops::Range, path::Path, pin::Pin, process};
+
+    use async_trait::async_trait;
+    use bytes::Bytes;
+    use futures::Stream;
 
     use super::*;
-    use crate::local::LocalFs;
+    use crate::{
+        DirId, FileId, FileSystemId, FsError, FsFile, FsOperation, MockFs,
+        OpenMode, fs::DirStream, local::LocalFs,
+    };
 
     async fn setup_test_dir() -> PathBuf {
         let base =
@@ -674,5 +691,257 @@ mod tests {
         assert!(result.entries.is_empty());
 
         fs_err::remove_dir_all(&base).ok();
+    }
+
+    // -----------------------------------------------------------------
+    // Root-level error propagation
+    // -----------------------------------------------------------------
+
+    /// A [`FileSystem`] that fails every `read_dir` but delegates all other
+    /// operations to the wrapped [`MockFs`]. Simulates a provider whose
+    /// connection drops after the root stat succeeds.
+    struct FailingReadDir(MockFs);
+
+    #[async_trait]
+    impl FileSystem for FailingReadDir {
+        async fn metadata(&self, path: &Path) -> Result<Metadata> {
+            self.0.metadata(path).await
+        }
+
+        async fn read_dir(&self, path: &Path) -> Result<DirStream<'_>> {
+            Err(FsError::Io {
+                operation: FsOperation::ReadDir,
+                path: path.to_path_buf(),
+                message: "connection lost".to_string(),
+            })
+        }
+
+        async fn open(
+            &self,
+            path: &Path,
+            mode: OpenMode,
+        ) -> Result<Box<dyn FsFile>> {
+            self.0.open(path, mode).await
+        }
+
+        async fn read(
+            &self,
+            path: &Path,
+            range: Option<Range<u64>>,
+        ) -> Result<Bytes> {
+            self.0.read(path, range).await
+        }
+
+        async fn read_stream(
+            &self,
+            path: &Path,
+            range: Option<Range<u64>>,
+        ) -> Result<Pin<Box<dyn Stream<Item = Result<Bytes>> + Send>>>
+        {
+            self.0.read_stream(path, range).await
+        }
+
+        async fn write(&self, path: &Path, data: Bytes) -> Result<()> {
+            self.0.write(path, data).await
+        }
+
+        async fn create_dir(&self, path: &Path) -> Result<()> {
+            self.0.create_dir(path).await
+        }
+
+        async fn remove(&self, path: &Path) -> Result<()> {
+            self.0.remove(path).await
+        }
+
+        async fn remove_all(&self, path: &Path) -> Result<()> {
+            self.0.remove_all(path).await
+        }
+
+        async fn rename(&self, src: &Path, dst: &Path) -> Result<()> {
+            self.0.rename(src, dst).await
+        }
+
+        async fn copy(&self, src: &Path, dst: &Path) -> Result<()> {
+            self.0.copy(src, dst).await
+        }
+
+        async fn read_link(&self, path: &Path) -> Result<PathBuf> {
+            self.0.read_link(path).await
+        }
+
+        async fn symlink(&self, target: &Path, link: &Path) -> Result<()> {
+            self.0.symlink(target, link).await
+        }
+
+        fn label(&self) -> &str {
+            self.0.label()
+        }
+    }
+
+    /// A [`NodeFileSystem`] that fails every `read_dir_node` but delegates
+    /// all other operations to the wrapped [`MockFs`]. Simulates a provider
+    /// whose connection drops after the root resolves.
+    struct FailingReadDirNode(MockFs);
+
+    #[async_trait]
+    impl NodeFileSystem for FailingReadDirNode {
+        type FsId = u64;
+        type Nid = u64;
+        type Error = FsError;
+
+        fn id(&self) -> FileSystemId<Self::FsId> {
+            self.0.id()
+        }
+
+        fn label_node(&self) -> &str {
+            self.0.label_node()
+        }
+
+        async fn resolve_path(
+            &self,
+            path: &Path,
+        ) -> Result<NodeId<Self::Nid>> {
+            self.0.resolve_path(path).await
+        }
+
+        async fn resolve_symlink(
+            &self,
+            id: NodeId<Self::Nid>,
+        ) -> Result<NodeId<Self::Nid>> {
+            self.0.resolve_symlink(id).await
+        }
+
+        fn get_node(&self, id: NodeId<Self::Nid>) -> Result<Arc<Node>> {
+            self.0.get_node(id)
+        }
+
+        fn node_metadata(&self, id: NodeId<Self::Nid>) -> Result<Metadata> {
+            self.0.node_metadata(id)
+        }
+
+        fn set_node_hash(
+            &self,
+            id: NodeId<Self::Nid>,
+            hash: String,
+        ) -> Result<()> {
+            self.0.set_node_hash(id, hash)
+        }
+
+        async fn read_dir_node(&self, _id: DirId<Self::Nid>) -> Result<()> {
+            Err(FsError::Io {
+                operation: FsOperation::ReadDir,
+                path: PathBuf::from("/data"),
+                message: "connection lost".to_string(),
+            })
+        }
+
+        async fn open_node(
+            &self,
+            id: FileId<Self::Nid>,
+            mode: OpenMode,
+        ) -> Result<Box<dyn FsFile>> {
+            self.0.open_node(id, mode).await
+        }
+
+        async fn read_node(
+            &self,
+            id: FileId<Self::Nid>,
+            range: Option<Range<u64>>,
+        ) -> Result<Bytes> {
+            self.0.read_node(id, range).await
+        }
+
+        async fn read_stream_node(
+            &self,
+            id: FileId<Self::Nid>,
+            range: Option<Range<u64>>,
+        ) -> Result<Pin<Box<dyn Stream<Item = Result<Bytes>> + Send>>>
+        {
+            self.0.read_stream_node(id, range).await
+        }
+    }
+
+    #[tokio::test]
+    async fn scan_root_read_dir_error_aborts() {
+        let fs: Arc<dyn FileSystem> = Arc::new(FailingReadDir(
+            MockFs::new("mock")
+                .with_dir("/data")
+                .with_file("/data/a.txt", "alpha"),
+        ));
+
+        let result =
+            scan_directory(&fs, Path::new("/data"), &ScanConfig::default())
+                .await;
+
+        assert!(matches!(result, Err(FsError::Io { .. })));
+    }
+
+    #[tokio::test]
+    async fn scan_subdir_read_dir_error_is_collected() {
+        let fs: Arc<dyn FileSystem> = Arc::new(
+            MockFs::new("mock")
+                .with_dir("/data")
+                .with_file("/data/a.txt", "alpha")
+                .with_dir("/data/sub")
+                .with_error(
+                    "/data/sub",
+                    FsError::PermissionDenied {
+                        operation: FsOperation::ReadDir,
+                        path: PathBuf::from("/data/sub"),
+                    },
+                ),
+        );
+
+        let result =
+            scan_directory(&fs, Path::new("/data"), &ScanConfig::default())
+                .await
+                .unwrap();
+
+        assert_eq!(result.errors.len(), 1);
+        assert!(matches!(result.errors[0], FsError::PermissionDenied { .. }));
+    }
+
+    #[tokio::test]
+    async fn node_scan_root_read_dir_error_aborts() {
+        let fs = FailingReadDirNode(
+            MockFs::new("mock")
+                .with_dir("/data")
+                .with_file("/data/a.txt", "alpha"),
+        );
+
+        let result = scan_directory_node(
+            &fs,
+            Path::new("/data"),
+            &ScanConfig::default(),
+        )
+        .await;
+
+        assert!(matches!(result, Err(FsError::Io { .. })));
+    }
+
+    #[tokio::test]
+    async fn node_scan_subdir_error_is_collected() {
+        let fs = MockFs::new("mock")
+            .with_dir("/data")
+            .with_file("/data/a.txt", "alpha")
+            .with_dir("/data/sub")
+            .with_error(
+                "/data/sub",
+                FsError::PermissionDenied {
+                    operation: FsOperation::ReadDir,
+                    path: PathBuf::from("/data/sub"),
+                },
+            );
+
+        let result = scan_directory_node(
+            &fs,
+            Path::new("/data"),
+            &ScanConfig::default(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.errors.len(), 1);
+        assert!(matches!(result.errors[0], FsError::PermissionDenied { .. }));
     }
 }

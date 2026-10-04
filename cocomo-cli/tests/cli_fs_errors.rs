@@ -223,6 +223,36 @@ async fn dir_sync_missing_root_returns_fs_error() {
     }
 }
 
+#[tokio::test]
+async fn dir_sync_non_dry_run_aborts_on_mid_walk_error() {
+    // Without `--dry-run` the sync must refuse to execute on top of an
+    // incomplete comparison instead of transferring a partial plan.
+    let mock = MockFs::new("mock")
+        .with_dir("/left")
+        .with_file("/left/left_only.txt", "only left")
+        .with_dir("/left/blocked")
+        .with_error(
+            "/left/blocked",
+            FsError::PermissionDenied {
+                operation: FsOperation::ReadDir,
+                path: PathBuf::from("/left/blocked"),
+            },
+        )
+        .with_dir("/right");
+
+    let result =
+        run_with_mock(mock, &["cocomo", "dir", "sync", "/left", "/right"])
+            .await;
+
+    match result {
+        Err(CliError::FsErrors(errors)) => {
+            assert_eq!(errors.len(), 1);
+            assert!(matches!(errors[0], FsError::PermissionDenied { .. }));
+        }
+        other => panic!("expected FsErrors, got {other:?}"),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // text compare
 // ---------------------------------------------------------------------------
@@ -335,4 +365,45 @@ async fn snapshot_capture_clean_tree_succeeds() {
         other => panic!("expected Ok(NoDiffs), got {other:?}"),
     }
     assert!(output.exists());
+}
+
+#[tokio::test]
+async fn snapshot_capture_mid_walk_error_writes_no_file() {
+    // A partial scan must abort the capture before any snapshot file is
+    // written, so no misleading empty snapshot ends up on disk.
+    let tmp = tempfile::TempDir::new().unwrap();
+    let output = tmp.path().join("data.snap");
+
+    let mock = MockFs::new("mock")
+        .with_dir("/data")
+        .with_file("/data/a.txt", "alpha")
+        .with_dir("/data/sub")
+        .with_error(
+            "/data/sub",
+            FsError::PermissionDenied {
+                operation: FsOperation::ReadDir,
+                path: PathBuf::from("/data/sub"),
+            },
+        );
+
+    let result = run_with_mock(
+        mock,
+        &[
+            "cocomo",
+            "snapshot",
+            "capture",
+            "/data",
+            output.to_str().unwrap(),
+        ],
+    )
+    .await;
+
+    match result {
+        Err(CliError::FsErrors(errors)) => {
+            assert_eq!(errors.len(), 1);
+            assert!(matches!(errors[0], FsError::PermissionDenied { .. }));
+        }
+        other => panic!("expected FsErrors, got {other:?}"),
+    }
+    assert!(!output.exists());
 }

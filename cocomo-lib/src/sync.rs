@@ -229,6 +229,15 @@ where
     let mut result =
         plan_sync_pair(pair, left_path, right_path, rules).await?;
 
+    // Refuse to execute when the planning comparison carried errors: a
+    // missing entry could turn a mirror into a mass deletion. Dry runs keep
+    // the errors in the result so the caller can surface them.
+    if !rules.dry_run && !result.errors.is_empty() {
+        return Err(crate::FsError::Incomplete {
+            errors: std::mem::take(&mut result.errors),
+        });
+    }
+
     if rules.dry_run || result.planned.is_empty() {
         result.transfer = Some(TransferResult::default());
         return Ok(result);
@@ -594,7 +603,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-    use crate::{LocalFs, MockFs, fs::FileSystem};
+    use crate::{FsError, FsOperation, LocalFs, MockFs, fs::FileSystem};
 
     /// Read a file's content from a `MockFs` tree.
     async fn mock_content(fs: &MockFs, path: &str) -> Vec<u8> {
@@ -1169,5 +1178,93 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn sync_pair_refuses_execution_when_comparison_has_errors() {
+        // The left side has a subdirectory that cannot be read, so the
+        // planning comparison carries an error. Executing a mirror on top
+        // of an incomplete plan could delete entries that were never seen,
+        // so the sync must abort.
+        let left_fs = MockFs::new("mock-left")
+            .with_dir("/left")
+            .with_file("/left/left_only.txt", "only left")
+            .with_dir("/left/blocked")
+            .with_error(
+                "/left/blocked",
+                FsError::PermissionDenied {
+                    operation: FsOperation::ReadDir,
+                    path: PathBuf::from("/left/blocked"),
+                },
+            );
+        let right_fs = MockFs::new("mock-right").with_dir("/right");
+
+        let rules = SyncRules {
+            operation: SyncOperation::MirrorLeft,
+            dry_run: false,
+            compare_files: true,
+            ..Default::default()
+        };
+
+        let result = sync_directories_pair(
+            FsPair::Separate(&left_fs, &right_fs),
+            Path::new("/left"),
+            Path::new("/right"),
+            &rules,
+        )
+        .await;
+
+        match result {
+            Err(FsError::Incomplete { errors }) => {
+                assert_eq!(errors.len(), 1);
+                assert!(matches!(errors[0], FsError::PermissionDenied { .. }));
+            }
+            other => panic!("expected Err(Incomplete), got {other:?}"),
+        }
+
+        // Nothing was transferred: the destination tree is untouched.
+        assert!(
+            right_fs
+                .read(Path::new("/right/left_only.txt"), None)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn sync_pair_dry_run_keeps_comparison_errors() {
+        // Dry runs never execute, so the errors stay in the result for the
+        // caller to surface instead of aborting.
+        let left_fs = MockFs::new("mock-left")
+            .with_dir("/left")
+            .with_file("/left/left_only.txt", "only left")
+            .with_dir("/left/blocked")
+            .with_error(
+                "/left/blocked",
+                FsError::PermissionDenied {
+                    operation: FsOperation::ReadDir,
+                    path: PathBuf::from("/left/blocked"),
+                },
+            );
+        let right_fs = MockFs::new("mock-right").with_dir("/right");
+
+        let rules = SyncRules {
+            operation: SyncOperation::MirrorLeft,
+            dry_run: true,
+            compare_files: true,
+            ..Default::default()
+        };
+
+        let result = sync_directories_pair(
+            FsPair::Separate(&left_fs, &right_fs),
+            Path::new("/left"),
+            Path::new("/right"),
+            &rules,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.errors.len(), 1);
+        assert!(matches!(result.errors[0], FsError::PermissionDenied { .. }));
     }
 }

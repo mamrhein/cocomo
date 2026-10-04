@@ -118,6 +118,12 @@ pub enum FsError {
         expected: &'static str,
         actual: &'static str,
     },
+
+    /// The operation could not be completed because one or more filesystem
+    /// errors occurred while walking the tree. The individual errors are
+    /// preserved so callers can report them.
+    #[error("operation incomplete due to {} filesystem error(s)", errors.len())]
+    Incomplete { errors: Vec<FsError> },
 }
 
 // ---------------------------------------------------------------------------
