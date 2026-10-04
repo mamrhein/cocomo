@@ -46,15 +46,17 @@ impl Secrets {
         Self {
             // The keychain backend only exists on macOS and can be turned
             // off entirely via `default-features = false`.
-            use_keychain: cfg!(all(feature = "keychain", target_os = "macos")),
+            #[cfg(all(feature = "keychain", target_os = "macos"))]
+            use_keychain: true,
         }
     }
 
     /// Create a password safe with the keychain lookup explicitly enabled or
     /// disabled (mainly useful for tests).
-    pub fn with_keychain(enabled: bool) -> Self {
+    pub fn with_keychain(_enabled: bool) -> Self {
         Self {
-            use_keychain: enabled,
+            #[cfg(all(feature = "keychain", target_os = "macos"))]
+            use_keychain: _enabled,
         }
     }
 
