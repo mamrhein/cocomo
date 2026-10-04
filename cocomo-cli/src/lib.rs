@@ -1126,10 +1126,12 @@ fn print_text_diff_table(diff: &TextDiff) {
 
 fn truncate(s: &str, max: usize) -> String {
     if s.len() <= max {
-        s.to_string()
-    } else {
-        format!("{}...", &s[..max.saturating_sub(3)])
+        return s.to_string();
     }
+    // The cut point may fall inside a multi-byte character, so snap down to
+    // the nearest char boundary before slicing.
+    let end = s.floor_char_boundary(max.saturating_sub(3));
+    format!("{}...", &s[..end])
 }
 
 async fn text_diff<R: EndpointResolver>(
@@ -1500,4 +1502,31 @@ async fn snapshot_diff(
     );
 
     Ok(DiffResult::HasDiffs)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::truncate;
+
+    #[test]
+    fn short_string_is_unchanged() {
+        assert_eq!(truncate("hello", 10), "hello");
+    }
+
+    #[test]
+    fn long_string_is_truncated_with_ellipsis() {
+        assert_eq!(truncate("abcdefghij", 8), "abcde...");
+    }
+
+    #[test]
+    fn cut_point_inside_multibyte_char_does_not_panic() {
+        // '✅' occupies bytes 56..59, so a naive cut at byte 57 would panic.
+        let line = format!("{}✅tail", "x".repeat(56));
+        assert_eq!(truncate(&line, 60), format!("{}...", "x".repeat(56)));
+    }
+
+    #[test]
+    fn max_smaller_than_ellipsis_returns_only_ellipsis() {
+        assert_eq!(truncate("abcdef", 2), "...");
+    }
 }
