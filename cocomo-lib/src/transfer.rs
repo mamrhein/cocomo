@@ -38,9 +38,9 @@ use crate::{DirComparison, DirEntryStatus, FsError, FsOperation};
 /// The kind of transfer operation to perform on a single entry.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TransferAction {
-    /// Copy from left to right side.
+    /// Copy to the left side (from the right).
     CopyLeft,
-    /// Copy from right to left side.
+    /// Copy to the right side (from the left).
     CopyRight,
     /// Copy from center to both left and right (3-way merge).
     CopyCenter,
@@ -48,9 +48,9 @@ pub enum TransferAction {
     DeleteLeft,
     /// Delete from the right side.
     DeleteRight,
-    /// Move from left to right side.
+    /// Move to the left side (from the right).
     MoveLeft,
-    /// Move from right to left side.
+    /// Move to the right side (from the left).
     MoveRight,
 }
 
@@ -58,13 +58,15 @@ impl TransferAction {
     /// Return a human-readable label for this action.
     pub fn label(&self) -> &'static str {
         match self {
-            TransferAction::CopyLeft => "copy left → right",
-            TransferAction::CopyRight => "copy right → left",
+            // The variant names the destination side, so the label shows
+            // the data flow in the opposite direction.
+            TransferAction::CopyLeft => "copy right → left",
+            TransferAction::CopyRight => "copy left → right",
             TransferAction::CopyCenter => "copy center → both",
             TransferAction::DeleteLeft => "delete left",
             TransferAction::DeleteRight => "delete right",
-            TransferAction::MoveLeft => "move left → right",
-            TransferAction::MoveRight => "move right → left",
+            TransferAction::MoveLeft => "move right → left",
+            TransferAction::MoveRight => "move left → right",
         }
     }
 
@@ -759,9 +761,10 @@ mod tests {
 
     #[test]
     fn transfer_action_labels() {
-        assert_eq!(TransferAction::CopyLeft.label(), "copy left → right");
+        // Labels name the data flow; the variant names the destination.
+        assert_eq!(TransferAction::CopyLeft.label(), "copy right → left");
         assert_eq!(TransferAction::DeleteRight.label(), "delete right");
-        assert_eq!(TransferAction::MoveLeft.label(), "move left → right");
+        assert_eq!(TransferAction::MoveLeft.label(), "move right → left");
     }
 
     #[test]
