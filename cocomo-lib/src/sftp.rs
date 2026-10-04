@@ -737,6 +737,19 @@ fn default_identity_files() -> Vec<PathBuf> {
         .collect()
 }
 
+/// Whether key-based authentication can succeed without a password: an
+/// ssh-agent is reachable (unix: `SSH_AUTH_SOCK` set) or one of the default
+/// identity files in `~/.ssh` exists. Mirrors the fallback order of
+/// [`SftpFs::authenticate`] so callers can skip a pointless password prompt.
+pub(crate) fn key_auth_fallback_available() -> bool {
+    #[cfg(unix)]
+    let agent =
+        std::env::var("SSH_AUTH_SOCK").is_ok_and(|sock| !sock.is_empty());
+    #[cfg(not(unix))]
+    let agent = false;
+    agent || default_identity_files().iter().any(|p| p.is_file())
+}
+
 /// The local user name, as `ssh` uses it when no user is given.
 fn local_username() -> Option<String> {
     #[cfg(unix)]

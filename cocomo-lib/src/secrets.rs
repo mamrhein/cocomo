@@ -216,7 +216,15 @@ fn prompt_visible(prompt: &str) -> Option<String> {
 /// Read one hidden line from the terminal (never echoed, never persisted).
 #[cfg(feature = "prompt")]
 fn prompt_secret(prompt: &str) -> Option<String> {
-    rpassword::prompt_password(prompt).ok()
+    let secret = rpassword::prompt_password(prompt).ok()?;
+    // A bare Enter means "no secret", mirroring `prompt_visible`: an empty
+    // password would only be rejected by the server, while `None` lets the
+    // key-based fallbacks in `SftpFs::authenticate` run.
+    if secret.is_empty() {
+        None
+    } else {
+        Some(secret)
+    }
 }
 
 // ---------------------------------------------------------------------------

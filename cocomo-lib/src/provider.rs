@@ -51,7 +51,7 @@ use crate::{
     profile::{Profile, ProfileError, ProfileStore, ProviderType},
     s3::{S3Config, S3Fs},
     secrets::{Prompter, Secrets},
-    sftp::{SftpConfig, SftpFs},
+    sftp::{key_auth_fallback_available, SftpConfig, SftpFs},
     snapshot::ProviderId,
     url::Url,
     webdav::{WebDavConfig, WebDavFs},
@@ -383,10 +383,15 @@ impl Provider {
             // Step 3: environment/keychain fallback, then a one-time TTY
             // prompt. Without a secret or key file the resolution still
             // succeeds: SftpFs falls back to ssh-agent identities and the
-            // default identity files in ~/.ssh at connect time.
+            // default identity files in ~/.ssh at connect time. The prompt
+            // is skipped when that key-based fallback is available, so a
+            // host reachable by key does not ask for a password.
             user = secrets.get(&url.scheme, "user");
             secret = secrets.get(&url.scheme, "password");
-            if secret.is_none() && prompter.is_tty() {
+            if secret.is_none()
+                && prompter.is_tty()
+                && !key_auth_fallback_available()
+            {
                 if user.is_none() {
                     user = prompter.prompt_user(&endpoint);
                 }
@@ -1175,12 +1180,14 @@ impl Default for ProviderRegistry {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+
     use tempfile::tempdir;
 
     use super::*;
     use crate::{
         profile::{Profile, ProfileStore},
-        secrets::{NullPrompter, Secrets},
+        secrets::{NullPrompter, Prompter, Secrets},
         url::Url,
     };
 
@@ -1363,6 +1370,90 @@ mod tests {
         let profile = Profile::new("bad-sftp", ProviderType::Sftp);
         let result = Provider::from_profile(&profile);
         assert!(result.is_err());
+    }
+
+    /// A prompter that records how often it was asked for credentials.
+    #[derive(Default)]
+    struct RecordingPrompter {
+        user_prompts: Cell<usize>,
+        secret_prompts: Cell<usize>,
+    }
+
+    impl Prompter for RecordingPrompter {
+        fn is_tty(&self) -> bool {
+            true
+        }
+
+        fn prompt_user(&self, _endpoint: &str) -> Option<String> {
+            self.user_prompts.set(self.user_prompts.get() + 1);
+            None
+        }
+
+        fn prompt_secret(&self, _endpoint: &str) -> Option<String> {
+            self.secret_prompts.set(self.secret_prompts.get() + 1);
+            None
+        }
+    }
+
+    /// Resolve an SFTP URL with a recording prompter under a controlled
+    /// `HOME`, `SSH_AUTH_SOCK`, and credential environment, keeping the test
+    /// independent of the developer's own ssh setup.
+    fn resolve_sftp_controlled(
+        home: &Path,
+        agent_sock: Option<&Path>,
+        prompter: &RecordingPrompter,
+    ) -> Provider {
+        let url = Url::parse("sftp://sftp.example.com/pub").unwrap();
+        let secrets = Secrets::with_keychain(false);
+        temp_env::with_vars(
+            [
+                ("HOME", Some(home)),
+                ("SSH_AUTH_SOCK", agent_sock),
+                // Keep a developer's own credentials out of the lookup.
+                ("COCOMO_SFTP_USER", None),
+                ("COCOMO_SFTP_PASSWORD", None),
+            ],
+            || {
+                Provider::resolve_sftp(&url, None, None, &secrets, prompter)
+                    .unwrap()
+            },
+        )
+    }
+
+    #[test]
+    fn sftp_resolve_skips_prompt_when_default_identity_exists() {
+        let home = tempdir().unwrap();
+        fs_err::create_dir_all(home.path().join(".ssh")).unwrap();
+        fs_err::write(home.path().join(".ssh/id_ed25519"), "key").unwrap();
+        let prompter = RecordingPrompter::default();
+        let provider = resolve_sftp_controlled(home.path(), None, &prompter);
+        assert!(matches!(provider, Provider::Sftp(_)));
+        assert_eq!(prompter.user_prompts.get(), 0);
+        assert_eq!(prompter.secret_prompts.get(), 0);
+    }
+
+    #[test]
+    fn sftp_resolve_skips_prompt_when_agent_available() {
+        let home = tempdir().unwrap();
+        let prompter = RecordingPrompter::default();
+        let provider = resolve_sftp_controlled(
+            home.path(),
+            Some(Path::new("/tmp/agent.sock")),
+            &prompter,
+        );
+        assert!(matches!(provider, Provider::Sftp(_)));
+        assert_eq!(prompter.user_prompts.get(), 0);
+        assert_eq!(prompter.secret_prompts.get(), 0);
+    }
+
+    #[test]
+    fn sftp_resolve_prompts_when_no_key_fallback() {
+        let home = tempdir().unwrap();
+        let prompter = RecordingPrompter::default();
+        let provider = resolve_sftp_controlled(home.path(), None, &prompter);
+        assert!(matches!(provider, Provider::Sftp(_)));
+        assert_eq!(prompter.user_prompts.get(), 1);
+        assert_eq!(prompter.secret_prompts.get(), 1);
     }
 
     #[test]
