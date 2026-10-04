@@ -57,7 +57,7 @@ use crate::{
     },
     identity::{DirId, FileId, FileSystemId, NodeId},
     meta::Metadata,
-    node::Node,
+    node::{Node, NodeKind},
 };
 
 // ---------------------------------------------------------------------------
@@ -998,11 +998,18 @@ impl NodeFileSystem for FtpFs {
         let dir_node = self.get_node(dir_id.as_node_id())?;
         let dir_path = dir_node.path();
 
-        // Verify it is actually a directory.
-        if !dir_path.is_dir() {
+        // Verify it is actually a directory. The node kind comes from remote
+        // metadata; checking the local path would inspect the wrong
+        // filesystem.
+        if !dir_node.kind().is_directory() {
             return Err(FsError::WrongKind {
                 expected: "directory",
-                actual: "file",
+                actual: match dir_node.kind() {
+                    NodeKind::File => "file",
+                    NodeKind::Symlink { .. } => "symlink",
+                    NodeKind::Special => "special",
+                    NodeKind::Directory { .. } => "directory",
+                },
             });
         }
 

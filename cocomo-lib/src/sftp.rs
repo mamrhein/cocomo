@@ -1182,11 +1182,18 @@ impl NodeFileSystem for SftpFs {
         let dir_node = self.get_node(dir_id.as_node_id())?;
         let dir_path = dir_node.path();
 
-        // Verify it is actually a directory.
-        if !dir_path.is_dir() {
+        // Verify it is actually a directory. The node kind comes from remote
+        // lstat metadata; checking the local path would inspect the wrong
+        // filesystem.
+        if !dir_node.kind().is_directory() {
             return Err(FsError::WrongKind {
                 expected: "directory",
-                actual: "file",
+                actual: match dir_node.kind() {
+                    NodeKind::File => "file",
+                    NodeKind::Symlink { .. } => "symlink",
+                    NodeKind::Special => "special",
+                    NodeKind::Directory { .. } => "directory",
+                },
             });
         }
 
@@ -1739,6 +1746,68 @@ mod tests {
             fs.get_node(NodeId::new(id)).unwrap().cached_hash(),
             Some("abc123"),
         );
+    }
+
+    #[test]
+    fn sftpfs_read_dir_node_on_file_returns_wrong_kind() {
+        let config = make_config();
+        let fs = SftpFs::new("test", config);
+
+        // A remote path that does not exist locally; the kind check must
+        // rely on the node, not the local filesystem.
+        let path = PathBuf::from("/remote-only/file.txt");
+        assert!(!path.is_dir());
+        let node = Node::file(
+            "file.txt".into(),
+            path.clone(),
+            Metadata::file(100, Utc::now()),
+        );
+        let id = fs.cache_node(node);
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(fs.read_dir_node(DirId::new(id)));
+
+        match result {
+            Err(FsError::WrongKind { expected, actual }) => {
+                assert_eq!(expected, "directory");
+                assert_eq!(actual, "file");
+            }
+            other => panic!("expected WrongKind, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sftpfs_read_dir_node_on_dir_ignores_local_path() {
+        // Regression test: the kind check must not consult the local
+        // filesystem. A remote directory whose path does not exist locally
+        // must pass the kind check and fail later at the connection step.
+        let config = SftpConfig {
+            host: "127.0.0.1".into(),
+            port: 1, // Port 1 is typically refused immediately.
+            username: "user".into(),
+            password: Some("pass".into()),
+            key_file: None,
+            root_path: None,
+        };
+        let fs = SftpFs::new("test", config);
+
+        let path = PathBuf::from("/remote-only/dir");
+        assert!(!path.is_dir());
+        let node =
+            Node::directory("dir".into(), path, Metadata::dir(Utc::now()));
+        let id = fs.cache_node(node);
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(fs.read_dir_node(DirId::new(id)));
+
+        // The kind check passed; the failure comes from the missing server.
+        match result {
+            Err(FsError::WrongKind { .. }) => {
+                panic!("local path check leaked into remote kind check")
+            }
+            Err(_) => {}
+            Ok(_) => panic!("expected connection error"),
+        }
     }
 
     #[test]
