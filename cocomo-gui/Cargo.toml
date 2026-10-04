@@ -6,25 +6,24 @@
 name = "cocomo-gui"
 version = "0.0.1"
 edition = "2024"
-authors = ["Michael Amrhein <michael@adrhinum.de>"]
 description = "GUI-App: COmpare, COpy & MOve directories and files."
+documentation = "https://docs.rs/cocomo-gui/"
 readme = "../README.md"
 homepage = "https://github.com/mamrhein/cocomo"
 repository = "https://github.com/mamrhein/cocomo"
-documentation = "https://docs.rs/cocomo-gui/"
 license-file = "../LICENSE.TXT"
-keywords = ["directory", "file", "compare", "copy", "move"]
-categories = ["gui", "filesystem"]
+keywords = ["compare", "copy", "directory", "file", "move"]
+categories = ["filesystem", "gui"]
 
 [[bin]]
 name = "cocomo-gui"
 path = "src/main.rs"
 
 [dependencies]
+anyhow = "1"
 cocomo-lib = { path = "../cocomo-lib" }
+dirs = "6"
 gpui-pre = "*"
 gpui-pre-platform = "*"
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
-anyhow = "1"
 log = "0.4"
-dirs = "6"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

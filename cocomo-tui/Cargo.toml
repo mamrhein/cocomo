@@ -2,14 +2,13 @@
 name = "cocomo-tui"
 version = "0.0.1"
 edition = "2024"
-authors = ["Michael Amrhein <michael@adrhinum.de>"]
 description = "TUI-App: COmpare, COpy & MOve directories and files."
+documentation = "https://docs.rs/cocomo-tui/"
 readme = "../README.md"
 homepage = "https://github.com/mamrhein/cocomo"
 repository = "https://github.com/mamrhein/cocomo"
-documentation = "https://docs.rs/cocomo-tui/"
 license-file = "../LICENSE.TXT"
-keywords = ["directory", "file", "compare", "copy", "move"]
+keywords = ["compare", "copy", "directory", "file", "move"]
 categories = ["command-line-utilities", "filesystem"]
 
 [[bin]]
@@ -17,12 +16,22 @@ name = "cocomo-tui"
 path = "src/main.rs"
 
 [dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
 cocomo-lib = { path = "../cocomo-lib" }
 crossterm = "0.29"
 dirs = "6"
-ratatui = { version = "0.30", default-features = false, features = [
+ratatui = {
+  version = "0.30",
+  default-features = false,
+  features = [
     "crossterm_0_29",
-] }
-tokio = { version = "1", features = ["macros", "rt-multi-thread",] }
-clap = { version = "4", features = ["derive"] }
-anyhow = "1"
+  ]
+}
+tokio = {
+  version = "1",
+  features = [
+    "macros",
+    "rt-multi-thread",
+  ]
+}
