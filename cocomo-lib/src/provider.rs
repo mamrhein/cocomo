@@ -26,10 +26,12 @@ use std::{
     collections::HashMap,
     ffi::OsStr,
     fmt,
+    net::{TcpStream, ToSocketAddrs},
     ops::Range,
     path::{Path, PathBuf},
     pin::Pin,
     sync::Arc,
+    time::Duration,
 };
 
 use async_trait::async_trait;
@@ -143,6 +145,12 @@ pub enum ProviderError {
     )]
     AuthRequired { endpoint: String },
 
+    /// The endpoint's host could not be reached at all (unresolvable,
+    /// refused, or timed out), so prompting for credentials would be
+    /// pointless.
+    #[error("cannot reach `{endpoint}`: {reason}")]
+    Unreachable { endpoint: String, reason: String },
+
     /// The explicitly selected profile does not describe the endpoint that
     /// was addressed. Mismatches are refused instead of silently resolving
     /// against a different server.
@@ -218,10 +226,12 @@ impl Provider {
     /// 2. otherwise auto-match: the first profile in `store` whose provider
     ///    type and host (and explicit port) match the URL.
     /// 3. otherwise `secrets` (environment, then keychain) and finally an
-    ///    interactive `prompter` prompt on a TTY; on a non-TTY (or without a
-    ///    prompter) the resolution fails with [`ProviderError::AuthRequired`],
-    ///    except for `sftp`, which can still authenticate at connect time via
-    ///    an ssh-agent or the default identity files in `~/.ssh`.
+    ///    interactive `prompter` prompt on a TTY, preceded by a reachability
+    ///    probe so an unreachable host fails before any credential is asked;
+    ///    on a non-TTY (or without a prompter) the resolution fails with
+    ///    [`ProviderError::AuthRequired`], except for `sftp`, which can still
+    ///    authenticate at connect time via an ssh-agent or the default
+    ///    identity files in `~/.ssh`.
     ///
     /// A matching profile's `tls` key overrides the TLS default implied by
     /// the scheme (`ftps`/`webdavs`), and a profile without any secret
@@ -312,6 +322,13 @@ impl Provider {
             user = secrets.get(&url.scheme, "user");
             secret = secrets.get(&url.scheme, "password");
             if secret.is_none() && prompter.is_tty() {
+                // A prompt is pointless when the host cannot be reached at
+                // all, so probe before asking for credentials.
+                if let (Some(host), Some(port)) =
+                    (&url.host, url.effective_port())
+                {
+                    probe_reachable(&endpoint, host, port)?;
+                }
                 if user.is_none() {
                     user = prompter.prompt_user(&endpoint);
                 }
@@ -392,6 +409,18 @@ impl Provider {
                 && prompter.is_tty()
                 && !key_auth_fallback_available()
             {
+                // A prompt is pointless when the host cannot be reached at
+                // all, so probe before asking for a password. Whether the
+                // server accepts password authentication cannot be checked:
+                // russh does not expose the auth methods a server
+                // advertises. When a public key is available (the branch
+                // skipped above), no probe runs either: the connection is
+                // simply tried with the key at connect time.
+                if let (Some(host), Some(port)) =
+                    (&url.host, url.effective_port())
+                {
+                    probe_reachable(&endpoint, host, port)?;
+                }
                 if user.is_none() {
                     user = prompter.prompt_user(&endpoint);
                 }
@@ -613,6 +642,37 @@ impl std::fmt::Debug for Provider {
             Self::WebDav(_) => f.debug_tuple("Provider::WebDav").finish(),
         }
     }
+}
+
+/// How long the pre-prompt reachability probe waits for a TCP connection.
+const REACHABILITY_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Probe whether `host` accepts TCP connections on `port`.
+///
+/// Prompting for credentials is pointless when the endpoint cannot be
+/// reached at all, so this runs right before any interactive prompt. The
+/// probe is a plain TCP connect: it verifies reachability only, not that
+/// the service on `port` speaks the expected protocol. It is deliberately
+/// blocking and bounded, like the terminal prompts it guards.
+fn probe_reachable(
+    endpoint: &str,
+    host: &str,
+    port: u16,
+) -> std::result::Result<(), ProviderError> {
+    let unreachable = |reason: String| ProviderError::Unreachable {
+        endpoint: endpoint.to_owned(),
+        reason,
+    };
+    // `connect_timeout` takes a single resolved address, so resolve the
+    // host (DNS included) first and probe the first address.
+    let addr = (host, port)
+        .to_socket_addrs()
+        .map_err(|e| unreachable(e.to_string()))?
+        .next()
+        .ok_or_else(|| unreachable("no addresses found".to_owned()))?;
+    TcpStream::connect_timeout(&addr, REACHABILITY_TIMEOUT)
+        .map(|_| ())
+        .map_err(|e| unreachable(e.to_string()))
 }
 
 /// Check whether `profile` describes the endpoint addressed by `url`.
@@ -1397,13 +1457,17 @@ mod tests {
 
     /// Resolve an SFTP URL with a recording prompter under a controlled
     /// `HOME`, `SSH_AUTH_SOCK`, and credential environment, keeping the test
-    /// independent of the developer's own ssh setup.
+    /// independent of the developer's own ssh setup. A live local listener
+    /// stands in for the SSH server so the pre-prompt reachability probe
+    /// succeeds.
     fn resolve_sftp_controlled(
         home: &Path,
         agent_sock: Option<&Path>,
         prompter: &RecordingPrompter,
     ) -> Provider {
-        let url = Url::parse("sftp://sftp.example.com/pub").unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let url = Url::parse(&format!("sftp://127.0.0.1:{port}/pub")).unwrap();
         let secrets = Secrets::with_keychain(false);
         temp_env::with_vars(
             [
@@ -1452,6 +1516,109 @@ mod tests {
         let prompter = RecordingPrompter::default();
         let provider = resolve_sftp_controlled(home.path(), None, &prompter);
         assert!(matches!(provider, Provider::Sftp(_)));
+        assert_eq!(prompter.user_prompts.get(), 1);
+        assert_eq!(prompter.secret_prompts.get(), 1);
+    }
+
+    /// Bind a loopback listener and return its port, keeping the listener
+    /// alive for the duration of the test so the reachability probe
+    /// succeeds.
+    fn reachable_loopback_port() -> (std::net::TcpListener, u16) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        (listener, port)
+    }
+
+    /// A just-released loopback port is refused immediately, so the probe
+    /// fails fast instead of waiting out its timeout.
+    fn refused_loopback_port() -> u16 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        port
+    }
+
+    #[test]
+    fn sftp_resolve_unreachable_host_fails_before_prompt() {
+        let home = tempdir().unwrap();
+        let port = refused_loopback_port();
+        let url = Url::parse(&format!("sftp://127.0.0.1:{port}/pub")).unwrap();
+        let prompter = RecordingPrompter::default();
+        let error = temp_env::with_vars(
+            [
+                ("HOME", Some(home.path())),
+                ("SSH_AUTH_SOCK", None),
+                ("COCOMO_SFTP_USER", None),
+                ("COCOMO_SFTP_PASSWORD", None),
+            ],
+            || {
+                Provider::resolve_sftp(
+                    &url,
+                    None,
+                    None,
+                    &Secrets::with_keychain(false),
+                    &prompter,
+                )
+                .unwrap_err()
+            },
+        );
+        assert!(matches!(error, ProviderError::Unreachable { .. }));
+        // The probe must fail before any credential is asked.
+        assert_eq!(prompter.user_prompts.get(), 0);
+        assert_eq!(prompter.secret_prompts.get(), 0);
+    }
+
+    #[test]
+    fn ftp_resolve_unreachable_host_fails_before_prompt() {
+        let port = refused_loopback_port();
+        let url = Url::parse(&format!("ftp://127.0.0.1:{port}/pub")).unwrap();
+        let prompter = RecordingPrompter::default();
+        let error = temp_env::with_vars(
+            vec![
+                ("COCOMO_FTP_USER", None::<&str>),
+                ("COCOMO_FTP_PASSWORD", None::<&str>),
+            ],
+            || {
+                Provider::resolve_ftp(
+                    &url,
+                    None,
+                    None,
+                    &Secrets::with_keychain(false),
+                    &prompter,
+                )
+                .unwrap_err()
+            },
+        );
+        assert!(matches!(error, ProviderError::Unreachable { .. }));
+        // The probe must fail before any credential is asked.
+        assert_eq!(prompter.user_prompts.get(), 0);
+        assert_eq!(prompter.secret_prompts.get(), 0);
+    }
+
+    #[test]
+    fn ftp_resolve_prompts_when_reachable() {
+        let (_listener, port) = reachable_loopback_port();
+        let url = Url::parse(&format!("ftp://127.0.0.1:{port}/pub")).unwrap();
+        let prompter = RecordingPrompter::default();
+        // The recording prompter answers nothing, so the run still fails
+        // with AuthRequired - but only after both prompts were asked.
+        let error = temp_env::with_vars(
+            vec![
+                ("COCOMO_FTP_USER", None::<&str>),
+                ("COCOMO_FTP_PASSWORD", None::<&str>),
+            ],
+            || {
+                Provider::resolve_ftp(
+                    &url,
+                    None,
+                    None,
+                    &Secrets::with_keychain(false),
+                    &prompter,
+                )
+                .unwrap_err()
+            },
+        );
+        assert!(matches!(error, ProviderError::AuthRequired { .. }));
         assert_eq!(prompter.user_prompts.get(), 1);
         assert_eq!(prompter.secret_prompts.get(), 1);
     }
