@@ -963,6 +963,14 @@ async fn dir_sync<R: EndpointResolver>(
             "\nTransfer complete: {} succeeded, {} failed",
             transfer.succeeded, transfer.failed,
         );
+        // A failed transfer aborts the operation: print each error and
+        // surface them as a hard failure (exit code 2).
+        if transfer.failed > 0 {
+            for err in &transfer.errors {
+                eprintln!("error: {err}");
+            }
+            return Err(CliError::FsErrors(transfer.errors.clone()));
+        }
     }
 
     Ok(DiffResult::HasDiffs)

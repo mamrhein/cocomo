@@ -238,8 +238,9 @@ where
         });
     }
 
+    // Nothing to execute: leave `transfer` as `None`, which is what marks
+    // the result as dry-run (no transfers executed).
     if rules.dry_run || result.planned.is_empty() {
-        result.transfer = Some(TransferResult::default());
         return Ok(result);
     }
 
@@ -931,6 +932,8 @@ mod tests {
         let result =
             sync_directories(&fs, &left, &right, &rules).await.unwrap();
         assert_eq!(result.planned_count(), 0);
+        // No transfers were executed, so the result must read as dry-run.
+        assert!(result.is_dry_run());
 
         fs_err::remove_dir_all(&base).ok();
     }

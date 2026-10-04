@@ -253,6 +253,53 @@ async fn dir_sync_non_dry_run_aborts_on_mid_walk_error() {
     }
 }
 
+#[tokio::test]
+async fn dir_sync_failed_transfer_returns_fs_errors() {
+    // The destination path does not exist in the tree, so the scan never
+    // touches it; only the transfer's copy hits the injected error.
+    let mock = MockFs::new("mock")
+        .with_dir("/left")
+        .with_file("/left/a.txt", "alpha")
+        .with_dir("/right")
+        .with_error(
+            "/right/a.txt",
+            FsError::PermissionDenied {
+                operation: FsOperation::Write,
+                path: PathBuf::from("/right/a.txt"),
+            },
+        );
+
+    let result =
+        run_with_mock(mock, &["cocomo", "dir", "sync", "/left", "/right"])
+            .await;
+
+    match result {
+        Err(CliError::FsErrors(errors)) => {
+            assert_eq!(errors.len(), 1);
+            assert!(matches!(errors[0], FsError::PermissionDenied { .. }));
+        }
+        other => panic!("expected FsErrors, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn dir_sync_clean_transfer_succeeds() {
+    // A fully successful transfer must not be turned into an error.
+    let mock = MockFs::new("mock")
+        .with_dir("/left")
+        .with_file("/left/a.txt", "alpha")
+        .with_dir("/right");
+
+    let result =
+        run_with_mock(mock, &["cocomo", "dir", "sync", "/left", "/right"])
+            .await;
+
+    match result {
+        Ok(DiffResult::HasDiffs) => {}
+        other => panic!("expected Ok(HasDiffs), got {other:?}"),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // text compare
 // ---------------------------------------------------------------------------
