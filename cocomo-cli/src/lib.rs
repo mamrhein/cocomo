@@ -28,6 +28,7 @@ use std::{
     sync::Arc,
 };
 
+use chrono::DateTime;
 use clap::{Parser, Subcommand, ValueEnum};
 use cocomo_lib::{
     DirEntry, FileSystem, ProviderId, TextDifference, WritableFileSystem,
@@ -154,6 +155,18 @@ pub struct DirCompareArgs {
     /// Control ANSI color output.
     #[arg(long, default_value = "auto")]
     color: ColorMode,
+    /// Show full relative path column in flat text output.
+    #[arg(long)]
+    show_path: bool,
+    /// Hide modification timestamp columns in text output.
+    #[arg(long)]
+    no_mtime: bool,
+    /// Show content hashes when available (full comparison only).
+    #[arg(long)]
+    show_hash: bool,
+    /// Suppress the summary line(s) at the end of output.
+    #[arg(long)]
+    no_summary: bool,
     /// Profile id to authenticate the addressed provider(s) with.
     #[arg(long)]
     profile: Option<String>,
@@ -598,15 +611,18 @@ async fn dir_compare<R: EndpointResolver>(
             if args.tree {
                 print_comparison_tree(&comparison, args);
             } else {
-                print_comparison_text(&comparison, args);
+                let mut stdout = std::io::stdout();
+                print_comparison_text(&comparison, args, &mut stdout);
             }
         }
         OutputFormat::Csv => print_comparison_csv(&comparison, args),
         OutputFormat::Json => print_comparison_json(&comparison, args),
     }
 
-    // Print summary.
-    print_summary(&comparison);
+    // Print summary unless suppressed via --no-summary.
+    if !args.no_summary {
+        print_summary(&comparison);
+    }
 
     // Write report file if requested.
     if let Some(ref report_path) = args.report {
@@ -730,7 +746,51 @@ fn color_code(status: DirEntryStatus) -> &'static str {
     }
 }
 
-fn print_comparison_text(comparison: &DirComparison, args: &DirCompareArgs) {
+/// Parse an RFC 3339 timestamp string and reformat it as `yyyy-mm-dd
+/// hh:mm:ss`. Falls back to the original string when parsing fails, so non-RFC
+/// 3339 values (such as the `"2024-03-15 14:30"` used in tests) are preserved.
+fn format_modified(rfc3339: &str) -> String {
+    DateTime::parse_from_rfc3339(rfc3339)
+        .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
+        .unwrap_or_else(|_| rfc3339.to_string())
+}
+
+/// Return the terminal width in columns, but only when stdout is a TTY.
+/// Returns `None` for piped or redirected output so that automated tests
+/// and CI get deterministic results.
+fn terminal_width() -> Option<usize> {
+    if !std::io::stdout().is_terminal() {
+        return None;
+    }
+    terminal_size::terminal_size().map(|size| size.0.0 as usize)
+}
+
+/// Truncate a name to fit within `width` display columns. When the name is
+/// too long, show the first `(width - 6)` characters, an ellipsis (`…`),
+/// and the last 5 characters. When `width` is too small for this pattern,
+/// fall back to a simple character-boundary truncation.
+fn truncate_name(name: &str, width: usize) -> String {
+    let name_len = name.chars().count();
+    if name_len <= width {
+        return name.to_string();
+    }
+    if width < 7 {
+        return name.chars().take(width).collect();
+    }
+    let head_len = width - 6;
+    let tail_start = name_len - 5;
+    let mut result = String::with_capacity(width);
+    result.extend(name.chars().take(head_len));
+    result.push('\u{2026}');
+    result.extend(name.chars().skip(tail_start));
+    result
+}
+
+fn print_comparison_text(
+    comparison: &DirComparison,
+    args: &DirCompareArgs,
+    output: &mut dyn Write,
+) {
     let colorizer = Colorizer::new(args.color);
     let mut entries = Vec::new();
     collect_entries(&comparison.entries, &mut entries);
@@ -743,54 +803,142 @@ fn print_comparison_text(comparison: &DirComparison, args: &DirCompareArgs) {
 
     if visible.is_empty() {
         if entries.is_empty() {
-            println!("Directories are identical.");
+            writeln!(output, "Directories are identical.").unwrap();
         } else {
-            println!("No matching entries.");
+            writeln!(output, "No matching entries.").unwrap();
         }
         return;
     }
 
+    let show_mtime = !args.no_mtime;
+    // Path column applies only to flat text mode (tree mode has its own
+    // renderer that embeds path context via indentation).
+    let show_path = args.show_path;
+    let show_hash = args.show_hash;
+
+    // Calculate the dynamic name column width based on terminal size. The
+    // fixed overhead is the status symbol, the inter-column spaces, and all
+    // non-name columns. When not on a TTY (piped/redirected output) we fall
+    // back to a 40-column default so that CI and integration tests remain
+    // deterministic.
+    // Fixed column widths (excluding the dynamic name column):
+    //   status symbol + space before name = 2
+    //   path column (if shown) = 31
+    //   size columns = 26
+    //   mtime columns (if shown) = 42
+    //   hash columns (if shown) = 34
+    let fixed_width = 2
+        + if show_path { 31 } else { 0 }
+        + 26
+        + if show_mtime { 42 } else { 0 }
+        + if show_hash { 34 } else { 0 };
+    let name_width = match terminal_width() {
+        Some(term_w) => term_w.saturating_sub(fixed_width).max(10),
+        None => 40,
+    };
+
     // Print header.
-    println!(
-        "{:5} {:<40} {:>12} {:>12}",
-        "Stat", "Name", "Left Size", "Right Size"
-    );
-    println!(
-        "{:5} {:<40} {:>12} {:>12}",
-        "----",
-        "----------------------------------------",
-        "------------",
-        "------------"
-    );
+    let mut header = format!("{} {:<w$}", "S", "Name", w = name_width);
+    if show_path {
+        header += &format!(" {:<30}", "Rel. Path");
+    }
+    header += &format!(" {:>12} {:>12}", "Left Size", "Right Size");
+    if show_mtime {
+        header +=
+            &format!(" {:<20} {:<20}", "Left Modified", "Right Modified");
+    }
+    if show_hash {
+        header += &format!(" {:<16} {:<16}", "Left Hash", "Right Hash");
+    }
+    writeln!(output, "{}", header).unwrap();
+
+    // Separator line matching column widths.
+    let sep_dashes = "-".repeat(name_width);
+    let mut sep = format!("{} {:<w$}", "-", sep_dashes, w = name_width);
+    if show_path {
+        sep += &format!(" {:<30}", "------------------------------");
+    }
+    sep += &format!(" {:>12} {:>12}", "------------", "------------");
+    if show_mtime {
+        sep += &format!(
+            " {:<20} {:<20}",
+            "--------------------", "--------------------"
+        );
+    }
+    if show_hash {
+        sep +=
+            &format!(" {:<16} {:<16}", "----------------", "----------------");
+    }
+    writeln!(output, "{}", sep).unwrap();
 
     for entry in &visible {
         let status_sym =
             colorizer.colorize(entry.status.symbol(), entry.status);
-        let name = &entry.name;
+        let is_dir = is_dir_entry(entry);
+        // Append "/" to directory names when --show-path is active (tree mode
+        // always shows it via its own renderer).
+        let display_name = if is_dir && show_path {
+            format!("{}{}", entry.name, "/")
+        } else {
+            entry.name.clone()
+        };
+        let display_name = truncate_name(&display_name, name_width);
+
         let left_size = entry
             .left
             .as_ref()
             .map(|l| format_size(l.size))
-            .unwrap_or("-".to_string());
+            .unwrap_or_else(|| "-".to_string());
         let right_size = entry
             .right
             .as_ref()
             .map(|r| format_size(r.size))
-            .unwrap_or("-".to_string());
+            .unwrap_or_else(|| "-".to_string());
 
-        if colorizer.is_active() {
-            // ANSI codes don't respect width formatting, so print the symbol
-            // without padding and rely on the space in the format string.
-            println!(
-                "{} {:<40} {:>12} {:>12}",
-                status_sym, name, left_size, right_size
-            );
-        } else {
-            println!(
-                "{:5} {:<40} {:>12} {:>12}",
-                status_sym, name, left_size, right_size
-            );
+        let mut row =
+            format!("{} {:<w$}", status_sym, display_name, w = name_width);
+
+        if show_path {
+            let path = entry
+                .left
+                .as_ref()
+                .map(|l| l.path.as_str())
+                .or_else(|| entry.right.as_ref().map(|r| r.path.as_str()))
+                .unwrap_or("");
+            row += &format!(" {:<30}", path);
         }
+
+        row += &format!(" {:>12} {:>12}", left_size, right_size);
+
+        if show_mtime {
+            let left_modified = entry
+                .left
+                .as_ref()
+                .map(|l| format_modified(l.modified.as_str()))
+                .unwrap_or_else(|| "-".to_string());
+            let right_modified = entry
+                .right
+                .as_ref()
+                .map(|r| format_modified(r.modified.as_str()))
+                .unwrap_or_else(|| "-".to_string());
+            row += &format!(" {:<20} {:<20}", left_modified, right_modified);
+        }
+
+        if show_hash {
+            let left_hash = entry
+                .left
+                .as_ref()
+                .and_then(|l| l.hash.as_deref())
+                .unwrap_or("-");
+            let right_hash = entry
+                .right
+                .as_ref()
+                .and_then(|r| r.hash.as_deref())
+                .unwrap_or("-");
+            row += &format!(" {:<16} {:<16}", left_hash, right_hash);
+        }
+
+        writeln!(output, "{}", row).unwrap();
     }
 }
 
@@ -831,6 +979,10 @@ impl DirCompareArgs {
             report_format: ReportFormatArg::Text,
             tree: true,
             color: ColorMode::Never,
+            show_path: false,
+            no_mtime: false,
+            show_hash: false,
+            no_summary: false,
             profile: None,
         }
     }
@@ -943,6 +1095,17 @@ fn render_tree_entries_to_vec(
     render_tree_entries(entries, prefix, buf, colorizer, args);
 }
 
+/// Wrapper around [`print_comparison_text`] that writes to a `Vec<u8>` buffer,
+/// enabling unit testing of text output without touching stdout.
+#[cfg(test)]
+fn render_comparison_text_to_vec(
+    comparison: &DirComparison,
+    args: &DirCompareArgs,
+    buf: &mut Vec<u8>,
+) {
+    print_comparison_text(comparison, args, buf);
+}
+
 /// Print the comparison result as a hierarchical tree (text format only).
 fn print_comparison_tree(comparison: &DirComparison, args: &DirCompareArgs) {
     let colorizer = Colorizer::new(args.color);
@@ -961,11 +1124,31 @@ fn print_comparison_csv(comparison: &DirComparison, args: &DirCompareArgs) {
     let mut entries = Vec::new();
     collect_entries(&comparison.entries, &mut entries);
 
-    println!("status,name,left_size,right_size,left_modified,right_modified");
+    let show_hash = args.show_hash;
+    // Header row with is_dir column (parity with the report module's CSV).
+    if show_hash {
+        println!(
+            "status,name,is_dir,left_size,right_size,left_modified,\
+             right_modified,left_hash,right_hash"
+        );
+    } else {
+        println!(
+            "status,name,is_dir,left_size,right_size,left_modified,
+             right_modified"
+        );
+    }
+
     for entry in &entries {
         if !should_show_entry(entry, args) {
             continue;
         }
+
+        let is_dir = entry
+            .left
+            .as_ref()
+            .map(|l| l.is_dir)
+            .or_else(|| entry.right.as_ref().map(|r| r.is_dir))
+            .unwrap_or(false);
 
         let left_size = entry
             .left
@@ -980,25 +1163,52 @@ fn print_comparison_csv(comparison: &DirComparison, args: &DirCompareArgs) {
         let left_modified = entry
             .left
             .as_ref()
-            .map(|l| l.modified.clone())
+            .map(|l| format_modified(&l.modified))
             .unwrap_or_default();
         let right_modified = entry
             .right
             .as_ref()
-            .map(|r| r.modified.clone())
+            .map(|r| format_modified(&r.modified))
             .unwrap_or_default();
 
         // Escape fields that may contain commas.
         let name = escape_csv_field(&entry.name);
-        println!(
-            "{},{},{},{},{},{}",
-            entry.status,
-            name,
-            left_size,
-            right_size,
-            left_modified,
-            right_modified
-        );
+
+        if show_hash {
+            let left_hash = entry
+                .left
+                .as_ref()
+                .and_then(|l| l.hash.as_deref())
+                .unwrap_or("");
+            let right_hash = entry
+                .right
+                .as_ref()
+                .and_then(|r| r.hash.as_deref())
+                .unwrap_or("");
+            println!(
+                "{},{},{},{},{},{},{},{},{}",
+                entry.status,
+                name,
+                is_dir,
+                left_size,
+                right_size,
+                escape_csv_field(&left_modified),
+                escape_csv_field(&right_modified),
+                left_hash,
+                right_hash,
+            );
+        } else {
+            println!(
+                "{},{},{},{},{},{},{}",
+                entry.status,
+                name,
+                is_dir,
+                left_size,
+                right_size,
+                escape_csv_field(&left_modified),
+                escape_csv_field(&right_modified),
+            );
+        }
     }
 }
 
@@ -1775,7 +1985,10 @@ mod tests {
         DirComparison, DirEntry, DirEntryStatus, EntryInfo,
     };
 
-    use super::{ColorMode, Colorizer, color_code, is_dir_entry};
+    use super::{
+        ColorMode, Colorizer, color_code, format_modified, is_dir_entry,
+        truncate_name,
+    };
 
     /// Build a `DirCompareArgs` with all flags set to their defaults, suitable
     /// for unit tests that need an args instance.
@@ -1986,5 +2199,183 @@ mod tests {
         let output = String::from_utf8(buf).unwrap();
         assert!(output.contains("\x1b[32m")); // green for Same
         assert!(output.contains("\x1b[35m")); // magenta for RightOnly
+    }
+
+    /// Build a `DirComparison` containing one file and one directory entry,
+    /// for testing directory-specific text output features.
+    fn make_test_comparison_with_dir() -> DirComparison {
+        let file = EntryInfo {
+            name: "file.txt".to_string(),
+            path: "file.txt".to_string(),
+            size: 6,
+            modified: "2024-03-15 14:30".to_string(),
+            is_dir: false,
+            hash: Some("abc".to_string()),
+        };
+        let dir = EntryInfo {
+            name: "mydir".to_string(),
+            path: "mydir".to_string(),
+            size: 4096,
+            modified: "2024-03-15 14:30".to_string(),
+            is_dir: true,
+            hash: None,
+        };
+        use std::collections::HashMap;
+        let mut counts = HashMap::new();
+        counts.insert(DirEntryStatus::Same, 1);
+        DirComparison {
+            entries: vec![
+                DirEntry {
+                    name: "file.txt".to_string(),
+                    status: DirEntryStatus::Same,
+                    left: Some(file.clone()),
+                    right: Some(file),
+                    center: None,
+                    sub_entries: None,
+                },
+                DirEntry {
+                    name: "mydir".to_string(),
+                    status: DirEntryStatus::LeftOnly,
+                    left: Some(dir),
+                    right: None,
+                    center: None,
+                    sub_entries: None,
+                },
+            ],
+            counts,
+            errors: vec![],
+        }
+    }
+
+    #[test]
+    fn text_mtime_columns_by_default() {
+        let comp = make_test_comparison();
+        let mut args = test_args();
+        args.tree = false;
+        let mut buf = Vec::new();
+        super::render_comparison_text_to_vec(&comp, &args, &mut buf);
+        let output = String::from_utf8(buf).unwrap();
+        assert!(output.contains("Left Modified"));
+        assert!(output.contains("Right Modified"));
+    }
+
+    #[test]
+    fn text_no_mtime_hides_timestamp_columns() {
+        let comp = make_test_comparison();
+        let mut args = test_args();
+        args.tree = false;
+        args.no_mtime = true;
+        let mut buf = Vec::new();
+        super::render_comparison_text_to_vec(&comp, &args, &mut buf);
+        let output = String::from_utf8(buf).unwrap();
+        assert!(!output.contains("Left Modified"));
+        assert!(!output.contains("Right Modified"));
+    }
+
+    #[test]
+    fn text_show_path_adds_path_column() {
+        let comp = make_test_comparison();
+        let mut args = test_args();
+        args.tree = false;
+        args.show_path = true;
+        let mut buf = Vec::new();
+        super::render_comparison_text_to_vec(&comp, &args, &mut buf);
+        let output = String::from_utf8(buf).unwrap();
+        assert!(output.contains("Rel. Path"));
+        // File paths should appear in the path column.
+        assert!(output.contains("same.txt"));
+    }
+
+    #[test]
+    fn text_show_hash_adds_hash_columns() {
+        let comp = make_test_comparison();
+        let mut args = test_args();
+        args.tree = false;
+        args.show_hash = true;
+        let mut buf = Vec::new();
+        super::render_comparison_text_to_vec(&comp, &args, &mut buf);
+        let output = String::from_utf8(buf).unwrap();
+        assert!(output.contains("Left Hash"));
+        assert!(output.contains("Right Hash"));
+        // The hash value for same.txt should be "abc".
+        assert!(output.contains("abc"));
+    }
+
+    #[test]
+    fn text_show_path_appends_slash_to_directory_names() {
+        let comp = make_test_comparison_with_dir();
+        let mut args = test_args();
+        args.tree = false;
+        args.show_path = true;
+        let mut buf = Vec::new();
+        super::render_comparison_text_to_vec(&comp, &args, &mut buf);
+        let output = String::from_utf8(buf).unwrap();
+        // Directory name should have a trailing slash.
+        assert!(output.contains("mydir/"));
+    }
+
+    #[test]
+    fn format_modified_parses_rfc3339() {
+        assert_eq!(
+            format_modified("2024-03-15T14:30:00+00:00"),
+            "2024-03-15 14:30:00"
+        );
+    }
+
+    #[test]
+    fn format_modified_strips_microseconds_and_tz() {
+        let rfc = "2024-03-15T14:30:45.905309080+00:00";
+        assert_eq!(format_modified(rfc), "2024-03-15 14:30:45");
+    }
+
+    #[test]
+    fn format_modified_falls_back_for_non_rfc3339() {
+        assert_eq!(format_modified("2024-03-15 14:30"), "2024-03-15 14:30");
+        assert_eq!(format_modified("garbage"), "garbage");
+    }
+
+    #[test]
+    fn truncate_name_short_unchanged() {
+        assert_eq!(truncate_name("file.txt", 40), "file.txt");
+    }
+
+    #[test]
+    fn truncate_name_long_uses_head_tail_pattern() {
+        // width = 20: head_len = 14, ellipsis = 1 char, tail = 5 -> total 20.
+        let long_name = "a".repeat(30);
+        let result = truncate_name(&long_name, 20);
+        assert_eq!(result.chars().count(), 20);
+        // First 14 chars are a, last 5 chars are a.
+        assert!(result.starts_with("aaaaaaaaaaaaaa"));
+        assert!(result.ends_with("aaaaa"));
+    }
+
+    #[test]
+    fn truncate_name_width_too_small_falls_back() {
+        // width < 7: simple truncation, no ellipsis pattern.
+        assert_eq!(truncate_name("verylongname", 3), "ver");
+        assert_eq!(truncate_name("abcdef", 2), "ab");
+    }
+
+    #[test]
+    fn text_mtime_displays_formatted_rfc3339() {
+        let mut comp = make_test_comparison();
+        // Replace with RFC 3339 timestamps to verify formatting in output.
+        for entry in &mut comp.entries {
+            if let Some(left) = &mut entry.left {
+                left.modified = "2024-03-15T14:30:00+00:00".to_string();
+            }
+            if let Some(right) = &mut entry.right {
+                right.modified = "2024-03-15T14:30:00+00:00".to_string();
+            }
+        }
+        let mut args = test_args();
+        args.tree = false;
+        let mut buf = Vec::new();
+        super::render_comparison_text_to_vec(&comp, &args, &mut buf);
+        let output = String::from_utf8(buf).unwrap();
+        // The formatted date should appear, not the raw RFC 3339 string.
+        assert!(output.contains("2024-03-15 14:30:00"));
+        assert!(!output.contains("2024-03-15T14:30:00+00:00"));
     }
 }

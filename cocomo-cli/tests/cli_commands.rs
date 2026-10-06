@@ -189,7 +189,7 @@ mod dir_compare {
             .assert()
             .code(1)
             .stdout(predicate::str::contains(
-                "status,name,left_size,right_size",
+                "status,name,is_dir,left_size,right_size",
             ))
             .stdout(predicate::str::contains("same"))
             .stdout(predicate::str::contains("different"));
@@ -441,6 +441,140 @@ mod dir_compare {
             .code(1)
             .stdout(predicate::str::contains("\x1b[32m")) // green for Same
             .stdout(predicate::str::contains("\u{251c}")); // ├
+    }
+
+    #[test]
+    fn text_output_includes_mtime_by_default() {
+        let dir = create_test_dirs();
+        cmd()
+            .args(["dir", "compare"])
+            .args([
+                dir.path().join("left").to_str().unwrap(),
+                dir.path().join("right").to_str().unwrap(),
+            ])
+            .assert()
+            .code(1)
+            .stdout(predicate::str::contains("Left Modified"))
+            .stdout(predicate::str::contains("Right Modified"));
+    }
+
+    #[test]
+    fn no_mtime_flag_hides_timestamp_columns() {
+        let dir = create_test_dirs();
+        cmd()
+            .args(["dir", "compare", "--no-mtime"])
+            .args([
+                dir.path().join("left").to_str().unwrap(),
+                dir.path().join("right").to_str().unwrap(),
+            ])
+            .assert()
+            .code(1)
+            .stdout(predicate::str::contains("Left Modified").not())
+            .stdout(predicate::str::contains("Right Modified").not());
+    }
+
+    #[test]
+    fn show_path_adds_relative_path_column() {
+        let dir = create_test_dirs();
+        cmd()
+            .args(["dir", "compare", "--show-path"])
+            .args([
+                dir.path().join("left").to_str().unwrap(),
+                dir.path().join("right").to_str().unwrap(),
+            ])
+            .assert()
+            .code(1)
+            .stdout(predicate::str::contains("Rel. Path"))
+            // The path for same.txt should be "same.txt".
+            .stdout(predicate::str::contains("same.txt"));
+    }
+
+    #[test]
+    fn show_path_appends_slash_to_directory_names() {
+        let dir = create_nested_test_dirs();
+        cmd()
+            .args(["dir", "compare", "--show-path"])
+            .args([
+                dir.path().join("left").to_str().unwrap(),
+                dir.path().join("right").to_str().unwrap(),
+            ])
+            .assert()
+            .code(1)
+            // The "sub" directory should appear with a trailing slash.
+            .stdout(predicate::str::contains("sub/"));
+    }
+
+    #[test]
+    fn show_hash_adds_hash_columns_to_text() {
+        let dir = create_test_dirs();
+        cmd()
+            .args(["dir", "compare", "--show-hash"])
+            .args([
+                dir.path().join("left").to_str().unwrap(),
+                dir.path().join("right").to_str().unwrap(),
+            ])
+            .assert()
+            .code(1)
+            .stdout(predicate::str::contains("Left Hash"))
+            .stdout(predicate::str::contains("Right Hash"));
+    }
+
+    #[test]
+    fn csv_includes_is_dir_column() {
+        let dir = create_test_dirs();
+        cmd()
+            .args(["dir", "compare", "--format", "csv"])
+            .args([
+                dir.path().join("left").to_str().unwrap(),
+                dir.path().join("right").to_str().unwrap(),
+            ])
+            .assert()
+            .code(1)
+            .stdout(predicate::str::contains("is_dir"));
+    }
+
+    #[test]
+    fn csv_with_show_hash_includes_hash_columns() {
+        let dir = create_test_dirs();
+        cmd()
+            .args(["dir", "compare", "--format", "csv", "--show-hash"])
+            .args([
+                dir.path().join("left").to_str().unwrap(),
+                dir.path().join("right").to_str().unwrap(),
+            ])
+            .assert()
+            .code(1)
+            .stdout(predicate::str::contains("left_hash"))
+            .stdout(predicate::str::contains("right_hash"));
+    }
+
+    #[test]
+    fn no_summary_suppresses_summary_line() {
+        let dir = create_test_dirs();
+        cmd()
+            .args(["dir", "compare", "--no-summary"])
+            .args([
+                dir.path().join("left").to_str().unwrap(),
+                dir.path().join("right").to_str().unwrap(),
+            ])
+            .assert()
+            .code(1)
+            .stdout(predicate::str::contains("Summary:").not());
+    }
+
+    #[test]
+    fn no_summary_still_prints_entries() {
+        let dir = create_test_dirs();
+        cmd()
+            .args(["dir", "compare", "--no-summary"])
+            .args([
+                dir.path().join("left").to_str().unwrap(),
+                dir.path().join("right").to_str().unwrap(),
+            ])
+            .assert()
+            .code(1)
+            .stdout(predicate::str::contains("same.txt"))
+            .stdout(predicate::str::contains("diff.txt"));
     }
 }
 
