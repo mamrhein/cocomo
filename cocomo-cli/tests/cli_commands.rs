@@ -576,6 +576,145 @@ mod dir_compare {
             .stdout(predicate::str::contains("same.txt"))
             .stdout(predicate::str::contains("diff.txt"));
     }
+
+    // -----------------------------------------------------------------------
+    // Phase 3: Summary Enhancement + Sorting (Tier 1.3, 1.9)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn summary_brief_is_default() {
+        let dir = create_test_dirs();
+        cmd()
+            .args(["dir", "compare"])
+            .args([
+                dir.path().join("left").to_str().unwrap(),
+                dir.path().join("right").to_str().unwrap(),
+            ])
+            .assert()
+            .code(1)
+            .stdout(predicate::str::contains("Summary:"))
+            .stdout(predicate::str::contains("total"))
+            .stdout(predicate::str::contains("Summary breakdown:").not());
+    }
+
+    #[test]
+    fn summary_full_prints_breakdown() {
+        let dir = create_test_dirs();
+        cmd()
+            .args(["dir", "compare", "--summary", "full"])
+            .args([
+                dir.path().join("left").to_str().unwrap(),
+                dir.path().join("right").to_str().unwrap(),
+            ])
+            .assert()
+            .code(1)
+            .stdout(predicate::str::contains("Summary breakdown:"))
+            .stdout(predicate::str::contains("% of total"))
+            .stdout(predicate::str::contains("Total"));
+    }
+
+    #[test]
+    fn summary_full_shows_per_status_counts() {
+        let dir = create_test_dirs();
+        cmd()
+            .args(["dir", "compare", "--summary", "full"])
+            .args([
+                dir.path().join("left").to_str().unwrap(),
+                dir.path().join("right").to_str().unwrap(),
+            ])
+            .assert()
+            .code(1)
+            // The test dirs have 1 same, 1 different, 2 orphans.
+            .stdout(predicate::str::contains("same"))
+            .stdout(predicate::str::contains("different"));
+    }
+
+    #[test]
+    fn sort_by_name_orders_entries() {
+        let dir = create_test_dirs();
+        cmd()
+            .args(["dir", "compare", "--sort", "name"])
+            .args([
+                dir.path().join("left").to_str().unwrap(),
+                dir.path().join("right").to_str().unwrap(),
+            ])
+            .assert()
+            .code(1)
+            .stdout(predicate::str::contains("same.txt"))
+            .stdout(predicate::str::contains("diff.txt"));
+    }
+
+    #[test]
+    fn sort_by_size_orders_entries() {
+        let dir = create_test_dirs();
+        cmd()
+            .args(["dir", "compare", "--sort", "size"])
+            .args([
+                dir.path().join("left").to_str().unwrap(),
+                dir.path().join("right").to_str().unwrap(),
+            ])
+            .assert()
+            .code(1)
+            .stdout(predicate::str::contains("same.txt"))
+            .stdout(predicate::str::contains("diff.txt"));
+    }
+
+    #[test]
+    fn sort_by_status_groups_entries() {
+        let dir = create_test_dirs();
+        cmd()
+            .args(["dir", "compare", "--sort", "status"])
+            .args([
+                dir.path().join("left").to_str().unwrap(),
+                dir.path().join("right").to_str().unwrap(),
+            ])
+            .assert()
+            .code(1)
+            .stdout(predicate::str::contains("same.txt"))
+            .stdout(predicate::str::contains("diff.txt"));
+    }
+
+    #[test]
+    fn sort_by_modified_orders_entries() {
+        let dir = create_test_dirs();
+        cmd()
+            .args(["dir", "compare", "--sort", "modified"])
+            .args([
+                dir.path().join("left").to_str().unwrap(),
+                dir.path().join("right").to_str().unwrap(),
+            ])
+            .assert()
+            .code(1)
+            .stdout(predicate::str::contains("same.txt"));
+    }
+
+    #[test]
+    fn sort_by_name_with_csv_format() {
+        let dir = create_test_dirs();
+        cmd()
+            .args(["dir", "compare", "--format", "csv", "--sort", "name"])
+            .args([
+                dir.path().join("left").to_str().unwrap(),
+                dir.path().join("right").to_str().unwrap(),
+            ])
+            .assert()
+            .code(1)
+            .stdout(predicate::str::contains("status,name"));
+    }
+
+    #[test]
+    fn sort_by_size_with_json_format() {
+        let dir = create_test_dirs();
+        cmd()
+            .args(["dir", "compare", "--format", "json", "--sort", "size"])
+            .args([
+                dir.path().join("left").to_str().unwrap(),
+                dir.path().join("right").to_str().unwrap(),
+            ])
+            .assert()
+            .code(1)
+            .stdout(predicate::str::contains(r#""entries"#));
+    }
 }
 
 // ---------------------------------------------------------------------------

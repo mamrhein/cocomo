@@ -167,6 +167,12 @@ pub struct DirCompareArgs {
     /// Suppress the summary line(s) at the end of output.
     #[arg(long)]
     no_summary: bool,
+    /// Summary output mode: brief (default) or full per-status breakdown.
+    #[arg(long, default_value = "brief")]
+    summary: SummaryMode,
+    /// Sort entries by the specified field (default: scan order).
+    #[arg(long)]
+    sort: Option<SortField>,
     /// Profile id to authenticate the addressed provider(s) with.
     #[arg(long)]
     profile: Option<String>,
@@ -313,6 +319,30 @@ enum ColorMode {
     Always,
     /// Never emit ANSI color codes.
     Never,
+}
+
+/// Summary output mode for directory comparison.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum SummaryMode {
+    /// Single-line summary with aggregate counts (total, same, different,
+    /// orphans).
+    Brief,
+    /// Per-status breakdown table with counts and percentages for every
+    /// status.
+    Full,
+}
+
+/// Sort field for directory comparison entries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum SortField {
+    /// Sort by entry name (alphabetical).
+    Name,
+    /// Sort by file size (largest first).
+    Size,
+    /// Sort by modification time (newest first).
+    Modified,
+    /// Sort by status display name.
+    Status,
 }
 
 #[derive(Debug, Clone, ValueEnum)]
@@ -621,7 +651,7 @@ async fn dir_compare<R: EndpointResolver>(
 
     // Print summary unless suppressed via --no-summary.
     if !args.no_summary {
-        print_summary(&comparison);
+        print_summary(&comparison, args.summary);
     }
 
     // Write report file if requested.
@@ -794,6 +824,9 @@ fn print_comparison_text(
     let colorizer = Colorizer::new(args.color);
     let mut entries = Vec::new();
     collect_entries(&comparison.entries, &mut entries);
+    if let Some(sort) = args.sort {
+        sort_entries(&mut entries, sort);
+    }
 
     // Filter entries according to display flags.
     let visible: Vec<&DirEntry> = entries
@@ -983,6 +1016,8 @@ impl DirCompareArgs {
             no_mtime: false,
             show_hash: false,
             no_summary: false,
+            summary: SummaryMode::Brief,
+            sort: None,
             profile: None,
         }
     }
@@ -1106,6 +1141,17 @@ fn render_comparison_text_to_vec(
     print_comparison_text(comparison, args, buf);
 }
 
+/// Wrapper around [`print_summary_to`] that writes to a `Vec<u8>` buffer,
+/// enabling unit testing of summary output without touching stdout.
+#[cfg(test)]
+fn print_summary_to_vec(
+    comparison: &DirComparison,
+    mode: SummaryMode,
+    buf: &mut Vec<u8>,
+) {
+    print_summary_to(comparison, mode, buf);
+}
+
 /// Print the comparison result as a hierarchical tree (text format only).
 fn print_comparison_tree(comparison: &DirComparison, args: &DirCompareArgs) {
     let colorizer = Colorizer::new(args.color);
@@ -1123,6 +1169,9 @@ fn print_comparison_tree(comparison: &DirComparison, args: &DirCompareArgs) {
 fn print_comparison_csv(comparison: &DirComparison, args: &DirCompareArgs) {
     let mut entries = Vec::new();
     collect_entries(&comparison.entries, &mut entries);
+    if let Some(sort) = args.sort {
+        sort_entries(&mut entries, sort);
+    }
 
     let show_hash = args.show_hash;
     // Header row with is_dir column (parity with the report module's CSV).
@@ -1223,6 +1272,9 @@ fn escape_csv_field(field: &str) -> String {
 fn print_comparison_json(comparison: &DirComparison, args: &DirCompareArgs) {
     let mut entries = Vec::new();
     collect_entries(&comparison.entries, &mut entries);
+    if let Some(sort) = args.sort {
+        sort_entries(&mut entries, sort);
+    }
 
     let json_entries: Vec<serde_json::Value> = entries
         .iter()
@@ -1292,15 +1344,131 @@ fn print_comparison_json(comparison: &DirComparison, args: &DirCompareArgs) {
     );
 }
 
-fn print_summary(comparison: &DirComparison) {
-    println!();
-    println!(
-        "Summary: {} total, {} same, {} different, {} orphans",
-        comparison.total(),
-        comparison.same_count(),
-        comparison.different_count(),
-        comparison.orphan_count(),
-    );
+/// All `DirEntryStatus` variants in a stable display order.
+fn all_statuses() -> [DirEntryStatus; 10] {
+    [
+        DirEntryStatus::Same,
+        DirEntryStatus::SameBinary,
+        DirEntryStatus::Similar,
+        DirEntryStatus::Different,
+        DirEntryStatus::LeftOnly,
+        DirEntryStatus::RightOnly,
+        DirEntryStatus::CenterOnly,
+        DirEntryStatus::Mergeable,
+        DirEntryStatus::Conflict,
+        DirEntryStatus::IdenticalNameDifferentType,
+    ]
+}
+
+/// Sort a flattened entry list in place by the given field.
+fn sort_entries(entries: &mut [DirEntry], sort: SortField) {
+    match sort {
+        SortField::Name => entries.sort_by(|a, b| a.name.cmp(&b.name)),
+        SortField::Size => entries.sort_by(|a, b| {
+            let size_a = entry_size(a);
+            let size_b = entry_size(b);
+            size_b.cmp(&size_a)
+        }),
+        SortField::Modified => entries.sort_by(|a, b| {
+            let mod_a = entry_modified(a);
+            let mod_b = entry_modified(b);
+            mod_b.cmp(&mod_a)
+        }),
+        SortField::Status => entries.sort_by_key(|a| a.status.to_string()),
+    }
+}
+
+/// Return the file size for an entry, preferring the left side then right.
+fn entry_size(entry: &DirEntry) -> u64 {
+    entry
+        .left
+        .as_ref()
+        .map(|l| l.size)
+        .or_else(|| entry.right.as_ref().map(|r| r.size))
+        .unwrap_or(0)
+}
+
+/// Return the modification timestamp for an entry, preferring left then right.
+fn entry_modified(entry: &DirEntry) -> String {
+    entry
+        .left
+        .as_ref()
+        .map(|l| l.modified.clone())
+        .or_else(|| entry.right.as_ref().map(|r| r.modified.clone()))
+        .unwrap_or_default()
+}
+
+fn print_summary(comparison: &DirComparison, mode: SummaryMode) {
+    let mut stdout = std::io::stdout();
+    print_summary_to(comparison, mode, &mut stdout);
+}
+
+/// Like [`print_summary`] but writes to the given writer, enabling unit tests.
+fn print_summary_to(
+    comparison: &DirComparison,
+    mode: SummaryMode,
+    output: &mut dyn Write,
+) {
+    writeln!(output,).unwrap();
+    match mode {
+        SummaryMode::Brief => {
+            writeln!(
+                output,
+                "Summary: {} total, {} same, {} different, {} orphans",
+                comparison.total(),
+                comparison.same_count(),
+                comparison.different_count(),
+                comparison.orphan_count(),
+            )
+            .unwrap();
+        }
+        SummaryMode::Full => {
+            print_full_summary_to(comparison, output);
+        }
+    }
+}
+
+/// Print a per-status breakdown table with counts and percentages.
+fn print_full_summary_to(comparison: &DirComparison, output: &mut dyn Write) {
+    let total = comparison.total();
+    writeln!(output, "Summary breakdown:").unwrap();
+    // The percentage column is right-aligned in a fixed 10-character field so
+    // that the header label and all data values share the same right edge.
+    writeln!(
+        output,
+        "  {:<20} {:>6}   {:>10}",
+        "Status", "Count", "% of total"
+    )
+    .unwrap();
+    for status in all_statuses() {
+        let count = comparison.counts.get(&status).copied().unwrap_or(0);
+        if count > 0 {
+            let pct = if total > 0 {
+                (count as f64 / total as f64) * 100.0
+            } else {
+                0.0
+            };
+            let pct_str = format!("{:.1}%", pct);
+            // Convert to String: Rust's {:<N} padding only works for
+            // &str/String (pad_str fast path), not custom Display
+            // types whose fmt() uses write!() without f.pad(). See
+            // Rust std::fmt internals.
+            let status_str = status.to_string();
+            writeln!(
+                output,
+                "  {:<20} {:>6}   {:>10}",
+                status_str, count, pct_str
+            )
+            .unwrap();
+        }
+    }
+    // Separator spans the status (20) + space (1) + count (6) = 27 columns.
+    let sep = "─".repeat(27);
+    writeln!(output, "  {sep}").unwrap();
+    let total_pct = format!("{:.1}%", 100.0);
+    let total_line =
+        format!("  {:<20} {:>6}   {:>10}", "Total", total, total_pct);
+    writeln!(output, "{}", total_line).unwrap();
 }
 
 fn format_size(size: u64) -> String {
@@ -1986,8 +2154,8 @@ mod tests {
     };
 
     use super::{
-        ColorMode, Colorizer, color_code, format_modified, is_dir_entry,
-        truncate_name,
+        ColorMode, Colorizer, SortField, SummaryMode, color_code,
+        format_modified, is_dir_entry, sort_entries, truncate_name,
     };
 
     /// Build a `DirCompareArgs` with all flags set to their defaults, suitable
@@ -2377,5 +2545,344 @@ mod tests {
         // The formatted date should appear, not the raw RFC 3339 string.
         assert!(output.contains("2024-03-15 14:30:00"));
         assert!(!output.contains("2024-03-15T14:30:00+00:00"));
+    }
+
+    #[test]
+    fn sort_entries_by_name_orders_alphabetically() {
+        let mut entries = vec![
+            DirEntry {
+                name: "zebra.txt".to_string(),
+                status: DirEntryStatus::Different,
+                left: Some(EntryInfo {
+                    name: "zebra.txt".to_string(),
+                    path: "zebra.txt".to_string(),
+                    size: 10,
+                    modified: String::new(),
+                    is_dir: false,
+                    hash: None,
+                }),
+                right: Some(EntryInfo {
+                    name: "zebra.txt".to_string(),
+                    path: "zebra.txt".to_string(),
+                    size: 20,
+                    modified: String::new(),
+                    is_dir: false,
+                    hash: None,
+                }),
+                center: None,
+                sub_entries: None,
+            },
+            DirEntry {
+                name: "apple.txt".to_string(),
+                status: DirEntryStatus::Same,
+                left: Some(EntryInfo {
+                    name: "apple.txt".to_string(),
+                    path: "apple.txt".to_string(),
+                    size: 5,
+                    modified: String::new(),
+                    is_dir: false,
+                    hash: None,
+                }),
+                right: Some(EntryInfo {
+                    name: "apple.txt".to_string(),
+                    path: "apple.txt".to_string(),
+                    size: 5,
+                    modified: String::new(),
+                    is_dir: false,
+                    hash: None,
+                }),
+                center: None,
+                sub_entries: None,
+            },
+        ];
+        sort_entries(&mut entries, SortField::Name);
+        assert_eq!(entries[0].name, "apple.txt");
+        assert_eq!(entries[1].name, "zebra.txt");
+    }
+
+    #[test]
+    fn sort_entries_by_size_largest_first() {
+        let mut entries = vec![
+            DirEntry {
+                name: "small.txt".to_string(),
+                status: DirEntryStatus::Same,
+                left: Some(EntryInfo {
+                    name: "small.txt".to_string(),
+                    path: "small.txt".to_string(),
+                    size: 10,
+                    modified: String::new(),
+                    is_dir: false,
+                    hash: None,
+                }),
+                right: Some(EntryInfo {
+                    name: "small.txt".to_string(),
+                    path: "small.txt".to_string(),
+                    size: 10,
+                    modified: String::new(),
+                    is_dir: false,
+                    hash: None,
+                }),
+                center: None,
+                sub_entries: None,
+            },
+            DirEntry {
+                name: "large.txt".to_string(),
+                status: DirEntryStatus::Same,
+                left: Some(EntryInfo {
+                    name: "large.txt".to_string(),
+                    path: "large.txt".to_string(),
+                    size: 1000,
+                    modified: String::new(),
+                    is_dir: false,
+                    hash: None,
+                }),
+                right: Some(EntryInfo {
+                    name: "large.txt".to_string(),
+                    path: "large.txt".to_string(),
+                    size: 1000,
+                    modified: String::new(),
+                    is_dir: false,
+                    hash: None,
+                }),
+                center: None,
+                sub_entries: None,
+            },
+        ];
+        sort_entries(&mut entries, SortField::Size);
+        assert_eq!(entries[0].name, "large.txt");
+        assert_eq!(entries[1].name, "small.txt");
+    }
+
+    #[test]
+    fn sort_entries_by_status_groups_like_items() {
+        let mut entries = vec![
+            DirEntry {
+                name: "right_only.txt".to_string(),
+                status: DirEntryStatus::RightOnly,
+                left: None,
+                right: Some(EntryInfo {
+                    name: "right_only.txt".to_string(),
+                    path: "right_only.txt".to_string(),
+                    size: 5,
+                    modified: String::new(),
+                    is_dir: false,
+                    hash: None,
+                }),
+                center: None,
+                sub_entries: None,
+            },
+            DirEntry {
+                name: "same.txt".to_string(),
+                status: DirEntryStatus::Same,
+                left: Some(EntryInfo {
+                    name: "same.txt".to_string(),
+                    path: "same.txt".to_string(),
+                    size: 5,
+                    modified: String::new(),
+                    is_dir: false,
+                    hash: None,
+                }),
+                right: Some(EntryInfo {
+                    name: "same.txt".to_string(),
+                    path: "same.txt".to_string(),
+                    size: 5,
+                    modified: String::new(),
+                    is_dir: false,
+                    hash: None,
+                }),
+                center: None,
+                sub_entries: None,
+            },
+        ];
+        sort_entries(&mut entries, SortField::Status);
+        // Display names: "right only" < "same" alphabetically (r < s).
+        assert_eq!(entries[0].status, DirEntryStatus::RightOnly);
+        assert_eq!(entries[1].status, DirEntryStatus::Same);
+    }
+
+    #[test]
+    fn sort_entries_by_modified_newest_first() {
+        let mut entries = vec![
+            DirEntry {
+                name: "old.txt".to_string(),
+                status: DirEntryStatus::Same,
+                left: Some(EntryInfo {
+                    name: "old.txt".to_string(),
+                    path: "old.txt".to_string(),
+                    size: 5,
+                    modified: "2024-01-01".to_string(),
+                    is_dir: false,
+                    hash: None,
+                }),
+                right: Some(EntryInfo {
+                    name: "old.txt".to_string(),
+                    path: "old.txt".to_string(),
+                    size: 5,
+                    modified: "2024-01-01".to_string(),
+                    is_dir: false,
+                    hash: None,
+                }),
+                center: None,
+                sub_entries: None,
+            },
+            DirEntry {
+                name: "new.txt".to_string(),
+                status: DirEntryStatus::Same,
+                left: Some(EntryInfo {
+                    name: "new.txt".to_string(),
+                    path: "new.txt".to_string(),
+                    size: 5,
+                    modified: "2024-06-01".to_string(),
+                    is_dir: false,
+                    hash: None,
+                }),
+                right: Some(EntryInfo {
+                    name: "new.txt".to_string(),
+                    path: "new.txt".to_string(),
+                    size: 5,
+                    modified: "2024-06-01".to_string(),
+                    is_dir: false,
+                    hash: None,
+                }),
+                center: None,
+                sub_entries: None,
+            },
+        ];
+        sort_entries(&mut entries, SortField::Modified);
+        assert_eq!(entries[0].name, "new.txt");
+        assert_eq!(entries[1].name, "old.txt");
+    }
+
+    #[test]
+    fn sort_entries_by_name_with_left_only_uses_name() {
+        // Entries with only a left side should still sort by name.
+        let mut entries = vec![
+            DirEntry {
+                name: "zzz.txt".to_string(),
+                status: DirEntryStatus::LeftOnly,
+                left: Some(EntryInfo {
+                    name: "zzz.txt".to_string(),
+                    path: "zzz.txt".to_string(),
+                    size: 5,
+                    modified: String::new(),
+                    is_dir: false,
+                    hash: None,
+                }),
+                right: None,
+                center: None,
+                sub_entries: None,
+            },
+            DirEntry {
+                name: "aaa.txt".to_string(),
+                status: DirEntryStatus::LeftOnly,
+                left: Some(EntryInfo {
+                    name: "aaa.txt".to_string(),
+                    path: "aaa.txt".to_string(),
+                    size: 5,
+                    modified: String::new(),
+                    is_dir: false,
+                    hash: None,
+                }),
+                right: None,
+                center: None,
+                sub_entries: None,
+            },
+        ];
+        sort_entries(&mut entries, SortField::Name);
+        assert_eq!(entries[0].name, "aaa.txt");
+        assert_eq!(entries[1].name, "zzz.txt");
+    }
+
+    #[test]
+    fn sort_entries_by_size_with_only_right_side() {
+        // Entries with only a right side should use the right size.
+        let mut entries = vec![
+            DirEntry {
+                name: "small.txt".to_string(),
+                status: DirEntryStatus::RightOnly,
+                left: None,
+                right: Some(EntryInfo {
+                    name: "small.txt".to_string(),
+                    path: "small.txt".to_string(),
+                    size: 10,
+                    modified: String::new(),
+                    is_dir: false,
+                    hash: None,
+                }),
+                center: None,
+                sub_entries: None,
+            },
+            DirEntry {
+                name: "large.txt".to_string(),
+                status: DirEntryStatus::RightOnly,
+                left: None,
+                right: Some(EntryInfo {
+                    name: "large.txt".to_string(),
+                    path: "large.txt".to_string(),
+                    size: 1000,
+                    modified: String::new(),
+                    is_dir: false,
+                    hash: None,
+                }),
+                center: None,
+                sub_entries: None,
+            },
+        ];
+        sort_entries(&mut entries, SortField::Size);
+        assert_eq!(entries[0].name, "large.txt");
+        assert_eq!(entries[1].name, "small.txt");
+    }
+
+    #[test]
+    fn summary_brief_prints_aggregate_line() {
+        let comp = make_test_comparison();
+        let mut buf = Vec::new();
+        super::print_summary_to_vec(&comp, SummaryMode::Brief, &mut buf);
+        let output = String::from_utf8(buf).unwrap();
+        assert!(output.contains("Summary:"));
+        assert!(output.contains("total"));
+        assert!(output.contains("same"));
+        assert!(output.contains("different"));
+        assert!(output.contains("orphans"));
+    }
+
+    #[test]
+    fn summary_full_prints_breakdown_table() {
+        let comp = make_test_comparison();
+        let mut buf = Vec::new();
+        super::print_summary_to_vec(&comp, SummaryMode::Full, &mut buf);
+        let output = String::from_utf8(buf).unwrap();
+        assert!(output.contains("Summary breakdown:"));
+        assert!(output.contains("Status"));
+        assert!(output.contains("Count"));
+        // "same" should appear with count 1 and 25.0%.
+        assert!(output.contains("same"));
+        assert!(output.contains("25.0%"));
+        // "Total" row should appear with 100.0%.
+        assert!(output.contains("Total"));
+    }
+
+    #[test]
+    fn summary_full_only_shows_nonzero_statuses() {
+        let comp = make_test_comparison();
+        let mut buf = Vec::new();
+        super::print_summary_to_vec(&comp, SummaryMode::Full, &mut buf);
+        let output = String::from_utf8(buf).unwrap();
+        // "conflict" has count 0, should not appear.
+        assert!(!output.contains("conflict"));
+        // "mergeable" has count 0, should not appear.
+        assert!(!output.contains("mergeable"));
+    }
+
+    #[test]
+    fn all_statuses_returns_all_variants() {
+        let statuses = super::all_statuses();
+        assert_eq!(statuses.len(), 10);
+        // Verify no duplicates.
+        for i in 0..statuses.len() {
+            for j in (i + 1)..statuses.len() {
+                assert_ne!(statuses[i], statuses[j]);
+            }
+        }
     }
 }
