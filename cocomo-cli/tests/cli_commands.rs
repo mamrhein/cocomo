@@ -50,6 +50,33 @@ fn create_test_dirs() -> TempDir {
     dir
 }
 
+/// Create a temp directory with nested subdirectories for tree-view tests.
+fn create_nested_test_dirs() -> TempDir {
+    let dir = TempDir::with_prefix("cocomo_nested").unwrap();
+
+    let left = dir.path().join("left");
+    let right = dir.path().join("right");
+    fs::create_dir_all(left.join("sub")).unwrap();
+    fs::create_dir_all(right.join("sub")).unwrap();
+
+    // Identical file at root.
+    fs::write(left.join("same.txt"), "hello\n").unwrap();
+    fs::write(right.join("same.txt"), "hello\n").unwrap();
+
+    // Identical file in subdir.
+    fs::write(left.join("sub").join("same.txt"), "hello\n").unwrap();
+    fs::write(right.join("sub").join("same.txt"), "hello\n").unwrap();
+
+    // Different file in subdir.
+    fs::write(left.join("sub").join("diff.txt"), "world\n").unwrap();
+    fs::write(right.join("sub").join("diff.txt"), "changed\n").unwrap();
+
+    // Left-only file in subdir.
+    fs::write(left.join("sub").join("only_left.txt"), "left\n").unwrap();
+
+    dir
+}
+
 /// Create two temp text files with different content.
 fn create_diff_text_files() -> TempDir {
     let dir = TempDir::with_prefix("cocomo_text").unwrap();
@@ -322,6 +349,98 @@ mod dir_compare {
         // report.
         assert!(!content.contains("same.txt"));
         assert!(content.contains("diff.txt"));
+    }
+
+    #[test]
+    fn tree_output_produces_tree_chars() {
+        let dir = create_test_dirs();
+        cmd()
+            .args(["dir", "compare", "--tree"])
+            .args([
+                dir.path().join("left").to_str().unwrap(),
+                dir.path().join("right").to_str().unwrap(),
+            ])
+            .assert()
+            .code(1)
+            .stdout(predicate::str::contains("\u{251c}")) // ├
+            .stdout(predicate::str::contains("\u{2514}")) // └
+            .stdout(predicate::str::contains("same.txt"))
+            .stdout(predicate::str::contains("diff.txt"));
+    }
+
+    #[test]
+    fn tree_output_with_nested_dirs() {
+        let dir = create_nested_test_dirs();
+        cmd()
+            .args(["dir", "compare", "--tree"])
+            .args([
+                dir.path().join("left").to_str().unwrap(),
+                dir.path().join("right").to_str().unwrap(),
+            ])
+            .assert()
+            .code(1)
+            .stdout(predicate::str::contains("sub/"))
+            .stdout(predicate::str::contains("only_left.txt"));
+    }
+
+    #[test]
+    fn color_always_produces_ansi_codes() {
+        let dir = create_test_dirs();
+        cmd()
+            .args(["dir", "compare", "--color", "always"])
+            .args([
+                dir.path().join("left").to_str().unwrap(),
+                dir.path().join("right").to_str().unwrap(),
+            ])
+            .assert()
+            .code(1)
+            // Green for Same status.
+            .stdout(predicate::str::contains("\x1b[32m"))
+            // Reset code.
+            .stdout(predicate::str::contains("\x1b[0m"));
+    }
+
+    #[test]
+    fn color_never_produces_no_ansi_codes() {
+        let dir = create_test_dirs();
+        cmd()
+            .args(["dir", "compare", "--color", "never"])
+            .args([
+                dir.path().join("left").to_str().unwrap(),
+                dir.path().join("right").to_str().unwrap(),
+            ])
+            .assert()
+            .code(1)
+            .stdout(predicate::str::contains("\x1b[").not());
+    }
+
+    #[test]
+    fn color_auto_without_tty_produces_no_ansi_codes() {
+        let dir = create_test_dirs();
+        cmd()
+            .args(["dir", "compare"]) // default --color auto
+            .args([
+                dir.path().join("left").to_str().unwrap(),
+                dir.path().join("right").to_str().unwrap(),
+            ])
+            .assert()
+            .code(1)
+            .stdout(predicate::str::contains("\x1b[").not());
+    }
+
+    #[test]
+    fn tree_with_color_always_includes_ansi() {
+        let dir = create_test_dirs();
+        cmd()
+            .args(["dir", "compare", "--tree", "--color", "always"])
+            .args([
+                dir.path().join("left").to_str().unwrap(),
+                dir.path().join("right").to_str().unwrap(),
+            ])
+            .assert()
+            .code(1)
+            .stdout(predicate::str::contains("\x1b[32m")) // green for Same
+            .stdout(predicate::str::contains("\u{251c}")); // ├
     }
 }
 

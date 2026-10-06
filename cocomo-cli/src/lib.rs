@@ -23,6 +23,7 @@
 //! - `2` — error occurred
 
 use std::{
+    io::{IsTerminal, Write},
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -147,6 +148,12 @@ pub struct DirCompareArgs {
     /// Format for the report file (used with --report).
     #[arg(long, default_value = "text")]
     report_format: ReportFormatArg,
+    /// Render output as a hierarchical tree (text format only).
+    #[arg(long)]
+    tree: bool,
+    /// Control ANSI color output.
+    #[arg(long, default_value = "auto")]
+    color: ColorMode,
     /// Profile id to authenticate the addressed provider(s) with.
     #[arg(long)]
     profile: Option<String>,
@@ -282,6 +289,17 @@ enum OutputFormat {
     Text,
     Csv,
     Json,
+}
+
+/// Color output mode for terminal display.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum ColorMode {
+    /// Enable colors only when stdout is a TTY.
+    Auto,
+    /// Always emit ANSI color codes.
+    Always,
+    /// Never emit ANSI color codes.
+    Never,
 }
 
 #[derive(Debug, Clone, ValueEnum)]
@@ -576,7 +594,13 @@ async fn dir_compare<R: EndpointResolver>(
     };
 
     match args.format {
-        OutputFormat::Text => print_comparison_text(&comparison, args),
+        OutputFormat::Text => {
+            if args.tree {
+                print_comparison_tree(&comparison, args);
+            } else {
+                print_comparison_text(&comparison, args);
+            }
+        }
         OutputFormat::Csv => print_comparison_csv(&comparison, args),
         OutputFormat::Json => print_comparison_json(&comparison, args),
     }
@@ -654,7 +678,60 @@ fn should_show_entry(entry: &DirEntry, args: &DirCompareArgs) -> bool {
     }
 }
 
+/// Return `true` when the entry is a directory on any side.
+fn is_dir_entry(entry: &DirEntry) -> bool {
+    entry.left.as_ref().map(|l| l.is_dir).unwrap_or(false)
+        || entry.right.as_ref().map(|r| r.is_dir).unwrap_or(false)
+        || entry.center.as_ref().map(|c| c.is_dir).unwrap_or(false)
+}
+
+/// Conditionally render text with ANSI color escape codes based on the entry
+/// status. When colors are disabled, returns the text unchanged.
+struct Colorizer {
+    active: bool,
+}
+
+impl Colorizer {
+    /// Create a new `Colorizer` from a [`ColorMode`].
+    fn new(mode: ColorMode) -> Self {
+        let active = match mode {
+            ColorMode::Always => true,
+            ColorMode::Never => false,
+            ColorMode::Auto => std::io::stdout().is_terminal(),
+        };
+        Self { active }
+    }
+
+    /// Return `true` when ANSI color codes will be emitted.
+    fn is_active(&self) -> bool {
+        self.active
+    }
+
+    /// Wrap `text` with ANSI codes appropriate for the given status.
+    fn colorize(&self, text: &str, status: DirEntryStatus) -> String {
+        if !self.active {
+            return text.to_string();
+        }
+        let code = color_code(status);
+        format!("\x1b[{code}m{text}\x1b[0m")
+    }
+}
+
+/// Return the ANSI color code for a given comparison status.
+fn color_code(status: DirEntryStatus) -> &'static str {
+    match status {
+        DirEntryStatus::Same | DirEntryStatus::SameBinary => "32", // green
+        DirEntryStatus::Similar | DirEntryStatus::Different => "33", // yellow
+        DirEntryStatus::LeftOnly | DirEntryStatus::CenterOnly => "36", // cyan
+        DirEntryStatus::RightOnly => "35",                         // magenta
+        DirEntryStatus::Mergeable => "34",                         // blue
+        DirEntryStatus::Conflict => "31",                          // red
+        DirEntryStatus::IdenticalNameDifferentType => "93", // bright yellow
+    }
+}
+
 fn print_comparison_text(comparison: &DirComparison, args: &DirCompareArgs) {
+    let colorizer = Colorizer::new(args.color);
     let mut entries = Vec::new();
     collect_entries(&comparison.entries, &mut entries);
 
@@ -687,7 +764,8 @@ fn print_comparison_text(comparison: &DirComparison, args: &DirCompareArgs) {
     );
 
     for entry in &visible {
-        let status_sym = entry.status.symbol();
+        let status_sym =
+            colorizer.colorize(entry.status.symbol(), entry.status);
         let name = &entry.name;
         let left_size = entry
             .left
@@ -700,10 +778,19 @@ fn print_comparison_text(comparison: &DirComparison, args: &DirCompareArgs) {
             .map(|r| format_size(r.size))
             .unwrap_or("-".to_string());
 
-        println!(
-            "{:5} {:<40} {:>12} {:>12}",
-            status_sym, name, left_size, right_size
-        );
+        if colorizer.is_active() {
+            // ANSI codes don't respect width formatting, so print the symbol
+            // without padding and rely on the space in the format string.
+            println!(
+                "{} {:<40} {:>12} {:>12}",
+                status_sym, name, left_size, right_size
+            );
+        } else {
+            println!(
+                "{:5} {:<40} {:>12} {:>12}",
+                status_sym, name, left_size, right_size
+            );
+        }
     }
 }
 
@@ -714,6 +801,160 @@ fn collect_entries(entries: &[DirEntry], out: &mut Vec<DirEntry>) {
             collect_entries(&sub.entries, out);
         }
     }
+}
+
+/// Count the entries at this level that would be visible in tree mode:
+/// directories are always shown as structural nodes; files are filtered.
+fn count_visible_tree_children(
+    entries: &[DirEntry],
+    args: &DirCompareArgs,
+) -> usize {
+    entries
+        .iter()
+        .filter(|e| is_dir_entry(e) || should_show_entry(e, args))
+        .count()
+}
+
+/// Build a `DirCompareArgs` with all flags set to their defaults, suitable
+/// for unit tests that need an args instance.
+#[cfg(test)]
+impl DirCompareArgs {
+    fn test_defaults() -> Self {
+        Self {
+            left: "./left".to_string(),
+            right: "./right".to_string(),
+            structure_only: false,
+            format: OutputFormat::Text,
+            show_different: false,
+            show_orphans: false,
+            report: None,
+            report_format: ReportFormatArg::Text,
+            tree: true,
+            color: ColorMode::Never,
+            profile: None,
+        }
+    }
+}
+
+/// Recursively render a directory comparison as an indented tree using
+/// box-drawing characters, with optional ANSI color on the status symbols.
+fn render_tree_entries(
+    entries: &[DirEntry],
+    prefix: &str,
+    output: &mut dyn Write,
+    colorizer: &Colorizer,
+    args: &DirCompareArgs,
+) {
+    let visible: Vec<&DirEntry> = entries
+        .iter()
+        .filter(|e| is_dir_entry(e) || should_show_entry(e, args))
+        .collect();
+
+    let count = visible.len();
+    for (i, entry) in visible.iter().enumerate() {
+        let is_last = i == count - 1;
+        let connector = if is_last {
+            "\u{2514}\u{2500}\u{2500} "
+        } else {
+            "\u{251c}\u{2500}\u{2500} "
+        };
+
+        let sym = colorizer.colorize(entry.status.symbol(), entry.status);
+        let is_dir = is_dir_entry(entry);
+
+        if is_dir && let Some(sub) = &entry.sub_entries {
+            let child_count = count_visible_tree_children(&sub.entries, args);
+            let display_name = format!("{}/", entry.name);
+            if colorizer.is_active() {
+                writeln!(
+                    output,
+                    "{prefix}{connector}{sym} {display_name} ({child_count})"
+                )
+                .unwrap();
+            } else {
+                writeln!(
+                    output,
+                    "{prefix}{connector}{sym:<5} {display_name} \
+                     ({child_count})"
+                )
+                .unwrap();
+            }
+            let child_prefix = format!(
+                "{prefix}{}",
+                if is_last { "    " } else { "\u{2502}   " }
+            );
+            render_tree_entries(
+                &sub.entries,
+                &child_prefix,
+                output,
+                colorizer,
+                args,
+            );
+        } else if is_dir {
+            let display_name = format!("{}/", entry.name);
+            if colorizer.is_active() {
+                writeln!(output, "{prefix}{connector}{sym} {display_name}")
+                    .unwrap();
+            } else {
+                writeln!(output, "{prefix}{connector}{sym:<5} {display_name}")
+                    .unwrap();
+            }
+        } else {
+            let left_size = entry
+                .left
+                .as_ref()
+                .map(|l| format_size(l.size))
+                .unwrap_or_else(|| "-".to_string());
+            let right_size = entry
+                .right
+                .as_ref()
+                .map(|r| format_size(r.size))
+                .unwrap_or_else(|| "-".to_string());
+            let name = &entry.name;
+            if colorizer.is_active() {
+                writeln!(
+                    output,
+                    "{prefix}{connector}{sym} {name:<20} {left_size} \
+                     \u{2192} {right_size}"
+                )
+                .unwrap();
+            } else {
+                writeln!(
+                    output,
+                    "{prefix}{connector}{sym:<5} {name:<20} {left_size} \
+                     \u{2192} {right_size}"
+                )
+                .unwrap();
+            }
+        }
+    }
+}
+
+/// Wrapper around [`render_tree_entries`] that writes to a `Vec<u8>` buffer,
+/// enabling unit testing of tree output without touching stdout.
+#[cfg(test)]
+fn render_tree_entries_to_vec(
+    entries: &[DirEntry],
+    prefix: &str,
+    buf: &mut Vec<u8>,
+    colorizer: &Colorizer,
+    args: &DirCompareArgs,
+) {
+    render_tree_entries(entries, prefix, buf, colorizer, args);
+}
+
+/// Print the comparison result as a hierarchical tree (text format only).
+fn print_comparison_tree(comparison: &DirComparison, args: &DirCompareArgs) {
+    let colorizer = Colorizer::new(args.color);
+    let mut stdout = std::io::stdout();
+    writeln!(stdout, ".").unwrap();
+    render_tree_entries(
+        &comparison.entries,
+        "",
+        &mut stdout,
+        &colorizer,
+        args,
+    );
 }
 
 fn print_comparison_csv(comparison: &DirComparison, args: &DirCompareArgs) {
@@ -1528,5 +1769,222 @@ mod tests {
     #[test]
     fn max_smaller_than_ellipsis_returns_only_ellipsis() {
         assert_eq!(truncate("abcdef", 2), "...");
+    }
+
+    use cocomo_lib::compare::{
+        DirComparison, DirEntry, DirEntryStatus, EntryInfo,
+    };
+
+    use super::{ColorMode, Colorizer, color_code, is_dir_entry};
+
+    /// Build a `DirCompareArgs` with all flags set to their defaults, suitable
+    /// for unit tests that need an args instance.
+    fn test_args() -> super::DirCompareArgs {
+        super::DirCompareArgs::test_defaults()
+    }
+
+    #[test]
+    fn colorizer_never_strips_codes() {
+        let c = Colorizer::new(ColorMode::Never);
+        assert!(!c.is_active());
+        assert_eq!(c.colorize("=", DirEntryStatus::Same), "=");
+    }
+
+    #[test]
+    fn colorizer_always_adds_codes() {
+        let c = Colorizer::new(ColorMode::Always);
+        assert!(c.is_active());
+        let result = c.colorize("=", DirEntryStatus::Same);
+        assert!(result.contains("\x1b[32m"));
+        assert!(result.ends_with("\x1b[0m"));
+    }
+
+    #[test]
+    fn colorizer_respects_all_status_codes() {
+        let c = Colorizer::new(ColorMode::Always);
+        assert_eq!(color_code(DirEntryStatus::Same), "32");
+        assert_eq!(color_code(DirEntryStatus::SameBinary), "32");
+        assert_eq!(color_code(DirEntryStatus::Similar), "33");
+        assert_eq!(color_code(DirEntryStatus::Different), "33");
+        assert_eq!(color_code(DirEntryStatus::LeftOnly), "36");
+        assert_eq!(color_code(DirEntryStatus::RightOnly), "35");
+        assert_eq!(color_code(DirEntryStatus::Mergeable), "34");
+        assert_eq!(color_code(DirEntryStatus::Conflict), "31");
+        assert_eq!(
+            color_code(DirEntryStatus::IdenticalNameDifferentType),
+            "93"
+        );
+        assert_eq!(color_code(DirEntryStatus::CenterOnly), "36");
+        // Verify the colored output contains the code.
+        assert!(
+            c.colorize("X", DirEntryStatus::Conflict)
+                .contains("\x1b[31m")
+        );
+    }
+
+    #[test]
+    fn colorizer_color_for_center_only() {
+        let c = Colorizer::new(ColorMode::Always);
+        assert!(
+            c.colorize("|", DirEntryStatus::CenterOnly)
+                .contains("\x1b[36m")
+        );
+    }
+
+    /// Build a flat `DirComparison` with the four standard test entries.
+    fn make_test_comparison() -> DirComparison {
+        let same = EntryInfo {
+            name: "same.txt".to_string(),
+            path: "same.txt".to_string(),
+            size: 6,
+            modified: "2024-03-15 14:30".to_string(),
+            is_dir: false,
+            hash: Some("abc".to_string()),
+        };
+        let diff = EntryInfo {
+            name: "diff.txt".to_string(),
+            path: "diff.txt".to_string(),
+            size: 6,
+            modified: "2024-03-15 14:30".to_string(),
+            is_dir: false,
+            hash: Some("abc".to_string()),
+        };
+        let diff_right = EntryInfo {
+            name: "diff.txt".to_string(),
+            path: "diff.txt".to_string(),
+            size: 8,
+            modified: "2024-03-15 14:30".to_string(),
+            is_dir: false,
+            hash: Some("def".to_string()),
+        };
+        let left_only = EntryInfo {
+            name: "only_left.txt".to_string(),
+            path: "only_left.txt".to_string(),
+            size: 13,
+            modified: "2024-03-15 14:30".to_string(),
+            is_dir: false,
+            hash: None,
+        };
+        let right_only = EntryInfo {
+            name: "only_right.txt".to_string(),
+            path: "only_right.txt".to_string(),
+            size: 13,
+            modified: "2024-03-15 14:30".to_string(),
+            is_dir: false,
+            hash: None,
+        };
+
+        use std::collections::HashMap;
+        let mut counts = HashMap::new();
+        counts.insert(DirEntryStatus::Same, 1);
+        counts.insert(DirEntryStatus::Different, 1);
+        counts.insert(DirEntryStatus::LeftOnly, 1);
+        counts.insert(DirEntryStatus::RightOnly, 1);
+
+        DirComparison {
+            entries: vec![
+                DirEntry {
+                    name: "same.txt".to_string(),
+                    status: DirEntryStatus::Same,
+                    left: Some(same.clone()),
+                    right: Some(same),
+                    center: None,
+                    sub_entries: None,
+                },
+                DirEntry {
+                    name: "diff.txt".to_string(),
+                    status: DirEntryStatus::Different,
+                    left: Some(diff.clone()),
+                    right: Some(diff_right),
+                    center: None,
+                    sub_entries: None,
+                },
+                DirEntry {
+                    name: "only_left.txt".to_string(),
+                    status: DirEntryStatus::LeftOnly,
+                    left: Some(left_only),
+                    right: None,
+                    center: None,
+                    sub_entries: None,
+                },
+                DirEntry {
+                    name: "only_right.txt".to_string(),
+                    status: DirEntryStatus::RightOnly,
+                    left: None,
+                    right: Some(right_only),
+                    center: None,
+                    sub_entries: None,
+                },
+            ],
+            counts,
+            errors: vec![],
+        }
+    }
+
+    #[test]
+    fn is_dir_entry_detects_files_as_non_dirs() {
+        let comp = make_test_comparison();
+        for entry in &comp.entries {
+            assert!(!is_dir_entry(entry));
+        }
+    }
+
+    #[test]
+    fn is_dir_entry_detects_directory_on_left_only() {
+        let dir_info = EntryInfo {
+            name: "mydir".to_string(),
+            path: "mydir".to_string(),
+            size: 4096,
+            modified: "2024-03-15 14:30".to_string(),
+            is_dir: true,
+            hash: None,
+        };
+        let entry = DirEntry {
+            name: "mydir".to_string(),
+            status: DirEntryStatus::LeftOnly,
+            left: Some(dir_info),
+            right: None,
+            center: None,
+            sub_entries: None,
+        };
+        assert!(is_dir_entry(&entry));
+    }
+
+    #[test]
+    fn tree_rendering_produces_box_drawing_chars() {
+        let comp = make_test_comparison();
+        let mut buf = Vec::new();
+        super::render_tree_entries_to_vec(
+            &comp.entries,
+            "",
+            &mut buf,
+            &Colorizer::new(ColorMode::Never),
+            &test_args(),
+        );
+        let output = String::from_utf8(buf).unwrap();
+        assert!(output.contains('\u{251c}')); // ├
+        assert!(output.contains('\u{2514}')); // └
+        assert!(output.contains("same.txt"));
+        assert!(output.contains("diff.txt"));
+        assert!(output.contains("only_left.txt"));
+        assert!(output.contains("only_right.txt"));
+        // Size arrow should be present for file entries.
+        assert!(output.contains('\u{2192}')); // →
+    }
+
+    #[test]
+    fn tree_rendering_with_color_includes_ansi() {
+        let comp = make_test_comparison();
+        let mut buf = Vec::new();
+        super::render_tree_entries_to_vec(
+            &comp.entries,
+            "",
+            &mut buf,
+            &Colorizer::new(ColorMode::Always),
+            &test_args(),
+        );
+        let output = String::from_utf8(buf).unwrap();
+        assert!(output.contains("\x1b[32m")); // green for Same
+        assert!(output.contains("\x1b[35m")); // magenta for RightOnly
     }
 }
