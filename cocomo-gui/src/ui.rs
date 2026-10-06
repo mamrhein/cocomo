@@ -21,11 +21,13 @@ use gpui::{
     prelude::*, px, rgb, uniform_list,
 };
 
-use crate::menus::{ReloadCompare, SaveSession};
-use crate::session_manager::GuiSessionManager;
-use crate::state::{AppState, StatusSummary};
-use crate::tab_bar::TabBar;
-use crate::toolbar::Toolbar;
+use crate::{
+    menus::{ReloadCompare, SaveSession},
+    session_manager::GuiSessionManager,
+    state::{AppState, StatusSummary},
+    tab_bar::TabBar,
+    toolbar::Toolbar,
+};
 
 // ---------------------------------------------------------------------------
 // Actions
@@ -260,7 +262,8 @@ impl FolderCompareView {
         });
     }
 
-    /// Handle OpenFileDiff: dispatch to session manager to create a text diff tab.
+    /// Handle OpenFileDiff: dispatch to session manager to create a text diff
+    /// tab.
     fn handle_open_file_diff(
         &mut self,
         action: &OpenFileDiff,
@@ -276,7 +279,8 @@ impl FolderCompareView {
         });
     }
 
-    /// Handle OpenDirDiff: dispatch to session manager to create a dir diff tab.
+    /// Handle OpenDirDiff: dispatch to session manager to create a dir diff
+    /// tab.
     fn handle_open_dir_diff(
         &mut self,
         action: &OpenDirDiff,

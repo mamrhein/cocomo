@@ -53,7 +53,7 @@ use crate::{
     profile::{Profile, ProfileError, ProfileStore, ProviderType},
     s3::{S3Config, S3Fs},
     secrets::{Prompter, Secrets},
-    sftp::{key_auth_fallback_available, SftpConfig, SftpFs},
+    sftp::{SftpConfig, SftpFs, key_auth_fallback_available},
     snapshot::ProviderId,
     url::Url,
     webdav::{WebDavConfig, WebDavFs},
