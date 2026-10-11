@@ -20,7 +20,7 @@ anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 cocomo-lib = { path = "../cocomo-lib" }
 crossterm = "0.29"
-dirs = "6"
+dirs = "7"
 ratatui = {
   version = "0.30",
   default-features = false,
