@@ -26,8 +26,10 @@ mod ui;
 use std::path::PathBuf;
 
 use anyhow::Result;
-use gpui::{App, AppContext, Bounds, WindowBounds, WindowOptions, px, size};
-use gpui_platform::application as create_application;
+use gpui::{
+    App, AppContext, Bounds, WindowBounds, WindowOptions,
+    application as create_application, px, size,
+};
 
 use crate::{
     menus::{menu_bindings, register_menu_handlers, set_app_menus},
@@ -63,6 +65,7 @@ fn main() -> Result<()> {
     runtime::set_handle();
 
     create_application().run(move |cx: &mut App| {
+        gpui::init(cx);
         let left = left_path;
         let right = right_path;
         // Center the window on screen.
@@ -103,12 +106,13 @@ fn main() -> Result<()> {
             ));
         });
 
-        cx.open_window(
+        gpui::open_window(
             WindowOptions {
                 focus: true,
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 ..Default::default()
             },
+            cx,
             |_, cx| cx.new(|cx| WindowRoot::new(session_manager.clone(), cx)),
         )
         .unwrap();
