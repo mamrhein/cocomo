@@ -10,14 +10,18 @@
 //! Tab content types and the window root.
 //!
 //! [`WindowRoot`] is the root entity of the main window. It manages the
-//! window chrome (tab bar, toolbar) and delegates content rendering to
-//! the active tab's entity.
+//! window chrome (tab bar, toolbar) and delegates content rendering to the
+//! active tab's entity via a [`gpui::base::NavStack`], which handles
+//! showing only the current tab view without manual flexbox hiding.
 
 use std::any::Any;
 
 use gpui::{
-    AnyElement, App, Context, Entity, FocusHandle, Render, Window, div,
-    prelude::*, rgb,
+    AnyView, App, Context, Entity, FocusHandle, Render, Window,
+    base::{NavMotion, NavStack, NavStackState},
+    div,
+    prelude::*,
+    rgb,
 };
 
 use crate::{
@@ -65,16 +69,18 @@ impl TabEntity {
         self.inner.focus_handle(cx)
     }
 
-    /// Render this tab's content as an element.
-    pub fn render(&self, window: &mut Window, cx: &mut App) -> AnyElement {
-        self.inner.render(window, cx)
+    /// Return the tab's view as a type-erased [`AnyView`].
+    ///
+    /// Used by [`WindowRoot`] to push the view into its [`NavStackState`].
+    pub fn any_view(&self) -> AnyView {
+        self.inner.any_view()
     }
 }
 
 /// Inner trait for type-erased tab entities.
 trait TabEntityInner: Any + Send + Sync {
     fn focus_handle(&self, cx: &App) -> FocusHandle;
-    fn render(&self, window: &mut Window, cx: &mut App) -> AnyElement;
+    fn any_view(&self) -> AnyView;
     fn clone_inner(&self) -> Box<dyn TabEntityInner>;
 }
 
@@ -85,11 +91,8 @@ impl TabEntityInner for FolderTabEntity {
         self.0.read(cx).focus_handle(cx)
     }
 
-    fn render(&self, window: &mut Window, cx: &mut App) -> AnyElement {
-        use gpui::IntoElement;
-        let entity = self.0.clone();
-        entity
-            .update(cx, |view, cx| view.render(window, cx).into_any_element())
+    fn any_view(&self) -> AnyView {
+        self.0.clone().into()
     }
 
     fn clone_inner(&self) -> Box<dyn TabEntityInner> {
@@ -104,11 +107,8 @@ impl TabEntityInner for TextDiffTabEntity {
         self.0.read(cx).focus_handle(cx)
     }
 
-    fn render(&self, window: &mut Window, cx: &mut App) -> AnyElement {
-        use gpui::IntoElement;
-        let entity = self.0.clone();
-        entity
-            .update(cx, |view, cx| view.render(window, cx).into_any_element())
+    fn any_view(&self) -> AnyView {
+        self.0.clone().into()
     }
 
     fn clone_inner(&self) -> Box<dyn TabEntityInner> {
@@ -124,16 +124,23 @@ impl TabEntityInner for TextDiffTabEntity {
 pub struct WindowRoot {
     /// Handle to the session manager.
     session_manager: Entity<GuiSessionManager>,
+    /// Navigation stack managing tab content visibility.
+    nav_stack_state: Entity<NavStackState>,
+    /// Last known active tab index, for diffing against the session manager.
+    last_active_index: usize,
 }
 
 impl WindowRoot {
     /// Create a new window root.
     pub fn new(
         session_manager: Entity<GuiSessionManager>,
-        _cx: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) -> Self {
-        let _ = _cx;
-        Self { session_manager }
+        Self {
+            session_manager,
+            nav_stack_state: cx.new(|_| NavStackState::new()),
+            last_active_index: 0,
+        }
     }
 }
 
@@ -145,35 +152,29 @@ impl Render for WindowRoot {
     ) -> impl IntoElement {
         let mgr = self.session_manager.read(cx);
         let active_index = mgr.active_index();
+        let tabs = mgr.tab_entities();
 
-        // Collect tab entities from the session manager.
-        let tabs: Vec<TabEntity> = mgr.tab_entities();
+        // Sync the NavStackState with the active tab. When the active tab
+        // changes or the stack is empty, clear and push the new view.
+        // NavMotion::Immediate switches views without animation, which is
+        // appropriate for tab switching.
+        if (active_index != self.last_active_index
+            || self.nav_stack_state.read(cx).is_empty())
+            && let Some(tab) = tabs.get(active_index)
+        {
+            let view = tab.any_view();
+            self.nav_stack_state.update(cx, |state, cx| {
+                state.clear(cx);
+                state.push(view, NavMotion::Immediate, cx);
+            });
+            self.last_active_index = active_index;
+        }
 
         // Focus the active tab.
         if let Some(tab) = tabs.get(active_index) {
             let focus = tab.focus_handle(cx);
             window.focus(&focus, cx);
         }
-
-        // Render tab content first to avoid borrow conflicts.
-        use gpui::IntoElement;
-        let tab_contents: Vec<AnyElement> = tabs
-            .iter()
-            .enumerate()
-            .map(|(i, tab)| {
-                let element = tab.render(window, cx);
-                if i == active_index {
-                    element
-                } else {
-                    div()
-                        .absolute()
-                        .size_0()
-                        .overflow_hidden()
-                        .child(element)
-                        .into_any_element()
-                }
-            })
-            .collect();
 
         let tab_bar_element =
             crate::chrome::tab_bar_element(self.session_manager.clone(), cx);
@@ -188,6 +189,12 @@ impl Render for WindowRoot {
             .text_sm()
             .child(tab_bar_element)
             .child(toolbar_element)
-            .child(div().flex_1().overflow_hidden().children(tab_contents))
+            .child(
+                div().flex_1().overflow_hidden().child(
+                    NavStack::new(&self.nav_stack_state).size_full().item(
+                        |page, _, _| page.size_full().into_any_element(),
+                    ),
+                ),
+            )
     }
 }
