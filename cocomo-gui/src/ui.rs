@@ -12,7 +12,7 @@
 //! This module provides the directory comparison view, including
 //! status indicators, navigation, and entry rendering.
 
-use std::{ops::Range, path::PathBuf, sync::Arc};
+use std::{ops::Range, path::PathBuf};
 
 use cocomo_lib::DirEntryStatus;
 use gpui::{
@@ -21,13 +21,9 @@ use gpui::{
     prelude::*, px, rgb, uniform_list,
 };
 
-use crate::{
-    menus::{ReloadCompare, SaveSession},
+use crate::{menus::{ReloadCompare, SaveSession},
     session_manager::GuiSessionManager,
-    state::{AppState, StatusSummary},
-    tab_bar::TabBar,
-    toolbar::Toolbar,
-};
+    state::{AppState, StatusSummary},};
 
 // ---------------------------------------------------------------------------
 // Actions
@@ -327,40 +323,9 @@ impl Render for FolderCompareView {
         // Focus the app state for keyboard navigation.
         window.focus(&self.state.focus_handle(cx), cx);
 
-        // Build the tab bar callbacks using Entity::update(&mut App).
-        let mgr = self.session_manager.clone();
-        #[allow(clippy::type_complexity)]
-        let on_activate: Arc<dyn Fn(usize, &mut App) + Send + Sync> =
-            Arc::new(move |index: usize, app: &mut App| {
-                mgr.update(app, |m, cx| {
-                    m.activate_session(index, cx);
-                });
-            });
-
-        let mgr = self.session_manager.clone();
-        #[allow(clippy::type_complexity)]
-        let on_close: Arc<dyn Fn(usize, &mut App) + Send + Sync> =
-            Arc::new(move |index: usize, app: &mut App| {
-                mgr.update(app, |m, cx| {
-                    m.close_session(index, cx);
-                });
-            });
-
-        let mgr = self.session_manager.clone();
-        let on_new: Arc<dyn Fn(&mut App) + Send + Sync> =
-            Arc::new(move |app: &mut App| {
-                mgr.update(app, |m, cx| {
-                    m.add_new_folder_tab(cx);
-                });
-            });
-
-        let mut tab_bar = TabBar::new(self.session_manager.clone());
         let tab_bar_element =
-            tab_bar.render(window, cx, on_activate, on_close, on_new);
-
-        // Build the toolbar.
-        let mut toolbar = Toolbar::new();
-        let toolbar_element = toolbar.render(window, cx);
+            crate::chrome::tab_bar_element(self.session_manager.clone(), cx);
+        let toolbar_element = crate::chrome::toolbar_element();
 
         div()
             .key_context("FolderCompare")

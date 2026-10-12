@@ -22,7 +22,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow = "1"
 cocomo-lib = { path = "../cocomo-lib" }
-dirs = "6"
-gpui = { package = "gpui-kit", version = "0.7", default-features = false }
+dirs = "7"
+gpui = { package = "gpui-kit", version = "0.7" }
 log = "0.4"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

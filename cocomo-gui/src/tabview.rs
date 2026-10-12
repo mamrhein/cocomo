@@ -25,8 +25,6 @@ use crate::{
     ui::FolderCompareView,
 };
 
-type TabCallback = std::sync::Arc<dyn Fn(usize, &mut App) + Send + Sync>;
-
 // ---------------------------------------------------------------------------
 // Type-erased tab entity
 // ---------------------------------------------------------------------------
@@ -177,38 +175,9 @@ impl Render for WindowRoot {
             })
             .collect();
 
-        // Build tab bar callbacks.
-        let mgr_activate = self.session_manager.clone();
-        let on_activate: TabCallback =
-            std::sync::Arc::new(move |index: usize, app: &mut App| {
-                mgr_activate.update(app, |m, cx| {
-                    m.activate_session(index, cx);
-                });
-            });
-
-        let mgr_close = self.session_manager.clone();
-        let on_close: TabCallback =
-            std::sync::Arc::new(move |index: usize, app: &mut App| {
-                mgr_close.update(app, |m, cx| {
-                    m.close_session(index, cx);
-                });
-            });
-
-        let mgr_new = self.session_manager.clone();
-        let on_new: std::sync::Arc<dyn Fn(&mut App) + Send + Sync> =
-            std::sync::Arc::new(move |app: &mut App| {
-                mgr_new.update(app, |m, cx| {
-                    m.add_new_folder_tab(cx);
-                });
-            });
-
-        let mut tab_bar =
-            crate::tab_bar::TabBar::new(self.session_manager.clone());
         let tab_bar_element =
-            tab_bar.render(window, cx, on_activate, on_close, on_new);
-
-        let mut toolbar = crate::toolbar::Toolbar::new();
-        let toolbar_element = toolbar.render(window, cx);
+            crate::chrome::tab_bar_element(self.session_manager.clone(), cx);
+        let toolbar_element = crate::chrome::toolbar_element();
 
         div()
             .flex()

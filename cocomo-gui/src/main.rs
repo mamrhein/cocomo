@@ -13,14 +13,13 @@
 //! indicators, and directory tree browsing. Built on gpui for GPU-accelerated
 //! rendering.
 
+mod chrome;
 mod menus;
 mod runtime;
 mod session_manager;
 mod state;
-mod tab_bar;
 mod tabview;
 mod text_diff;
-mod toolbar;
 mod ui;
 
 use std::path::PathBuf;
