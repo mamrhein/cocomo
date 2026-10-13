@@ -134,6 +134,9 @@ pub struct DirCompareArgs {
     /// Compare file contents (activate content hashing).
     #[arg(long)]
     content: bool,
+    /// Maximum scan depth. Without this flag the scan is unlimited.
+    #[arg(long)]
+    max_depth: Option<usize>,
     /// Output format for console display.
     #[arg(long, default_value = "text")]
     format: OutputFormat,
@@ -617,11 +620,12 @@ async fn dir_compare<R: EndpointResolver>(
         &args.right,
         args.profile.as_deref(),
     )?;
-    let config = if args.content {
+    let mut config = if args.content {
         CompareConfig::full()
     } else {
         CompareConfig::meta_data_only()
     };
+    config.max_depth = args.max_depth;
 
     let comparison = match pair {
         EndpointPair::Shared(fs) => {
@@ -1005,6 +1009,7 @@ impl DirCompareArgs {
             left: "./left".to_string(),
             right: "./right".to_string(),
             content: false,
+            max_depth: None,
             format: OutputFormat::Text,
             show_different: false,
             show_orphans: false,
