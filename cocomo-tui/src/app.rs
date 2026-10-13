@@ -353,11 +353,12 @@ pub async fn run_comparison(session: &mut SessionView) -> anyhow::Result<()> {
     let fs = LocalFs::new("local");
     let cache = ContentCache::default_config();
 
-    let config = if session.compare_content {
+    let mut config = if session.compare_content {
         CompareConfig::full()
     } else {
         CompareConfig::meta_data_only()
     };
+    config.max_depth = Some(1);
 
     let comparison = cocomo_lib::compare_directories_node(
         &fs,
