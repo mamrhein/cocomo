@@ -57,9 +57,9 @@ struct Cli {
     #[arg(short, long)]
     right: Option<PathBuf>,
 
-    /// Structure-only comparison (skip content hashing).
-    #[arg(short = 's', long, default_value_t = false)]
-    structure_only: bool,
+    /// Compare file content (using hashing).
+    #[arg(short = 'c', long, default_value_t = false)]
+    content: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -299,7 +299,7 @@ async fn main() -> Result<()> {
     // Create the initial comparison session if paths were provided.
     if has_paths {
         let mut session =
-            SessionView::new_dir_compare(left, right, !cli.structure_only);
+            SessionView::new_dir_compare(left, right, cli.content);
         if let Err(e) = run_comparison(&mut session).await {
             session.errors.push(format!("Comparison failed: {e}"));
         }

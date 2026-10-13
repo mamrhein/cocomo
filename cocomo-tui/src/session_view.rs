@@ -448,8 +448,8 @@ fn render_help_bar(frame: &mut Frame, area: Rect, session: &SessionView) {
             Span::raw(" filter  "),
             Span::styled("F", Style::default().add_modifier(Modifier::BOLD)),
             Span::raw(" hide same  "),
-            Span::styled("S", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(" files/struct  "),
+            Span::styled("C", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(" cont. on/off  "),
             Span::styled("m/M", Style::default().add_modifier(Modifier::BOLD)),
             Span::raw(" sync op  "),
             Span::styled("P", Style::default().add_modifier(Modifier::BOLD)),
@@ -550,7 +550,7 @@ pub fn handle_session_key(
             session.table_state.select(Some(0));
             SessionAction::None
         }
-        KeyCode::Char('S') => {
+        KeyCode::Char('C') => {
             session.compare_content = !session.compare_content;
             SessionAction::None
         }

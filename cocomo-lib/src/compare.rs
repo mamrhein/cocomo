@@ -889,7 +889,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn compare_structure_only() {
+    async fn compare_meta_data_only() {
         let (left, right) = make_test_dirs();
         let fs: Arc<dyn FileSystem> = Arc::new(LocalFs::new("test"));
         let cache = ContentCache::default_config();
@@ -943,7 +943,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn node_compare_structure_only() {
+    async fn node_compare_meta_data_only() {
         let (left, right) = make_test_dirs();
         let fs = LocalFs::new("test");
         let cache = ContentCache::default_config();

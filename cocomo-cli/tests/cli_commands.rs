@@ -164,10 +164,10 @@ mod dir_compare {
     }
 
     #[test]
-    fn meta_data_only_flag() {
+    fn content_flag() {
         let dir = create_test_dirs();
         cmd()
-            .args(["dir", "compare", "--meta-data-only"])
+            .args(["dir", "compare", "--content"])
             .args([
                 dir.path().join("left").to_str().unwrap(),
                 dir.path().join("right").to_str().unwrap(),

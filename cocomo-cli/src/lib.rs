@@ -131,9 +131,9 @@ pub struct DirCompareArgs {
     left: String,
     /// Right directory path or URL (e.g. `ftp://host/pub/src`).
     right: String,
-    /// Compare meta data only (skip content hashing).
+    /// Compare file contents (activate content hashing).
     #[arg(long)]
-    meta_data_only: bool,
+    content: bool,
     /// Output format for console display.
     #[arg(long, default_value = "text")]
     format: OutputFormat,
@@ -161,7 +161,7 @@ pub struct DirCompareArgs {
     /// Hide modification timestamp columns in text output.
     #[arg(long)]
     no_mtime: bool,
-    /// Show content hashes when available (full comparison only).
+    /// Show content hashes when available (requires --content).
     #[arg(long)]
     show_hash: bool,
     /// Suppress the summary line(s) at the end of output.
@@ -617,10 +617,10 @@ async fn dir_compare<R: EndpointResolver>(
         &args.right,
         args.profile.as_deref(),
     )?;
-    let config = if args.meta_data_only {
-        CompareConfig::meta_data_only()
-    } else {
+    let config = if args.content {
         CompareConfig::full()
+    } else {
+        CompareConfig::meta_data_only()
     };
 
     let comparison = match pair {
@@ -1004,7 +1004,7 @@ impl DirCompareArgs {
         Self {
             left: "./left".to_string(),
             right: "./right".to_string(),
-            meta_data_only: false,
+            content: false,
             format: OutputFormat::Text,
             show_different: false,
             show_orphans: false,
