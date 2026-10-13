@@ -53,6 +53,7 @@ use cocomo_lib::{
     transfer::FsPair,
     url::{Url, UrlError},
 };
+use globset::Glob;
 
 // ---------------------------------------------------------------------------
 // CLI definitions
@@ -179,6 +180,16 @@ pub struct DirCompareArgs {
     /// Profile id to authenticate the addressed provider(s) with.
     #[arg(long)]
     profile: Option<String>,
+    /// Exclude hidden files and directories (names starting with `.`).
+    #[arg(long = "excl-hidden")]
+    excl_hidden: bool,
+    /// Show only directories in the output.
+    #[arg(long = "dirs-only")]
+    dirs_only: bool,
+    /// Show only entries whose name matches this glob pattern (e.g.
+    /// `*.txt`, `config*`).
+    #[arg(long, value_name = "expr")]
+    filter: Option<String>,
 }
 
 #[derive(Parser)]
@@ -708,7 +719,29 @@ fn build_report_config(args: &DirCompareArgs) -> ReportConfig {
     }
 }
 
-fn should_show_entry(entry: &DirEntry, args: &DirCompareArgs) -> bool {
+/// Check whether an entry passes the name/type filters: `--excl-hidden`,
+/// `--dirs-only`, and `--filter`.
+fn matches_name_filter(entry: &DirEntry, args: &DirCompareArgs) -> bool {
+    if args.excl_hidden && entry.name.starts_with('.') {
+        return false;
+    }
+    if args.dirs_only && !is_dir_entry(entry) {
+        return false;
+    }
+    if let Some(pattern) = &args.filter
+        && let Ok(glob) = Glob::new(pattern)
+    {
+        let matcher = glob.compile_matcher();
+        if !matcher.is_match(&entry.name) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Check whether an entry passes the status display filters:
+/// `--show-different` and `--show-orphans`.
+fn matches_status_filter(entry: &DirEntry, args: &DirCompareArgs) -> bool {
     if args.show_different && args.show_orphans {
         return true;
     }
@@ -726,6 +759,25 @@ fn should_show_entry(entry: &DirEntry, args: &DirCompareArgs) -> bool {
     } else {
         true
     }
+}
+
+/// Check whether an entry should be shown in flat text, CSV, or JSON output.
+/// Applies both name/type and status filters.
+fn should_show_entry(entry: &DirEntry, args: &DirCompareArgs) -> bool {
+    matches_name_filter(entry, args) && matches_status_filter(entry, args)
+}
+
+/// Check whether an entry should be shown in tree mode.
+///
+/// The name/type filter applies to all entries (so hidden or non-matching
+/// directories are excluded entirely). Directories are always shown as
+/// structural nodes unless filtered by name/type, preserving the tree
+/// skeleton when status filters like `--show-different` are active.
+fn should_show_in_tree(entry: &DirEntry, args: &DirCompareArgs) -> bool {
+    if !matches_name_filter(entry, args) {
+        return false;
+    }
+    is_dir_entry(entry) || matches_status_filter(entry, args)
 }
 
 /// Return `true` when the entry is a directory on any side.
@@ -996,7 +1048,7 @@ fn count_visible_tree_children(
 ) -> usize {
     entries
         .iter()
-        .filter(|e| is_dir_entry(e) || should_show_entry(e, args))
+        .filter(|e| should_show_in_tree(e, args))
         .count()
 }
 
@@ -1024,6 +1076,9 @@ impl DirCompareArgs {
             summary: SummaryMode::Brief,
             sort: None,
             profile: None,
+            excl_hidden: false,
+            dirs_only: false,
+            filter: None,
         }
     }
 }
@@ -1039,7 +1094,7 @@ fn render_tree_entries(
 ) {
     let visible: Vec<&DirEntry> = entries
         .iter()
-        .filter(|e| is_dir_entry(e) || should_show_entry(e, args))
+        .filter(|e| should_show_in_tree(e, args))
         .collect();
 
     let count = visible.len();
@@ -2160,7 +2215,8 @@ mod tests {
 
     use super::{
         ColorMode, Colorizer, SortField, SummaryMode, color_code,
-        format_modified, is_dir_entry, sort_entries, truncate_name,
+        format_modified, is_dir_entry, matches_name_filter,
+        should_show_in_tree, sort_entries, truncate_name,
     };
 
     /// Build a `DirCompareArgs` with all flags set to their defaults, suitable
@@ -2334,6 +2390,137 @@ mod tests {
             sub_entries: None,
         };
         assert!(is_dir_entry(&entry));
+    }
+
+    // -----------------------------------------------------------------------
+    // Name/type filter unit tests
+    // -----------------------------------------------------------------------
+
+    fn make_hidden_file_entry() -> DirEntry {
+        DirEntry {
+            name: ".hidden.txt".to_string(),
+            status: DirEntryStatus::Same,
+            left: Some(EntryInfo {
+                name: ".hidden.txt".to_string(),
+                path: ".hidden.txt".to_string(),
+                size: 4,
+                modified: "2024-03-15 14:30".to_string(),
+                is_dir: false,
+                hash: None,
+            }),
+            right: Some(EntryInfo {
+                name: ".hidden.txt".to_string(),
+                path: ".hidden.txt".to_string(),
+                size: 4,
+                modified: "2024-03-15 14:30".to_string(),
+                is_dir: false,
+                hash: None,
+            }),
+            center: None,
+            sub_entries: None,
+        }
+    }
+
+    fn make_dir_entry() -> DirEntry {
+        DirEntry {
+            name: "mydir".to_string(),
+            status: DirEntryStatus::LeftOnly,
+            left: Some(EntryInfo {
+                name: "mydir".to_string(),
+                path: "mydir".to_string(),
+                size: 4096,
+                modified: "2024-03-15 14:30".to_string(),
+                is_dir: true,
+                hash: None,
+            }),
+            right: None,
+            center: None,
+            sub_entries: None,
+        }
+    }
+
+    #[test]
+    fn excl_hidden_filters_dotfiles() {
+        let entry = make_hidden_file_entry();
+        let mut args = test_args();
+        args.excl_hidden = true;
+        assert!(!matches_name_filter(&entry, &args));
+    }
+
+    #[test]
+    fn excl_hidden_keeps_visible_files() {
+        let comp = make_test_comparison();
+        let entry = &comp.entries[0]; // "same.txt"
+        let mut args = test_args();
+        args.excl_hidden = true;
+        assert!(matches_name_filter(entry, &args));
+    }
+
+    #[test]
+    fn dirs_only_filters_files() {
+        let comp = make_test_comparison();
+        let entry = &comp.entries[0]; // "same.txt" — a file
+        let mut args = test_args();
+        args.dirs_only = true;
+        assert!(!matches_name_filter(entry, &args));
+    }
+
+    #[test]
+    fn dirs_only_keeps_directories() {
+        let entry = make_dir_entry();
+        let mut args = test_args();
+        args.dirs_only = true;
+        assert!(matches_name_filter(&entry, &args));
+    }
+
+    #[test]
+    fn filter_glob_matches_txt() {
+        let comp = make_test_comparison();
+        let entry = &comp.entries[0]; // "same.txt"
+        let mut args = test_args();
+        args.filter = Some("*.txt".to_string());
+        assert!(matches_name_filter(entry, &args));
+    }
+
+    #[test]
+    fn filter_glob_excludes_unmatched() {
+        let comp = make_test_comparison();
+        let entry = &comp.entries[0]; // "same.txt"
+        let mut args = test_args();
+        args.filter = Some("*.log".to_string());
+        assert!(!matches_name_filter(entry, &args));
+    }
+
+    #[test]
+    fn should_show_in_tree_preserves_dirs_with_show_different() {
+        let dir_entry = make_dir_entry();
+        let mut args = test_args();
+        args.show_different = true;
+        // A directory with LeftOnly status should be shown in tree mode even
+        // though LeftOnly is not a "different" status.
+        assert!(should_show_in_tree(&dir_entry, &args));
+    }
+
+    #[test]
+    fn should_show_in_tree_excludes_hidden_dirs() {
+        let hidden_dir = DirEntry {
+            name: ".git".to_string(),
+            status: DirEntryStatus::LeftOnly,
+            left: Some(EntryInfo {
+                name: ".git".to_string(),
+                path: ".git".to_string(),
+                size: 4096,
+                modified: "2024-03-15 14:30".to_string(),
+                is_dir: true,
+                hash: None,
+            }),
+            right: None,
+            center: None,
+            sub_entries: None,
+        };
+        let mut args = test_args();
+        args.excl_hidden = true;
+        assert!(!should_show_in_tree(&hidden_dir, &args));
     }
 
     #[test]

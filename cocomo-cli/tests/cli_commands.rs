@@ -77,6 +77,47 @@ fn create_nested_test_dirs() -> TempDir {
     dir
 }
 
+/// Create a temp directory with hidden files and nested directories for
+/// testing --excl-hidden and --dirs-only filters.
+fn create_test_dirs_with_hidden() -> TempDir {
+    let dir = TempDir::with_prefix("cocomo_hidden").unwrap();
+
+    let left = dir.path().join("left");
+    let right = dir.path().join("right");
+    fs::create_dir_all(left.join("sub")).unwrap();
+    fs::create_dir_all(right.join("sub")).unwrap();
+    fs::create_dir_all(left.join(".hidden_dir")).unwrap();
+    fs::create_dir_all(right.join(".hidden_dir")).unwrap();
+
+    // Visible identical file.
+    fs::write(left.join("same.txt"), "hello\n").unwrap();
+    fs::write(right.join("same.txt"), "hello\n").unwrap();
+
+    // Visible different file.
+    fs::write(left.join("diff.txt"), "world\n").unwrap();
+    fs::write(right.join("diff.txt"), "changed\n").unwrap();
+
+    // Hidden file.
+    fs::write(left.join(".hidden"), "secret\n").unwrap();
+    fs::write(right.join(".hidden"), "secret\n").unwrap();
+
+    // Hidden directory with a visible child.
+    fs::write(left.join(".hidden_dir").join("inside.txt"), "x\n").unwrap();
+    fs::write(right.join(".hidden_dir").join("inside.txt"), "x\n").unwrap();
+
+    // Visible file in subdir.
+    fs::write(left.join("sub").join("nested.txt"), "nested\n").unwrap();
+    fs::write(right.join("sub").join("nested.txt"), "nested\n").unwrap();
+
+    // Left-only file.
+    fs::write(left.join("only_left.txt"), "left\n").unwrap();
+
+    // Right-only file.
+    fs::write(right.join("only_right.txt"), "right\n").unwrap();
+
+    dir
+}
+
 /// Create two temp text files with different content.
 fn create_diff_text_files() -> TempDir {
     let dir = TempDir::with_prefix("cocomo_text").unwrap();
@@ -714,6 +755,187 @@ mod dir_compare {
             .assert()
             .code(1)
             .stdout(predicate::str::contains(r#""entries"#));
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 3: New filters (--excl-hidden, --dirs-only, --filter)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn excl_hidden_excludes_dotfiles() {
+        let dir = create_test_dirs_with_hidden();
+        cmd()
+            .args(["dir", "compare", "--excl-hidden"])
+            .args([
+                dir.path().join("left").to_str().unwrap(),
+                dir.path().join("right").to_str().unwrap(),
+            ])
+            .assert()
+            .code(1)
+            .stdout(predicate::str::contains(".hidden").not())
+            .stdout(predicate::str::contains("same.txt"));
+    }
+
+    #[test]
+    fn excl_hidden_with_tree_excludes_hidden_dirs() {
+        let dir = create_test_dirs_with_hidden();
+        cmd()
+            .args(["dir", "compare", "--tree", "--excl-hidden"])
+            .args([
+                dir.path().join("left").to_str().unwrap(),
+                dir.path().join("right").to_str().unwrap(),
+            ])
+            .assert()
+            .code(1)
+            .stdout(predicate::str::contains(".hidden").not())
+            .stdout(predicate::str::contains("same.txt"))
+            .stdout(predicate::str::contains("sub/"));
+    }
+
+    #[test]
+    fn dirs_only_shows_only_dirs_in_tree() {
+        let dir = create_test_dirs_with_hidden();
+        cmd()
+            .args(["dir", "compare", "--tree", "--dirs-only"])
+            .args([
+                dir.path().join("left").to_str().unwrap(),
+                dir.path().join("right").to_str().unwrap(),
+            ])
+            .assert()
+            .code(1)
+            .stdout(predicate::str::contains("sub/"))
+            .stdout(predicate::str::contains(".hidden_dir/"))
+            .stdout(predicate::str::contains("same.txt").not());
+    }
+
+    #[test]
+    fn dirs_only_with_csv_shows_only_dir_rows() {
+        let dir = create_test_dirs_with_hidden();
+        let output = cmd()
+            .args([
+                "dir",
+                "compare",
+                "--dirs-only",
+                "--format",
+                "csv",
+                "--no-summary",
+            ])
+            .args([
+                dir.path().join("left").to_str().unwrap(),
+                dir.path().join("right").to_str().unwrap(),
+            ])
+            .assert()
+            .code(1)
+            .get_output()
+            .stdout
+            .clone();
+
+        let stdout_str = String::from_utf8(output).unwrap();
+        // Every data row should have is_dir=true.  Skip header lines
+        // and empty lines — data rows always contain commas.
+        for line in stdout_str.lines() {
+            if !line.contains(',') {
+                continue;
+            }
+            if line.contains("is_dir") || line.contains("status") {
+                continue;
+            }
+            assert!(
+                line.contains("true"),
+                "expected is_dir=true for all rows, got: {line}"
+            );
+        }
+        // No file names should appear.
+        assert!(!stdout_str.contains("same.txt"));
+    }
+
+    #[test]
+    fn filter_glob_matches_txt() {
+        let dir = create_test_dirs_with_hidden();
+        cmd()
+            .args(["dir", "compare", "--filter", "*.txt"])
+            .args([
+                dir.path().join("left").to_str().unwrap(),
+                dir.path().join("right").to_str().unwrap(),
+            ])
+            .assert()
+            .code(1)
+            .stdout(predicate::str::contains("same.txt"))
+            .stdout(predicate::str::contains("diff.txt"))
+            .stdout(predicate::str::contains(".hidden").not());
+    }
+
+    #[test]
+    fn filter_glob_excludes_unmatched() {
+        let dir = create_test_dirs();
+        cmd()
+            .args(["dir", "compare", "--filter", "nonexistent*"])
+            .args([
+                dir.path().join("left").to_str().unwrap(),
+                dir.path().join("right").to_str().unwrap(),
+            ])
+            .assert()
+            .code(1)
+            .stdout(predicate::str::contains("No matching entries"));
+    }
+
+    #[test]
+    fn filter_with_json_shows_only_matching_names() {
+        let dir = create_test_dirs();
+        let output = cmd()
+            .args(["dir", "compare", "--filter", "*.txt", "--format", "json"])
+            .args([
+                dir.path().join("left").to_str().unwrap(),
+                dir.path().join("right").to_str().unwrap(),
+            ])
+            .assert()
+            .code(1)
+            .get_output()
+            .stdout
+            .clone();
+
+        let stdout_str = String::from_utf8(output).unwrap();
+        let json_end = stdout_str.rfind('}').unwrap() + 1;
+        let json_str = &stdout_str[..json_end];
+        let parsed: serde_json::Value =
+            serde_json::from_str(json_str).unwrap();
+
+        let entries = parsed["entries"].as_array().unwrap();
+        for entry in entries {
+            let name = entry["name"].as_str().unwrap();
+            assert!(name.ends_with(".txt"), "expected .txt name, got: {name}");
+        }
+    }
+
+    #[test]
+    fn dirs_only_and_excl_hidden_combined() {
+        let dir = create_test_dirs_with_hidden();
+        cmd()
+            .args(["dir", "compare", "--tree", "--dirs-only", "--excl-hidden"])
+            .args([
+                dir.path().join("left").to_str().unwrap(),
+                dir.path().join("right").to_str().unwrap(),
+            ])
+            .assert()
+            .code(1)
+            .stdout(predicate::str::contains("sub/"))
+            .stdout(predicate::str::contains(".hidden_dir").not())
+            .stdout(predicate::str::contains("same.txt").not());
+    }
+
+    #[test]
+    fn filter_and_excl_hidden_combined() {
+        let dir = create_test_dirs_with_hidden();
+        cmd()
+            .args(["dir", "compare", "--filter", "*.txt", "--excl-hidden"])
+            .args([
+                dir.path().join("left").to_str().unwrap(),
+                dir.path().join("right").to_str().unwrap(),
+            ])
+            .assert()
+            .code(1)
+            .stdout(predicate::str::contains("same.txt"))
+            .stdout(predicate::str::contains(".hidden").not());
     }
 }
 
