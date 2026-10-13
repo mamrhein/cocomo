@@ -334,7 +334,7 @@ async fn main() -> Result<()> {
                         let mut new_session = SessionView::new_dir_compare(
                             left,
                             right,
-                            session.compare_files,
+                            session.compare_content,
                         );
                         if let Err(e) = run_comparison(&mut new_session).await
                         {
@@ -357,7 +357,7 @@ async fn main() -> Result<()> {
                                     SessionView::new_dir_compare(
                                         l.to_path_buf(),
                                         r.to_path_buf(),
-                                        session.compare_files,
+                                        session.compare_content,
                                     );
                                 if let Err(e) =
                                     run_comparison(&mut new_session).await

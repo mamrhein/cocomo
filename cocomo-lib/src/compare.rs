@@ -180,10 +180,10 @@ impl DirComparison {
 /// Configuration for a directory comparison.
 #[derive(Clone, Debug, Default)]
 pub struct CompareConfig {
-    /// Compare file contents, not just structure.
-    pub compare_files: bool,
-    /// Compare directory structure.
-    pub compare_structure: bool,
+    /// Compare file contents, not just meta data.
+    pub compare_content: bool,
+    /// Compare node meta data (name, size, modification date).
+    pub compare_meta_data: bool,
     /// Follow symlinks during scan.
     pub follow_symlinks: bool,
     /// Maximum scan depth.
@@ -193,22 +193,22 @@ pub struct CompareConfig {
 }
 
 impl CompareConfig {
-    /// Full comparison: structure + content.
+    /// Full comparison: meta data + content.
     pub fn full() -> Self {
         Self {
-            compare_files: true,
-            compare_structure: true,
+            compare_content: true,
+            compare_meta_data: true,
             follow_symlinks: false,
             max_depth: None,
             size_tolerance: 0.1,
         }
     }
 
-    /// Structure-only comparison (no content hashing).
-    pub fn structure_only() -> Self {
+    /// Meta-data-only comparison (no content hashing).
+    pub fn meta_data_only() -> Self {
         Self {
-            compare_files: false,
-            compare_structure: true,
+            compare_content: false,
+            compare_meta_data: true,
             follow_symlinks: false,
             max_depth: None,
             size_tolerance: 0.1,
@@ -588,7 +588,7 @@ where
     L: NodeFileSystem<Nid = u64>,
     R: NodeFileSystem<Nid = u64>,
 {
-    if !config.compare_files {
+    if !config.compare_content {
         return if left.meta.size == right.meta.size {
             Ok(DirEntryStatus::Same)
         } else {
@@ -751,7 +751,7 @@ async fn compare_file_status(
     config: &CompareConfig,
     cache: Option<&ContentCache>,
 ) -> Result<DirEntryStatus> {
-    if !config.compare_files {
+    if !config.compare_content {
         return if left.meta.size == right.meta.size {
             Ok(DirEntryStatus::Same)
         } else {
@@ -893,7 +893,7 @@ mod tests {
         let (left, right) = make_test_dirs();
         let fs: Arc<dyn FileSystem> = Arc::new(LocalFs::new("test"));
         let cache = ContentCache::default_config();
-        let config = CompareConfig::structure_only();
+        let config = CompareConfig::meta_data_only();
 
         let result =
             compare_directories(&fs, &left, &right, &config, Some(&cache))
@@ -947,7 +947,7 @@ mod tests {
         let (left, right) = make_test_dirs();
         let fs = LocalFs::new("test");
         let cache = ContentCache::default_config();
-        let config = CompareConfig::structure_only();
+        let config = CompareConfig::meta_data_only();
 
         let result = compare_directories_node(
             &fs,

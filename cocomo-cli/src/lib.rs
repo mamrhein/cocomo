@@ -131,9 +131,9 @@ pub struct DirCompareArgs {
     left: String,
     /// Right directory path or URL (e.g. `ftp://host/pub/src`).
     right: String,
-    /// Compare directory structure only (skip content hashing).
+    /// Compare meta data only (skip content hashing).
     #[arg(long)]
-    structure_only: bool,
+    meta_data_only: bool,
     /// Output format for console display.
     #[arg(long, default_value = "text")]
     format: OutputFormat,
@@ -617,8 +617,8 @@ async fn dir_compare<R: EndpointResolver>(
         &args.right,
         args.profile.as_deref(),
     )?;
-    let config = if args.structure_only {
-        CompareConfig::structure_only()
+    let config = if args.meta_data_only {
+        CompareConfig::meta_data_only()
     } else {
         CompareConfig::full()
     };
@@ -1004,7 +1004,7 @@ impl DirCompareArgs {
         Self {
             left: "./left".to_string(),
             right: "./right".to_string(),
-            structure_only: false,
+            meta_data_only: false,
             format: OutputFormat::Text,
             show_different: false,
             show_orphans: false,
@@ -1519,7 +1519,7 @@ async fn dir_sync<R: EndpointResolver>(
         operation,
         dry_run: args.dry_run,
         max_depth: None,
-        compare_files: args.compare_files,
+        compare_content: args.compare_files,
     };
 
     let result = match pair {

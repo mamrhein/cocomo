@@ -551,7 +551,7 @@ pub fn handle_session_key(
             SessionAction::None
         }
         KeyCode::Char('S') => {
-            session.compare_files = !session.compare_files;
+            session.compare_content = !session.compare_content;
             SessionAction::None
         }
         KeyCode::Char('P') => {

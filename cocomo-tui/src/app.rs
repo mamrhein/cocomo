@@ -118,8 +118,8 @@ pub struct SessionView {
     pub active_filter: Option<String>,
     /// Hide identical entries.
     pub hide_same: bool,
-    /// Compare file contents (vs. structure only).
-    pub compare_files: bool,
+    /// Compare file contents (vs. meta data only).
+    pub compare_content: bool,
     /// Errors encountered during comparison.
     pub errors: Vec<String>,
     /// Planned sync result for review. `Some` means sync preview is active.
@@ -133,7 +133,7 @@ impl SessionView {
     pub fn new_dir_compare(
         left: PathBuf,
         right: PathBuf,
-        compare_files: bool,
+        compare_content: bool,
     ) -> Self {
         let name = Self::tab_title_for_paths(&left, &right);
         Self {
@@ -152,7 +152,7 @@ impl SessionView {
             filter_input: String::new(),
             active_filter: None,
             hide_same: false,
-            compare_files,
+            compare_content,
             errors: Vec::new(),
             sync_planned: None,
             sync_operation: SyncOperation::default(),
@@ -185,7 +185,7 @@ impl SessionView {
             filter_input: String::new(),
             active_filter: None,
             hide_same: false,
-            compare_files: true,
+            compare_content: true,
             errors: Vec::new(),
             sync_planned: None,
             sync_operation: SyncOperation::default(),
@@ -353,10 +353,10 @@ pub async fn run_comparison(session: &mut SessionView) -> anyhow::Result<()> {
     let fs = LocalFs::new("local");
     let cache = ContentCache::default_config();
 
-    let config = if session.compare_files {
+    let config = if session.compare_content {
         CompareConfig::full()
     } else {
-        CompareConfig::structure_only()
+        CompareConfig::meta_data_only()
     };
 
     let comparison = cocomo_lib::compare_directories_node(
@@ -463,7 +463,7 @@ pub async fn plan_sync_session(
         operation: session.sync_operation,
         dry_run: true,
         max_depth: None,
-        compare_files: session.compare_files,
+        compare_content: session.compare_content,
     };
 
     let result = cocomo_lib::plan_sync(
@@ -489,7 +489,7 @@ pub async fn execute_sync_session(
         operation: session.sync_operation,
         dry_run: false,
         max_depth: None,
-        compare_files: session.compare_files,
+        compare_content: session.compare_content,
     };
 
     let result = cocomo_lib::sync_directories(
@@ -521,7 +521,7 @@ pub fn session_to_config(session: &SessionView) -> SessionConfig {
         },
         center: None,
         settings: SessionSettings {
-            compare_files: session.compare_files,
+            compare_files: session.compare_content,
             compare_structure: true,
             name_filter: session
                 .active_filter

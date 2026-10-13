@@ -94,7 +94,7 @@ pub struct SyncRules {
     /// Maximum depth for recursive comparison. `None` means unlimited.
     pub max_depth: Option<usize>,
     /// Compare file contents. If `false`, uses size/mtime only.
-    pub compare_files: bool,
+    pub compare_content: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -148,8 +148,8 @@ where
 {
     let cache = crate::hash::ContentCache::default_config();
     let compare_config = CompareConfig {
-        compare_files: rules.compare_files,
-        compare_structure: true,
+        compare_content: rules.compare_content,
+        compare_meta_data: true,
         follow_symlinks: false,
         max_depth: rules.max_depth,
         size_tolerance: 0.1,
@@ -1137,7 +1137,7 @@ mod tests {
         let rules = SyncRules {
             operation: SyncOperation::MirrorLeft,
             dry_run: false,
-            compare_files: true,
+            compare_content: true,
             ..Default::default()
         };
 
@@ -1205,7 +1205,7 @@ mod tests {
         let rules = SyncRules {
             operation: SyncOperation::MirrorLeft,
             dry_run: false,
-            compare_files: true,
+            compare_content: true,
             ..Default::default()
         };
 
@@ -1254,7 +1254,7 @@ mod tests {
         let rules = SyncRules {
             operation: SyncOperation::MirrorLeft,
             dry_run: true,
-            compare_files: true,
+            compare_content: true,
             ..Default::default()
         };
 
