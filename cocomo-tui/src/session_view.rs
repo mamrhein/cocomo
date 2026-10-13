@@ -171,7 +171,7 @@ fn render_main(frame: &mut Frame, area: Rect, session: &SessionView) {
             .as_ref()
             .map(|l| {
                 format!(
-                    "{:>6}  {}",
+                    "{:>6} {}",
                     format_size(l.size),
                     format_date(&l.modified)
                 )
@@ -184,7 +184,7 @@ fn render_main(frame: &mut Frame, area: Rect, session: &SessionView) {
             .as_ref()
             .map(|r| {
                 format!(
-                    "{:>6}  {}",
+                    "{:>6} {}",
                     format_size(r.size),
                     format_date(&r.modified)
                 )
@@ -195,13 +195,13 @@ fn render_main(frame: &mut Frame, area: Rect, session: &SessionView) {
         let dir_indicator = if entry.left.as_ref().is_some_and(|l| l.is_dir)
             || entry.right.as_ref().is_some_and(|r| r.is_dir)
         {
-            "[+] "
+            "\u{1F5C0}"
         } else {
-            "    "
+            " "
         };
 
         Row::new(vec![
-            Span::raw(format!("{dir_indicator}{name}")),
+            Span::raw(format!("{dir_indicator} {name}")),
             Span::raw(left_meta),
             Span::styled(
                 entry.status.symbol(),
@@ -214,14 +214,14 @@ fn render_main(frame: &mut Frame, area: Rect, session: &SessionView) {
     });
 
     let header = Row::new(vec![
-        Span::styled("Name", Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled("T Name", Style::default().add_modifier(Modifier::BOLD)),
         Span::styled(
-            "Left (size  modified)",
+            format!("{:^6} {:^17}", "Size", "Modified"),
             Style::default().add_modifier(Modifier::BOLD),
         ),
         Span::styled("S", Style::default().add_modifier(Modifier::BOLD)),
         Span::styled(
-            "Right (size  modified)",
+            format!("{:^6} {:^17}", "Size", "Modified"),
             Style::default().add_modifier(Modifier::BOLD),
         ),
     ]);
