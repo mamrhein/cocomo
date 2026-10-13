@@ -171,7 +171,7 @@ fn render_main(frame: &mut Frame, area: Rect, session: &SessionView) {
             .as_ref()
             .map(|l| {
                 format!(
-                    "{}  {}",
+                    "{:>6}  {}",
                     format_size(l.size),
                     format_date(&l.modified)
                 )
@@ -184,7 +184,7 @@ fn render_main(frame: &mut Frame, area: Rect, session: &SessionView) {
             .as_ref()
             .map(|r| {
                 format!(
-                    "{}  {}",
+                    "{:>6}  {}",
                     format_size(r.size),
                     format_date(&r.modified)
                 )
