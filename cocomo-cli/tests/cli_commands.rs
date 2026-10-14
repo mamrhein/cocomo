@@ -544,21 +544,6 @@ mod dir_compare {
     }
 
     #[test]
-    fn show_hash_adds_hash_columns_to_text() {
-        let dir = create_test_dirs();
-        cmd()
-            .args(["dir", "compare", "--show-hash"])
-            .args([
-                dir.path().join("left").to_str().unwrap(),
-                dir.path().join("right").to_str().unwrap(),
-            ])
-            .assert()
-            .code(1)
-            .stdout(predicate::str::contains("Left Hash"))
-            .stdout(predicate::str::contains("Right Hash"));
-    }
-
-    #[test]
     fn csv_includes_is_dir_column() {
         let dir = create_test_dirs();
         cmd()
@@ -570,21 +555,6 @@ mod dir_compare {
             .assert()
             .code(1)
             .stdout(predicate::str::contains("is_dir"));
-    }
-
-    #[test]
-    fn csv_with_show_hash_includes_hash_columns() {
-        let dir = create_test_dirs();
-        cmd()
-            .args(["dir", "compare", "--format", "csv", "--show-hash"])
-            .args([
-                dir.path().join("left").to_str().unwrap(),
-                dir.path().join("right").to_str().unwrap(),
-            ])
-            .assert()
-            .code(1)
-            .stdout(predicate::str::contains("left_hash"))
-            .stdout(predicate::str::contains("right_hash"));
     }
 
     #[test]

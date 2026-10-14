@@ -175,9 +175,6 @@ pub struct DirCompareArgs {
     /// Hide modification timestamp columns in text output.
     #[arg(long)]
     no_mtime: bool,
-    /// Show content hashes when available (requires --content).
-    #[arg(short = 'H', long)]
-    show_hash: bool,
     /// Suppress the summary line(s) at the end of output.
     #[arg(long)]
     no_summary: bool,
@@ -924,7 +921,6 @@ fn print_comparison_text(
     // Path column applies only to flat text mode (tree mode has its own
     // renderer that embeds path context via indentation).
     let show_path = args.show_path;
-    let show_hash = args.show_hash;
 
     // Calculate the dynamic name column width based on terminal size. The
     // fixed overhead is the inter-column spaces and all non-name columns.
@@ -936,13 +932,11 @@ fn print_comparison_text(
     //   left metadata column (size + date) = 25 (space + 24)
     //   status symbol = 2 (space + symbol)
     //   right metadata column (size + date) = 25 (space + 24)
-    //   hash columns (if shown) = 34
     let fixed_width = 2
         + if show_path { 31 } else { 0 }
         + 24  // space + left metadata (23)
         + 2   // space + status (2)
-        + 24  // space + right metadata (23)
-        + if show_hash { 34 } else { 0 };
+        + 24; // space + right metadata (23)
     let name_width = match terminal_width() {
         Some(term_w) => term_w.saturating_sub(fixed_width).max(10),
         None => 40,
@@ -957,7 +951,7 @@ fn print_comparison_text(
     };
 
     // Print header — adapted to the TUI's column layout:
-    //   T Name | [Rel. Path] | Size Modified | S | Size Modified | [Hash]
+    //   T Name | [Rel. Path] | Size Modified | S | Size Modified
     let mut header = format!("{} {:<w$}", "T", "Name", w = name_width);
     if show_path {
         header += &format!(" {:<30}", "Rel. Path");
@@ -965,9 +959,6 @@ fn print_comparison_text(
     header += &format!(" {:^23}", meta_header);
     header += &format!(" {}", "S");
     header += &format!(" {:^23}", meta_header);
-    if show_hash {
-        header += &format!(" {:<16} {:<16}", "Left Hash", "Right Hash");
-    }
     writeln!(output, "{}", header).unwrap();
 
     // Separator line matching column widths.
@@ -979,10 +970,6 @@ fn print_comparison_text(
     sep += &format!(" {:^23}", "-----------------------");
     sep += &format!(" {}", "-");
     sep += &format!(" {:^23}", "-----------------------");
-    if show_hash {
-        sep +=
-            &format!(" {:<16} {:<16}", "----------------", "----------------");
-    }
     writeln!(output, "{}", sep).unwrap();
 
     for entry in &visible {
@@ -1048,20 +1035,6 @@ fn print_comparison_text(
         row += &format!(" {}", status_sym);
         row += &format!(" {:<23}", right_meta);
 
-        if show_hash {
-            let left_hash = entry
-                .left
-                .as_ref()
-                .and_then(|l| l.hash.as_deref())
-                .unwrap_or("-");
-            let right_hash = entry
-                .right
-                .as_ref()
-                .and_then(|r| r.hash.as_deref())
-                .unwrap_or("-");
-            row += &format!(" {:<16} {:<16}", left_hash, right_hash);
-        }
-
         writeln!(output, "{}", row).unwrap();
     }
 }
@@ -1106,7 +1079,6 @@ impl DirCompareArgs {
             color: ColorMode::Never,
             show_path: false,
             no_mtime: false,
-            show_hash: false,
             no_summary: false,
             summary: SummaryMode::Brief,
             sort: None,
@@ -1268,19 +1240,11 @@ fn print_comparison_csv(comparison: &DirComparison, args: &DirCompareArgs) {
         sort_entries(&mut entries, sort);
     }
 
-    let show_hash = args.show_hash;
     // Header row with is_dir column (parity with the report module's CSV).
-    if show_hash {
-        println!(
-            "status,name,is_dir,left_size,right_size,left_modified,\
-             right_modified,left_hash,right_hash"
-        );
-    } else {
-        println!(
-            "status,name,is_dir,left_size,right_size,left_modified,
-             right_modified"
-        );
-    }
+    println!(
+        "status,name,is_dir,left_size,right_size,left_modified,
+         right_modified"
+    );
 
     for entry in &entries {
         if !should_show_entry(entry, args) {
@@ -1317,42 +1281,16 @@ fn print_comparison_csv(comparison: &DirComparison, args: &DirCompareArgs) {
 
         // Escape fields that may contain commas.
         let name = escape_csv_field(&entry.name);
-
-        if show_hash {
-            let left_hash = entry
-                .left
-                .as_ref()
-                .and_then(|l| l.hash.as_deref())
-                .unwrap_or("");
-            let right_hash = entry
-                .right
-                .as_ref()
-                .and_then(|r| r.hash.as_deref())
-                .unwrap_or("");
-            println!(
-                "{},{},{},{},{},{},{},{},{}",
-                entry.status,
-                name,
-                is_dir,
-                left_size,
-                right_size,
-                escape_csv_field(&left_modified),
-                escape_csv_field(&right_modified),
-                left_hash,
-                right_hash,
-            );
-        } else {
-            println!(
-                "{},{},{},{},{},{},{}",
-                entry.status,
-                name,
-                is_dir,
-                left_size,
-                right_size,
-                escape_csv_field(&left_modified),
-                escape_csv_field(&right_modified),
-            );
-        }
+        println!(
+            "{},{},{},{},{},{},{}",
+            entry.status,
+            name,
+            is_dir,
+            left_size,
+            right_size,
+            escape_csv_field(&left_modified),
+            escape_csv_field(&right_modified),
+        );
     }
 }
 
@@ -2696,21 +2634,6 @@ mod tests {
         assert!(output.contains("Rel. Path"));
         // File paths should appear in the path column.
         assert!(output.contains("same.txt"));
-    }
-
-    #[test]
-    fn text_show_hash_adds_hash_columns() {
-        let comp = make_test_comparison();
-        let mut args = test_args();
-        args.tree = false;
-        args.show_hash = true;
-        let mut buf = Vec::new();
-        super::render_comparison_text_to_vec(&comp, &args, &mut buf);
-        let output = String::from_utf8(buf).unwrap();
-        assert!(output.contains("Left Hash"));
-        assert!(output.contains("Right Hash"));
-        // The hash value for same.txt should be "abc".
-        assert!(output.contains("abc"));
     }
 
     #[test]
