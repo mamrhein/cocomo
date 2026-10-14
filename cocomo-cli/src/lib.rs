@@ -851,6 +851,17 @@ fn format_modified(rfc3339: &str) -> String {
         .unwrap_or_else(|_| rfc3339.to_string())
 }
 
+/// Format a date string for display in the combined size+date column,
+/// truncating to 16 characters to match the TUI's `format_date` behavior.
+fn format_date_display(date_str: &str) -> String {
+    let formatted = format_modified(date_str);
+    if formatted.len() > 16 {
+        formatted[..16].to_string()
+    } else {
+        formatted
+    }
+}
+
 /// Return the terminal width in columns, but only when stdout is a TTY.
 /// Returns `None` for piped or redirected output so that automated tests
 /// and CI get deterministic results.
@@ -916,36 +927,44 @@ fn print_comparison_text(
     let show_hash = args.show_hash;
 
     // Calculate the dynamic name column width based on terminal size. The
-    // fixed overhead is the status symbol, the inter-column spaces, and all
-    // non-name columns. When not on a TTY (piped/redirected output) we fall
-    // back to a 40-column default so that CI and integration tests remain
-    // deterministic.
-    // Fixed column widths (excluding the dynamic name column):
-    //   status symbol + space before name = 2
+    // fixed overhead is the inter-column spaces and all non-name columns.
+    // When not on a TTY (piped/redirected output) we fall back to a 40-column
+    // default so that CI and integration tests remain deterministic.
+    // Column layout adapted to the TUI's main area:
+    //   dir indicator + space before name = 2
     //   path column (if shown) = 31
-    //   size columns = 26
-    //   mtime columns (if shown) = 42
+    //   left metadata column (size + date) = 25 (space + 24)
+    //   status symbol = 2 (space + symbol)
+    //   right metadata column (size + date) = 25 (space + 24)
     //   hash columns (if shown) = 34
     let fixed_width = 2
         + if show_path { 31 } else { 0 }
-        + 26
-        + if show_mtime { 42 } else { 0 }
+        + 24  // space + left metadata (23)
+        + 2   // space + status (2)
+        + 24  // space + right metadata (23)
         + if show_hash { 34 } else { 0 };
     let name_width = match terminal_width() {
         Some(term_w) => term_w.saturating_sub(fixed_width).max(10),
         None => 40,
     };
 
-    // Print header.
-    let mut header = format!("{} {:<w$}", "S", "Name", w = name_width);
+    // Combined header for size+date metadata column, matching the TUI's
+    // layout (24 chars).
+    let meta_header = if show_mtime {
+        format!("{:^6} {:^16}", "Size", "Modified")
+    } else {
+        format!("{:^6}", "Size")
+    };
+
+    // Print header — adapted to the TUI's column layout:
+    //   T Name | [Rel. Path] | Size Modified | S | Size Modified | [Hash]
+    let mut header = format!("{} {:<w$}", "T", "Name", w = name_width);
     if show_path {
         header += &format!(" {:<30}", "Rel. Path");
     }
-    header += &format!(" {:>12} {:>12}", "Left Size", "Right Size");
-    if show_mtime {
-        header +=
-            &format!(" {:<20} {:<20}", "Left Modified", "Right Modified");
-    }
+    header += &format!(" {:^23}", meta_header);
+    header += &format!(" {}", "S");
+    header += &format!(" {:^23}", meta_header);
     if show_hash {
         header += &format!(" {:<16} {:<16}", "Left Hash", "Right Hash");
     }
@@ -957,13 +976,9 @@ fn print_comparison_text(
     if show_path {
         sep += &format!(" {:<30}", "------------------------------");
     }
-    sep += &format!(" {:>12} {:>12}", "------------", "------------");
-    if show_mtime {
-        sep += &format!(
-            " {:<20} {:<20}",
-            "--------------------", "--------------------"
-        );
-    }
+    sep += &format!(" {:^23}", "-----------------------");
+    sep += &format!(" {}", "-");
+    sep += &format!(" {:^23}", "-----------------------");
     if show_hash {
         sep +=
             &format!(" {:<16} {:<16}", "----------------", "----------------");
@@ -983,19 +998,41 @@ fn print_comparison_text(
         };
         let display_name = truncate_name(&display_name, name_width);
 
-        let left_size = entry
+        // Format combined left metadata: "size date" (24-char column,
+        // matching the TUI's `format!("{:>6} {}", size, date)`).
+        let left_meta = entry
             .left
             .as_ref()
-            .map(|l| format_size(l.size))
-            .unwrap_or_else(|| "-".to_string());
-        let right_size = entry
+            .map(|l| {
+                let size_str = format_size(l.size);
+                let date_str = format_date_display(&l.modified);
+                if show_mtime {
+                    format!("{:>6} {}", size_str, date_str)
+                } else {
+                    format!("{:>6}", size_str)
+                }
+            })
+            .unwrap_or_default();
+
+        // Format combined right metadata.
+        let right_meta = entry
             .right
             .as_ref()
-            .map(|r| format_size(r.size))
-            .unwrap_or_else(|| "-".to_string());
+            .map(|r| {
+                let size_str = format_size(r.size);
+                let date_str = format_date_display(&r.modified);
+                if show_mtime {
+                    format!("{:>6} {}", size_str, date_str)
+                } else {
+                    format!("{:>6}", size_str)
+                }
+            })
+            .unwrap_or_default();
 
+        // Directory type indicator (matching the TUI's 📁 for dirs).
+        let dir_indicator = if is_dir { "\u{1F5C0}" } else { " " };
         let mut row =
-            format!("{} {:<w$}", status_sym, display_name, w = name_width);
+            format!("{} {:<w$}", dir_indicator, display_name, w = name_width);
 
         if show_path {
             let path = entry
@@ -1007,21 +1044,9 @@ fn print_comparison_text(
             row += &format!(" {:<30}", path);
         }
 
-        row += &format!(" {:>12} {:>12}", left_size, right_size);
-
-        if show_mtime {
-            let left_modified = entry
-                .left
-                .as_ref()
-                .map(|l| format_modified(l.modified.as_str()))
-                .unwrap_or_else(|| "-".to_string());
-            let right_modified = entry
-                .right
-                .as_ref()
-                .map(|r| format_modified(r.modified.as_str()))
-                .unwrap_or_else(|| "-".to_string());
-            row += &format!(" {:<20} {:<20}", left_modified, right_modified);
-        }
+        row += &format!(" {:<23}", left_meta);
+        row += &format!(" {}", status_sym);
+        row += &format!(" {:<23}", right_meta);
 
         if show_hash {
             let left_hash = entry
@@ -1725,7 +1750,16 @@ async fn text_compare<R: EndpointResolver>(
         return Ok(DiffResult::NoDiffs);
     }
 
-    print_text_diff_table(&diff);
+    let left_name = left_path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| args.left.clone());
+    let right_name = right_path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| args.right.clone());
+
+    print_text_diff_table(&diff, &left_name, &right_name);
 
     println!(
         "\n{} differences found ({} lines left, {} lines right)",
@@ -1737,37 +1771,41 @@ async fn text_compare<R: EndpointResolver>(
     Ok(DiffResult::HasDiffs)
 }
 
-fn print_text_diff_table(diff: &TextDiff) {
+fn print_text_diff_table(diff: &TextDiff, left_name: &str, right_name: &str) {
+    // Column layout adapted to the TUI's text main area:
+    //   Num | marker | content | Num | marker | content
+    // Widths: [7, 2, 60, 7, 2, 60] with 2-space gaps between groups.
     println!(
-        "{:<6} {:<6}   {:<6} {:<6}   Content",
-        "L-No", "R-No", "L-No", "R-No"
+        "{:<6}  {:<2} {:<60}  {:<6}  {:<2} {:<60}",
+        "Num", "", left_name, "Num", "", right_name
     );
     println!(
-        "{:<6} {:<6}   {:<6} {:<6}   -------",
-        "----", "----", "----", "----"
+        "{:<6}  {:<2} {:<60}  {:<6}  {:<2} {:<60}",
+        "----", "--", "", "----", "--", ""
     );
 
     for difference in &diff.differences {
         match difference {
             TextDifference::LineDifferent(left, right) => {
                 println!(
-                    "{:<6} {:<6}   {:<6} {:<6}   | {} | {}",
+                    "{:<6}  {:<2} {:<60}  {:<6}  {:<2} {:<60}",
                     left.number,
-                    right.number,
-                    "-",
-                    "-",
+                    "▶ ",
                     truncate(&left.content, 60),
+                    right.number,
+                    "▶ ",
                     truncate(&right.content, 60),
                 );
             }
             TextDifference::LinesAdded(_start, lines) => {
                 for line in lines {
                     println!(
-                        "{:<6} {:<6}   {:<6} {:<6}   |     | {}",
+                        "{:<6}  {:<2} {:<60}  {:<6}  {:<2} {:<60}",
                         "-",
+                        "  ",
+                        "",
                         line.number,
-                        "-",
-                        "-",
+                        "▶ ",
                         truncate(&line.content, 60),
                     );
                 }
@@ -1775,39 +1813,45 @@ fn print_text_diff_table(diff: &TextDiff) {
             TextDifference::LinesRemoved(_start, lines) => {
                 for line in lines {
                     println!(
-                        "{:<6} {:<6}   {:<6} {:<6}   | {} |     |",
+                        "{:<6}  {:<2} {:<60}  {:<6}  {:<2} {:<60}",
                         line.number,
-                        "-",
-                        "-",
-                        "-",
+                        "▶ ",
                         truncate(&line.content, 60),
+                        "-",
+                        "  ",
+                        "",
                     );
                 }
             }
             TextDifference::LinesChanged(_start, removed, added) => {
                 for line in removed {
                     println!(
-                        "{:<6} {:<6}   {:<6} {:<6}   | {} |     |",
+                        "{:<6}  {:<2} {:<60}  {:<6}  {:<2} {:<60}",
                         line.number,
-                        "-",
-                        "-",
-                        "-",
+                        "▶ ",
                         truncate(&line.content, 60),
+                        "-",
+                        "  ",
+                        "",
                     );
                 }
                 for line in added {
                     println!(
-                        "{:<6} {:<6}   {:<6} {:<6}   |     | {}",
+                        "{:<6}  {:<2} {:<60}  {:<6}  {:<2} {:<60}",
                         "-",
+                        "  ",
+                        "",
                         line.number,
-                        "-",
-                        "-",
+                        "▶ ",
                         truncate(&line.content, 60),
                     );
                 }
             }
             TextDifference::BlankLine => {
-                println!("      {:<6}   {:<6} {:<6}   (blank)", "-", "-", "-");
+                println!(
+                    "{:<6}  {:<2} {:<60}  {:<6}  {:<2} {:<60}",
+                    "-", "  ", "(blank)", "-", "  ", ""
+                );
             }
         }
     }
@@ -2625,8 +2669,7 @@ mod tests {
         let mut buf = Vec::new();
         super::render_comparison_text_to_vec(&comp, &args, &mut buf);
         let output = String::from_utf8(buf).unwrap();
-        assert!(output.contains("Left Modified"));
-        assert!(output.contains("Right Modified"));
+        assert!(output.contains("Size Modified"));
     }
 
     #[test]
@@ -2638,8 +2681,7 @@ mod tests {
         let mut buf = Vec::new();
         super::render_comparison_text_to_vec(&comp, &args, &mut buf);
         let output = String::from_utf8(buf).unwrap();
-        assert!(!output.contains("Left Modified"));
-        assert!(!output.contains("Right Modified"));
+        assert!(!output.contains("Modified"));
     }
 
     #[test]
@@ -2744,8 +2786,9 @@ mod tests {
         let mut buf = Vec::new();
         super::render_comparison_text_to_vec(&comp, &args, &mut buf);
         let output = String::from_utf8(buf).unwrap();
-        // The formatted date should appear, not the raw RFC 3339 string.
-        assert!(output.contains("2024-03-15 14:30:00"));
+        // The formatted date should appear (truncated to 16 chars to match
+        // the TUI's column width), not the raw RFC 3339 string.
+        assert!(output.contains("2024-03-15 14:30"));
         assert!(!output.contains("2024-03-15T14:30:00+00:00"));
     }
 

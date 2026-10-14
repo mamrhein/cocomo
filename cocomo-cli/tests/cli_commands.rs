@@ -495,8 +495,7 @@ mod dir_compare {
             ])
             .assert()
             .code(1)
-            .stdout(predicate::str::contains("Left Modified"))
-            .stdout(predicate::str::contains("Right Modified"));
+            .stdout(predicate::str::contains("Size Modified"));
     }
 
     #[test]
@@ -510,8 +509,7 @@ mod dir_compare {
             ])
             .assert()
             .code(1)
-            .stdout(predicate::str::contains("Left Modified").not())
-            .stdout(predicate::str::contains("Right Modified").not());
+            .stdout(predicate::str::contains("Modified").not());
     }
 
     #[test]
