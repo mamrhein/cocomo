@@ -379,3 +379,165 @@ mod routing {
             .stderr(predicate::str::contains("error:"));
     }
 }
+
+// ---------------------------------------------------------------------------
+// Abbreviations: command aliases and short flags
+// ---------------------------------------------------------------------------
+
+mod abbreviations {
+    use super::*;
+
+    // -- top-level command single-char aliases --
+
+    #[test]
+    fn single_char_alias_dir_works() {
+        cmd()
+            .args(["d", "compare", "--help"])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("Compare two directory trees"));
+    }
+
+    #[test]
+    fn single_char_alias_text_works() {
+        cmd()
+            .args(["t", "compare", "--help"])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("Compare two text files"));
+    }
+
+    #[test]
+    fn single_char_alias_snapshot_works() {
+        cmd()
+            .args(["s", "list", "--help"])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("List saved snapshots"));
+    }
+
+    // -- subcommand multi-char aliases --
+
+    #[test]
+    fn multi_char_alias_compare_works() {
+        cmd()
+            .args(["dir", "cmp", "--help"])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("Compare two directory trees"));
+    }
+
+    #[test]
+    fn multi_char_alias_sync_works() {
+        cmd()
+            .args(["dir", "syn", "--help"])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains(
+                "Synchronize two directory trees",
+            ));
+    }
+
+    #[test]
+    fn multi_char_alias_capture_works() {
+        cmd()
+            .args(["snapshot", "cap", "--help"])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("Capture a snapshot"));
+    }
+
+    #[test]
+    fn multi_char_alias_list_works() {
+        cmd()
+            .args(["snapshot", "ls", "--help"])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("List saved snapshots"));
+    }
+
+    #[test]
+    fn multi_char_alias_diff_works() {
+        cmd()
+            .args(["snapshot", "df", "--help"])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("Compare two snapshot files"));
+    }
+
+    // -- short flags on options --
+
+    #[test]
+    fn short_flag_content_works() {
+        let left = "/etc/hostname";
+        let right = "/etc/hostname";
+        cmd()
+            .args(["dir", "compare", "-c", left, right])
+            .assert()
+            .success();
+    }
+
+    #[test]
+    fn short_flag_format_works() {
+        let left = "/etc/hostname";
+        let right = "/etc/hostname";
+        cmd()
+            .args(["dir", "compare", "-f", "csv", left, right])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("status,name"));
+    }
+
+    #[test]
+    fn short_flag_dry_run_works() {
+        let left = "/etc/hostname";
+        let right = "/etc/hostname";
+        cmd()
+            .args(["dir", "sync", "-n", left, right])
+            .assert()
+            .success();
+    }
+
+    #[test]
+    fn short_flag_ignore_case_works() {
+        let left = "/etc/hostname";
+        let right = "/etc/hostname";
+        cmd()
+            .args(["text", "compare", "-i", left, right])
+            .assert()
+            .success();
+    }
+
+    #[test]
+    fn short_flag_grammar_works() {
+        let left = "/etc/hostname";
+        let right = "/etc/hostname";
+        cmd()
+            .args(["text", "compare", "-g", "plain-text", left, right])
+            .assert()
+            .success();
+    }
+
+    // -- help shows aliases --
+
+    #[test]
+    fn help_shows_top_level_aliases() {
+        cmd()
+            .args(["--help"])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("[alias: d]"))
+            .stdout(predicate::str::contains("[alias: t]"))
+            .stdout(predicate::str::contains("[alias: s]"));
+    }
+
+    #[test]
+    fn help_shows_subcommand_aliases() {
+        cmd()
+            .args(["dir", "--help"])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("[aliases: c, cmp]"))
+            .stdout(predicate::str::contains("[aliases: s, syn]"));
+    }
+}

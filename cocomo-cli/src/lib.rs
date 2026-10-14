@@ -71,10 +71,13 @@ pub struct Cli {
 #[derive(Subcommand)]
 pub enum Commands {
     /// Directory comparison and synchronization.
+    #[command(visible_alias = "d")]
     Dir(DirArgs),
     /// File text comparison.
+    #[command(visible_alias = "t")]
     Text(TextArgs),
     /// Point-in-time directory snapshots.
+    #[command(visible_alias = "s")]
     Snapshot(SnapshotArgs),
 }
 
@@ -87,8 +90,10 @@ pub struct DirArgs {
 #[derive(Subcommand)]
 pub enum DirCommand {
     /// Compare two directory trees.
+    #[command(visible_aliases = ["c", "cmp"])]
     Compare(DirCompareArgs),
     /// Synchronize two directory trees.
+    #[command(visible_aliases = ["s", "syn"])]
     Sync(DirSyncArgs),
 }
 
@@ -101,8 +106,10 @@ pub struct TextArgs {
 #[derive(Subcommand)]
 pub enum TextCommand {
     /// Compare two text files and show differences.
+    #[command(visible_aliases = ["c", "cmp"])]
     Compare(TextCompareArgs),
     /// Compare two text files in unified diff format.
+    #[command(visible_aliases = ["d", "df"])]
     Diff(TextDiffArgs),
 }
 
@@ -115,10 +122,13 @@ pub struct SnapshotArgs {
 #[derive(Subcommand)]
 pub enum SnapshotCommand {
     /// Capture a snapshot of a directory tree.
+    #[command(visible_aliases = ["c", "cap"])]
     Capture(SnapshotCaptureArgs),
     /// List saved snapshots in a directory.
+    #[command(visible_aliases = ["l", "ls"])]
     List(SnapshotListArgs),
     /// Compare two snapshot files.
+    #[command(visible_aliases = ["d", "df"])]
     Diff(SnapshotDiffArgs),
 }
 
@@ -133,40 +143,40 @@ pub struct DirCompareArgs {
     /// Right directory path or URL (e.g. `ftp://host/pub/src`).
     right: String,
     /// Compare file contents (activate content hashing).
-    #[arg(long)]
+    #[arg(short = 'c', long)]
     content: bool,
     /// Maximum scan depth. Without this flag the scan is unlimited.
-    #[arg(long)]
+    #[arg(short = 'm', long)]
     max_depth: Option<usize>,
     /// Output format for console display.
-    #[arg(long, default_value = "text")]
+    #[arg(short = 'f', long, default_value = "text")]
     format: OutputFormat,
     /// Show only entries that differ between left and right.
     #[arg(long)]
     show_different: bool,
     /// Show only orphan entries (left-only or right-only).
-    #[arg(long)]
+    #[arg(short = 'o', long)]
     show_orphans: bool,
     /// Write a report file in the specified format.
-    #[arg(long)]
+    #[arg(short = 'r', long)]
     report: Option<PathBuf>,
     /// Format for the report file (used with --report).
     #[arg(long, default_value = "text")]
     report_format: ReportFormatArg,
     /// Render output as a hierarchical tree (text format only).
-    #[arg(long)]
+    #[arg(short = 't', long)]
     tree: bool,
     /// Control ANSI color output.
     #[arg(long, default_value = "auto")]
     color: ColorMode,
     /// Show full relative path column in flat text output.
-    #[arg(long)]
+    #[arg(short = 'p', long)]
     show_path: bool,
     /// Hide modification timestamp columns in text output.
     #[arg(long)]
     no_mtime: bool,
     /// Show content hashes when available (requires --content).
-    #[arg(long)]
+    #[arg(short = 'H', long)]
     show_hash: bool,
     /// Suppress the summary line(s) at the end of output.
     #[arg(long)]
@@ -175,20 +185,20 @@ pub struct DirCompareArgs {
     #[arg(long, default_value = "brief")]
     summary: SummaryMode,
     /// Sort entries by the specified field (default: scan order).
-    #[arg(long)]
+    #[arg(short = 's', long)]
     sort: Option<SortField>,
     /// Profile id to authenticate the addressed provider(s) with.
-    #[arg(long)]
+    #[arg(short = 'P', long)]
     profile: Option<String>,
     /// Exclude hidden files and directories (names starting with `.`).
-    #[arg(long = "excl-hidden")]
+    #[arg(short = 'x', long = "excl-hidden")]
     excl_hidden: bool,
     /// Show only directories in the output.
-    #[arg(long = "dirs-only")]
+    #[arg(short = 'D', long = "dirs-only")]
     dirs_only: bool,
     /// Show only entries whose name matches this glob pattern (e.g.
     /// `*.txt`, `config*`).
-    #[arg(long, value_name = "expr")]
+    #[arg(short = 'F', long, value_name = "expr")]
     filter: Option<String>,
 }
 
@@ -222,16 +232,16 @@ pub struct DirSyncArgs {
     #[arg(long, default_value_t = false)]
     copy_newer: bool,
     /// Delete orphan files that exist on only one side.
-    #[arg(long, default_value_t = false)]
+    #[arg(short = 'd', long, default_value_t = false)]
     delete_orphans: bool,
     /// Plan transfers without executing them.
-    #[arg(long, default_value_t = false)]
+    #[arg(short = 'n', long, default_value_t = false)]
     dry_run: bool,
     /// Compare file contents. If absent, uses size/mtime only.
-    #[arg(long, default_value_t = true)]
+    #[arg(short = 'c', long, default_value_t = true)]
     compare_files: bool,
     /// Profile id to authenticate the addressed provider(s) with.
-    #[arg(long)]
+    #[arg(short = 'P', long)]
     profile: Option<String>,
 }
 
@@ -242,7 +252,7 @@ pub struct TextCompareArgs {
     /// Right file path or URL (e.g. `ftp://host/pub/file.txt`).
     right: String,
     /// Ignore case when comparing lines.
-    #[arg(long, default_value_t = false)]
+    #[arg(short = 'i', long, default_value_t = false)]
     ignore_case: bool,
     /// Ignore whitespace differences. Accepts: sensitive, trim, insensitive.
     #[arg(long, default_value = "sensitive")]
@@ -254,10 +264,10 @@ pub struct TextCompareArgs {
     #[arg(long, default_value_t = false)]
     ignore_comments: bool,
     /// Grammar for syntax-aware classification.
-    #[arg(long)]
+    #[arg(short = 'g', long)]
     grammar: Option<GrammarArg>,
     /// Profile id to authenticate the addressed provider(s) with.
-    #[arg(long)]
+    #[arg(short = 'P', long)]
     profile: Option<String>,
 }
 
@@ -268,7 +278,7 @@ pub struct TextDiffArgs {
     /// Right file path or URL (e.g. `ftp://host/pub/file.txt`).
     right: String,
     /// Ignore case when comparing lines.
-    #[arg(long, default_value_t = false)]
+    #[arg(short = 'i', long, default_value_t = false)]
     ignore_case: bool,
     /// Ignore whitespace differences. Accepts: sensitive, trim, insensitive.
     #[arg(long, default_value = "sensitive")]
@@ -280,10 +290,10 @@ pub struct TextDiffArgs {
     #[arg(long, default_value_t = false)]
     ignore_comments: bool,
     /// Grammar for syntax-aware classification.
-    #[arg(long)]
+    #[arg(short = 'g', long)]
     grammar: Option<GrammarArg>,
     /// Profile id to authenticate the addressed provider(s) with.
-    #[arg(long)]
+    #[arg(short = 'P', long)]
     profile: Option<String>,
 }
 
@@ -294,7 +304,7 @@ pub struct SnapshotCaptureArgs {
     /// Output file path (default: <dirname>.snap in current directory).
     output: Option<PathBuf>,
     /// Profile id to authenticate the addressed provider with.
-    #[arg(long)]
+    #[arg(short = 'P', long)]
     profile: Option<String>,
 }
 
