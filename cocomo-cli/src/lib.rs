@@ -812,6 +812,7 @@ impl Colorizer {
     }
 
     /// Return `true` when ANSI color codes will be emitted.
+    #[allow(dead_code)]
     fn is_active(&self) -> bool {
         self.active
     }
@@ -1098,44 +1099,94 @@ fn render_tree_entries(
     output: &mut dyn Write,
     colorizer: &Colorizer,
     args: &DirCompareArgs,
+    name_width: usize,
 ) {
     let visible: Vec<&DirEntry> = entries
         .iter()
         .filter(|e| should_show_in_tree(e, args))
         .collect();
 
+    let show_mtime = !args.no_mtime;
+    let prefix_len = prefix.chars().count();
+    // Total name area = name_width + 2 (matching flat output).
+    // Within the name area: prefix + connector (2) + space (1) + name_field.
+    let name_field_width = name_width
+        .saturating_sub(prefix_len)
+        .saturating_sub(1)
+        .max(1);
+
     let count = visible.len();
     for (i, entry) in visible.iter().enumerate() {
         let is_last = i == count - 1;
         let connector = if is_last {
-            "\u{2514}\u{2500}\u{2500} "
+            "\u{2514}\u{2500}" // └─
         } else {
-            "\u{251c}\u{2500}\u{2500} "
+            "\u{251c}\u{2500}" // ├─
         };
 
-        let sym = colorizer.colorize(entry.status.symbol(), entry.status);
         let is_dir = is_dir_entry(entry);
 
-        if is_dir && let Some(sub) = &entry.sub_entries {
-            let child_count = count_visible_tree_children(&sub.entries, args);
-            let display_name = format!("{}/", entry.name);
-            if colorizer.is_active() {
-                writeln!(
-                    output,
-                    "{prefix}{connector}{sym} {display_name} ({child_count})"
-                )
-                .unwrap();
+        // Build display name (including "/" for directories and child count).
+        let display_name = if is_dir {
+            if let Some(sub) = &entry.sub_entries {
+                let child_count =
+                    count_visible_tree_children(&sub.entries, args);
+                format!("{}/ ({})", entry.name, child_count)
             } else {
-                writeln!(
-                    output,
-                    "{prefix}{connector}{sym:<5} {display_name} \
-                     ({child_count})"
-                )
-                .unwrap();
+                format!("{}/", entry.name)
             }
+        } else {
+            entry.name.clone()
+        };
+        let display_name = truncate_name(&display_name, name_field_width);
+
+        // Format metadata columns (matching flat output format).
+        let left_meta = entry
+            .left
+            .as_ref()
+            .map(|l| {
+                let size_str = format_size(l.size);
+                let date_str = format_date_display(&l.modified);
+                if show_mtime {
+                    format!("{:>6} {}", size_str, date_str)
+                } else {
+                    format!("{:>6}", size_str)
+                }
+            })
+            .unwrap_or_default();
+
+        let right_meta = entry
+            .right
+            .as_ref()
+            .map(|r| {
+                let size_str = format_size(r.size);
+                let date_str = format_date_display(&r.modified);
+                if show_mtime {
+                    format!("{:>6} {}", size_str, date_str)
+                } else {
+                    format!("{:>6}", size_str)
+                }
+            })
+            .unwrap_or_default();
+
+        let status_sym =
+            colorizer.colorize(entry.status.symbol(), entry.status);
+
+        let mut row = format!(
+            "{prefix}{connector} {:<w$}",
+            display_name,
+            w = name_field_width
+        );
+        row += &format!(" {:<23}", left_meta);
+        row += &format!(" {}", status_sym);
+        row += &format!(" {:<23}", right_meta);
+        writeln!(output, "{}", row).unwrap();
+
+        // Recurse into subdirectories.
+        if is_dir && let Some(sub) = &entry.sub_entries {
             let child_prefix = format!(
                 "{prefix}{}",
-                if is_last { "    " } else { "\u{2502}   " }
+                if is_last { "  " } else { "\u{2502} " }
             );
             render_tree_entries(
                 &sub.entries,
@@ -1143,43 +1194,8 @@ fn render_tree_entries(
                 output,
                 colorizer,
                 args,
+                name_width,
             );
-        } else if is_dir {
-            let display_name = format!("{}/", entry.name);
-            if colorizer.is_active() {
-                writeln!(output, "{prefix}{connector}{sym} {display_name}")
-                    .unwrap();
-            } else {
-                writeln!(output, "{prefix}{connector}{sym:<5} {display_name}")
-                    .unwrap();
-            }
-        } else {
-            let left_size = entry
-                .left
-                .as_ref()
-                .map(|l| format_size(l.size))
-                .unwrap_or_else(|| "-".to_string());
-            let right_size = entry
-                .right
-                .as_ref()
-                .map(|r| format_size(r.size))
-                .unwrap_or_else(|| "-".to_string());
-            let name = &entry.name;
-            if colorizer.is_active() {
-                writeln!(
-                    output,
-                    "{prefix}{connector}{sym} {name:<20} {left_size} \
-                     \u{2192} {right_size}"
-                )
-                .unwrap();
-            } else {
-                writeln!(
-                    output,
-                    "{prefix}{connector}{sym:<5} {name:<20} {left_size} \
-                     \u{2192} {right_size}"
-                )
-                .unwrap();
-            }
         }
     }
 }
@@ -1193,8 +1209,9 @@ fn render_tree_entries_to_vec(
     buf: &mut Vec<u8>,
     colorizer: &Colorizer,
     args: &DirCompareArgs,
+    name_width: usize,
 ) {
-    render_tree_entries(entries, prefix, buf, colorizer, args);
+    render_tree_entries(entries, prefix, buf, colorizer, args, name_width);
 }
 
 /// Wrapper around [`print_comparison_text`] that writes to a `Vec<u8>` buffer,
@@ -1223,13 +1240,46 @@ fn print_summary_to_vec(
 fn print_comparison_tree(comparison: &DirComparison, args: &DirCompareArgs) {
     let colorizer = Colorizer::new(args.color);
     let mut stdout = std::io::stdout();
+
+    let show_mtime = !args.no_mtime;
+    // Fixed overhead: dir indicator + space (2) + left metadata (24) +
+    // status (2) + right metadata (24) = 52. No path column in tree mode.
+    let fixed_width = 2 + 24 + 2 + 24;
+    let name_width = match terminal_width() {
+        Some(term_w) => term_w.saturating_sub(fixed_width).max(10),
+        None => 40,
+    };
+
+    // Header row — matching the flat output format, without the "T" type
+    // column (tree mode shows directory types via "/" suffix).
+    let meta_header = if show_mtime {
+        format!("{:^6} {:^16}", "Size", "Modified")
+    } else {
+        format!("{:^6}", "Size")
+    };
+    let mut header = format!("{:<w$}", "Name", w = name_width + 2);
+    header += &format!(" {:^23}", meta_header);
+    header += &format!(" {}", "S");
+    header += &format!(" {:^23}", meta_header);
+    writeln!(stdout, "{}", header).unwrap();
+
+    // Separator line matching column widths.
+    let mut sep = "-".repeat(name_width + 2);
+    sep += &format!(" {:^23}", "-----------------------");
+    sep += &format!(" {}", "-");
+    sep += &format!(" {:^23}", "-----------------------");
+    writeln!(stdout, "{}", sep).unwrap();
+
+    // Root of the tree.
     writeln!(stdout, ".").unwrap();
+
     render_tree_entries(
         &comparison.entries,
         "",
         &mut stdout,
         &colorizer,
         args,
+        name_width,
     );
 }
 
@@ -2525,6 +2575,7 @@ mod tests {
             &mut buf,
             &Colorizer::new(ColorMode::Never),
             &test_args(),
+            40,
         );
         let output = String::from_utf8(buf).unwrap();
         assert!(output.contains('\u{251c}')); // ├
@@ -2533,8 +2584,8 @@ mod tests {
         assert!(output.contains("diff.txt"));
         assert!(output.contains("only_left.txt"));
         assert!(output.contains("only_right.txt"));
-        // Size arrow should be present for file entries.
-        assert!(output.contains('\u{2192}')); // →
+        // Metadata columns should be present (size + modified date).
+        assert!(output.contains("2024-03-15"));
     }
 
     #[test]
@@ -2547,6 +2598,7 @@ mod tests {
             &mut buf,
             &Colorizer::new(ColorMode::Always),
             &test_args(),
+            40,
         );
         let output = String::from_utf8(buf).unwrap();
         assert!(output.contains("\x1b[32m")); // green for Same
