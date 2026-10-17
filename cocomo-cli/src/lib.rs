@@ -152,7 +152,7 @@ pub struct DirCompareArgs {
     #[arg(short = 'f', long, default_value = "text")]
     format: OutputFormat,
     /// Show only entries that differ between left and right.
-    #[arg(long)]
+    #[arg(short = 'd', long)]
     show_different: bool,
     /// Show only orphan entries (left-only or right-only).
     #[arg(short = 'o', long)]
