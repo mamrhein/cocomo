@@ -22,27 +22,32 @@
 //! - `1` — differences found (comparison commands only)
 //! - `2` — error occurred
 
+mod error;
+mod resolver;
+
+pub use error::{CliError, DiffResult};
+pub use resolver::{EndpointResolver, ProductionResolver};
+
+use error::fs_error_to_cli;
+use resolver::{EndpointPair, resolve_endpoint, resolve_endpoint_pair};
+
 use std::{
     collections::HashMap,
     io::{IsTerminal, Write},
     path::{Path, PathBuf},
-    sync::Arc,
 };
 
 use chrono::DateTime;
 use clap::{Parser, Subcommand, ValueEnum};
 use cocomo_lib::{
-    DirEntry, FileSystem, ProviderId, TextDifference, WritableFileSystem,
+    DirEntry, FileSystem, TextDifference,
     compare::{
         CompareConfig, DirComparison, DirEntryStatus,
         compare_directories_node, compare_directories_pair_node,
     },
-    error::{FsError, FsOperation, wrap},
+    error::{FsOperation, wrap},
     grammar::Grammar,
-    profile::{ProfileError, ProfileStore},
-    provider::{Provider, ProviderError},
     report::{ReportConfig, ReportFormat, generate_report},
-    secrets::{Secrets, TtyPrompter},
     snapshot::{
         Snapshot, SnapshotEntry, SnapshotEntryStatus, capture_snapshot_node,
     },
@@ -52,7 +57,6 @@ use cocomo_lib::{
     },
     text::{TextCompareSettings, TextDiff, WhitespaceMode, compare_texts},
     transfer::FsPair,
-    url::{Url, UrlError},
 };
 use globset::Glob;
 
@@ -415,181 +419,6 @@ impl From<ReportFormatArg> for ReportFormat {
             ReportFormatArg::Json => ReportFormat::Json,
         }
     }
-}
-
-// ---------------------------------------------------------------------------
-// Endpoint resolution
-// ---------------------------------------------------------------------------
-
-/// Result of a command that may or may not find differences.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DiffResult {
-    NoDiffs,
-    HasDiffs,
-}
-
-/// Errors that can occur while resolving an endpoint or reading from a
-/// resolved provider.
-#[derive(Debug, thiserror::Error)]
-pub enum CliError {
-    #[error(transparent)]
-    Fs(#[from] FsError),
-    #[error(transparent)]
-    Url(#[from] UrlError),
-    #[error(transparent)]
-    Provider(#[from] ProviderError),
-    #[error(transparent)]
-    Profile(#[from] ProfileError),
-    /// Non-fatal filesystem errors collected while walking the trees. The
-    /// result may be incomplete; each error is printed to stderr before
-    /// this variant is returned.
-    #[error("operation incomplete due to filesystem errors")]
-    FsErrors(Vec<FsError>),
-}
-
-/// Convert a filesystem error into a [`CliError`], printing the individual
-/// errors of an incomplete operation to stderr before returning them.
-fn fs_error_to_cli(e: FsError) -> CliError {
-    match e {
-        FsError::Incomplete { errors } => {
-            for err in &errors {
-                eprintln!("error: {err}");
-            }
-            CliError::FsErrors(errors)
-        }
-        other => CliError::Fs(other),
-    }
-}
-
-/// Maps CLI endpoint arguments (paths or URLs) to filesystem instances.
-///
-/// The production binary resolves endpoints to live [`Provider`] instances
-/// via [`ProductionResolver`]; tests inject a resolver backed by
-/// `cocomo_lib::MockFs` to exercise the command logic against an in-memory
-/// tree with injected errors.
-pub trait EndpointResolver {
-    /// The filesystem type this resolver produces. It must support both the
-    /// path-based reads of the text commands and the node-based scan,
-    /// compare, and sync pipelines.
-    type Fs: FileSystem + WritableFileSystem<Nid = u64>;
-
-    /// Resolve the provider that services `url`, authenticated with
-    /// `profile_id` if given. Both sides of a pair command that address the
-    /// same endpoint identity receive the same instance, so one connection
-    /// services both.
-    fn resolve(
-        &self,
-        url: &Url,
-        profile_id: Option<&str>,
-    ) -> Result<Arc<Self::Fs>, CliError>;
-
-    /// Return the identity of the endpoint `fs` addresses, as recorded in
-    /// snapshots.
-    fn provider_id(&self, fs: &Self::Fs) -> ProviderId;
-}
-
-/// The production [`EndpointResolver`]: resolves endpoints to live
-/// [`Provider`] instances.
-pub struct ProductionResolver;
-
-impl EndpointResolver for ProductionResolver {
-    type Fs = Provider;
-
-    fn resolve(
-        &self,
-        url: &Url,
-        profile_id: Option<&str>,
-    ) -> Result<Arc<Provider>, CliError> {
-        Ok(Arc::new(resolve_provider(url, profile_id)?))
-    }
-
-    fn provider_id(&self, fs: &Provider) -> ProviderId {
-        fs.provider_id()
-    }
-}
-
-/// Return the identity of the endpoint `url` addresses. Two URLs with
-/// equal identities are serviced by the same provider, so one filesystem
-/// instance can serve both sides of a comparison.
-fn endpoint_identity(url: &Url) -> (String, Option<String>, Option<u16>) {
-    (url.scheme.clone(), url.host.clone(), url.effective_port())
-}
-
-/// Resolve the provider that services `url`, letting `Provider::resolve`
-/// consult the default profile store, the environment, and the keychain.
-/// The store is only opened for remote endpoints, so local-only runs
-/// neither read nor create the profile configuration files.
-fn resolve_provider(
-    url: &Url,
-    profile_id: Option<&str>,
-) -> Result<Provider, CliError> {
-    let store = if url.scheme == Url::LOCAL_SCHEME {
-        None
-    } else {
-        Some(ProfileStore::open_default()?)
-    };
-    let secrets = Secrets::new();
-    let prompter = TtyPrompter::new();
-    let provider = Provider::resolve(
-        url,
-        store.as_ref(),
-        profile_id,
-        &secrets,
-        &prompter,
-    )?;
-    Ok(provider)
-}
-
-/// Resolve one path-like CLI argument into a filesystem instance and the
-/// path within it.
-fn resolve_endpoint<R: EndpointResolver>(
-    resolver: &R,
-    arg: &str,
-    profile_id: Option<&str>,
-) -> Result<(Arc<R::Fs>, PathBuf), CliError> {
-    let url = Url::parse(arg)?;
-    let fs = resolver.resolve(&url, profile_id)?;
-    Ok((fs, url.path))
-}
-
-/// The filesystem(s) addressing the two sides of a pair command. Both
-/// variants hold `Arc`s, so the size difference is a single pointer and no
-/// padding is needed.
-enum EndpointPair<N> {
-    /// One instance addressing both sides: the endpoints share an identity,
-    /// so one connection services both and cross-boundary transfers keep
-    /// the same-provider fast path.
-    Shared(Arc<N>),
-    /// Two distinct instances: the endpoints address different providers,
-    /// so each side resolves and connects on its own.
-    Separate(Arc<N>, Arc<N>),
-}
-
-/// Resolve a pair of path-like CLI arguments into the filesystem(s) that
-/// service them plus the in-provider path of each side. Endpoints with
-/// equal identities share one instance (one connection); equal identities
-/// resolved per side would give two providers with the same label, aliasing
-/// the shared `ContentCache` keys. Different identities resolve to one
-/// instance per side, so a mixed pair such as `ftp://host/pub` vs. `./src`
-/// is accepted and each side runs against its own backend.
-fn resolve_endpoint_pair<R: EndpointResolver>(
-    resolver: &R,
-    left_arg: &str,
-    right_arg: &str,
-    profile_id: Option<&str>,
-) -> Result<(EndpointPair<R::Fs>, PathBuf, PathBuf), CliError> {
-    let left_url = Url::parse(left_arg)?;
-    let right_url = Url::parse(right_arg)?;
-    let pair = if endpoint_identity(&left_url) == endpoint_identity(&right_url)
-    {
-        let fs = resolver.resolve(&left_url, profile_id)?;
-        EndpointPair::Shared(fs)
-    } else {
-        let left = resolver.resolve(&left_url, profile_id)?;
-        let right = resolver.resolve(&right_url, profile_id)?;
-        EndpointPair::Separate(left, right)
-    };
-    Ok((pair, left_url.path, right_url.path))
 }
 
 // ---------------------------------------------------------------------------
