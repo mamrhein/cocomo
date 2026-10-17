@@ -169,9 +169,6 @@ pub struct DirCompareArgs {
     /// Control ANSI color output.
     #[arg(long, default_value = "auto")]
     color: ColorMode,
-    /// Show full relative path column in flat text output.
-    #[arg(short = 'p', long)]
-    show_path: bool,
     /// Hide modification timestamp columns in text output.
     #[arg(long)]
     no_mtime: bool,
@@ -919,9 +916,6 @@ fn print_comparison_text(
     }
 
     let show_mtime = !args.no_mtime;
-    // Path column applies only to flat text mode (tree mode has its own
-    // renderer that embeds path context via indentation).
-    let show_path = args.show_path;
 
     // Calculate the dynamic name column width based on terminal size. The
     // fixed overhead is the inter-column spaces and all non-name columns.
@@ -929,12 +923,10 @@ fn print_comparison_text(
     // default so that CI and integration tests remain deterministic.
     // Column layout adapted to the TUI's main area:
     //   dir indicator + space before name = 2
-    //   path column (if shown) = 31
     //   left metadata column (size + date) = 25 (space + 24)
     //   status symbol = 2 (space + symbol)
     //   right metadata column (size + date) = 25 (space + 24)
     let fixed_width = 2
-        + if show_path { 31 } else { 0 }
         + 24  // space + left metadata (23)
         + 2   // space + status (2)
         + 24; // space + right metadata (23)
@@ -952,11 +944,8 @@ fn print_comparison_text(
     };
 
     // Print header — adapted to the TUI's column layout:
-    //   T Name | [Rel. Path] | Size Modified | S | Size Modified
+    //   T Name | Size Modified | S | Size Modified
     let mut header = format!("{} {:<w$}", "T", "Name", w = name_width);
-    if show_path {
-        header += &format!(" {:<30}", "Rel. Path");
-    }
     header += &format!(" {:^23}", meta_header);
     header += &format!(" {}", "S");
     header += &format!(" {:^23}", meta_header);
@@ -965,9 +954,6 @@ fn print_comparison_text(
     // Separator line matching column widths.
     let sep_dashes = "-".repeat(name_width);
     let mut sep = format!("{} {:<w$}", "-", sep_dashes, w = name_width);
-    if show_path {
-        sep += &format!(" {:<30}", "------------------------------");
-    }
     sep += &format!(" {:^23}", "-----------------------");
     sep += &format!(" {}", "-");
     sep += &format!(" {:^23}", "-----------------------");
@@ -977,13 +963,7 @@ fn print_comparison_text(
         let status_sym =
             colorizer.colorize(entry.status.symbol(), entry.status);
         let is_dir = is_dir_entry(entry);
-        // Append "/" to directory names when --show-path is active (tree mode
-        // always shows it via its own renderer).
-        let display_name = if is_dir && show_path {
-            format!("{}{}", entry.name, "/")
-        } else {
-            entry.name.clone()
-        };
+        let display_name = entry.name.clone();
         let display_name = truncate_name(&display_name, name_width);
 
         // Format combined left metadata: "size date" (24-char column,
@@ -1021,16 +1001,6 @@ fn print_comparison_text(
         let dir_indicator = if is_dir { "\u{1F5C0}" } else { " " };
         let mut row =
             format!("{} {:<w$}", dir_indicator, display_name, w = name_width);
-
-        if show_path {
-            let path = entry
-                .left
-                .as_ref()
-                .map(|l| l.path.as_str())
-                .or_else(|| entry.right.as_ref().map(|r| r.path.as_str()))
-                .unwrap_or("");
-            row += &format!(" {:<30}", path);
-        }
 
         row += &format!(" {:<23}", left_meta);
         row += &format!(" {}", status_sym);
@@ -1078,7 +1048,6 @@ impl DirCompareArgs {
             report_format: ReportFormatArg::Text,
             tree: true,
             color: ColorMode::Never,
-            show_path: false,
             no_mtime: false,
             no_summary: false,
             summary: SummaryMode::Brief,
@@ -2605,52 +2574,6 @@ mod tests {
         assert!(output.contains("\x1b[35m")); // magenta for RightOnly
     }
 
-    /// Build a `DirComparison` containing one file and one directory entry,
-    /// for testing directory-specific text output features.
-    fn make_test_comparison_with_dir() -> DirComparison {
-        let file = EntryInfo {
-            name: "file.txt".to_string(),
-            path: "file.txt".to_string(),
-            size: 6,
-            modified: "2024-03-15 14:30".to_string(),
-            is_dir: false,
-            hash: Some("abc".to_string()),
-        };
-        let dir = EntryInfo {
-            name: "mydir".to_string(),
-            path: "mydir".to_string(),
-            size: 4096,
-            modified: "2024-03-15 14:30".to_string(),
-            is_dir: true,
-            hash: None,
-        };
-        use std::collections::HashMap;
-        let mut counts = HashMap::new();
-        counts.insert(DirEntryStatus::Same, 1);
-        DirComparison {
-            entries: vec![
-                DirEntry {
-                    name: "file.txt".to_string(),
-                    status: DirEntryStatus::Same,
-                    left: Some(file.clone()),
-                    right: Some(file),
-                    center: None,
-                    sub_entries: None,
-                },
-                DirEntry {
-                    name: "mydir".to_string(),
-                    status: DirEntryStatus::LeftOnly,
-                    left: Some(dir),
-                    right: None,
-                    center: None,
-                    sub_entries: None,
-                },
-            ],
-            counts,
-            errors: vec![],
-        }
-    }
-
     #[test]
     fn text_mtime_columns_by_default() {
         let comp = make_test_comparison();
@@ -2672,33 +2595,6 @@ mod tests {
         super::render_comparison_text_to_vec(&comp, &args, &mut buf);
         let output = String::from_utf8(buf).unwrap();
         assert!(!output.contains("Modified"));
-    }
-
-    #[test]
-    fn text_show_path_adds_path_column() {
-        let comp = make_test_comparison();
-        let mut args = test_args();
-        args.tree = false;
-        args.show_path = true;
-        let mut buf = Vec::new();
-        super::render_comparison_text_to_vec(&comp, &args, &mut buf);
-        let output = String::from_utf8(buf).unwrap();
-        assert!(output.contains("Rel. Path"));
-        // File paths should appear in the path column.
-        assert!(output.contains("same.txt"));
-    }
-
-    #[test]
-    fn text_show_path_appends_slash_to_directory_names() {
-        let comp = make_test_comparison_with_dir();
-        let mut args = test_args();
-        args.tree = false;
-        args.show_path = true;
-        let mut buf = Vec::new();
-        super::render_comparison_text_to_vec(&comp, &args, &mut buf);
-        let output = String::from_utf8(buf).unwrap();
-        // Directory name should have a trailing slash.
-        assert!(output.contains("mydir/"));
     }
 
     #[test]

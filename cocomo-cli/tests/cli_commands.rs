@@ -513,37 +513,6 @@ mod dir_compare {
     }
 
     #[test]
-    fn show_path_adds_relative_path_column() {
-        let dir = create_test_dirs();
-        cmd()
-            .args(["dir", "compare", "--show-path"])
-            .args([
-                dir.path().join("left").to_str().unwrap(),
-                dir.path().join("right").to_str().unwrap(),
-            ])
-            .assert()
-            .code(1)
-            .stdout(predicate::str::contains("Rel. Path"))
-            // The path for same.txt should be "same.txt".
-            .stdout(predicate::str::contains("same.txt"));
-    }
-
-    #[test]
-    fn show_path_appends_slash_to_directory_names() {
-        let dir = create_nested_test_dirs();
-        cmd()
-            .args(["dir", "compare", "--show-path"])
-            .args([
-                dir.path().join("left").to_str().unwrap(),
-                dir.path().join("right").to_str().unwrap(),
-            ])
-            .assert()
-            .code(1)
-            // The "sub" directory should appear with a trailing slash.
-            .stdout(predicate::str::contains("sub/"));
-    }
-
-    #[test]
     fn csv_includes_is_dir_column() {
         let dir = create_test_dirs();
         cmd()
