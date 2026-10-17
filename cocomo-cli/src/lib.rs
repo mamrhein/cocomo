@@ -23,6 +23,7 @@
 //! - `2` — error occurred
 
 use std::{
+    collections::HashMap,
     io::{IsTerminal, Write},
     path::{Path, PathBuf},
     sync::Arc,
@@ -321,7 +322,7 @@ pub struct SnapshotDiffArgs {
 // Enum arguments
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, ValueEnum)]
+#[derive(Debug, Clone, PartialEq, Eq, ValueEnum)]
 enum OutputFormat {
     Text,
     Csv,
@@ -655,22 +656,38 @@ async fn dir_compare<R: EndpointResolver>(
         }
     };
 
+    // Flatten, filter, and count visible entries in one pass so that both
+    // the output and the summary reflect the same set of entries.
+    let use_tree_filter = args.format == OutputFormat::Text && args.tree;
+    let (mut visible_entries, summary) =
+        collect_and_count(&comparison.entries, args, use_tree_filter);
+
     match args.format {
         OutputFormat::Text => {
             if args.tree {
                 print_comparison_tree(&comparison, args);
             } else {
+                if let Some(sort) = args.sort {
+                    sort_entries(&mut visible_entries, sort);
+                }
                 let mut stdout = std::io::stdout();
-                print_comparison_text(&comparison, args, &mut stdout);
+                print_comparison_text(&visible_entries, args, &mut stdout);
             }
         }
-        OutputFormat::Csv => print_comparison_csv(&comparison, args),
-        OutputFormat::Json => print_comparison_json(&comparison, args),
+        OutputFormat::Csv => {
+            if let Some(sort) = args.sort {
+                sort_entries(&mut visible_entries, sort);
+            }
+            print_comparison_csv(&visible_entries);
+        }
+        OutputFormat::Json => {
+            print_comparison_json(&visible_entries, &summary);
+        }
     }
 
     // Print summary unless suppressed via --no-summary.
     if !args.no_summary {
-        print_summary(&comparison, args.summary);
+        print_summary(&summary, args.summary);
     }
 
     // Write report file if requested.
@@ -694,7 +711,7 @@ async fn dir_compare<R: EndpointResolver>(
         return Err(CliError::FsErrors(comparison.errors));
     }
 
-    if comparison.different_count() > 0 || comparison.orphan_count() > 0 {
+    if summary.different_count() > 0 || summary.orphan_count() > 0 {
         Ok(DiffResult::HasDiffs)
     } else {
         Ok(DiffResult::NoDiffs)
@@ -889,31 +906,18 @@ fn truncate_name(name: &str, width: usize) -> String {
 }
 
 fn print_comparison_text(
-    comparison: &DirComparison,
+    entries: &[DirEntry],
     args: &DirCompareArgs,
     output: &mut dyn Write,
 ) {
     let colorizer = Colorizer::new(args.color);
-    let mut entries = Vec::new();
-    collect_entries(&comparison.entries, &mut entries);
-    if let Some(sort) = args.sort {
-        sort_entries(&mut entries, sort);
-    }
 
-    // Filter entries according to display flags.
-    let visible: Vec<&DirEntry> = entries
-        .iter()
-        .filter(|e| should_show_entry(e, args))
-        .collect();
-
-    if visible.is_empty() {
-        if entries.is_empty() {
-            writeln!(output, "Directories are identical.").unwrap();
-        } else {
-            writeln!(output, "No matching entries.").unwrap();
-        }
+    if entries.is_empty() {
+        writeln!(output, "No matching entries.").unwrap();
         return;
     }
+
+    let visible: Vec<&DirEntry> = entries.iter().collect();
 
     let show_mtime = !args.no_mtime;
 
@@ -1010,11 +1014,102 @@ fn print_comparison_text(
     }
 }
 
-fn collect_entries(entries: &[DirEntry], out: &mut Vec<DirEntry>) {
+/// Per-status counts computed from the entries that are actually visible in
+/// the output, after applying all display filters.
+struct Summary {
+    by_status: HashMap<DirEntryStatus, usize>,
+}
+
+impl Summary {
+    /// Return the total number of visible entries.
+    fn total(&self) -> usize {
+        self.by_status.values().sum()
+    }
+
+    /// Return the number of visible same entries (same + same binary).
+    fn same_count(&self) -> usize {
+        self.get(DirEntryStatus::Same) + self.get(DirEntryStatus::SameBinary)
+    }
+
+    /// Return the number of visible different entries (different + similar).
+    fn different_count(&self) -> usize {
+        self.get(DirEntryStatus::Different) + self.get(DirEntryStatus::Similar)
+    }
+
+    /// Return the number of visible orphan entries (left only + right only).
+    fn orphan_count(&self) -> usize {
+        self.get(DirEntryStatus::LeftOnly)
+            + self.get(DirEntryStatus::RightOnly)
+    }
+
+    /// Return the count for a specific status, or zero if absent.
+    fn get(&self, status: DirEntryStatus) -> usize {
+        self.by_status.get(&status).copied().unwrap_or(0)
+    }
+}
+
+/// Flatten the entry tree, apply display filters, and count visible entries
+/// in a single recursive pass.
+///
+/// Returns a flat `Vec` of visible entries (for flat output modes) and a
+/// [`Summary`] with per-status counts.
+///
+/// When `use_tree_filter` is `true` (tree mode), only visible directories are
+/// descended into, matching the behavior of [`render_tree_entries`]. When
+/// `false` (flat text, CSV, JSON), all subdirectories are always visited, so
+/// that children of filtered-out directories are still counted if they pass
+/// the filter themselves.
+fn collect_and_count(
+    entries: &[DirEntry],
+    args: &DirCompareArgs,
+    use_tree_filter: bool,
+) -> (Vec<DirEntry>, Summary) {
+    let mut visible = Vec::new();
+    let mut by_status = HashMap::new();
+    collect_and_count_into(
+        entries,
+        args,
+        use_tree_filter,
+        &mut visible,
+        &mut by_status,
+    );
+    (visible, Summary { by_status })
+}
+
+/// Recursive worker for [`collect_and_count`].
+fn collect_and_count_into(
+    entries: &[DirEntry],
+    args: &DirCompareArgs,
+    use_tree_filter: bool,
+    visible: &mut Vec<DirEntry>,
+    by_status: &mut HashMap<DirEntryStatus, usize>,
+) {
     for entry in entries {
-        out.push(entry.clone());
-        if let Some(ref sub) = entry.sub_entries {
-            collect_entries(&sub.entries, out);
+        let is_visible = if use_tree_filter {
+            should_show_in_tree(entry, args)
+        } else {
+            should_show_entry(entry, args)
+        };
+
+        if is_visible {
+            visible.push(entry.clone());
+            *by_status.entry(entry.status).or_insert(0) += 1;
+        }
+
+        // Recurse into subdirectories.
+        // Tree mode: only descend into visible directories (matching
+        // render_tree_entries). Flat mode: always descend, since children
+        // are shown independently of parent visibility.
+        if let Some(sub) = &entry.sub_entries
+            && (!use_tree_filter || (is_visible && is_dir_entry(entry)))
+        {
+            collect_and_count_into(
+                &sub.entries,
+                args,
+                use_tree_filter,
+                visible,
+                by_status,
+            );
         }
     }
 }
@@ -1187,22 +1282,22 @@ fn render_tree_entries_to_vec(
 /// enabling unit testing of text output without touching stdout.
 #[cfg(test)]
 fn render_comparison_text_to_vec(
-    comparison: &DirComparison,
+    entries: &[DirEntry],
     args: &DirCompareArgs,
     buf: &mut Vec<u8>,
 ) {
-    print_comparison_text(comparison, args, buf);
+    print_comparison_text(entries, args, buf);
 }
 
 /// Wrapper around [`print_summary_to`] that writes to a `Vec<u8>` buffer,
 /// enabling unit testing of summary output without touching stdout.
 #[cfg(test)]
 fn print_summary_to_vec(
-    comparison: &DirComparison,
+    summary: &Summary,
     mode: SummaryMode,
     buf: &mut Vec<u8>,
 ) {
-    print_summary_to(comparison, mode, buf);
+    print_summary_to(summary, mode, buf);
 }
 
 /// Print the comparison result as a hierarchical tree (text format only).
@@ -1252,24 +1347,14 @@ fn print_comparison_tree(comparison: &DirComparison, args: &DirCompareArgs) {
     );
 }
 
-fn print_comparison_csv(comparison: &DirComparison, args: &DirCompareArgs) {
-    let mut entries = Vec::new();
-    collect_entries(&comparison.entries, &mut entries);
-    if let Some(sort) = args.sort {
-        sort_entries(&mut entries, sort);
-    }
-
+fn print_comparison_csv(entries: &[DirEntry]) {
     // Header row with is_dir column (parity with the report module's CSV).
     println!(
         "status,name,is_dir,left_size,right_size,left_modified,
          right_modified"
     );
 
-    for entry in &entries {
-        if !should_show_entry(entry, args) {
-            continue;
-        }
-
+    for entry in entries {
         let is_dir = entry
             .left
             .as_ref()
@@ -1321,16 +1406,12 @@ fn escape_csv_field(field: &str) -> String {
     }
 }
 
-fn print_comparison_json(comparison: &DirComparison, args: &DirCompareArgs) {
-    let mut entries = Vec::new();
-    collect_entries(&comparison.entries, &mut entries);
-    if let Some(sort) = args.sort {
-        sort_entries(&mut entries, sort);
-    }
-
+fn print_comparison_json(
+    entries: &[DirEntry],
+    summary: &Summary,
+) {
     let json_entries: Vec<serde_json::Value> = entries
         .iter()
-        .filter(|e| should_show_entry(e, args))
         .map(|entry| {
             let mut obj = serde_json::Map::new();
             obj.insert(
@@ -1378,15 +1459,15 @@ fn print_comparison_json(comparison: &DirComparison, args: &DirCompareArgs) {
         })
         .collect();
 
-    let summary = serde_json::json!({
-        "total": comparison.total(),
-        "same": comparison.same_count(),
-        "different": comparison.different_count(),
-        "orphans": comparison.orphan_count(),
+    let summary_json = serde_json::json!({
+        "total": summary.total(),
+        "same": summary.same_count(),
+        "different": summary.different_count(),
+        "orphans": summary.orphan_count(),
     });
 
     let output = serde_json::json!({
-        "summary": summary,
+        "summary": summary_json,
         "entries": json_entries,
     });
 
@@ -1450,14 +1531,14 @@ fn entry_modified(entry: &DirEntry) -> String {
         .unwrap_or_default()
 }
 
-fn print_summary(comparison: &DirComparison, mode: SummaryMode) {
+fn print_summary(summary: &Summary, mode: SummaryMode) {
     let mut stdout = std::io::stdout();
-    print_summary_to(comparison, mode, &mut stdout);
+    print_summary_to(summary, mode, &mut stdout);
 }
 
 /// Like [`print_summary`] but writes to the given writer, enabling unit tests.
 fn print_summary_to(
-    comparison: &DirComparison,
+    summary: &Summary,
     mode: SummaryMode,
     output: &mut dyn Write,
 ) {
@@ -1467,22 +1548,22 @@ fn print_summary_to(
             writeln!(
                 output,
                 "Summary: {} total, {} same, {} different, {} orphans",
-                comparison.total(),
-                comparison.same_count(),
-                comparison.different_count(),
-                comparison.orphan_count(),
+                summary.total(),
+                summary.same_count(),
+                summary.different_count(),
+                summary.orphan_count(),
             )
             .unwrap();
         }
         SummaryMode::Full => {
-            print_full_summary_to(comparison, output);
+            print_full_summary_to(summary, output);
         }
     }
 }
 
 /// Print a per-status breakdown table with counts and percentages.
-fn print_full_summary_to(comparison: &DirComparison, output: &mut dyn Write) {
-    let total = comparison.total();
+fn print_full_summary_to(summary: &Summary, output: &mut dyn Write) {
+    let total = summary.total();
     writeln!(output, "Summary breakdown:").unwrap();
     // The percentage column is right-aligned in a fixed 10-character field so
     // that the header label and all data values share the same right edge.
@@ -1493,7 +1574,7 @@ fn print_full_summary_to(comparison: &DirComparison, output: &mut dyn Write) {
     )
     .unwrap();
     for status in all_statuses() {
-        let count = comparison.counts.get(&status).copied().unwrap_or(0);
+        let count = summary.get(status);
         if count > 0 {
             let pct = if total > 0 {
                 (count as f64 / total as f64) * 100.0
@@ -2225,8 +2306,8 @@ mod tests {
     };
 
     use super::{
-        ColorMode, Colorizer, SortField, SummaryMode, color_code,
-        format_modified, is_dir_entry, matches_name_filter,
+        ColorMode, Colorizer, SortField, SummaryMode, collect_and_count,
+        color_code, format_modified, is_dir_entry, matches_name_filter,
         should_show_in_tree, sort_entries, truncate_name,
     };
 
@@ -2580,9 +2661,10 @@ mod tests {
         let mut args = test_args();
         args.tree = false;
         let mut buf = Vec::new();
-        super::render_comparison_text_to_vec(&comp, &args, &mut buf);
+        super::render_comparison_text_to_vec(&comp.entries, &args, &mut buf);
         let output = String::from_utf8(buf).unwrap();
-        assert!(output.contains("Size Modified"));
+        assert!(output.contains("Size"));
+        assert!(output.contains("Modified"));
     }
 
     #[test]
@@ -2592,7 +2674,7 @@ mod tests {
         args.tree = false;
         args.no_mtime = true;
         let mut buf = Vec::new();
-        super::render_comparison_text_to_vec(&comp, &args, &mut buf);
+        super::render_comparison_text_to_vec(&comp.entries, &args, &mut buf);
         let output = String::from_utf8(buf).unwrap();
         assert!(!output.contains("Modified"));
     }
@@ -2655,7 +2737,7 @@ mod tests {
         let mut args = test_args();
         args.tree = false;
         let mut buf = Vec::new();
-        super::render_comparison_text_to_vec(&comp, &args, &mut buf);
+        super::render_comparison_text_to_vec(&comp.entries, &args, &mut buf);
         let output = String::from_utf8(buf).unwrap();
         // The formatted date should appear (truncated to 16 chars to match
         // the TUI's column width), not the raw RFC 3339 string.
@@ -2952,8 +3034,10 @@ mod tests {
     #[test]
     fn summary_brief_prints_aggregate_line() {
         let comp = make_test_comparison();
+        let (_, summary) =
+            collect_and_count(&comp.entries, &test_args(), false);
         let mut buf = Vec::new();
-        super::print_summary_to_vec(&comp, SummaryMode::Brief, &mut buf);
+        super::print_summary_to_vec(&summary, SummaryMode::Brief, &mut buf);
         let output = String::from_utf8(buf).unwrap();
         assert!(output.contains("Summary:"));
         assert!(output.contains("total"));
@@ -2965,8 +3049,10 @@ mod tests {
     #[test]
     fn summary_full_prints_breakdown_table() {
         let comp = make_test_comparison();
+        let (_, summary) =
+            collect_and_count(&comp.entries, &test_args(), false);
         let mut buf = Vec::new();
-        super::print_summary_to_vec(&comp, SummaryMode::Full, &mut buf);
+        super::print_summary_to_vec(&summary, SummaryMode::Full, &mut buf);
         let output = String::from_utf8(buf).unwrap();
         assert!(output.contains("Summary breakdown:"));
         assert!(output.contains("Status"));
@@ -2981,13 +3067,331 @@ mod tests {
     #[test]
     fn summary_full_only_shows_nonzero_statuses() {
         let comp = make_test_comparison();
+        let (_, summary) =
+            collect_and_count(&comp.entries, &test_args(), false);
         let mut buf = Vec::new();
-        super::print_summary_to_vec(&comp, SummaryMode::Full, &mut buf);
+        super::print_summary_to_vec(&summary, SummaryMode::Full, &mut buf);
         let output = String::from_utf8(buf).unwrap();
         // "conflict" has count 0, should not appear.
         assert!(!output.contains("conflict"));
         // "mergeable" has count 0, should not appear.
         assert!(!output.contains("mergeable"));
+    }
+
+    #[test]
+    fn summary_reflects_show_different_filter() {
+        // With --show-different, only Different + Similar entries should be
+        // counted in the summary.
+        let comp = make_test_comparison();
+        let mut args = test_args();
+        args.show_different = true;
+        let (visible, summary) = collect_and_count(&comp.entries, &args, false);
+        assert_eq!(visible.len(), 1); // only diff.txt (Different)
+        assert_eq!(summary.total(), 1);
+        assert_eq!(summary.same_count(), 0);
+        assert_eq!(summary.different_count(), 1);
+        assert_eq!(summary.orphan_count(), 0);
+    }
+
+    #[test]
+    fn summary_reflects_show_orphans_filter() {
+        // With --show-orphans, only LeftOnly + RightOnly entries should be
+        // counted.
+        let comp = make_test_comparison();
+        let mut args = test_args();
+        args.show_orphans = true;
+        let (visible, summary) = collect_and_count(&comp.entries, &args, false);
+        assert_eq!(visible.len(), 2); // only_left.txt + only_right.txt
+        assert_eq!(summary.total(), 2);
+        assert_eq!(summary.same_count(), 0);
+        assert_eq!(summary.different_count(), 0);
+        assert_eq!(summary.orphan_count(), 2);
+    }
+
+    #[test]
+    fn summary_counts_nested_entries_recursively() {
+        // The summary should count entries at all levels, not just the first
+        // level of the compared directories.
+        let comp = make_nested_comparison();
+        let (visible, summary) = collect_and_count(&comp.entries, &test_args(), false);
+        // Root level: 1 dir + 1 file = 2 entries
+        // Sub-level (sub/): 1 same + 1 diff + 1 left_only = 3 entries
+        // Total: 5
+        assert_eq!(visible.len(), 5);
+        assert_eq!(summary.total(), 5);
+        assert_eq!(summary.same_count(), 3); // sub/ + same.txt (root) + same.txt (sub)
+        assert_eq!(summary.different_count(), 1); // diff.txt (sub)
+        assert_eq!(summary.orphan_count(), 1); // only_left.txt (sub)
+    }
+
+    #[test]
+    fn summary_tree_mode_counts_only_visible_dirs() {
+        // In tree mode, directories are always shown but children of filtered
+        // directories are not counted.
+        let comp = make_nested_comparison();
+        let mut args = test_args();
+        args.tree = true;
+        let (visible, summary) = collect_and_count(&comp.entries, &args, true);
+        // Root level: 1 dir + 1 file = 2 entries (all visible with default args)
+        // Sub-level (sub/): 3 entries
+        // Total: 5
+        assert_eq!(visible.len(), 5);
+        assert_eq!(summary.total(), 5);
+    }
+
+    #[test]
+    fn summary_tree_mode_excludes_children_of_filtered_dirs() {
+        // With --excl-hidden, a hidden directory and its children should not be
+        // counted in tree mode.
+        let comp = make_nested_comparison_with_hidden();
+        let mut args = test_args();
+        args.excl_hidden = true;
+        let (visible, summary) = collect_and_count(&comp.entries, &args, true);
+        // Root: sub/ (visible, Same) + visible.txt (visible, Same) = 2
+        // .hidden_dir/ is filtered out, so its children are not counted.
+        assert!(!visible.iter().any(|e| e.name.starts_with('.')));
+        assert_eq!(summary.total(), 2);
+    }
+
+    #[test]
+    fn summary_flat_mode_includes_children_of_filtered_dirs() {
+        // In flat mode, children of filtered directories ARE counted if they
+        // pass the name filter themselves.
+        let comp = make_nested_comparison_with_hidden();
+        let mut args = test_args();
+        args.excl_hidden = true;
+        let (_visible, summary) = collect_and_count(&comp.entries, &args, false);
+        // Root: sub/ (Same) + visible.txt (Same) + .hidden_dir/ (filtered out)
+        // .hidden_dir/child.txt (passes name filter, counted)
+        assert_eq!(summary.total(), 3); // sub, visible.txt, child.txt
+        assert_eq!(summary.same_count(), 3);
+    }
+
+    /// Build a comparison with nested subdirectories for testing recursive
+    /// counting.
+    fn make_nested_comparison() -> DirComparison {
+        let dir_info = EntryInfo {
+            name: "sub".to_string(),
+            path: "sub".to_string(),
+            size: 4096,
+            modified: "2024-03-15 14:30".to_string(),
+            is_dir: true,
+            hash: None,
+        };
+        // Sub-entries for the "sub" directory.
+        let sub_same = EntryInfo {
+            name: "same.txt".to_string(),
+            path: "sub/same.txt".to_string(),
+            size: 6,
+            modified: "2024-03-15 14:30".to_string(),
+            is_dir: false,
+            hash: Some("abc".to_string()),
+        };
+        let sub_diff_left = EntryInfo {
+            name: "diff.txt".to_string(),
+            path: "sub/diff.txt".to_string(),
+            size: 6,
+            modified: "2024-03-15 14:30".to_string(),
+            is_dir: false,
+            hash: Some("abc".to_string()),
+        };
+        let sub_diff_right = EntryInfo {
+            name: "diff.txt".to_string(),
+            path: "sub/diff.txt".to_string(),
+            size: 8,
+            modified: "2024-03-15 14:30".to_string(),
+            is_dir: false,
+            hash: Some("def".to_string()),
+        };
+        let sub_left_only = EntryInfo {
+            name: "only_left.txt".to_string(),
+            path: "sub/only_left.txt".to_string(),
+            size: 13,
+            modified: "2024-03-15 14:30".to_string(),
+            is_dir: false,
+            hash: None,
+        };
+
+        use std::sync::Arc;
+        let sub_comparison = DirComparison {
+            entries: vec![
+                DirEntry {
+                    name: "same.txt".to_string(),
+                    status: DirEntryStatus::Same,
+                    left: Some(sub_same.clone()),
+                    right: Some(sub_same),
+                    center: None,
+                    sub_entries: None,
+                },
+                DirEntry {
+                    name: "diff.txt".to_string(),
+                    status: DirEntryStatus::Different,
+                    left: Some(sub_diff_left),
+                    right: Some(sub_diff_right),
+                    center: None,
+                    sub_entries: None,
+                },
+                DirEntry {
+                    name: "only_left.txt".to_string(),
+                    status: DirEntryStatus::LeftOnly,
+                    left: Some(sub_left_only),
+                    right: None,
+                    center: None,
+                    sub_entries: None,
+                },
+            ],
+            counts: std::collections::HashMap::new(),
+            errors: vec![],
+        };
+
+        let same = EntryInfo {
+            name: "same.txt".to_string(),
+            path: "same.txt".to_string(),
+            size: 6,
+            modified: "2024-03-15 14:30".to_string(),
+            is_dir: false,
+            hash: Some("abc".to_string()),
+        };
+
+        DirComparison {
+            entries: vec![
+                DirEntry {
+                    name: "sub".to_string(),
+                    status: DirEntryStatus::Same,
+                    left: Some(dir_info.clone()),
+                    right: Some(dir_info.clone()),
+                    center: None,
+                    sub_entries: Some(Arc::new(sub_comparison)),
+                },
+                DirEntry {
+                    name: "same.txt".to_string(),
+                    status: DirEntryStatus::Same,
+                    left: Some(same.clone()),
+                    right: Some(same),
+                    center: None,
+                    sub_entries: None,
+                },
+            ],
+            counts: std::collections::HashMap::new(),
+            errors: vec![],
+        }
+    }
+
+    /// Build a comparison with a hidden directory for testing tree-aware
+    /// filtering.
+    fn make_nested_comparison_with_hidden() -> DirComparison {
+        let hidden_dir = EntryInfo {
+            name: ".hidden_dir".to_string(),
+            path: ".hidden_dir".to_string(),
+            size: 4096,
+            modified: "2024-03-15 14:30".to_string(),
+            is_dir: true,
+            hash: None,
+        };
+        let visible_dir = EntryInfo {
+            name: "sub".to_string(),
+            path: "sub".to_string(),
+            size: 4096,
+            modified: "2024-03-15 14:30".to_string(),
+            is_dir: true,
+            hash: None,
+        };
+        let visible_file = EntryInfo {
+            name: "visible.txt".to_string(),
+            path: "visible.txt".to_string(),
+            size: 6,
+            modified: "2024-03-15 14:30".to_string(),
+            is_dir: false,
+            hash: Some("abc".to_string()),
+        };
+        let child_file = EntryInfo {
+            name: "child.txt".to_string(),
+            path: ".hidden_dir/child.txt".to_string(),
+            size: 6,
+            modified: "2024-03-15 14:30".to_string(),
+            is_dir: false,
+            hash: Some("abc".to_string()),
+        };
+
+        let hidden_sub = DirComparison {
+            entries: vec![
+                DirEntry {
+                    name: "child.txt".to_string(),
+                    status: DirEntryStatus::Same,
+                    left: Some(child_file),
+                    right: Some(EntryInfo {
+                        name: "child.txt".to_string(),
+                        path: ".hidden_dir/child.txt".to_string(),
+                        size: 6,
+                        modified: "2024-03-15 14:30".to_string(),
+                        is_dir: false,
+                        hash: Some("abc".to_string()),
+                    }),
+                    center: None,
+                    sub_entries: None,
+                },
+            ],
+            counts: std::collections::HashMap::new(),
+            errors: vec![],
+        };
+        let visible_sub = DirComparison {
+            entries: vec![],
+            counts: std::collections::HashMap::new(),
+            errors: vec![],
+        };
+
+        use std::sync::Arc;
+        DirComparison {
+            entries: vec![
+                DirEntry {
+                    name: ".hidden_dir".to_string(),
+                    status: DirEntryStatus::Same,
+                    left: Some(hidden_dir),
+                    right: Some(EntryInfo {
+                        name: ".hidden_dir".to_string(),
+                        path: ".hidden_dir".to_string(),
+                        size: 4096,
+                        modified: "2024-03-15 14:30".to_string(),
+                        is_dir: true,
+                        hash: None,
+                    }),
+                    center: None,
+                    sub_entries: Some(Arc::new(hidden_sub)),
+                },
+                DirEntry {
+                    name: "sub".to_string(),
+                    status: DirEntryStatus::Same,
+                    left: Some(visible_dir),
+                    right: Some(EntryInfo {
+                        name: "sub".to_string(),
+                        path: "sub".to_string(),
+                        size: 4096,
+                        modified: "2024-03-15 14:30".to_string(),
+                        is_dir: true,
+                        hash: None,
+                    }),
+                    center: None,
+                    sub_entries: Some(Arc::new(visible_sub)),
+                },
+                DirEntry {
+                    name: "visible.txt".to_string(),
+                    status: DirEntryStatus::Same,
+                    left: Some(visible_file),
+                    right: Some(EntryInfo {
+                        name: "visible.txt".to_string(),
+                        path: "visible.txt".to_string(),
+                        size: 6,
+                        modified: "2024-03-15 14:30".to_string(),
+                        is_dir: false,
+                        hash: Some("abc".to_string()),
+                    }),
+                    center: None,
+                    sub_entries: None,
+                },
+            ],
+            counts: std::collections::HashMap::new(),
+            errors: vec![],
+        }
     }
 
     #[test]

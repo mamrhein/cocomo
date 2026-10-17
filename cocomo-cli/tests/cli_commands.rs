@@ -495,7 +495,8 @@ mod dir_compare {
             ])
             .assert()
             .code(1)
-            .stdout(predicate::str::contains("Size Modified"));
+            .stdout(predicate::str::contains("Size"))
+            .stdout(predicate::str::contains("Modified"));
     }
 
     #[test]
@@ -739,7 +740,7 @@ mod dir_compare {
                 dir.path().join("right").to_str().unwrap(),
             ])
             .assert()
-            .code(1)
+            .code(0)
             .stdout(predicate::str::contains("sub/"))
             .stdout(predicate::str::contains(".hidden_dir/"))
             .stdout(predicate::str::contains("same.txt").not());
@@ -762,7 +763,7 @@ mod dir_compare {
                 dir.path().join("right").to_str().unwrap(),
             ])
             .assert()
-            .code(1)
+            .code(0)
             .get_output()
             .stdout
             .clone();
@@ -812,7 +813,7 @@ mod dir_compare {
                 dir.path().join("right").to_str().unwrap(),
             ])
             .assert()
-            .code(1)
+            .code(0)
             .stdout(predicate::str::contains("No matching entries"));
     }
 
@@ -854,7 +855,7 @@ mod dir_compare {
                 dir.path().join("right").to_str().unwrap(),
             ])
             .assert()
-            .code(1)
+            .code(0)
             .stdout(predicate::str::contains("sub/"))
             .stdout(predicate::str::contains(".hidden_dir").not())
             .stdout(predicate::str::contains("same.txt").not());
