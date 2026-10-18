@@ -21,8 +21,8 @@ use crate::{
         SnapshotCaptureArgs, SnapshotCommand, SnapshotDiffArgs,
         SnapshotListArgs,
     },
+    dir::format_size,
     error::{CliError, DiffResult, fs_error_to_cli},
-    format_size,
     resolver::{EndpointResolver, resolve_endpoint},
 };
 
