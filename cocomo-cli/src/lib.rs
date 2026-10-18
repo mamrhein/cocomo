@@ -26,30 +26,30 @@ mod cli;
 mod error;
 mod resolver;
 mod snapshot;
+mod text;
 
 pub use cli::Cli;
 pub use error::{CliError, DiffResult};
 pub use resolver::{EndpointResolver, ProductionResolver};
 
 use cli::{
-    Commands, ColorMode, DirCommand, DirCompareArgs, DirSyncArgs, GrammarArg,
-    OutputFormat, SortField, SummaryMode, TextCommand, TextCompareArgs,
-    TextDiffArgs, WhitespaceArg,
+    Commands, ColorMode, DirCommand, DirCompareArgs, DirSyncArgs, OutputFormat,
+    SortField, SummaryMode,
 };
 
 use error::fs_error_to_cli;
-use resolver::{EndpointPair, resolve_endpoint, resolve_endpoint_pair};
+use resolver::{EndpointPair, resolve_endpoint_pair};
 use snapshot::run_snapshot;
+use text::run_text;
 
 use std::{
     collections::HashMap,
     io::{IsTerminal, Write},
-    path::Path,
 };
 
 use chrono::DateTime;
 use cocomo_lib::{
-    DirEntry, FileSystem, TextDifference,
+    DirEntry,
     compare::{
         CompareConfig, DirComparison, DirEntryStatus,
         compare_directories_node, compare_directories_pair_node,
@@ -60,7 +60,6 @@ use cocomo_lib::{
         SyncOperation, SyncRules, plan_sync, plan_sync_pair, sync_directories,
         sync_directories_pair,
     },
-    text::{TextCompareSettings, TextDiff, compare_texts},
     transfer::FsPair,
 };
 use globset::Glob;
@@ -1172,398 +1171,8 @@ async fn dir_sync<R: EndpointResolver>(
     Ok(DiffResult::HasDiffs)
 }
 
-// ---------------------------------------------------------------------------
-// Text commands
-// ---------------------------------------------------------------------------
-
-async fn run_text<R: EndpointResolver>(
-    cmd: &TextCommand,
-    resolver: &R,
-) -> Result<DiffResult, CliError> {
-    match cmd {
-        TextCommand::Compare(args) => text_compare(args, resolver).await,
-        TextCommand::Diff(args) => text_diff(args, resolver).await,
-    }
-}
-
-fn build_text_settings(
-    ignore_case: bool,
-    whitespace: WhitespaceArg,
-    ignore_blank_lines: bool,
-    ignore_comments: bool,
-    grammar: Option<GrammarArg>,
-) -> TextCompareSettings {
-    let mut settings = TextCompareSettings::new();
-    settings.ignore_case = ignore_case;
-    settings.whitespace_mode = whitespace.clone().into();
-    settings.ignore_blank_lines = ignore_blank_lines;
-    settings.ignore_comments = ignore_comments;
-    if let Some(g) = grammar {
-        settings.grammar = Some(g.into());
-    }
-    settings
-}
-
-async fn text_compare<R: EndpointResolver>(
-    args: &TextCompareArgs,
-    resolver: &R,
-) -> Result<DiffResult, CliError> {
-    let (left_fs, left_path) =
-        resolve_endpoint(resolver, &args.left, args.profile.as_deref())?;
-    let (right_fs, right_path) =
-        resolve_endpoint(resolver, &args.right, args.profile.as_deref())?;
-    let left_bytes = left_fs.read(&left_path, None).await?;
-    let right_bytes = right_fs.read(&right_path, None).await?;
-    let left_content = String::from_utf8_lossy(&left_bytes);
-    let right_content = String::from_utf8_lossy(&right_bytes);
-
-    let settings = build_text_settings(
-        args.ignore_case,
-        args.ignore_whitespace.clone(),
-        args.ignore_blank_lines,
-        args.ignore_comments,
-        args.grammar.clone(),
-    );
-
-    let diff = compare_texts(&left_content, &right_content, &settings);
-
-    if diff.is_empty() {
-        println!("Files are identical.");
-        return Ok(DiffResult::NoDiffs);
-    }
-
-    let left_name = left_path
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| args.left.clone());
-    let right_name = right_path
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| args.right.clone());
-
-    print_text_diff_table(&diff, &left_name, &right_name);
-
-    println!(
-        "\n{} differences found ({} lines left, {} lines right)",
-        diff.differences.len(),
-        diff.left_line_count,
-        diff.right_line_count,
-    );
-
-    Ok(DiffResult::HasDiffs)
-}
-
-fn print_text_diff_table(diff: &TextDiff, left_name: &str, right_name: &str) {
-    // Column layout adapted to the TUI's text main area:
-    //   Num | marker | content | Num | marker | content
-    // Widths: [7, 2, 60, 7, 2, 60] with 2-space gaps between groups.
-    println!(
-        "{:<6}  {:<2} {:<60}  {:<6}  {:<2} {:<60}",
-        "Num", "", left_name, "Num", "", right_name
-    );
-    println!(
-        "{:<6}  {:<2} {:<60}  {:<6}  {:<2} {:<60}",
-        "----", "--", "", "----", "--", ""
-    );
-
-    for difference in &diff.differences {
-        match difference {
-            TextDifference::LineDifferent(left, right) => {
-                println!(
-                    "{:<6}  {:<2} {:<60}  {:<6}  {:<2} {:<60}",
-                    left.number,
-                    "▶ ",
-                    truncate(&left.content, 60),
-                    right.number,
-                    "▶ ",
-                    truncate(&right.content, 60),
-                );
-            }
-            TextDifference::LinesAdded(_start, lines) => {
-                for line in lines {
-                    println!(
-                        "{:<6}  {:<2} {:<60}  {:<6}  {:<2} {:<60}",
-                        "-",
-                        "  ",
-                        "",
-                        line.number,
-                        "▶ ",
-                        truncate(&line.content, 60),
-                    );
-                }
-            }
-            TextDifference::LinesRemoved(_start, lines) => {
-                for line in lines {
-                    println!(
-                        "{:<6}  {:<2} {:<60}  {:<6}  {:<2} {:<60}",
-                        line.number,
-                        "▶ ",
-                        truncate(&line.content, 60),
-                        "-",
-                        "  ",
-                        "",
-                    );
-                }
-            }
-            TextDifference::LinesChanged(_start, removed, added) => {
-                for line in removed {
-                    println!(
-                        "{:<6}  {:<2} {:<60}  {:<6}  {:<2} {:<60}",
-                        line.number,
-                        "▶ ",
-                        truncate(&line.content, 60),
-                        "-",
-                        "  ",
-                        "",
-                    );
-                }
-                for line in added {
-                    println!(
-                        "{:<6}  {:<2} {:<60}  {:<6}  {:<2} {:<60}",
-                        "-",
-                        "  ",
-                        "",
-                        line.number,
-                        "▶ ",
-                        truncate(&line.content, 60),
-                    );
-                }
-            }
-            TextDifference::BlankLine => {
-                println!(
-                    "{:<6}  {:<2} {:<60}  {:<6}  {:<2} {:<60}",
-                    "-", "  ", "(blank)", "-", "  ", ""
-                );
-            }
-        }
-    }
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        return s.to_string();
-    }
-    // The cut point may fall inside a multi-byte character, so snap down to
-    // the nearest char boundary before slicing.
-    let end = s.floor_char_boundary(max.saturating_sub(3));
-    format!("{}...", &s[..end])
-}
-
-async fn text_diff<R: EndpointResolver>(
-    args: &TextDiffArgs,
-    resolver: &R,
-) -> Result<DiffResult, CliError> {
-    let (left_fs, left_path) =
-        resolve_endpoint(resolver, &args.left, args.profile.as_deref())?;
-    let (right_fs, right_path) =
-        resolve_endpoint(resolver, &args.right, args.profile.as_deref())?;
-    let left_bytes = left_fs.read(&left_path, None).await?;
-    let right_bytes = right_fs.read(&right_path, None).await?;
-    let left_content = String::from_utf8_lossy(&left_bytes);
-    let right_content = String::from_utf8_lossy(&right_bytes);
-
-    let settings = build_text_settings(
-        args.ignore_case,
-        args.ignore_whitespace.clone(),
-        args.ignore_blank_lines,
-        args.ignore_comments,
-        args.grammar.clone(),
-    );
-
-    let diff = compare_texts(&left_content, &right_content, &settings);
-
-    if diff.is_empty() {
-        return Ok(DiffResult::NoDiffs);
-    }
-
-    // Generate unified diff from the TextDiff result.
-    let unified = generate_unified_diff(
-        Path::new(&args.left),
-        Path::new(&args.right),
-        &left_content,
-        &right_content,
-        &diff,
-    );
-
-    print!("{}", unified);
-
-    Ok(DiffResult::HasDiffs)
-}
-
-fn generate_unified_diff(
-    left_path: &Path,
-    right_path: &Path,
-    left_content: &str,
-    right_content: &str,
-    diff: &TextDiff,
-) -> String {
-    use std::fmt::Write;
-
-    let left_lines: Vec<&str> = left_content.lines().collect();
-    let right_lines: Vec<&str> = right_content.lines().collect();
-
-    let mut output = String::new();
-    writeln!(
-        output,
-        "--- {}\n+++ {}",
-        left_path.display(),
-        right_path.display(),
-    )
-    .ok();
-
-    // Walk the differences and emit hunks. We need context lines around
-    // each change group.
-    let context_lines = 3;
-
-    // Build a mapping of which left/right lines are part of changes.
-    let mut changed_left: std::collections::HashSet<usize> =
-        std::collections::HashSet::new();
-    let mut changed_right: std::collections::HashSet<usize> =
-        std::collections::HashSet::new();
-
-    for difference in &diff.differences {
-        match difference {
-            TextDifference::LineDifferent(left, right) => {
-                changed_left.insert(left.number - 1);
-                changed_right.insert(right.number - 1);
-            }
-            TextDifference::LinesAdded(_start, lines) => {
-                for line in lines {
-                    changed_right.insert(line.number - 1);
-                }
-            }
-            TextDifference::LinesRemoved(_start, lines) => {
-                for line in lines {
-                    changed_left.insert(line.number - 1);
-                }
-            }
-            TextDifference::LinesChanged(_start, removed, added) => {
-                for line in removed {
-                    changed_left.insert(line.number - 1);
-                }
-                for line in added {
-                    changed_right.insert(line.number - 1);
-                }
-            }
-            TextDifference::BlankLine => {
-                // Blank lines between changes are context.
-            }
-        }
-    }
-
-    // Group into hunks based on left-side changes.
-    let mut sorted_left: Vec<usize> = changed_left.iter().copied().collect();
-    sorted_left.sort();
-
-    let mut hunks: Vec<(usize, usize)> = Vec::new();
-    let mut current_start: Option<usize> = None;
-    let mut current_end: Option<usize> = None;
-
-    for idx in sorted_left {
-        let ctx_start = idx.saturating_sub(context_lines);
-        let ctx_end = idx + context_lines;
-
-        match (&mut current_start, &mut current_end) {
-            (Some(s), Some(e)) if ctx_start <= *e => {
-                *e = ctx_end.min(left_lines.len());
-            }
-            _ => {
-                if let (Some(s), Some(e)) =
-                    (current_start.take(), current_end.take())
-                {
-                    hunks.push((s, e));
-                }
-                current_start = Some(ctx_start);
-                current_end = Some(ctx_end.min(left_lines.len()));
-            }
-        }
-    }
-
-    if let (Some(s), Some(e)) = (current_start, current_end) {
-        hunks.push((s, e));
-    }
-
-    // If no left-side changes (only additions), emit a single hunk at
-    // the end.
-    if hunks.is_empty() && !changed_right.is_empty() {
-        hunks.push((left_lines.len(), left_lines.len()));
-    }
-
-    for (hunk_start, hunk_end) in &hunks {
-        let left_start = *hunk_start;
-        let left_count = *hunk_end - *hunk_start + (context_lines * 2);
-
-        // Approximate the right range.
-        let mut right_start = *hunk_start;
-        let mut right_count = *hunk_end - *hunk_start + (context_lines * 2);
-
-        // Adjust for pure additions at the end.
-        if changed_left.is_empty() {
-            right_start = right_lines.len().saturating_sub(context_lines);
-            right_count = context_lines + changed_right.len();
-        }
-
-        writeln!(output, "@@ -{},+{} @@", left_start + 1, right_start + 1,)
-            .ok();
-
-        // Emit context and changed lines from the original text.
-        for (i, line) in left_lines.iter().enumerate() {
-            if i >= left_count {
-                break;
-            }
-            if changed_left.contains(&i) {
-                writeln!(output, "-{}", line).ok();
-            } else if i >= hunk_start.saturating_sub(context_lines)
-                && i < hunk_end + context_lines
-            {
-                writeln!(output, " {}", line).ok();
-            }
-        }
-
-        for (i, line) in right_lines.iter().enumerate() {
-            if changed_right.contains(&i) {
-                writeln!(output, "+{}", line).ok();
-            } else if i >= right_start.saturating_sub(context_lines)
-                && i < right_start + right_count
-            {
-                // Only emit context that wasn't already emitted as left
-                // context.
-                if !changed_left.contains(&i) {
-                    // Avoid duplicate context lines.
-                }
-            }
-        }
-    }
-
-    output
-}
-
 #[cfg(test)]
 mod tests {
-    use super::truncate;
-
-    #[test]
-    fn short_string_is_unchanged() {
-        assert_eq!(truncate("hello", 10), "hello");
-    }
-
-    #[test]
-    fn long_string_is_truncated_with_ellipsis() {
-        assert_eq!(truncate("abcdefghij", 8), "abcde...");
-    }
-
-    #[test]
-    fn cut_point_inside_multibyte_char_does_not_panic() {
-        // '✅' occupies bytes 56..59, so a naive cut at byte 57 would panic.
-        let line = format!("{}✅tail", "x".repeat(56));
-        assert_eq!(truncate(&line, 60), format!("{}...", "x".repeat(56)));
-    }
-
-    #[test]
-    fn max_smaller_than_ellipsis_returns_only_ellipsis() {
-        assert_eq!(truncate("abcdef", 2), "...");
-    }
-
     use cocomo_lib::compare::{
         DirComparison, DirEntry, DirEntryStatus, EntryInfo,
     };
