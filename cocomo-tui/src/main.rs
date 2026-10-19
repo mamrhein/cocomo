@@ -172,11 +172,22 @@ fn render_welcome(frame: &mut Frame, area: Rect, _app: &App) {
 // Global key handling
 // ---------------------------------------------------------------------------
 
+/// Result of dispatching a global key event.
+enum GlobalKeyResult {
+    /// The key was not consumed; dispatch to the active session.
+    Ignored,
+    /// The key was consumed; continue the event loop.
+    Consumed,
+    /// The key was consumed and the application should quit.
+    Quit,
+}
+
 /// Handle keys that affect the app globally (tab switching, menu, quit).
 ///
-/// Returns `true` if the key was consumed by a global handler, `false` if it
-/// should be dispatched to the active session.
-fn handle_global_key(app: &mut App, key: KeyEvent) -> bool {
+/// Returns `GlobalKeyResult::Quit` when the application should exit (e.g. on
+/// `q` or when closing the last tab), `Consumed` when the key was handled, or
+/// `Ignored` to let the session handler take over.
+fn handle_global_key(app: &mut App, key: KeyEvent) -> GlobalKeyResult {
     const MENU_COUNT: usize = 6; // Sessions, Compare, Sync, View, Filter, Help
 
     // Ctrl+W — close active tab.
@@ -184,7 +195,11 @@ fn handle_global_key(app: &mut App, key: KeyEvent) -> bool {
         && key.modifiers.contains(KeyModifiers::CONTROL)
     {
         app.close_active();
-        return true;
+        return if app.sessions.is_empty() {
+            GlobalKeyResult::Quit
+        } else {
+            GlobalKeyResult::Consumed
+        };
     }
 
     // Ctrl+Tab — next tab.
@@ -193,7 +208,7 @@ fn handle_global_key(app: &mut App, key: KeyEvent) -> bool {
     {
         let is_shift = key.modifiers.contains(KeyModifiers::SHIFT);
         app.switch_tab(if is_shift { -1 } else { 1 });
-        return true;
+        return GlobalKeyResult::Consumed;
     }
 
     // Left/Right arrow keys — navigate menu bar.
@@ -205,11 +220,11 @@ fn handle_global_key(app: &mut App, key: KeyEvent) -> bool {
                 } else {
                     MENU_COUNT - 1
                 };
-                return true;
+                return GlobalKeyResult::Consumed;
             }
             KeyCode::Right => {
                 app.menu_selection = (app.menu_selection + 1) % MENU_COUNT;
-                return true;
+                return GlobalKeyResult::Consumed;
             }
             _ => {}
         }
@@ -221,16 +236,14 @@ fn handle_global_key(app: &mut App, key: KeyEvent) -> bool {
         // it.
         if let Some(session) = app.active() {
             if session.mode != app::AppMode::Filter {
-                app.running = false;
-                return true;
+                return GlobalKeyResult::Quit;
             }
         } else {
-            app.running = false;
-            return true;
+            return GlobalKeyResult::Quit;
         }
     }
 
-    false
+    GlobalKeyResult::Ignored
 }
 
 // ---------------------------------------------------------------------------
@@ -319,11 +332,10 @@ async fn main() -> Result<()> {
             };
 
             // Global keys first.
-            if handle_global_key(&mut app_state, key) {
-                if !app_state.running {
-                    break;
-                }
-                continue;
+            match handle_global_key(&mut app_state, key) {
+                GlobalKeyResult::Quit => break,
+                GlobalKeyResult::Consumed => continue,
+                GlobalKeyResult::Ignored => {}
             }
 
             // Dispatch to active session.
@@ -478,7 +490,7 @@ async fn main() -> Result<()> {
                 }
             }
 
-            if !app_state.running {
+            if app_state.sessions.is_empty() {
                 break;
             }
         }

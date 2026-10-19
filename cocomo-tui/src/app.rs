@@ -22,7 +22,7 @@ use cocomo_lib::{
     SessionType as LibSessionType, SyncOperation, SyncResult, SyncRules,
     TextCompareSettings, TextDiff, compare_texts,
 };
-use ratatui_kit::ratatui::widgets::TableState;
+use ratatui_kit::{Atom, components::table::TableState};
 
 /// Which pane currently has keyboard focus within a session.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -256,10 +256,8 @@ impl SessionView {
 ///
 /// Manages multiple [`SessionView`] instances as tabs and tracks which tab
 /// is currently active.
-#[allow(dead_code)] // reload_pending, session_count and menu_selection are stubs for M5.2+.
+#[allow(dead_code)] // reload_pending and session_count are stubs for M5.2+.
 pub struct App {
-    /// `false` when the app should exit.
-    pub running: bool,
     /// All open session tabs.
     pub sessions: Vec<SessionView>,
     /// Index of the currently active tab.
@@ -270,11 +268,20 @@ pub struct App {
     pub menu_selection: usize,
 }
 
+/// Global reactive application state, subscribed to via
+/// `use_atom(&APP_STATE)`.
+///
+/// Declared as a module-level static so that event handlers and background
+/// tasks can read or mutate it without a `Hooks` handle (via `.get()` /
+/// `.set()`). Components subscribe with `hooks.use_atom(&APP_STATE)` to
+/// receive re-render notifications on writes.
+#[allow(dead_code)] // subscribed via use_atom in the root App component (Step 2).
+pub static APP_STATE: Atom<App> = Atom::new(|| App::new());
+
 impl App {
     /// Create a new, empty application state.
     pub fn new() -> Self {
         Self {
-            running: true,
             sessions: Vec::new(),
             active_tab: 0,
             reload_pending: None,
@@ -292,7 +299,8 @@ impl App {
     ///
     /// If there are other tabs, switch to the previous one (or the last one
     /// if the active tab was already the last). If this was the last tab,
-    /// exit the application.
+    /// [`App::sessions`] becomes empty; the caller (event handler) detects this
+    /// and triggers `exit()`.
     pub fn close_active(&mut self) {
         let len = self.sessions.len();
         if len == 0 {
@@ -301,9 +309,7 @@ impl App {
 
         self.sessions.remove(self.active_tab);
 
-        if self.sessions.is_empty() {
-            self.running = false;
-        } else {
+        if !self.sessions.is_empty() {
             // Clamp the active tab index.
             if self.active_tab >= self.sessions.len() {
                 self.active_tab = self.sessions.len() - 1;

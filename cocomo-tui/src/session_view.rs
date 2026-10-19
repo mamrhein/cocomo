@@ -24,11 +24,25 @@ use ratatui_kit::{
         layout::{Alignment, Constraint, Direction, Layout, Rect},
         style::{Color, Modifier, Style},
         text::{Line, Span},
-        widgets::{Block, Borders, Paragraph, Row, Table},
+        widgets::{
+            Block, Borders, Paragraph, Row, Table,
+            TableState as RatatuiTableState,
+        },
     },
 };
 
 use crate::app::{AppMode, Focus, SessionAction, SessionType, SessionView};
+
+/// Build a ratatui `TableState` with the given selection, bridging from the
+/// ratatui-kit `TableState` stored in [`SessionView`].
+///
+/// The legacy `Table` widget requires ratatui's own `TableState`, so we
+/// transfer the selected row index at each render.
+fn ratatui_table_state(selected: Option<usize>) -> RatatuiTableState {
+    let mut state = RatatuiTableState::default();
+    state.select(selected);
+    state
+}
 
 /// Render the active session's content (header, filter bar, main table, status
 /// bar, help bar).
@@ -256,11 +270,8 @@ fn render_main(frame: &mut Frame, area: Rect, session: &SessionView) {
         )
         .highlight_symbol(ratatui_kit::ratatui::symbols::block::FULL);
 
-    frame.render_stateful_widget(
-        table,
-        area,
-        &mut session.table_state.clone(),
-    );
+    let mut state = ratatui_table_state(session.table_state.selected());
+    frame.render_stateful_widget(table, area, &mut state);
 }
 
 /// Render the sync preview table showing planned transfer items.
@@ -339,11 +350,8 @@ fn render_sync_preview(frame: &mut Frame, area: Rect, session: &SessionView) {
         )
         .highlight_symbol(ratatui_kit::ratatui::symbols::block::FULL);
 
-    frame.render_stateful_widget(
-        table,
-        area,
-        &mut session.table_state.clone(),
-    );
+    let mut state = ratatui_table_state(session.table_state.selected());
+    frame.render_stateful_widget(table, area, &mut state);
 }
 
 /// Render the status bar with comparison statistics or mode-specific info.
@@ -1213,11 +1221,8 @@ fn render_text_main(frame: &mut Frame, area: Rect, session: &SessionView) {
         )
         .highlight_symbol(ratatui_kit::ratatui::symbols::block::FULL);
 
-    frame.render_stateful_widget(
-        table,
-        area,
-        &mut session.table_state.clone(),
-    );
+    let mut state = ratatui_table_state(session.table_state.selected());
+    frame.render_stateful_widget(table, area, &mut state);
 }
 
 /// Render the status bar for text diff sessions.
