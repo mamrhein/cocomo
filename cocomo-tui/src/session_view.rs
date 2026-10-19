@@ -17,13 +17,15 @@ use cocomo_lib::{
     DirEntryStatus, Importance, LineInfo, SyncOperation, TextDifference,
     TransferAction,
 };
-use crossterm::event::{KeyCode, KeyEvent};
-use ratatui::{
-    Frame,
-    layout::{Alignment, Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style},
-    text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Row, Table},
+use ratatui_kit::{
+    crossterm::event::{KeyCode, KeyEvent},
+    ratatui::{
+        Frame,
+        layout::{Alignment, Constraint, Direction, Layout, Rect},
+        style::{Color, Modifier, Style},
+        text::{Line, Span},
+        widgets::{Block, Borders, Paragraph, Row, Table},
+    },
 };
 
 use crate::app::{AppMode, Focus, SessionAction, SessionType, SessionView};
@@ -252,7 +254,7 @@ fn render_main(frame: &mut Frame, area: Rect, session: &SessionView) {
                 .bg(Color::DarkGray)
                 .add_modifier(Modifier::REVERSED),
         )
-        .highlight_symbol(ratatui::symbols::block::FULL);
+        .highlight_symbol(ratatui_kit::ratatui::symbols::block::FULL);
 
     frame.render_stateful_widget(
         table,
@@ -333,9 +335,9 @@ fn render_sync_preview(frame: &mut Frame, area: Rect, session: &SessionView) {
         .row_highlight_style(
             Style::default()
                 .bg(Color::DarkGray)
-                .add_modifier(Modifier::REVERSED),
+                .add_modifier(Modifier::BOLD),
         )
-        .highlight_symbol(ratatui::symbols::block::FULL);
+        .highlight_symbol(ratatui_kit::ratatui::symbols::block::FULL);
 
     frame.render_stateful_widget(
         table,
@@ -1209,7 +1211,7 @@ fn render_text_main(frame: &mut Frame, area: Rect, session: &SessionView) {
                 .bg(Color::DarkGray)
                 .add_modifier(Modifier::REVERSED),
         )
-        .highlight_symbol(ratatui::symbols::block::FULL);
+        .highlight_symbol(ratatui_kit::ratatui::symbols::block::FULL);
 
     frame.render_stateful_widget(
         table,

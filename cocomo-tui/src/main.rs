@@ -29,16 +29,18 @@ use app::{
     run_comparison, run_text_comparison, session_to_config,
 };
 use clap::Parser;
-use crossterm::event::{
-    self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
-};
-use ratatui::{
-    Frame, Terminal,
-    backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style},
-    text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Tabs},
+use ratatui_kit::{
+    crossterm::event::{
+        self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
+    },
+    ratatui::{
+        Frame, Terminal,
+        backend::CrosstermBackend,
+        layout::{Alignment, Constraint, Direction, Layout, Rect},
+        style::{Color, Modifier, Style},
+        text::{Line, Span},
+        widgets::{Block, Borders, Paragraph, Tabs},
+    },
 };
 
 // ---------------------------------------------------------------------------
@@ -162,7 +164,7 @@ fn render_welcome(frame: &mut Frame, area: Rect, _app: &App) {
         .border_style(Style::default().fg(Color::Gray));
     let paragraph = Paragraph::new(lines)
         .block(block)
-        .alignment(ratatui::layout::Alignment::Center);
+        .alignment(Alignment::Center);
     frame.render_widget(paragraph, area);
 }
 
@@ -486,10 +488,10 @@ async fn main() -> Result<()> {
 }
 
 fn setup_terminal() -> Result<Terminal<CrosstermBackend<std::io::Stdout>>> {
-    crossterm::terminal::enable_raw_mode()?;
-    crossterm::execute!(
+    ratatui_kit::crossterm::terminal::enable_raw_mode()?;
+    ratatui_kit::crossterm::execute!(
         std::io::stdout(),
-        crossterm::terminal::EnterAlternateScreen,
+        ratatui_kit::crossterm::terminal::EnterAlternateScreen,
     )?;
     let backend = CrosstermBackend::new(std::io::stdout());
     let terminal = Terminal::new(backend)?;
@@ -501,10 +503,10 @@ fn teardown_terminal() -> Result<()> {
     if !TERMINAL_ACTIVE.swap(false, Ordering::Relaxed) {
         return Ok(());
     }
-    crossterm::terminal::disable_raw_mode()?;
-    crossterm::execute!(
+    ratatui_kit::crossterm::terminal::disable_raw_mode()?;
+    ratatui_kit::crossterm::execute!(
         std::io::stdout(),
-        crossterm::terminal::LeaveAlternateScreen,
+        ratatui_kit::crossterm::terminal::LeaveAlternateScreen,
     )?;
     Ok(())
 }

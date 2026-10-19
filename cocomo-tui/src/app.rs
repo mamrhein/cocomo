@@ -22,7 +22,7 @@ use cocomo_lib::{
     SessionType as LibSessionType, SyncOperation, SyncResult, SyncRules,
     TextCompareSettings, TextDiff, compare_texts,
 };
-use ratatui::widgets::TableState;
+use ratatui_kit::ratatui::widgets::TableState;
 
 /// Which pane currently has keyboard focus within a session.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]

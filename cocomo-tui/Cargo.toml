@@ -19,15 +19,8 @@ path = "src/main.rs"
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 cocomo-lib = { path = "../cocomo-lib" }
-crossterm = "0.29"
 dirs = "7"
-ratatui = {
-  version = "0.30",
-  default-features = false,
-  features = [
-    "crossterm_0_29",
-  ]
-}
+ratatui-kit = { version = "0.12", features = ["full"] }
 tokio = {
   version = "1",
   features = [
