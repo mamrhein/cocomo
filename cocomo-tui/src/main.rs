@@ -220,6 +220,99 @@ impl Component for SessionContent {
 }
 
 // ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+/// Menu bar item labels, in order: Sessions, Compare, Sync, View, Filter,
+/// Help.
+const MENU_TITLES: [&str; 6] =
+    ["Sessions", "Compare", "Sync", "View", "Filter", "Help"];
+
+// ---------------------------------------------------------------------------
+// MenuBar component
+// ---------------------------------------------------------------------------
+
+/// Props for [`MenuBar`].
+#[derive(Default, Props)]
+struct MenuBarProps {
+    /// Titles of the menu items.
+    menu_titles: Vec<Line<'static>>,
+    /// Index of the currently selected menu item.
+    selected: usize,
+}
+
+/// Top menu bar with tab-like navigation items (Sessions, Compare, Sync,
+/// View, Filter, Help).
+#[component]
+fn MenuBar(props: &MenuBarProps) -> impl Into<AnyElement<'static>> {
+    let menu_tabs = Tabs::new(props.menu_titles.clone())
+        .select(props.selected)
+        .highlight_style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )
+        .divider(Span::raw(" | "))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Gray)),
+        );
+
+    element!(
+        View(height: Constraint::Length(3)) {
+            widget(menu_tabs)
+        }
+    )
+}
+
+// ---------------------------------------------------------------------------
+// TabBar component
+// ---------------------------------------------------------------------------
+
+/// Props for [`TabBar`].
+#[derive(Default, Props)]
+struct TabBarProps {
+    /// Titles of the session tabs.
+    tab_titles: Vec<Line<'static>>,
+    /// Index of the active session tab.
+    active_index: usize,
+}
+
+/// Session tab bar showing open comparison sessions. When no sessions are
+/// open, an empty bordered block is rendered.
+#[component]
+fn TabBar(props: &TabBarProps) -> impl Into<AnyElement<'static>> {
+    let tab_tabs = if !props.tab_titles.is_empty() {
+        Tabs::new(props.tab_titles.clone())
+            .select(props.active_index)
+            .highlight_style(
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .divider(Span::raw(" | "))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::Gray)),
+            )
+    } else {
+        Tabs::new(Vec::<Line>::new()).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Gray)),
+        )
+    };
+
+    element!(
+        View(height: Constraint::Length(3)) {
+            widget(tab_tabs)
+        }
+    )
+}
+
+// ---------------------------------------------------------------------------
 // App component (root component)
 // ---------------------------------------------------------------------------
 
@@ -261,14 +354,10 @@ fn App(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let app = app_state.read();
     let menu_selection = app.menu_selection;
     let active_index = app.active_index();
-    let session_count = app.sessions.len();
 
     // Build menu bar tab titles.
     let menu_titles: Vec<Line<'static>> =
-        ["Sessions", "Compare", "Sync", "View", "Filter", "Help"]
-            .iter()
-            .map(|s| Line::from(*s))
-            .collect();
+        MENU_TITLES.iter().map(|s| Line::from(*s)).collect();
 
     // Build session tab titles.
     let tab_titles: Vec<Line<'static>> = app
@@ -279,50 +368,10 @@ fn App(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     drop(app);
 
-    let menu_tabs = Tabs::new(menu_titles)
-        .select(menu_selection)
-        .highlight_style(
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        )
-        .divider(Span::raw(" | "))
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Gray)),
-        );
-
-    let tab_tabs = if session_count > 0 {
-        Tabs::new(tab_titles)
-            .select(active_index)
-            .highlight_style(
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            )
-            .divider(Span::raw(" | "))
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(Color::Gray)),
-            )
-    } else {
-        Tabs::new(Vec::<Line>::new()).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Gray)),
-        )
-    };
-
     element!(
         View(flex_direction: Direction::Vertical) {
-            View(height: Constraint::Length(3)) {
-                widget(menu_tabs)
-            }
-            View(height: Constraint::Length(3)) {
-                widget(tab_tabs)
-            }
+            MenuBar(menu_titles: menu_titles, selected: menu_selection)
+            TabBar(tab_titles: tab_titles, active_index: active_index)
             View(height: Constraint::Min(1)) {
                 SessionContent()
             }
