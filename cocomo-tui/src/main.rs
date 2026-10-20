@@ -402,19 +402,19 @@ fn process_session_action(action: SessionAction) {
                     }
                 };
 
-                APP_STATE.state().write().active_mut().map(|s| {
+                if let Some(s) = APP_STATE.state().write().active_mut() {
                     s.comparison = None;
-                });
+                }
 
                 let mut session = SessionView::new_dir_compare(left_path, right_path, compare_content);
                 if let Err(e) = run_comparison(&mut session).await {
                     session.errors.push(format!("Comparison failed: {e}"));
                 }
 
-                APP_STATE.state().write().active_mut().map(|s| {
+                if let Some(s) = APP_STATE.state().write().active_mut() {
                     s.comparison = session.comparison;
                     s.table_state.select(Some(0));
-                });
+                }
             });
         }
         SessionAction::PlanSync { operation } => {
@@ -434,9 +434,9 @@ fn process_session_action(action: SessionAction) {
                 };
 
                 // Set the sync operation under write lock (brief, no await).
-                APP_STATE.state().write().active_mut().map(|s| {
+                if let Some(s) = APP_STATE.state().write().active_mut() {
                     s.sync_operation = operation;
-                });
+                }
 
                 // Run sync planning outside any lock.
                 let fs = LocalFs::new("local");
@@ -449,10 +449,10 @@ fn process_session_action(action: SessionAction) {
 
                 match cocomo_lib::plan_sync(&fs, &left_path, &right_path, &rules).await {
                     Ok(result) => {
-                        APP_STATE.state().write().active_mut().map(|s| {
+                        if let Some(s) = APP_STATE.state().write().active_mut() {
                             s.sync_planned = Some(result);
                             s.table_state.select(Some(0));
-                        });
+                        }
                     }
                     Err(e) => {
                         let state = APP_STATE.state();
@@ -492,10 +492,10 @@ fn process_session_action(action: SessionAction) {
 
                 match cocomo_lib::sync_directories(&fs, &left_path, &right_path, &rules).await {
                     Ok(result) => {
-                        APP_STATE.state().write().active_mut().map(|s| {
+                        if let Some(s) = APP_STATE.state().write().active_mut() {
                             s.sync_planned = Some(result);
                             s.table_state.select(Some(0));
-                        });
+                        }
                     }
                     Err(e) => {
                         let state = APP_STATE.state();
@@ -538,24 +538,21 @@ fn process_session_action(action: SessionAction) {
         }
         SessionAction::ListSessions => {
             tokio::spawn(async move {
-                match list_saved_sessions().await {
-                    Ok(sessions) => {
-                        let state = APP_STATE.state();
-                        let mut app = state.write();
-                        if let Some(session) = app.active_mut() {
-                            session.filter_input = sessions
-                                .iter()
-                                .map(|p| {
-                                    p.file_stem()
-                                        .unwrap_or_default()
-                                        .to_string_lossy()
-                                        .to_string()
-                                })
-                                .collect::<Vec<_>>()
-                                .join(",");
-                        }
+                if let Ok(sessions) = list_saved_sessions().await {
+                    let state = APP_STATE.state();
+                    let mut app = state.write();
+                    if let Some(session) = app.active_mut() {
+                        session.filter_input = sessions
+                            .iter()
+                            .map(|p| {
+                                p.file_stem()
+                                    .unwrap_or_default()
+                                    .to_string_lossy()
+                                    .to_string()
+                            })
+                            .collect::<Vec<_>>()
+                            .join(",");
                     }
-                    Err(_) => {}
                 }
             });
         }
@@ -593,6 +590,7 @@ fn process_session_action(action: SessionAction) {
 // ---------------------------------------------------------------------------
 
 /// Props for [`DirCompareView`] — none; state is read from the global atom.
+#[allow(dead_code)]
 #[derive(Default, Props)]
 struct DirCompareViewProps;
 
@@ -676,12 +674,12 @@ fn DirCompareView(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         move || {
             let state = APP_STATE.state();
             let app_read = state.read();
-            if let Some(s) = app_read.active() {
-                if s.session_type == SessionType::DirCompare {
+            if let Some(s) = app_read.active()
+                && s.session_type == SessionType::DirCompare
+            {
                     let selected = s.table_state.selected();
                     ts_for_effect.write_no_update().select(selected);
                 }
-            }
         },
         active_tab,
     );
@@ -923,7 +921,7 @@ fn DirCompareView(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         vec![
                             TableCell::new(action_str)
                                 .style(Style::new().fg(action_color).add_modifier(Modifier::BOLD)),
-                            TableCell::new(format!("{}{}", dir_indicator, &item.rel_path)),
+                            TableCell::new(format!("{}{}", dir_indicator, item.rel_path)),
                         ]
                     }) as RenderTableRow<TransferItem>),
                     block: Some(sync_block),
@@ -990,7 +988,7 @@ fn DirCompareView(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         };
 
                         vec![
-                            TableCell::new(format!("{} {}", dir_indicator, &entry.name)),
+                            TableCell::new(format!("{} {}", dir_indicator, entry.name)),
                             TableCell::new(left_meta),
                             TableCell::new(entry.status.symbol())
                                 .style(Style::new().fg(status_color).add_modifier(Modifier::BOLD)),

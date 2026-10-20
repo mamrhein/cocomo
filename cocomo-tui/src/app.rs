@@ -276,7 +276,7 @@ pub struct App {
 /// `.set()`). Components subscribe with `hooks.use_atom(&APP_STATE)` to
 /// receive re-render notifications on writes.
 #[allow(dead_code)] // subscribed via use_atom in the root App component (Step 2).
-pub static APP_STATE: Atom<App> = Atom::new(|| App::new());
+pub static APP_STATE: Atom<App> = Atom::new(App::new);
 
 impl App {
     /// Create a new, empty application state.
@@ -462,6 +462,7 @@ pub async fn run_text_comparison(
 }
 
 /// Plan a sync operation (dry-run) and populate the session's sync state.
+#[allow(dead_code)] // sync logic inlined into process_session_action (Step 4).
 pub async fn plan_sync_session(
     session: &mut SessionView,
 ) -> anyhow::Result<()> {
@@ -488,6 +489,7 @@ pub async fn plan_sync_session(
 }
 
 /// Execute the planned sync operation.
+#[allow(dead_code)] // sync logic inlined into process_session_action (Step 4).
 pub async fn execute_sync_session(
     session: &mut SessionView,
 ) -> anyhow::Result<()> {
