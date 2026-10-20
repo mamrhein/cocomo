@@ -24,7 +24,9 @@ use app::{
     APP_STATE, AppMode, Focus, SessionAction, SessionType, SessionView, create_session_from_config,
     list_saved_sessions, run_comparison, run_text_comparison, session_to_config,
 };
-use cocomo_lib::{DirEntry, LocalFs, SessionConfig, SyncRules, TransferAction, TransferItem};
+use cocomo_lib::{
+    DirEntry, Importance, LocalFs, SessionConfig, SyncRules, TransferAction, TransferItem,
+};
 use clap::Parser;
 use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
@@ -586,6 +588,323 @@ fn process_session_action(action: SessionAction) {
 }
 
 // ---------------------------------------------------------------------------
+// TextCompareView component
+// ---------------------------------------------------------------------------
+
+/// Pre-computed rendering data for a single row in the text diff table.
+///
+/// Styles and formatted strings are computed in the component body (before
+/// `element!`) so that the `render_row` callback has everything it needs without
+/// capturing external data.  This mirrors how the legacy `render_text_main`
+/// computed per-line styles using grammar classification and diff highlighting.
+#[derive(Clone)]
+struct TextDiffRow {
+    /// Left line number, right-aligned in a 6-char field.
+    left_num: String,
+    /// Diff marker for the left side ("\u{25B6} " if different, "  " otherwise).
+    left_marker: &'static str,
+    /// Left line content (empty when the file has no line at this index).
+    left_content: String,
+    /// Style for the left marker and content (red bold for diffs, grammar style otherwise).
+    left_style: Style,
+    /// Right line number, right-aligned in a 6-char field.
+    right_num: String,
+    /// Diff marker for the right side ("\u{25B6} " if different, "  " otherwise).
+    right_marker: &'static str,
+    /// Right line content (empty when the file has no line at this index).
+    right_content: String,
+    /// Style for the right marker and content (green bold for diffs, grammar style otherwise).
+    right_style: Style,
+}
+
+/// Props for [`TextCompareView`] — none; state is read from the global atom.
+#[allow(dead_code)]
+#[derive(Default, Props)]
+struct TextCompareViewProps;
+
+/// Text comparison view using ratatui-kit's `Table` component.
+///
+/// Renders a side-by-side text diff with grammar-based syntax styling and red/green
+/// diff highlighting.  Subscribes to the global [`APP_STATE`] atom, uses a local
+/// `State<TableState>` for table selection that is synced from the session on each
+/// render, and registers an event handler that delegates to `handle_session_key`
+/// (which routes text-compare keys to `handle_text_key`).
+#[component]
+fn TextCompareView(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+    // Subscribe to global state for re-render notifications on writes.
+    let app_handle = hooks.use_atom(&APP_STATE);
+
+    // Local table selection state, synced from the session's table_state.
+    let table_state = hooks.use_state(TableState::default);
+
+    // Read session data from the atom.
+    let app = app_handle.read();
+    let active_tab = app.active_tab;
+    let session = match app.active() {
+        Some(s) if s.session_type == SessionType::TextCompare => s,
+        _ => {
+            drop(app);
+            return element!(View {});
+        }
+    };
+
+    // Sync local table state from the session's table_state (no re-render trigger).
+    let session_selected = session.table_state.selected();
+    if table_state.read().selected() != session_selected {
+        table_state.write_no_update().select(session_selected);
+    }
+
+    // Extract rendering data from the session.
+    let left_path_str = session.left_path.to_string_lossy().to_string();
+    let right_path_str = session.right_path.to_string_lossy().to_string();
+    let grammar_name = session.grammar.name.clone();
+    let left_line_count = session.left_lines.len();
+    let right_line_count = session.right_lines.len();
+
+    // Compute diff line numbers and current diff-group position for the status bar.
+    let diff_numbers = session_view::diff_line_numbers(session);
+    let (current_group, total_groups) = session_view::current_diff_position(session);
+
+    // Build row data with pre-computed styles (let bindings are not allowed in
+    // element! children blocks).
+    let max_lines = std::cmp::max(left_line_count, right_line_count);
+    let rows: Vec<TextDiffRow> = (0..max_lines)
+        .map(|i| {
+            let left_line = session.left_lines.get(i);
+            let right_line = session.right_lines.get(i);
+
+            // Left side formatting.
+            let left_num = left_line.map(|l| l.number).unwrap_or(0);
+            let left_content = left_line
+                .as_ref()
+                .map(|l| l.content.clone())
+                .unwrap_or_default();
+            let left_is_diff = left_line.is_some_and(|l| diff_numbers.contains(&l.number));
+            let left_importance = left_line
+                .map(session_view::importance_for_line)
+                .unwrap_or(Importance::Ignored);
+            let left_style = if left_is_diff {
+                Style::new().fg(Color::Red).add_modifier(Modifier::BOLD)
+            } else {
+                session_view::grammar_style(left_importance)
+            };
+
+            // Right side formatting.
+            let right_num = right_line.map(|l| l.number).unwrap_or(0);
+            let right_content = right_line
+                .as_ref()
+                .map(|l| l.content.clone())
+                .unwrap_or_default();
+            let right_is_diff = right_line.is_some_and(|l| diff_numbers.contains(&l.number));
+            let right_importance = right_line
+                .map(session_view::importance_for_line)
+                .unwrap_or(Importance::Ignored);
+            let right_style = if right_is_diff {
+                Style::new().fg(Color::Green).add_modifier(Modifier::BOLD)
+            } else {
+                session_view::grammar_style(right_importance)
+            };
+
+            TextDiffRow {
+                left_num: format!("{left_num:<6}"),
+                left_marker: if left_is_diff { "\u{25B6} " } else { "  " },
+                left_content,
+                left_style,
+                right_num: format!("{right_num:<6}"),
+                right_marker: if right_is_diff { "\u{25B6} " } else { "  " },
+                right_content,
+                right_style,
+            }
+        })
+        .collect();
+
+    // Build header line.
+    let header_line = Line::from(format!(
+        "Text Diff  |  {}: {left_line_count}L  |  {}: {right_line_count}L  |  Grammar: {}",
+        left_path_str, right_path_str, grammar_name
+    ));
+
+    // Build status bar line.
+    let position_str = if total_groups > 0 {
+        if current_group > 0 {
+            format!("Diff {current_group}/{total_groups}")
+        } else {
+            format!("Diff 0/{total_groups} (no diff selected)")
+        }
+    } else {
+        "No differences".to_string()
+    };
+    let status_bar_line = Line::from(format!(
+        "{position_str}  |  Left: {left_line_count} lines  |  Right: {right_line_count} lines"
+    ));
+
+    // Build help bar line.
+    let help_bar_line: Line<'static> = Line::from(vec![
+        Span::styled("j/k", Style::new().add_modifier(Modifier::BOLD)),
+        Span::raw(" navigate  "),
+        Span::styled("n/N", Style::new().add_modifier(Modifier::BOLD)),
+        Span::raw(" next/prev diff  "),
+        Span::styled("l/Tab", Style::new().add_modifier(Modifier::BOLD)),
+        Span::raw(" focus  "),
+        Span::styled("Ctrl+W", Style::new().add_modifier(Modifier::BOLD)),
+        Span::raw(" close  "),
+        Span::styled("Ctrl+Tab", Style::new().add_modifier(Modifier::BOLD)),
+        Span::raw(" tabs  "),
+        Span::styled("q", Style::new().add_modifier(Modifier::BOLD)),
+        Span::raw(" quit"),
+    ]);
+
+    // File names for table column headers.
+    let left_name = session
+        .left_path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let right_name = session
+        .right_path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+
+    drop(app);
+
+    // Tab-switch sync: when the active tab changes, re-sync local table state
+    // from the new session's table_state.
+    let ts_for_effect = table_state;
+    hooks.use_effect(
+        move || {
+            let state = APP_STATE.state();
+            let app_read = state.read();
+            if let Some(s) = app_read.active()
+                && s.session_type == SessionType::TextCompare
+            {
+                    let selected = s.table_state.selected();
+                    ts_for_effect.write_no_update().select(selected);
+                }
+        },
+        active_tab,
+    );
+
+    // Event handler for session-level keys (j/k, g/G, n/N, l/Tab).
+    // The App component's global handler runs first and consumes global keys
+    // (Ctrl+W, Ctrl+Tab, Left/Right, q).  For remaining keys, this handler
+    // delegates to `handle_session_key`, which routes text-compare keys to
+    // `handle_text_key`.
+    hooks.use_event_handler(
+        EventScope::Current,
+        EventPriority::Normal,
+        move |event| {
+            let Event::Key(key) = event else {
+                return EventResult::Ignored;
+            };
+            if key.kind != KeyEventKind::Press {
+                return EventResult::Ignored;
+            }
+
+            let state = APP_STATE.state();
+            let mut app = state.write();
+            let session = match app.active_mut() {
+                Some(s) if s.session_type == SessionType::TextCompare => s,
+                _ => return EventResult::Ignored,
+            };
+
+            let action = handle_session_key(session, key);
+            drop(app);
+
+            process_session_action(action);
+            EventResult::Consumed
+        },
+    );
+
+    // -- Build the element tree -------------------------------------------------
+
+    let border_style = Style::new().fg(Color::Gray);
+    let title_style = Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD);
+    let text_block = Block::default()
+        .borders(Borders::ALL)
+        .title(Span::styled(" Text Diff ", title_style))
+        .border_style(border_style);
+
+    element!(
+        View(flex_direction: Direction::Vertical, height: Constraint::Fill(1)) {
+            // Header (1 content line + 2 border lines = 3).
+            Border(
+                height: Constraint::Length(3),
+                border_style: border_style,
+            ) {
+                Text(text: header_line)
+            }
+            // Main content area.
+            if rows.is_empty() {
+                Border(
+                    height: Constraint::Fill(1),
+                    border_style: border_style,
+                    top_title: Line::from(" Text Diff ").fg(Color::Yellow).bold().centered(),
+                ) {
+                    Text(
+                        text: Line::from("Empty file(s)."),
+                        alignment: Alignment::Center,
+                    )
+                }
+            } else {
+                Table<TextDiffRow>(
+                    height: Constraint::Fill(1),
+                    state: Some(table_state),
+                    active: false,
+                    default_index: Some(0),
+                    columns: vec![
+                        TableColumn::new("Num", Constraint::Length(7)),
+                        TableColumn::new("", Constraint::Length(2)),
+                        TableColumn::new(
+                            Line::from(vec![Span::styled(
+                                left_name.clone(),
+                                Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                            )]),
+                            Constraint::Min(20),
+                        ),
+                        TableColumn::new("Num", Constraint::Length(7)),
+                        TableColumn::new("", Constraint::Length(2)),
+                        TableColumn::new(
+                            Line::from(vec![Span::styled(
+                                right_name.clone(),
+                                Style::new().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+                            )]),
+                            Constraint::Min(20),
+                        ),
+                    ],
+                    rows: rows,
+                    render_row: Some(Arc::new(|row: &TextDiffRow, _is_selected: bool| {
+                        vec![
+                            TableCell::new(row.left_num.clone())
+                                .style(Style::new().fg(Color::DarkGray)),
+                            TableCell::new(row.left_marker).style(row.left_style),
+                            TableCell::new(row.left_content.clone()).style(row.left_style),
+                            TableCell::new(row.right_num.clone())
+                                .style(Style::new().fg(Color::DarkGray)),
+                            TableCell::new(row.right_marker).style(row.right_style),
+                            TableCell::new(row.right_content.clone()).style(row.right_style),
+                        ]
+                    }) as RenderTableRow<TextDiffRow>),
+                    block: Some(text_block),
+                    highlight_style: Style::new().bg(Color::DarkGray).add_modifier(Modifier::REVERSED),
+                    highlight_symbol: Some(symbols::block::FULL),
+                    column_spacing: 1u16,
+                    header_style: Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                )
+            }
+            // Status bar.
+            Border(height: Constraint::Length(3), border_style: border_style) {
+                Text(text: status_bar_line)
+            }
+            // Help bar.
+            Border(height: Constraint::Length(3), border_style: border_style) {
+                Text(text: help_bar_line)
+            }
+        }
+    )
+}
+
+// ---------------------------------------------------------------------------
 // DirCompareView component
 // ---------------------------------------------------------------------------
 
@@ -1078,7 +1397,8 @@ fn App(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             View(height: Constraint::Min(1)) {
                 match active_session_type {
                     Some(SessionType::DirCompare) => { DirCompareView() }
-                    _ => { SessionContent() }
+                    Some(SessionType::TextCompare) => { TextCompareView() }
+                    None => { SessionContent() }
                 }
             }
         }

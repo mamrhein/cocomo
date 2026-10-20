@@ -974,7 +974,7 @@ fn render_text_header(frame: &mut Frame, area: Rect, session: &SessionView) {
 }
 
 /// Build a set of line numbers that are part of a difference.
-fn diff_line_numbers(
+pub fn diff_line_numbers(
     session: &SessionView,
 ) -> std::collections::HashSet<usize> {
     let mut numbers = std::collections::HashSet::new();
@@ -1056,7 +1056,7 @@ fn diff_group_starts(session: &SessionView) -> Vec<usize> {
 /// Scans backward from the current selection to find which contiguous
 /// difference group the cursor is on. Returns `(current, total)` where
 /// `current` is 1-based. Returns `(0, total)` if no group is selected.
-fn current_diff_position(session: &SessionView) -> (usize, usize) {
+pub fn current_diff_position(session: &SessionView) -> (usize, usize) {
     let groups = diff_group_starts(session);
     let total = groups.len();
     if total == 0 {
@@ -1288,7 +1288,7 @@ fn render_text_help_bar(
 }
 
 /// Return the highest importance token in a line.
-fn importance_for_line(line: &LineInfo) -> Importance {
+pub fn importance_for_line(line: &LineInfo) -> Importance {
     let mut max_imp = Importance::Ignored;
     for token in &line.tokens {
         if token.importance > max_imp {
@@ -1299,7 +1299,7 @@ fn importance_for_line(line: &LineInfo) -> Importance {
 }
 
 /// Return a text style based on the grammar importance of a token.
-fn grammar_style(importance: Importance) -> Style {
+pub fn grammar_style(importance: Importance) -> Style {
     match importance {
         Importance::Code => Style::default(),
         Importance::Data => Style::default().fg(Color::Yellow),
