@@ -17,26 +17,17 @@
 mod app;
 mod session_view;
 
-use std::{
-    path::PathBuf,
-    sync::atomic::{AtomicBool, Ordering},
-};
+use std::path::PathBuf;
 
 use anyhow::Result;
-use app::{
-    App, SessionAction, SessionView, create_session_from_config,
-    execute_sync_session, list_saved_sessions, plan_sync_session,
-    run_comparison, run_text_comparison, session_to_config,
-};
+use app::{APP_STATE, SessionView, run_comparison};
 use clap::Parser;
 use ratatui_kit::{
-    crossterm::event::{
-        self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
-    },
+    crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
+    prelude::*,
     ratatui::{
-        Frame, Terminal,
-        backend::CrosstermBackend,
-        layout::{Alignment, Constraint, Direction, Layout, Rect},
+        Frame,
+        layout::{Alignment, Constraint, Direction, Rect},
         style::{Color, Modifier, Style},
         text::{Line, Span},
         widgets::{Block, Borders, Paragraph, Tabs},
@@ -65,110 +56,6 @@ struct Cli {
 }
 
 // ---------------------------------------------------------------------------
-// Rendering
-// ---------------------------------------------------------------------------
-
-fn render(frame: &mut Frame, app: &App) {
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints(
-            [
-                Constraint::Length(3), // menu bar (1 line + borders)
-                Constraint::Length(3), // tab bar (1 line + borders)
-                Constraint::Min(1),    // main content
-            ]
-            .as_ref(),
-        )
-        .split(frame.area());
-
-    render_menu_bar(frame, chunks[0], app);
-    render_tab_bar(frame, chunks[1], app);
-
-    if let Some(session) = app.active() {
-        match session.session_type {
-            app::SessionType::DirCompare => {
-                session_view::render_session(frame, chunks[2], session);
-            }
-            app::SessionType::TextCompare => {
-                session_view::render_text_session(frame, chunks[2], session);
-            }
-        }
-    } else {
-        // No sessions open — show welcome screen.
-        render_welcome(frame, chunks[2], app);
-    }
-}
-
-/// Render the top menu bar with Tabs widget.
-fn render_menu_bar(frame: &mut Frame, area: Rect, app: &App) {
-    let menu_items = ["Sessions", "Compare", "Sync", "View", "Filter", "Help"];
-    let tabs = Tabs::new(menu_items.map(Line::from))
-        .select(app.menu_selection)
-        .highlight_style(
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        )
-        .divider(Span::raw(" | "))
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Gray)),
-        );
-    frame.render_widget(tabs, area);
-}
-
-fn render_tab_bar(frame: &mut Frame, area: Rect, app: &App) {
-    let sessions = &app.sessions;
-    let active = app.active_index();
-
-    if sessions.is_empty() {
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Gray));
-        frame.render_widget(block, area);
-        return;
-    }
-
-    // Build tab titles from session names.
-    let titles: Vec<Line> =
-        sessions.iter().map(|s| Line::from(s.tab_title())).collect();
-
-    let tabs = Tabs::new(titles)
-        .select(active)
-        .highlight_style(
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        )
-        .divider(Span::raw(" | "))
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Gray)),
-        );
-    frame.render_widget(tabs, area);
-}
-
-fn render_welcome(frame: &mut Frame, area: Rect, _app: &App) {
-    let lines = vec![
-        Line::from("cocomo — COmpare, COpy & MOve"),
-        Line::from(""),
-        Line::from("Provide --left and --right to start a comparison."),
-        Line::from(""),
-        Line::from("Press q to quit."),
-    ];
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Gray));
-    let paragraph = Paragraph::new(lines)
-        .block(block)
-        .alignment(Alignment::Center);
-    frame.render_widget(paragraph, area);
-}
-
-// ---------------------------------------------------------------------------
 // Global key handling
 // ---------------------------------------------------------------------------
 
@@ -187,7 +74,7 @@ enum GlobalKeyResult {
 /// Returns `GlobalKeyResult::Quit` when the application should exit (e.g. on
 /// `q` or when closing the last tab), `Consumed` when the key was handled, or
 /// `Ignored` to let the session handler take over.
-fn handle_global_key(app: &mut App, key: KeyEvent) -> GlobalKeyResult {
+fn handle_global_key(app: &mut app::App, key: KeyEvent) -> GlobalKeyResult {
     const MENU_COUNT: usize = 6; // Sessions, Compare, Sync, View, Filter, Help
 
     // Ctrl+W — close active tab.
@@ -247,33 +134,208 @@ fn handle_global_key(app: &mut App, key: KeyEvent) -> GlobalKeyResult {
 }
 
 // ---------------------------------------------------------------------------
-// Main
+// Content rendering (used by SessionContent component)
 // ---------------------------------------------------------------------------
 
-/// Global flag indicating whether the terminal has been set up.
-static TERMINAL_ACTIVE: AtomicBool = AtomicBool::new(false);
+/// Render the welcome screen when no sessions are open.
+fn render_welcome(frame: &mut Frame, area: Rect) {
+    let lines = vec![
+        Line::from("cocomo — COmpare, COpy & MOve"),
+        Line::from(""),
+        Line::from("Provide --left and --right to start a comparison."),
+        Line::from(""),
+        Line::from("Press q to quit."),
+    ];
 
-fn install_panic_hook() {
-    let original = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        let _ = teardown_terminal();
-        TERMINAL_ACTIVE.store(false, Ordering::Relaxed);
-        original(info);
-    }));
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Gray));
+    let paragraph = Paragraph::new(lines)
+        .block(block)
+        .alignment(Alignment::Center);
+    frame.render_widget(paragraph, area);
 }
 
-struct TerminalGuard;
-
-impl Drop for TerminalGuard {
-    fn drop(&mut self) {
-        let _ = teardown_terminal();
+/// Render the main content area: either the active session or the welcome
+/// screen, within the given area.
+fn render_content(frame: &mut Frame, area: Rect, app: &app::App) {
+    if let Some(session) = app.active() {
+        match session.session_type {
+            app::SessionType::DirCompare => {
+                session_view::render_session(frame, area, session);
+            }
+            app::SessionType::TextCompare => {
+                session_view::render_text_session(frame, area, session);
+            }
+        }
+    } else {
+        render_welcome(frame, area);
     }
 }
 
+// ---------------------------------------------------------------------------
+// SessionContent component (manual Component impl for Frame-based rendering)
+// ---------------------------------------------------------------------------
+
+/// Props for [`SessionContent`] — no props; state is read from the global
+/// atom.
+#[derive(Default, Props)]
+struct SessionContentProps;
+
+/// Component that renders the main content area using the existing
+/// Frame-based render functions.
+///
+/// This component reads from `APP_STATE` via `use_atom` in its `update()`
+/// method, then renders using `ComponentDrawer`'s frame in `draw()`. This
+/// bridges the legacy Frame-based rendering with ratatui-kit's component
+/// model.
+struct SessionContent {
+    app_handle: Option<AtomState<app::App>>,
+}
+
+impl Component for SessionContent {
+    type Props<'a> = SessionContentProps;
+
+    fn new(_props: &Self::Props<'_>) -> Self {
+        Self { app_handle: None }
+    }
+
+    fn update(
+        &mut self,
+        _props: &mut Self::Props<'_>,
+        mut hooks: Hooks,
+        updater: &mut ComponentUpdater,
+    ) {
+        let mut hooks =
+            hooks.with_context_stack(updater.component_context_stack());
+        self.app_handle = Some(hooks.use_atom(&APP_STATE));
+    }
+
+    fn draw(&mut self, drawer: &mut ComponentDrawer<'_, '_>) {
+        if let Some(handle) = &self.app_handle {
+            let app = handle.read();
+            render_content(drawer.frame, drawer.area, &app);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// App component (root component)
+// ---------------------------------------------------------------------------
+
+/// Root component: subscribes to global state, registers global key handlers,
+/// and renders the menu bar, tab bar, and main content.
+#[component]
+fn App(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+    let app_state = hooks.use_atom(&APP_STATE);
+    let mut exit = hooks.use_exit();
+
+    // Register global key handler: Ctrl+W (close tab), Ctrl+Tab (switch tabs),
+    // Left/Right (menu nav), q (quit).
+    hooks.use_event_handler(
+        EventScope::Current,
+        EventPriority::Normal,
+        move |event| {
+            let Event::Key(key) = event else {
+                return EventResult::Ignored;
+            };
+            if key.kind != KeyEventKind::Press {
+                return EventResult::Ignored;
+            }
+
+            let state = APP_STATE.state();
+            let mut app = state.write();
+            match handle_global_key(&mut app, key) {
+                GlobalKeyResult::Quit => {
+                    drop(app);
+                    exit();
+                    EventResult::Consumed
+                }
+                GlobalKeyResult::Consumed => EventResult::Consumed,
+                GlobalKeyResult::Ignored => EventResult::Ignored,
+            }
+        },
+    );
+
+    // Read current state for rendering the menu and tab bars.
+    let app = app_state.read();
+    let menu_selection = app.menu_selection;
+    let active_index = app.active_index();
+    let session_count = app.sessions.len();
+
+    // Build menu bar tab titles.
+    let menu_titles: Vec<Line<'static>> =
+        ["Sessions", "Compare", "Sync", "View", "Filter", "Help"]
+            .iter()
+            .map(|s| Line::from(*s))
+            .collect();
+
+    // Build session tab titles.
+    let tab_titles: Vec<Line<'static>> = app
+        .sessions
+        .iter()
+        .map(|s| Line::from(s.tab_title().to_string()))
+        .collect();
+
+    drop(app);
+
+    let menu_tabs = Tabs::new(menu_titles)
+        .select(menu_selection)
+        .highlight_style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )
+        .divider(Span::raw(" | "))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Gray)),
+        );
+
+    let tab_tabs = if session_count > 0 {
+        Tabs::new(tab_titles)
+            .select(active_index)
+            .highlight_style(
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .divider(Span::raw(" | "))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::Gray)),
+            )
+    } else {
+        Tabs::new(Vec::<Line>::new()).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Gray)),
+        )
+    };
+
+    element!(
+        View(flex_direction: Direction::Vertical) {
+            View(height: Constraint::Length(3)) {
+                widget(menu_tabs)
+            }
+            View(height: Constraint::Length(3)) {
+                widget(tab_tabs)
+            }
+            View(height: Constraint::Min(1)) {
+                SessionContent()
+            }
+        }
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Main entry point
+// ---------------------------------------------------------------------------
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    install_panic_hook();
-
     let cli = Cli::parse();
 
     let has_paths = cli.left.is_some() && cli.right.is_some();
@@ -306,10 +368,7 @@ async fn main() -> Result<()> {
         (PathBuf::from("."), PathBuf::from("."))
     };
 
-    let _terminal_guard = TerminalGuard;
-    let mut terminal = setup_terminal()?;
-
-    let mut app_state = App::new();
+    let mut app = app::App::new();
 
     // Create the initial comparison session if paths were provided.
     if has_paths {
@@ -318,207 +377,12 @@ async fn main() -> Result<()> {
         if let Err(e) = run_comparison(&mut session).await {
             session.errors.push(format!("Comparison failed: {e}"));
         }
-        app_state.add_session(session);
+        app.add_session(session);
     }
 
-    // Main event loop.
-    loop {
-        terminal.draw(|frame| render(frame, &app_state))?;
+    APP_STATE.set(app);
 
-        if event::poll(std::time::Duration::from_millis(100))? {
-            let key = match event::read()? {
-                Event::Key(k) if k.kind == KeyEventKind::Press => k,
-                _ => continue,
-            };
+    element!(App).fullscreen().await?;
 
-            // Global keys first.
-            match handle_global_key(&mut app_state, key) {
-                GlobalKeyResult::Quit => break,
-                GlobalKeyResult::Consumed => continue,
-                GlobalKeyResult::Ignored => {}
-            }
-
-            // Dispatch to active session.
-            if let Some(session) = app_state.active_mut() {
-                let action = session_view::handle_session_key(session, key);
-
-                // Handle async actions.
-                match action {
-                    SessionAction::OpenDir { left, right } => {
-                        let mut new_session = SessionView::new_dir_compare(
-                            left,
-                            right,
-                            session.compare_content,
-                        );
-                        if let Err(e) = run_comparison(&mut new_session).await
-                        {
-                            new_session
-                                .errors
-                                .push(format!("Comparison failed: {e}"));
-                        }
-                        app_state.add_session(new_session);
-                    }
-                    SessionAction::GoUp => {
-                        let left_parent = session.left_path.parent();
-                        let right_parent = session.right_path.parent();
-                        if let (Some(l), Some(r)) = (left_parent, right_parent)
-                        {
-                            // Avoid going above root.
-                            if l != session.left_path.as_path()
-                                || r != session.right_path.as_path()
-                            {
-                                let mut new_session =
-                                    SessionView::new_dir_compare(
-                                        l.to_path_buf(),
-                                        r.to_path_buf(),
-                                        session.compare_content,
-                                    );
-                                if let Err(e) =
-                                    run_comparison(&mut new_session).await
-                                {
-                                    new_session.errors.push(format!(
-                                        "Comparison failed: {e}"
-                                    ));
-                                }
-                                app_state.add_session(new_session);
-                            }
-                        }
-                    }
-                    SessionAction::OpenFile { left, right } => {
-                        match run_text_comparison(left, right).await {
-                            Ok(new_session) => {
-                                app_state.add_session(new_session);
-                            }
-                            Err(e) => {
-                                session.errors.push(format!(
-                                    "Text comparison failed: {e}"
-                                ));
-                            }
-                        }
-                    }
-                    SessionAction::Reload => {
-                        // Clear sync preview on reload.
-                        session.sync_planned = None;
-                        if let Err(e) = run_comparison(session).await {
-                            session.errors.push(format!("Reload failed: {e}"));
-                        }
-                    }
-                    SessionAction::PlanSync { operation } => {
-                        session.sync_operation = operation;
-                        if let Err(e) = plan_sync_session(session).await {
-                            session
-                                .errors
-                                .push(format!("Sync plan failed: {e}"));
-                        }
-                    }
-                    SessionAction::ExecuteSync => {
-                        if let Err(e) = execute_sync_session(session).await {
-                            session.errors.push(format!("Sync failed: {e}"));
-                        }
-                    }
-                    SessionAction::SaveSession { name } => {
-                        let config = session_to_config(session);
-                        let session_dir = app::default_session_dir();
-                        if !session_dir.exists()
-                            && let Err(e) =
-                                tokio::fs::create_dir_all(&session_dir).await
-                        {
-                            session.errors.push(format!(
-                                "Failed to create session dir: {e}"
-                            ));
-                        } else {
-                            let path =
-                                session_dir.join(format!("{name}.toml"));
-                            if let Err(e) = config.save_to_file(&path).await {
-                                session
-                                    .errors
-                                    .push(format!("Save failed: {e}"));
-                            } else {
-                                session.errors.clear();
-                            }
-                        }
-                    }
-                    SessionAction::ListSessions => {
-                        match list_saved_sessions().await {
-                            Ok(paths) => {
-                                // Store paths as filter_input for display.
-                                // We'll render them in the footer.
-                                session.filter_input = paths
-                                    .iter()
-                                    .map(|p| {
-                                        p.file_name()
-                                            .map(|n| {
-                                                n.to_string_lossy().to_string()
-                                            })
-                                            .unwrap_or_default()
-                                    })
-                                    .collect::<Vec<_>>()
-                                    .join(", ");
-                            }
-                            Err(e) => {
-                                session.errors.push(format!(
-                                    "List sessions failed: {e}"
-                                ));
-                            }
-                        }
-                    }
-                    SessionAction::LoadSession { path } => {
-                        match cocomo_lib::SessionConfig::load_from_file(&path)
-                            .await
-                        {
-                            Ok(config) => {
-                                match create_session_from_config(&config).await
-                                {
-                                    Ok(new_session) => {
-                                        app_state.add_session(new_session);
-                                    }
-                                    Err(e) => {
-                                        session.errors.push(format!(
-                                            "Load session failed: {e}"
-                                        ));
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                session.errors.push(format!(
-                                    "Failed to load config: {e}"
-                                ));
-                            }
-                        }
-                    }
-                    SessionAction::None => {}
-                }
-            }
-
-            if app_state.sessions.is_empty() {
-                break;
-            }
-        }
-    }
-
-    Ok(())
-}
-
-fn setup_terminal() -> Result<Terminal<CrosstermBackend<std::io::Stdout>>> {
-    ratatui_kit::crossterm::terminal::enable_raw_mode()?;
-    ratatui_kit::crossterm::execute!(
-        std::io::stdout(),
-        ratatui_kit::crossterm::terminal::EnterAlternateScreen,
-    )?;
-    let backend = CrosstermBackend::new(std::io::stdout());
-    let terminal = Terminal::new(backend)?;
-    TERMINAL_ACTIVE.store(true, Ordering::Relaxed);
-    Ok(terminal)
-}
-
-fn teardown_terminal() -> Result<()> {
-    if !TERMINAL_ACTIVE.swap(false, Ordering::Relaxed) {
-        return Ok(());
-    }
-    ratatui_kit::crossterm::terminal::disable_raw_mode()?;
-    ratatui_kit::crossterm::execute!(
-        std::io::stdout(),
-        ratatui_kit::crossterm::terminal::LeaveAlternateScreen,
-    )?;
     Ok(())
 }
