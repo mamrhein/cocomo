@@ -43,6 +43,13 @@ use ratatui_kit::{
         widgets::{Block, Borders, Tabs},
     },
 };
+
+// `tui_input::Input` is the underlying input-state type used by the Input
+// component and for manual save/load session name entry.
+use ratatui_kit::components::tui_input;
+// The `EventHandler` trait provides `handle_event` on `tui_input::Input`
+// for processing crossterm key events (character insertion, backspace, etc.).
+use tui_input::backend::crossterm::EventHandler as _;
 use session_view::handle_session_key;
 
 // ---------------------------------------------------------------------------
@@ -957,11 +964,34 @@ fn DirCompareView(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         active_tab,
     );
 
+    // Local state for the save/load session name input (tui_input::Input).
+    // Synced from session.filter_input when entering SaveSession/LoadSession mode.
+    let save_input = hooks.use_state(tui_input::Input::default);
+
+    // Sync save_input from session.filter_input when in SaveSession/LoadSession mode.
+    if (mode == AppMode::SaveSession || mode == AppMode::LoadSession)
+        && save_input.read().value() != filter_input.as_str()
+    {
+        *save_input.write() = tui_input::Input::new(filter_input.clone());
+    }
+
+    // Input layer for save/load session name entry.  Active only when the
+    // session is in SaveSession or LoadSession mode.
+    let input_layer = hooks.use_input_layer(
+        mode == AppMode::SaveSession || mode == AppMode::LoadSession,
+        true,
+    );
+
     // Event handler for session-level keys (j/k, g/G, Enter, f, F, etc.).
     // The App component's global handler runs first and consumes global keys
     // (Ctrl+W, Ctrl+Tab, Left/Right, q). For remaining keys, this handler
     // delegates to `handle_session_key`, which modifies session state in the
     // atom and returns a `SessionAction` for async processing.
+    //
+    // When the session is in an input mode (Filter, SaveSession, LoadSession),
+    // keys are delegated to the ratatui-kit input components (SearchInput's
+    // built-in layer, or our custom Input layer handler below).  Only Esc is
+    // handled here as a fallback to exit the mode without activating editing.
     hooks.use_event_handler(
         EventScope::Current,
         EventPriority::Normal,
@@ -980,11 +1010,113 @@ fn DirCompareView(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 _ => return EventResult::Ignored,
             };
 
+            // When in an input mode, let the component layers (SearchInput or
+            // Input) handle keys.  Only Esc is handled here as a fallback to
+            // exit the mode without requiring activation.
+            if session.mode != AppMode::Normal {
+                if key.code == KeyCode::Esc || key.code == KeyCode::Char('q') {
+                    session.mode = AppMode::Normal;
+                    session.filter_input.clear();
+                    drop(app);
+                    return EventResult::Consumed;
+                }
+                drop(app);
+                return EventResult::Ignored;
+            }
+
             let action = handle_session_key(session, key);
             drop(app);
 
             process_session_action(action);
             EventResult::Consumed
+        },
+    );
+
+    // Custom input layer handler for save/load session name entry.
+    // Uses the Input component with manual tui_input::Input state management.
+    let si = save_input;
+    hooks.use_event_handler(
+        EventScope::Layer(input_layer),
+        EventPriority::High,
+        move |event| {
+            let Event::Key(key) = event else {
+                return EventResult::Ignored;
+            };
+            if key.kind != KeyEventKind::Press {
+                return EventResult::Ignored;
+            }
+
+            // Only active when in SaveSession/LoadSession mode.
+            let current_mode = {
+                let state = APP_STATE.state();
+                state
+                    .read()
+                    .active()
+                    .map(|s| s.mode.clone())
+                    .unwrap_or(AppMode::Normal)
+            };
+            if current_mode != AppMode::SaveSession
+                && current_mode != AppMode::LoadSession
+            {
+                return EventResult::Ignored;
+            }
+
+            match key.code {
+                KeyCode::Char(_) => {
+                    si.write().handle_event(&Event::Key(key));
+                    let state = APP_STATE.state();
+                    if let Some(s) = state.write().active_mut() {
+                        s.filter_input = si.read().value().to_string();
+                    }
+                    EventResult::Consumed
+                }
+                KeyCode::Backspace => {
+                    si.write().handle_event(&Event::Key(key));
+                    let state = APP_STATE.state();
+                    if let Some(s) = state.write().active_mut() {
+                        s.filter_input = si.read().value().to_string();
+                    }
+                    EventResult::Consumed
+                }
+                KeyCode::Enter => {
+                    let name = si.read().value().to_string();
+                    if let Some(s) = APP_STATE.state().write().active_mut() {
+                        s.mode = AppMode::Normal;
+                    }
+
+                    match current_mode {
+                        AppMode::SaveSession => {
+                            let save_name = if name.is_empty() {
+                                APP_STATE
+                                    .state()
+                                    .read()
+                                    .active()
+                                    .map(|s| s.name.clone())
+                                    .unwrap_or_default()
+                            } else {
+                                name
+                            };
+                            process_session_action(SessionAction::SaveSession {
+                                name: save_name,
+                            });
+                        }
+                        AppMode::LoadSession => {
+                            let session_dir = app::default_session_dir();
+                            let path = session_dir.join(format!("{}.toml", name));
+                            process_session_action(SessionAction::LoadSession { path });
+                        }
+                        _ => {}
+                    }
+                    EventResult::Consumed
+                }
+                KeyCode::Esc => {
+                    if let Some(s) = APP_STATE.state().write().active_mut() {
+                        s.mode = AppMode::Normal;
+                    }
+                    EventResult::Consumed
+                }
+                _ => EventResult::Ignored,
+            }
         },
     );
 
@@ -1032,23 +1164,10 @@ fn DirCompareView(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     };
 
     // -- Build status bar line ----------------------------------------------
+    // When in Filter, SaveSession, or LoadSession mode, the status bar is
+    // replaced by SearchInput or Input components rendered in the element! tree.
 
-    let status_bar_line: Line<'static> = if mode == AppMode::Filter {
-        Line::from(Span::styled(
-            format!("Filter: {}", filter_input),
-            Style::new().fg(Color::Yellow),
-        ))
-    } else if mode == AppMode::SaveSession {
-        Line::from(Span::styled(
-            format!("Save session as: {}", filter_input),
-            Style::new().fg(Color::Yellow),
-        ))
-    } else if mode == AppMode::LoadSession {
-        Line::from(Span::styled(
-            format!("Load session: {}", filter_input),
-            Style::new().fg(Color::Yellow),
-        ))
-    } else if sync_active {
+    let status_bar_line: Line<'static> = if sync_active {
         let count = sync_planned_count;
         let executed = sync_executed;
         let op_label = sync_operation.label();
@@ -1084,11 +1203,11 @@ fn DirCompareView(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // -- Build help bar line -----------------------------------------------
 
     let help_bar_line: Line<'static> = if mode == AppMode::Filter {
-        Line::from("Enter=apply  Esc=cancel")
+        Line::from("f=activate  Enter=apply  Esc=cancel")
     } else if mode == AppMode::SaveSession {
         Line::from("Enter=save  Esc=cancel")
     } else if mode == AppMode::LoadSession {
-        Line::from("j/k=select  Enter=load  Esc=cancel")
+        Line::from("Enter=load  Esc=cancel")
     } else if sync_active {
         Line::from(vec![
             Span::styled("j/k", Style::new().add_modifier(Modifier::BOLD)),
@@ -1275,9 +1394,47 @@ fn DirCompareView(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     header_style: Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
                 )
             }
-            // Status bar.
-            Border(height: Constraint::Length(3), border_style: border_style) {
-                Text(text: status_bar_line)
+            // Status bar or input component depending on mode.
+            if mode == AppMode::Filter {
+                SearchInput(
+                    value: filter_input,
+                    placeholder: "Filter entries...".to_string(),
+                    is_editing: true,
+                    activate_key: KeyCode::Char('f'),
+                    on_change: Handler::from(move |val: String| {
+                        let state = APP_STATE.state();
+                        if let Some(s) = state.write().active_mut() {
+                            s.filter_input = val;
+                        }
+                    }),
+                    on_submit: Handler::from(move |val: String| -> bool {
+                        let state = APP_STATE.state();
+                        if let Some(s) = state.write().active_mut() {
+                            s.active_filter = Some(val);
+                            s.mode = AppMode::Normal;
+                        }
+                        true
+                    }),
+                    clear_on_escape: true,
+                    on_clear: Handler::from(move |_: ()| {
+                        let state = APP_STATE.state();
+                        if let Some(s) = state.write().active_mut() {
+                            s.mode = AppMode::Normal;
+                        }
+                    }),
+                )
+            } else if mode == AppMode::SaveSession || mode == AppMode::LoadSession {
+                Border(height: Constraint::Length(3), border_style: border_style) {
+                    Input(
+                        input: save_input.read().clone(),
+                        placeholder: "Session name...".to_string(),
+                        hide_cursor: false,
+                    )
+                }
+            } else {
+                Border(height: Constraint::Length(3), border_style: border_style) {
+                    Text(text: status_bar_line)
+                }
             }
             // Help bar.
             Border(height: Constraint::Length(3), border_style: border_style) {

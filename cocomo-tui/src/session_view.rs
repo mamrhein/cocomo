@@ -506,13 +506,11 @@ pub fn handle_session_key(
     session: &mut SessionView,
     key: KeyEvent,
 ) -> SessionAction {
-    // Handle input modes (filter, save session, load session).
-    if session.mode == AppMode::Filter
-        || session.mode == AppMode::SaveSession
-        || session.mode == AppMode::LoadSession
-    {
-        return handle_filter_input(session, key);
-    }
+    // Input modes (Filter, SaveSession, LoadSession) are handled by
+    // ratatui-kit components (SearchInput / Input with input layers).  The
+    // session key handler in DirCompareView returns Ignored for those
+    // modes so the component layers receive keys; only Esc is handled as a
+    // fallback to exit the mode.
 
     // Route to text-specific handler for text diff sessions.
     if session.session_type == SessionType::TextCompare {
@@ -609,107 +607,6 @@ pub fn handle_session_key(
                 session.active_filter = None;
                 session.table_state.select(Some(0));
             }
-            SessionAction::None
-        }
-        _ => SessionAction::None,
-    }
-}
-
-fn handle_filter_input(
-    session: &mut SessionView,
-    key: KeyEvent,
-) -> SessionAction {
-    match key.code {
-        KeyCode::Esc => {
-            session.filter_input.clear();
-            session.mode = AppMode::Normal;
-            SessionAction::None
-        }
-        KeyCode::Enter => {
-            // SaveSession mode — dispatch save action.
-            if session.mode == AppMode::SaveSession {
-                let name = if session.filter_input.is_empty() {
-                    session.name.clone()
-                } else {
-                    session.filter_input.clone()
-                };
-                session.mode = AppMode::Normal;
-                return SessionAction::SaveSession { name };
-            }
-
-            // LoadSession mode — load the first (or selected) session.
-            if session.mode == AppMode::LoadSession {
-                // filter_input contains comma-separated session names.
-                // Build the path from the first entry.
-                let session_dir = crate::app::default_session_dir();
-                let entries: Vec<_> = session
-                    .filter_input
-                    .split(',')
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect();
-                let idx = session.table_state.selected().unwrap_or(0);
-                if let Some(name) = entries.get(idx) {
-                    let path = session_dir.join(format!("{name}.toml"));
-                    session.mode = AppMode::Normal;
-                    return SessionAction::LoadSession { path };
-                }
-                session.mode = AppMode::Normal;
-                return SessionAction::None;
-            }
-
-            // Normal filter mode.
-            if session.filter_input.is_empty() {
-                session.active_filter = None;
-            } else {
-                session.active_filter = Some(session.filter_input.clone());
-            }
-            session.filter_input.clear();
-            session.mode = AppMode::Normal;
-            session.table_state.select(Some(0));
-            SessionAction::None
-        }
-        KeyCode::Char('j')
-        | KeyCode::Down
-        | KeyCode::Char('k')
-        | KeyCode::Up => {
-            // In LoadSession mode, navigate through the session list.
-            if session.mode == AppMode::LoadSession {
-                let entries: Vec<_> = session
-                    .filter_input
-                    .split(',')
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect();
-                let delta = if matches!(
-                    key.code,
-                    KeyCode::Char('j') | KeyCode::Down
-                ) {
-                    1
-                } else {
-                    -1
-                };
-                if let Some(selected) = session.table_state.selected() {
-                    let new_idx = if delta > 0 {
-                        selected
-                            .saturating_add(1)
-                            .min(entries.len().saturating_sub(1))
-                    } else {
-                        selected.saturating_sub(1)
-                    };
-                    session.table_state.select(Some(new_idx));
-                } else if !entries.is_empty() {
-                    session.table_state.select(Some(0));
-                }
-            }
-            SessionAction::None
-        }
-        KeyCode::Backspace => {
-            session.filter_input.pop();
-            SessionAction::None
-        }
-        KeyCode::Char(c) => {
-            session.filter_input.push(c);
             SessionAction::None
         }
         _ => SessionAction::None,
