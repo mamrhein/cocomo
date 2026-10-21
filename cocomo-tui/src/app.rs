@@ -14,7 +14,10 @@
 //! [`SessionView`] holds the full state for one comparison (paths, results,
 //! filters, selection, etc.).
 
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    sync::atomic::{AtomicUsize, Ordering},
+};
 
 use cocomo_lib::{
     CompareConfig, ContentCache, DirComparison, DirEntry, DirEntryStatus,
@@ -85,6 +88,12 @@ pub enum SessionAction {
 /// comparison results, selection state, filters, and UI preferences for
 /// that session.
 pub struct SessionView {
+    /// Stable identity of this session.
+    ///
+    /// Spawned async tasks capture this id at spawn time and write their
+    /// results back to the originating session, even if the user switches
+    /// tabs while the task is running.
+    pub id: usize,
     /// Type of content this session displays.
     pub session_type: SessionType,
     /// Display name shown in the tab bar.
@@ -120,13 +129,14 @@ pub struct SessionView {
     pub hide_same: bool,
     /// Compare file contents (vs. meta data only).
     pub compare_content: bool,
-    /// Errors encountered during comparison.
-    pub errors: Vec<String>,
     /// Planned sync result for review. `Some` means sync preview is active.
     pub sync_planned: Option<SyncResult>,
     /// Sync operation currently configured.
     pub sync_operation: SyncOperation,
 }
+
+/// Monotonic counter assigning stable ids to sessions.
+static NEXT_SESSION_ID: AtomicUsize = AtomicUsize::new(1);
 
 impl SessionView {
     /// Create a new directory comparison session.
@@ -137,6 +147,7 @@ impl SessionView {
     ) -> Self {
         let name = Self::tab_title_for_paths(&left, &right);
         Self {
+            id: NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed),
             session_type: SessionType::DirCompare,
             name,
             left_path: left,
@@ -153,7 +164,6 @@ impl SessionView {
             active_filter: None,
             hide_same: false,
             compare_content,
-            errors: Vec::new(),
             sync_planned: None,
             sync_operation: SyncOperation::default(),
         }
@@ -170,6 +180,7 @@ impl SessionView {
     ) -> Self {
         let name = Self::tab_title_for_paths(&left, &right);
         Self {
+            id: NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed),
             session_type: SessionType::TextCompare,
             name,
             left_path: left,
@@ -186,7 +197,6 @@ impl SessionView {
             active_filter: None,
             hide_same: false,
             compare_content: true,
-            errors: Vec::new(),
             sync_planned: None,
             sync_operation: SyncOperation::default(),
         }
@@ -348,6 +358,20 @@ impl App {
         self.sessions.get(self.active_tab)
     }
 
+    /// Return a reference to the session with the given stable id.
+    ///
+    /// Unlike [`App::active`], this survives tab switches: spawned async
+    /// tasks capture a session id at spawn time and write their results
+    /// back to the originating session.
+    pub fn session(&self, id: usize) -> Option<&SessionView> {
+        self.sessions.iter().find(|s| s.id == id)
+    }
+
+    /// Return a mutable reference to the session with the given stable id.
+    pub fn session_mut(&mut self, id: usize) -> Option<&mut SessionView> {
+        self.sessions.iter_mut().find(|s| s.id == id)
+    }
+
     /// Return the number of open sessions.
     #[allow(dead_code)] // Used by M5.4+ for sync progress display.
     pub fn session_count(&self) -> usize {
@@ -467,58 +491,47 @@ pub async fn run_text_comparison(
     ))
 }
 
-/// Plan a sync operation (dry-run) and populate the session's sync state.
-#[allow(dead_code)] // sync logic inlined into process_session_action (Step 4).
+/// Plan a sync operation (dry-run) for the given directories.
+///
+/// Takes explicit paths instead of a `&mut SessionView` so callers can run
+/// it inside a spawned task without holding the `APP_STATE` lock across an
+/// `await`.
 pub async fn plan_sync_session(
-    session: &mut SessionView,
-) -> anyhow::Result<()> {
+    left: &Path,
+    right: &Path,
+    operation: SyncOperation,
+    compare_content: bool,
+) -> anyhow::Result<SyncResult> {
     let fs = LocalFs::new("local");
     let rules = SyncRules {
-        operation: session.sync_operation,
+        operation,
         dry_run: true,
         max_depth: None,
-        compare_content: session.compare_content,
+        compare_content,
     };
 
-    let result = cocomo_lib::plan_sync(
-        &fs,
-        &session.left_path,
-        &session.right_path,
-        &rules,
-    )
-    .await?;
-
-    session.sync_planned = Some(result);
-    session.table_state.select(Some(0));
-
-    Ok(())
+    Ok(cocomo_lib::plan_sync(&fs, left, right, &rules).await?)
 }
 
-/// Execute the planned sync operation.
-#[allow(dead_code)] // sync logic inlined into process_session_action (Step 4).
+/// Execute a sync operation for the given directories.
+///
+/// Like [`plan_sync_session`], takes explicit paths so it can run in a
+/// spawned task without holding a lock across an `await`.
 pub async fn execute_sync_session(
-    session: &mut SessionView,
-) -> anyhow::Result<()> {
+    left: &Path,
+    right: &Path,
+    operation: SyncOperation,
+    compare_content: bool,
+) -> anyhow::Result<SyncResult> {
     let fs = LocalFs::new("local");
     let rules = SyncRules {
-        operation: session.sync_operation,
+        operation,
         dry_run: false,
         max_depth: None,
-        compare_content: session.compare_content,
+        compare_content,
     };
 
-    let result = cocomo_lib::sync_directories(
-        &fs,
-        &session.left_path,
-        &session.right_path,
-        &rules,
-    )
-    .await?;
-
-    session.sync_planned = Some(result);
-    session.table_state.select(Some(0));
-
-    Ok(())
+    Ok(cocomo_lib::sync_directories(&fs, left, right, &rules).await?)
 }
 
 /// Convert a directory comparison session to a serializable config.
@@ -595,10 +608,9 @@ pub async fn create_session_from_config(
         compare_files,
     );
 
-    // Run the comparison.
-    if let Err(e) = run_comparison(&mut session).await {
-        session.errors.push(format!("Comparison failed: {e}"));
-    }
+    // Run the comparison; propagate failures so the caller can report them
+    // instead of opening a session with a permanently empty view.
+    run_comparison(&mut session).await?;
 
     // Restore filter settings.
     if !config.settings.name_filter.is_empty() {

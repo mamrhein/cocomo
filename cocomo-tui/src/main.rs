@@ -25,11 +25,10 @@ use std::{path::PathBuf, sync::Arc};
 use anyhow::Result;
 use app::{
     APP_STATE, AppMode, Focus, SessionAction, SessionType, SessionView, create_session_from_config,
-    list_saved_sessions, run_comparison, run_text_comparison, session_to_config,
+    execute_sync_session, list_saved_sessions, plan_sync_session, run_comparison,
+    run_text_comparison, session_to_config,
 };
-use cocomo_lib::{
-    DirEntry, Importance, LocalFs, SessionConfig, SyncRules, TransferAction, TransferItem,
-};
+use cocomo_lib::{DirEntry, Importance, SessionConfig, TransferAction, TransferItem};
 use clap::Parser;
 use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
@@ -286,10 +285,33 @@ fn TabBar(props: &TabBarProps) -> impl Into<AnyElement<'static>> {
 // Session action processing (async operations triggered by key events)
 // ---------------------------------------------------------------------------
 
+/// Report a failure from a spawned async task via the global `AlertModal`.
+fn report_error(msg: impl Into<String>) {
+    APP_STATE.state().write().error_message = Some(msg.into());
+}
+
+/// Return the stable id of the active directory-comparison session, if any.
+///
+/// Spawned tasks capture this at spawn time so their results are written
+/// back to the originating session even if the user switches tabs while the
+/// task is running.
+fn active_dir_session_id() -> Option<usize> {
+    let state = APP_STATE.state();
+    state
+        .read()
+        .active()
+        .filter(|s| s.session_type == SessionType::DirCompare)
+        .map(|s| s.id)
+}
+
 /// Process a [`SessionAction`] returned by `handle_session_key`.
 ///
-/// Actions that require async work are spawned as `tokio::spawn` tasks
-/// that operate on `APP_STATE`.
+/// Actions that require async work are spawned as `tokio::spawn` tasks.
+/// Each task reads its inputs from `APP_STATE` under a short-lived lock,
+/// runs the async operation outside any lock, then writes the result back
+/// under a fresh lock (targeting the originating session by id).  Writes to
+/// the atom wake the subscribed components, so the UI re-renders on
+/// completion.
 fn process_session_action(action: SessionAction) {
     match action {
         SessionAction::OpenDir { left, right } => {
@@ -298,26 +320,19 @@ fn process_session_action(action: SessionAction) {
                     .state()
                     .read()
                     .active()
-                    .map(|s| s.compare_content)
-                    .unwrap_or(false);
+                    .is_some_and(|s| s.compare_content);
                 let mut session = SessionView::new_dir_compare(left, right, compare_content);
-                if let Err(e) = run_comparison(&mut session).await {
-                    session.errors.push(format!("Comparison failed: {e}"));
+                match run_comparison(&mut session).await {
+                    Ok(()) => APP_STATE.state().write().add_session(session),
+                    Err(e) => report_error(format!("Comparison failed: {e}")),
                 }
-                APP_STATE.state().write().add_session(session);
             });
         }
         SessionAction::OpenFile { left, right } => {
             tokio::spawn(async move {
                 match run_text_comparison(left, right).await {
                     Ok(session) => APP_STATE.state().write().add_session(session),
-                    Err(e) => {
-                        let state = APP_STATE.state();
-                        let mut app = state.write();
-                        if let Some(s) = app.active_mut() {
-                            s.errors.push(format!("Text comparison failed: {e}"));
-                        }
-                    }
+                    Err(e) => report_error(format!("Text comparison failed: {e}")),
                 }
             });
         }
@@ -337,175 +352,163 @@ fn process_session_action(action: SessionAction) {
                     }
                 };
 
-                let left_parent = left_path.parent().map(PathBuf::from);
-                let right_parent = right_path.parent().map(PathBuf::from);
+                let (Some(left), Some(right)) = (
+                    left_path.parent().map(PathBuf::from),
+                    right_path.parent().map(PathBuf::from),
+                ) else {
+                    return;
+                };
 
-                if let (Some(left), Some(right)) = (left_parent, right_parent) {
-                    let mut session = SessionView::new_dir_compare(left, right, compare_content);
-                    if let Err(e) = run_comparison(&mut session).await {
-                        session.errors.push(format!("Comparison failed: {e}"));
-                    }
-                    APP_STATE.state().write().add_session(session);
+                let mut session = SessionView::new_dir_compare(left, right, compare_content);
+                match run_comparison(&mut session).await {
+                    Ok(()) => APP_STATE.state().write().add_session(session),
+                    Err(e) => report_error(format!("Comparison failed: {e}")),
                 }
             });
         }
         SessionAction::Reload => {
+            let Some(id) = active_dir_session_id() else {
+                return;
+            };
             tokio::spawn(async move {
                 let (left_path, right_path, compare_content) = {
                     let state = APP_STATE.state();
                     let app = state.read();
-                    match app.active() {
-                        Some(s)
-                            if s.session_type == SessionType::DirCompare => (
+                    match app.session(id) {
+                        Some(s) => (
                             s.left_path.clone(),
                             s.right_path.clone(),
                             s.compare_content,
                         ),
-                        _ => return,
+                        None => return,
                     }
                 };
 
-                if let Some(s) = APP_STATE.state().write().active_mut() {
+                // Clear the comparison so the view shows a loading state.
+                if let Some(s) = APP_STATE.state().write().session_mut(id) {
                     s.comparison = None;
                 }
 
-                let mut session = SessionView::new_dir_compare(left_path, right_path, compare_content);
-                if let Err(e) = run_comparison(&mut session).await {
-                    session.errors.push(format!("Comparison failed: {e}"));
-                }
-
-                if let Some(s) = APP_STATE.state().write().active_mut() {
-                    s.comparison = session.comparison;
-                    s.table_state.select(Some(0));
+                let mut session =
+                    SessionView::new_dir_compare(left_path, right_path, compare_content);
+                match run_comparison(&mut session).await {
+                    Ok(()) => {
+                        if let Some(s) = APP_STATE.state().write().session_mut(id) {
+                            s.comparison = session.comparison;
+                            s.table_state.select(Some(0));
+                        }
+                    }
+                    Err(e) => report_error(format!("Comparison failed: {e}")),
                 }
             });
         }
         SessionAction::PlanSync { operation } => {
+            let Some(id) = active_dir_session_id() else {
+                return;
+            };
             tokio::spawn(async move {
-                // Extract session data under read lock, then release before async work.
+                // Extract session data under read lock, then release before
+                // async work.
                 let (left_path, right_path, compare_content) = {
                     let state = APP_STATE.state();
                     let app = state.read();
-                    match app.active() {
-                        Some(s) if s.session_type == SessionType::DirCompare => (
+                    match app.session(id) {
+                        Some(s) => (
                             s.left_path.clone(),
                             s.right_path.clone(),
                             s.compare_content,
                         ),
-                        _ => return,
+                        None => return,
                     }
                 };
 
-                // Set the sync operation under write lock (brief, no await).
-                if let Some(s) = APP_STATE.state().write().active_mut() {
+                // Record the requested operation (brief write lock, no await).
+                if let Some(s) = APP_STATE.state().write().session_mut(id) {
                     s.sync_operation = operation;
                 }
 
                 // Run sync planning outside any lock.
-                let fs = LocalFs::new("local");
-                let rules = SyncRules {
-                    operation,
-                    dry_run: true,
-                    max_depth: None,
-                    compare_content,
-                };
-
-                match cocomo_lib::plan_sync(&fs, &left_path, &right_path, &rules).await {
+                match plan_sync_session(&left_path, &right_path, operation, compare_content).await
+                {
                     Ok(result) => {
-                        if let Some(s) = APP_STATE.state().write().active_mut() {
+                        if let Some(s) = APP_STATE.state().write().session_mut(id) {
                             s.sync_planned = Some(result);
                             s.table_state.select(Some(0));
                         }
                     }
-                    Err(e) => {
-                        let state = APP_STATE.state();
-                        let mut app = state.write();
-                        if let Some(s) = app.active_mut() {
-                            s.errors.push(format!("Sync planning failed: {e}"));
-                        }
-                    }
+                    Err(e) => report_error(format!("Sync planning failed: {e}")),
                 }
             });
         }
         SessionAction::ExecuteSync => {
+            let Some(id) = active_dir_session_id() else {
+                return;
+            };
             tokio::spawn(async move {
-                // Extract session data under read lock, then release before async work.
+                // Extract session data under read lock, then release before
+                // async work.
                 let (left_path, right_path, compare_content, operation) = {
                     let state = APP_STATE.state();
                     let app = state.read();
-                    match app.active() {
-                        Some(s) if s.session_type == SessionType::DirCompare => (
+                    match app.session(id) {
+                        Some(s) => (
                             s.left_path.clone(),
                             s.right_path.clone(),
                             s.compare_content,
                             s.sync_operation,
                         ),
-                        _ => return,
+                        None => return,
                     }
                 };
 
                 // Run sync execution outside any lock.
-                let fs = LocalFs::new("local");
-                let rules = SyncRules {
-                    operation,
-                    dry_run: false,
-                    max_depth: None,
-                    compare_content,
-                };
-
-                match cocomo_lib::sync_directories(&fs, &left_path, &right_path, &rules).await {
+                match execute_sync_session(&left_path, &right_path, operation, compare_content)
+                    .await
+                {
                     Ok(result) => {
-                        if let Some(s) = APP_STATE.state().write().active_mut() {
+                        if let Some(s) = APP_STATE.state().write().session_mut(id) {
                             s.sync_planned = Some(result);
                             s.table_state.select(Some(0));
                         }
                     }
-                    Err(e) => {
-                        let state = APP_STATE.state();
-                        let mut app = state.write();
-                        if let Some(s) = app.active_mut() {
-                            s.errors.push(format!("Sync execution failed: {e}"));
-                        }
-                    }
+                    Err(e) => report_error(format!("Sync execution failed: {e}")),
                 }
             });
         }
         SessionAction::SaveSession { name } => {
+            let Some(id) = active_dir_session_id() else {
+                return;
+            };
             tokio::spawn(async move {
                 let config = {
                     let state = APP_STATE.state();
                     let app = state.read();
-                    match app.active() {
-                        Some(s) if s.session_type == SessionType::DirCompare => session_to_config(s),
-                        _ => return,
+                    match app.session(id) {
+                        Some(s) => session_to_config(s),
+                        None => return,
                     }
                 };
 
                 let session_dir = app::default_session_dir();
-                if std::fs::create_dir_all(&session_dir).is_err() {
+                if let Err(e) = std::fs::create_dir_all(&session_dir) {
+                    report_error(format!("Failed to save session: {e}"));
                     return;
                 }
 
-                let path = session_dir.join(format!("{}.toml", name));
-                match config.save_to_file(&path).await {
-                    Ok(_) => {}
-                    Err(e) => {
-                        let state = APP_STATE.state();
-                        let mut app = state.write();
-                        if let Some(s) = app.active_mut() {
-                            s.errors.push(format!("Failed to save session: {e}"));
-                        }
-                    }
+                let path = session_dir.join(format!("{name}.toml"));
+                if let Err(e) = config.save_to_file(&path).await {
+                    report_error(format!("Failed to save session: {e}"));
                 }
             });
         }
         SessionAction::ListSessions => {
+            let Some(id) = active_dir_session_id() else {
+                return;
+            };
             tokio::spawn(async move {
-                if let Ok(sessions) = list_saved_sessions().await {
-                    let state = APP_STATE.state();
-                    let mut app = state.write();
-                    if let Some(session) = app.active_mut() {
-                        session.filter_input = sessions
+                match list_saved_sessions().await {
+                    Ok(sessions) => {
+                        let names = sessions
                             .iter()
                             .map(|p| {
                                 p.file_stem()
@@ -515,7 +518,11 @@ fn process_session_action(action: SessionAction) {
                             })
                             .collect::<Vec<_>>()
                             .join(",");
+                        if let Some(s) = APP_STATE.state().write().session_mut(id) {
+                            s.filter_input = names;
+                        }
                     }
+                    Err(e) => report_error(format!("Failed to list saved sessions: {e}")),
                 }
             });
         }
@@ -524,23 +531,13 @@ fn process_session_action(action: SessionAction) {
                 let config = match SessionConfig::load_from_file(&path).await {
                     Ok(c) => c,
                     Err(e) => {
-                        let state = APP_STATE.state();
-                        let mut app = state.write();
-                        if let Some(s) = app.active_mut() {
-                            s.errors.push(format!("Session load failed: {e}"));
-                        }
+                        report_error(format!("Session load failed: {e}"));
                         return;
                     }
                 };
                 match create_session_from_config(&config).await {
                     Ok(session) => APP_STATE.state().write().add_session(session),
-                    Err(e) => {
-                        let state = APP_STATE.state();
-                        let mut app = state.write();
-                        if let Some(s) = app.active_mut() {
-                            s.errors.push(format!("Session load failed: {e}"));
-                        }
-                    }
+                    Err(e) => report_error(format!("Session load failed: {e}")),
                 }
             });
         }
