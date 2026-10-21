@@ -266,6 +266,11 @@ pub struct App {
     pub reload_pending: Option<usize>,
     /// Index of the currently selected menu item.
     pub menu_selection: usize,
+    /// Top-level error message to display in an `AlertModal`.
+    ///
+    /// Set when an operation that cannot be attributed to a specific session
+    /// fails (e.g. the initial comparison launched from `main`).
+    pub error_message: Option<String>,
 }
 
 /// Global reactive application state, subscribed to via
@@ -286,6 +291,7 @@ impl App {
             active_tab: 0,
             reload_pending: None,
             menu_selection: 0,
+            error_message: None,
         }
     }
 

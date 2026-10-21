@@ -14,8 +14,11 @@
 //! is an independent comparison session; pressing Enter on a directory opens
 //! a new tab comparing the subdirectories.
 
-mod app;
+// Legacy Frame-based render functions are temporarily unused after the
+// ratatui-kit component migration; they will be removed in Step 9.
+#[allow(dead_code)]
 mod session_view;
+mod app;
 
 use std::{path::PathBuf, sync::Arc};
 
@@ -32,13 +35,12 @@ use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     prelude::*,
     ratatui::{
-        Frame,
-        layout::{Alignment, Constraint, Direction, Rect},
+        layout::{Alignment, Constraint, Direction, Flex},
         prelude::Stylize,
         style::{Color, Modifier, Style},
         symbols,
         text::{Line, Span},
-        widgets::{Block, Borders, Paragraph, Tabs},
+        widgets::{Block, Borders, Tabs},
     },
 };
 use session_view::handle_session_key;
@@ -142,90 +144,42 @@ fn handle_global_key(app: &mut app::App, key: KeyEvent) -> GlobalKeyResult {
     GlobalKeyResult::Ignored
 }
 
-// ---------------------------------------------------------------------------
-// Content rendering (used by SessionContent component for text compare & welcome)
-// ---------------------------------------------------------------------------
-
-/// Render the welcome screen when no sessions are open.
-fn render_welcome(frame: &mut Frame, area: Rect) {
-    let lines = vec![
-        Line::from("cocomo — COmpare, COpy & MOve"),
-        Line::from(""),
-        Line::from("Provide --left and --right to start a comparison."),
-        Line::from(""),
-        Line::from("Press q to quit."),
-    ];
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Gray));
-    let paragraph = Paragraph::new(lines)
-        .block(block)
-        .alignment(Alignment::Center);
-    frame.render_widget(paragraph, area);
-}
-
-/// Render the main content area: either the active session or the welcome
-/// screen, within the given area.
-fn render_content(frame: &mut Frame, area: Rect, app: &app::App) {
-    if let Some(session) = app.active() {
-        match session.session_type {
-            SessionType::DirCompare => {
-                session_view::render_session(frame, area, session);
-            }
-            SessionType::TextCompare => {
-                session_view::render_text_session(frame, area, session);
-            }
-        }
-    } else {
-        render_welcome(frame, area);
-    }
-}
-
-// ---------------------------------------------------------------------------
-// SessionContent component (manual Component impl for Frame-based rendering)
-// ---------------------------------------------------------------------------
-
-/// Props for [`SessionContent`] — no props; state is read from the global
-/// atom.
+/// Props for [`WelcomeScreen`] — none; state is read from the global atom.
 #[derive(Default, Props)]
-struct SessionContentProps;
+struct WelcomeScreenProps;
 
-/// Component that renders the main content area using the existing
-/// Frame-based render functions.
+/// Welcome screen rendered when no sessions are open.
 ///
-/// This component reads from `APP_STATE` via `use_atom` in its `update()`
-/// method, then renders using `ComponentDrawer`'s frame in `draw()`. This
-/// bridges the legacy Frame-based rendering with ratatui-kit's component
-/// model.
-struct SessionContent {
-    app_handle: Option<AtomState<app::App>>,
-}
+/// Displays the application name, a short description, and usage hints using
+/// ratatui-kit layout components (`Center`, `Border`, `Text`) instead of
+/// legacy Frame-based rendering.
+#[component]
+fn WelcomeScreen(_props: &WelcomeScreenProps) -> impl Into<AnyElement<'static>> {
+    let title_line = Line::from("cocomo \u{2014} COmpare, COpy & MOve")
+        .bold()
+        .cyan()
+        .centered();
+    let hint_line_1 = Line::from("Provide --left and --right to start a comparison.")
+        .dark_gray()
+        .centered();
+    let hint_line_2 = Line::from("Press q to quit.").dark_gray().centered();
 
-impl Component for SessionContent {
-    type Props<'a> = SessionContentProps;
-
-    fn new(_props: &Self::Props<'_>) -> Self {
-        Self { app_handle: None }
-    }
-
-    fn update(
-        &mut self,
-        _props: &mut Self::Props<'_>,
-        mut hooks: Hooks,
-        updater: &mut ComponentUpdater,
-    ) {
-        let mut hooks =
-            hooks.with_context_stack(updater.component_context_stack());
-        self.app_handle = Some(hooks.use_atom(&APP_STATE));
-    }
-
-    fn draw(&mut self, drawer: &mut ComponentDrawer<'_, '_>) {
-        if let Some(handle) = &self.app_handle {
-            let app = handle.read();
-            render_content(drawer.frame, drawer.area, &app);
+    element!(
+        Center(width: Constraint::Length(58), height: Constraint::Length(16)) {
+            Border(
+                flex_direction: Direction::Vertical,
+                justify_content: Flex::Center,
+                border_style: Style::new().fg(Color::Gray),
+                top_title: Line::from(" Welcome ").fg(Color::Yellow).bold().centered(),
+            ) {
+                Text(text: title_line)
+                Text(text: Line::from(""))
+                Text(text: hint_line_1)
+                Text(text: Line::from(""))
+                Text(text: hint_line_2)
+            }
         }
-    }
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1377,6 +1331,10 @@ fn App(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let active_index = app.active_index();
     let active_session_type = app.active().map(|s| s.session_type);
 
+    // Extract error message for the AlertModal (cloned to avoid holding the
+    // read guard across element! rendering).
+    let error_message = app.error_message.clone();
+
     // Build menu bar tab titles.
     let menu_titles: Vec<Line<'static>> =
         MENU_TITLES.iter().map(|s| Line::from(*s)).collect();
@@ -1398,9 +1356,18 @@ fn App(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 match active_session_type {
                     Some(SessionType::DirCompare) => { DirCompareView() }
                     Some(SessionType::TextCompare) => { TextCompareView() }
-                    None => { SessionContent() }
+                    None => { WelcomeScreen() }
                 }
             }
+            AlertModal(
+                open: error_message.is_some(),
+                title: Line::from(" Error "),
+                message: error_message.unwrap_or_default(),
+                close_hint: Line::from("Enter / Esc").centered(),
+                on_close: move |_: ()| {
+                    APP_STATE.state().write().error_message = None;
+                },
+            )
         }
     )
 }
@@ -1450,7 +1417,7 @@ async fn main() -> Result<()> {
         let mut session =
             SessionView::new_dir_compare(left, right, cli.content);
         if let Err(e) = run_comparison(&mut session).await {
-            session.errors.push(format!("Comparison failed: {e}"));
+            app.error_message = Some(format!("Comparison failed: {e}"));
         }
         app.add_session(session);
     }
