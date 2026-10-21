@@ -57,7 +57,7 @@ pub enum SessionType {
     TextCompare,
 }
 
-/// Actions that a session's key handler can request from the main loop.
+/// Actions that a session's key handler can request from the App component.
 #[derive(Clone, Debug)]
 pub enum SessionAction {
     /// Open a subdirectory comparison in a new session.

@@ -14,9 +14,6 @@
 //! is an independent comparison session; pressing Enter on a directory opens
 //! a new tab comparing the subdirectories.
 
-// Legacy Frame-based render functions are temporarily unused after the
-// ratatui-kit component migration; they will be removed in Step 9.
-#[allow(dead_code)]
 mod session_view;
 mod app;
 
@@ -31,7 +28,7 @@ use app::{
 use cocomo_lib::{DirEntry, Importance, SessionConfig, TransferAction, TransferItem};
 use clap::Parser;
 use ratatui_kit::{
-    crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
+    crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers},
     prelude::*,
     ratatui::{
         layout::{Alignment, Constraint, Direction, Flex},
@@ -70,84 +67,6 @@ struct Cli {
     /// Compare file content (using hashing).
     #[arg(short = 'c', long, default_value_t = false)]
     content: bool,
-}
-
-// ---------------------------------------------------------------------------
-// Global key handling
-// ---------------------------------------------------------------------------
-
-/// Result of dispatching a global key event.
-enum GlobalKeyResult {
-    /// The key was not consumed; dispatch to the active session.
-    Ignored,
-    /// The key was consumed; continue the event loop.
-    Consumed,
-    /// The key was consumed and the application should quit.
-    Quit,
-}
-
-/// Handle keys that affect the app globally (tab switching, menu, quit).
-///
-/// Returns `GlobalKeyResult::Quit` when the application should exit (e.g. on
-/// `q` or when closing the last tab), `Consumed` when the key was handled, or
-/// `Ignored` to let the session handler take over.
-fn handle_global_key(app: &mut app::App, key: KeyEvent) -> GlobalKeyResult {
-    const MENU_COUNT: usize = 6; // Sessions, Compare, Sync, View, Filter, Help
-
-    // Ctrl+W — close active tab.
-    if key.code == KeyCode::Char('w')
-        && key.modifiers.contains(KeyModifiers::CONTROL)
-    {
-        app.close_active();
-        return if app.sessions.is_empty() {
-            GlobalKeyResult::Quit
-        } else {
-            GlobalKeyResult::Consumed
-        };
-    }
-
-    // Ctrl+Tab — next tab.
-    if key.code == KeyCode::Tab
-        && key.modifiers.contains(KeyModifiers::CONTROL)
-    {
-        let is_shift = key.modifiers.contains(KeyModifiers::SHIFT);
-        app.switch_tab(if is_shift { -1 } else { 1 });
-        return GlobalKeyResult::Consumed;
-    }
-
-    // Left/Right arrow keys — navigate menu bar.
-    if key.modifiers == KeyModifiers::NONE {
-        match key.code {
-            KeyCode::Left => {
-                app.menu_selection = if app.menu_selection > 0 {
-                    app.menu_selection - 1
-                } else {
-                    MENU_COUNT - 1
-                };
-                return GlobalKeyResult::Consumed;
-            }
-            KeyCode::Right => {
-                app.menu_selection = (app.menu_selection + 1) % MENU_COUNT;
-                return GlobalKeyResult::Consumed;
-            }
-            _ => {}
-        }
-    }
-
-    // q — quit (only when not in a session filter mode).
-    if key.code == KeyCode::Char('q') || key.code == KeyCode::Char('Q') {
-        // If there's an active session in filter mode, let the session handle
-        // it.
-        if let Some(session) = app.active() {
-            if session.mode != AppMode::Filter {
-                return GlobalKeyResult::Quit;
-            }
-        } else {
-            return GlobalKeyResult::Quit;
-        }
-    }
-
-    GlobalKeyResult::Ignored
 }
 
 /// Props for [`WelcomeScreen`] — none; state is read from the global atom.
@@ -1458,6 +1377,8 @@ fn App(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         EventScope::Current,
         EventPriority::Normal,
         move |event| {
+            const MENU_COUNT: usize = 6; // Sessions, Compare, Sync, View, Filter, Help
+
             let Event::Key(key) = event else {
                 return EventResult::Ignored;
             };
@@ -1467,15 +1388,64 @@ fn App(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
             let state = APP_STATE.state();
             let mut app = state.write();
-            match handle_global_key(&mut app, key) {
-                GlobalKeyResult::Quit => {
+
+            // Ctrl+W — close active tab; quit when it was the last one.
+            if key.code == KeyCode::Char('w')
+                && key.modifiers.contains(KeyModifiers::CONTROL)
+            {
+                app.close_active();
+                if app.sessions.is_empty() {
                     drop(app);
                     exit();
-                    EventResult::Consumed
                 }
-                GlobalKeyResult::Consumed => EventResult::Consumed,
-                GlobalKeyResult::Ignored => EventResult::Ignored,
+                return EventResult::Consumed;
             }
+
+            // Ctrl+Tab — switch tabs (Shift reverses direction).
+            if key.code == KeyCode::Tab
+                && key.modifiers.contains(KeyModifiers::CONTROL)
+            {
+                let is_shift = key.modifiers.contains(KeyModifiers::SHIFT);
+                app.switch_tab(if is_shift { -1 } else { 1 });
+                return EventResult::Consumed;
+            }
+
+            // Left/Right arrow keys — navigate the menu bar.
+            if key.modifiers == KeyModifiers::NONE {
+                match key.code {
+                    KeyCode::Left => {
+                        app.menu_selection = if app.menu_selection > 0 {
+                            app.menu_selection - 1
+                        } else {
+                            MENU_COUNT - 1
+                        };
+                        return EventResult::Consumed;
+                    }
+                    KeyCode::Right => {
+                        app.menu_selection =
+                            (app.menu_selection + 1) % MENU_COUNT;
+                        return EventResult::Consumed;
+                    }
+                    _ => {}
+                }
+            }
+
+            // q — quit (unless the active session is in filter mode, where the
+            // session's input layer handles the key).
+            if key.code == KeyCode::Char('q') || key.code == KeyCode::Char('Q')
+            {
+                let quit = match app.active() {
+                    Some(session) => session.mode != AppMode::Filter,
+                    None => true,
+                };
+                if quit {
+                    drop(app);
+                    exit();
+                    return EventResult::Consumed;
+                }
+            }
+
+            EventResult::Ignored
         },
     );
 
