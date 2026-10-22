@@ -65,6 +65,23 @@ pub enum SyncOperation {
 }
 
 impl SyncOperation {
+    /// Every sync operation, in a stable order.
+    ///
+    /// Frontends that cycle through the operations (for example the TUI's
+    /// `Tab`/`BackTab` binding) iterate over this list instead of
+    /// hardcoding the variant set, so a newly added variant becomes
+    /// reachable without touching the frontend.
+    pub const ALL: [SyncOperation; 8] = [
+        SyncOperation::MirrorLeft,
+        SyncOperation::MirrorRight,
+        SyncOperation::UpdateNewer,
+        SyncOperation::UpdateBoth,
+        SyncOperation::CopyLeft,
+        SyncOperation::CopyRight,
+        SyncOperation::CopyNewer,
+        SyncOperation::DeleteOrphans,
+    ];
+
     /// Return a human-readable label for this operation.
     pub fn label(&self) -> &'static str {
         match self {
@@ -687,6 +704,23 @@ mod tests {
         assert_eq!(SyncOperation::MirrorLeft.label(), "mirror left → right");
         assert_eq!(SyncOperation::DeleteOrphans.label(), "delete orphans");
         assert_eq!(SyncOperation::UpdateBoth.label(), "update both");
+    }
+
+    #[test]
+    fn sync_operation_all_has_unique_labels_and_default() {
+        // The default must be reachable through `ALL` so a frontend that
+        // starts from `SyncOperation::default()` can cycle back to it.
+        assert!(SyncOperation::ALL.contains(&SyncOperation::default()));
+        // Distinct labels keep a cycled UI from showing two identical rows.
+        let mut labels: Vec<&str> = SyncOperation::ALL
+            .iter()
+            .map(SyncOperation::label)
+            .collect();
+        let count = labels.len();
+        labels.sort_unstable();
+        labels.dedup();
+        assert_eq!(labels.len(), count);
+        assert!(labels.iter().all(|l| !l.is_empty()));
     }
 
     #[test]

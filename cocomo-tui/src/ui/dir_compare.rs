@@ -11,7 +11,9 @@
 
 use std::sync::Arc;
 
-use cocomo_lib::{DirEntry, TransferAction, TransferItem};
+use cocomo_lib::{
+    DirEntry, TransferAction, TransferItem, format_date, format_size,
+};
 use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEventKind},
     prelude::*,
@@ -31,7 +33,7 @@ use crate::{
         dispatch_session_key, set_active_mode, set_filter_input,
         set_mode_name, submit_filter, submit_load_name, submit_save_name,
     },
-    format::{format_date, format_size, status_style},
+    format::status_style,
     keys::{self, KeyScope},
     state::{APP_STATE, Focus, SessionMode, SessionType},
 };

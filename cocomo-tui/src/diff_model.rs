@@ -7,51 +7,27 @@
 // $Source$
 // $Revision$
 
-//! Pure diff analysis over a text-compare session: which rows contain
-//! differences, how they group into contiguous blocks, and where the cursor
-//! sits relative to those groups.
+//! Thin adapters from a [`SessionView`] to the diff-group model in
+//! `cocomo-lib`.
+//!
+//! The difference analysis itself (which lines differ, how they group into
+//! contiguous blocks, and where the cursor sits relative to those groups)
+//! lives on [`TextDiff`] in `cocomo-lib` and is tested there. These helpers
+//! only bridge the session's `Option<TextDiff>` and its table selection to
+//! those methods, so the view layer never has to unwrap the diff itself.
 
 use std::collections::HashSet;
 
-use cocomo_lib::TextDifference;
+use cocomo_lib::TextDiff;
 
 use crate::state::SessionView;
 
-/// Build a set of line numbers that are part of a difference.
+/// Build the set of line numbers that are part of a difference.
 pub fn diff_line_numbers(session: &SessionView) -> HashSet<usize> {
-    let mut numbers = HashSet::new();
-
-    if let Some(ref diff) = session.text_diff {
-        for td in &diff.differences {
-            match td {
-                TextDifference::LineDifferent(left, right) => {
-                    numbers.insert(left.number);
-                    numbers.insert(right.number);
-                }
-                TextDifference::LinesAdded(_, lines) => {
-                    for l in lines {
-                        numbers.insert(l.number);
-                    }
-                }
-                TextDifference::LinesRemoved(_, lines) => {
-                    for l in lines {
-                        numbers.insert(l.number);
-                    }
-                }
-                TextDifference::LinesChanged(_, removed, added) => {
-                    for l in removed {
-                        numbers.insert(l.number);
-                    }
-                    for l in added {
-                        numbers.insert(l.number);
-                    }
-                }
-                TextDifference::BlankLine => {}
-            }
-        }
-    }
-
-    numbers
+    session
+        .text_diff
+        .as_ref()
+        .map_or_else(HashSet::new, TextDiff::difference_line_numbers)
 }
 
 /// Return the first row index of each contiguous difference group.
@@ -59,63 +35,25 @@ pub fn diff_line_numbers(session: &SessionView) -> HashSet<usize> {
 /// Each element is the row index (0-based into the merged view) where a
 /// difference group starts. These are the targets for n/N navigation.
 pub fn diff_group_starts(session: &SessionView) -> Vec<usize> {
-    let diff_numbers = diff_line_numbers(session);
-
-    let max_lines =
-        std::cmp::max(session.left_lines.len(), session.right_lines.len());
-
-    // Find all rows that contain at least one diff line.
-    let diff_rows: Vec<usize> = (0..max_lines)
-        .filter(|&i| {
-            let left_is_diff = session
-                .left_lines
-                .get(i)
-                .is_some_and(|l| diff_numbers.contains(&l.number));
-            let right_is_diff = session
-                .right_lines
-                .get(i)
-                .is_some_and(|l| diff_numbers.contains(&l.number));
-            left_is_diff || right_is_diff
-        })
-        .collect();
-
-    // Group contiguous rows and return the first index of each group.
-    let mut groups = Vec::new();
-    let mut i = 0;
-    while i < diff_rows.len() {
-        groups.push(diff_rows[i]);
-        while i + 1 < diff_rows.len() && diff_rows[i + 1] == diff_rows[i] + 1 {
-            i += 1;
-        }
-        i += 1;
-    }
-
-    groups
+    session
+        .text_diff
+        .as_ref()
+        .map_or_else(Vec::new, TextDiff::group_starts)
 }
 
 /// Return the current diff group index (1-based) and total count.
 ///
-/// Scans backward from the current selection to find which contiguous
-/// difference group the cursor is on. Returns `(current, total)` where
-/// `current` is 1-based. Returns `(0, total)` if no group is selected.
+/// Returns `(current, total)` where `current` is 1-based, `(0, total)` if the
+/// cursor precedes the first group, and `(0, 0)` for a session with no text
+/// diff.
 pub fn current_diff_position(session: &SessionView) -> (usize, usize) {
-    let groups = diff_group_starts(session);
-    let total = groups.len();
-    if total == 0 {
-        return (0, 0);
-    }
-
-    let selected = session.table_state.selected().unwrap_or(0);
-
-    // Find the group whose start is <= selected.
-    for (i, &start) in groups.iter().enumerate().rev() {
-        if selected >= start {
-            return (i + 1, total);
+    match session.text_diff.as_ref() {
+        Some(diff) => {
+            let selected = session.table_state.selected().unwrap_or(0);
+            diff.position_of(selected)
         }
+        None => (0, 0),
     }
-
-    // Selected is before the first group.
-    (0, total)
 }
 
 #[cfg(test)]
@@ -166,25 +104,23 @@ mod tests {
     }
 
     #[test]
-    fn diff_line_numbers_collects_all_difference_lines() {
+    fn diff_line_numbers_delegates_to_lib() {
         let numbers = diff_line_numbers(&session());
         for n in [3, 4, 5, 7] {
             assert!(numbers.contains(&n), "missing line {n}");
         }
         assert!(!numbers.contains(&1));
-        assert!(!numbers.contains(&10));
     }
 
     #[test]
-    fn diff_group_starts_merges_contiguous_rows() {
+    fn diff_group_starts_delegates_to_lib() {
         // Diff rows 2, 3, 4 (0-based) form one group, row 6 another.
         assert_eq!(diff_group_starts(&session()), vec![2, 6]);
     }
 
     #[test]
-    fn current_diff_position_counts_groups_one_based() {
+    fn current_diff_position_uses_the_selected_row() {
         let mut session = session();
-        // Before the first group.
         session.table_state.select(Some(0));
         assert_eq!(current_diff_position(&session), (0, 2));
         session.table_state.select(Some(3));
@@ -194,9 +130,10 @@ mod tests {
     }
 
     #[test]
-    fn empty_diff_has_no_groups() {
+    fn session_without_a_text_diff_is_empty() {
         let mut session = session();
-        session.text_diff = Some(TextDiff::default());
+        session.text_diff = None;
+        assert!(diff_line_numbers(&session).is_empty());
         assert!(diff_group_starts(&session).is_empty());
         assert_eq!(current_diff_position(&session), (0, 0));
     }

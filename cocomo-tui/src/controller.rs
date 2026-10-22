@@ -32,16 +32,14 @@ use std::{
 use cocomo_lib::{
     CompareConfig, ContentCache, DirComparison, Grammar, LineInfo, LocalFs,
     SessionConfig, SyncOperation, SyncResult, SyncRules, TextCompareSettings,
-    compare_texts,
+    compare_texts, default_session_dir, list_saved_sessions,
 };
 use ratatui_kit::crossterm::event::KeyEvent;
 
 use crate::{
     error::{Result, TuiError},
     keys::handle_session_key,
-    session_store::{
-        default_session_dir, list_saved_sessions, session_to_config,
-    },
+    session_store::session_to_config,
     state::{
         APP_STATE, AppState, SessionAction, SessionMode, SessionType,
         SessionView,

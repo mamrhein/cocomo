@@ -7,8 +7,12 @@
 // $Source$
 // $Revision$
 
-//! Presentation formatting helpers: status colors, human-readable sizes and
-//! dates, and grammar-based text styles.
+//! Presentation formatting helpers: status colors and grammar-based text
+//! styles.
+//!
+//! Human-readable size and date formatting live in
+//! [`cocomo_lib::format_size`] / [`cocomo_lib::format_date`] so all three
+//! frontends share one implementation.
 
 use cocomo_lib::{DirEntryStatus, Importance, LineInfo};
 use ratatui_kit::ratatui::style::{Color, Style};
@@ -25,28 +29,6 @@ pub(crate) fn status_style(status: DirEntryStatus) -> Color {
         DirEntryStatus::Mergeable => Color::Green,
         DirEntryStatus::Conflict => Color::Rgb(255, 0, 255),
         DirEntryStatus::IdenticalNameDifferentType => Color::Rgb(255, 255, 0),
-    }
-}
-
-/// Format a byte count as a human-readable size string.
-pub(crate) fn format_size(bytes: u64) -> String {
-    if bytes < 1024 {
-        format!("{bytes}B")
-    } else if bytes < 1024 * 1024 {
-        format!("{:.1}K", bytes as f64 / 1024.0)
-    } else if bytes < 1024 * 1024 * 1024 {
-        format!("{:.1}M", bytes as f64 / (1024.0 * 1024.0))
-    } else {
-        format!("{:.1}G", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
-    }
-}
-
-/// Truncate an ISO-8601 date string to "YYYY-MM-DD HH:MM".
-pub(crate) fn format_date(date_str: &str) -> String {
-    if date_str.len() > 16 {
-        date_str[..16].replace('T', " ")
-    } else {
-        date_str.to_string()
     }
 }
 
@@ -74,27 +56,6 @@ pub(crate) fn grammar_style(importance: Importance) -> Style {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn format_size_uses_binary_units() {
-        assert_eq!(format_size(0), "0B");
-        assert_eq!(format_size(999), "999B");
-        assert_eq!(format_size(1024), "1.0K");
-        assert_eq!(format_size(1536), "1.5K");
-        assert_eq!(format_size(3 * 1024 * 1024), "3.0M");
-        assert_eq!(format_size(2 * 1024 * 1024 * 1024), "2.0G");
-    }
-
-    #[test]
-    fn format_date_truncates_to_minutes() {
-        assert_eq!(
-            format_date("2026-10-22T09:47:08+02:00"),
-            "2026-10-22 09:47"
-        );
-        // Strings at or below the cut length pass through unchanged.
-        assert_eq!(format_date("2026-10-22T09:47"), "2026-10-22T09:47");
-        assert_eq!(format_date(""), "");
-    }
 
     #[test]
     fn status_style_distinguishes_all_statuses() {

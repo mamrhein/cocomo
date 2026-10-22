@@ -7,19 +7,18 @@
 // $Source$
 // $Revision$
 
-//! Session-file persistence: config conversion, saved-session listing, and
-//! the default session directory.
-
-use std::{io, path::PathBuf};
+//! Converting a [`SessionView`] into a serializable [`SessionConfig`].
+//!
+//! The session-file location and listing helpers live in `cocomo-lib`
+//! ([`cocomo_lib::default_session_dir`], [`cocomo_lib::list_saved_sessions`])
+//! so all frontends share them; only the TUI-specific view-to-config mapping
+//! stays here.
 
 use cocomo_lib::{
     ProviderRef, SessionConfig, SessionSettings, SessionType as LibSessionType,
 };
 
-use crate::{
-    error::{Result, TuiError},
-    state::SessionView,
-};
+use crate::state::SessionView;
 
 /// Convert a directory comparison session to a serializable config.
 pub(crate) fn session_to_config(session: &SessionView) -> SessionConfig {
@@ -51,39 +50,4 @@ pub(crate) fn session_to_config(session: &SessionView) -> SessionConfig {
             show_orphans: true,
         },
     }
-}
-
-/// List all saved session files in the default session directory.
-///
-/// A session directory that does not exist yet simply means "no saved
-/// sessions"; any other I/O failure is propagated with path context.
-pub(crate) async fn list_saved_sessions() -> Result<Vec<PathBuf>> {
-    let session_dir = default_session_dir();
-    let mut entries = match fs_err::tokio::read_dir(&session_dir).await {
-        Ok(entries) => entries,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(TuiError::io(&session_dir, e)),
-    };
-
-    let mut sessions = Vec::new();
-    while let Some(entry) = entries
-        .next_entry()
-        .await
-        .map_err(|e| TuiError::io(&session_dir, e))?
-    {
-        let path = entry.path();
-        if path.extension().is_some_and(|ext| ext == "toml") {
-            sessions.push(path);
-        }
-    }
-    sessions.sort();
-    Ok(sessions)
-}
-
-/// Return the default directory for saved session files.
-pub(crate) fn default_session_dir() -> PathBuf {
-    let config_dir = dirs::config_dir()
-        .unwrap_or_else(|| PathBuf::from("~/.config"))
-        .join("cocomo");
-    config_dir.join("sessions")
 }

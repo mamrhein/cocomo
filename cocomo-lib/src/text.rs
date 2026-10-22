@@ -14,7 +14,7 @@
 //! syntax-aware comparison via [`Grammar`][crate::grammar::Grammar] and
 //! configurable normalization through [`TextCompareSettings`].
 
-use std::fmt;
+use std::{collections::HashSet, fmt};
 
 use crate::grammar::{Grammar, Importance};
 
@@ -250,6 +250,82 @@ impl TextDiff {
     /// Return `true` when the texts are identical (no differences).
     pub fn is_empty(&self) -> bool {
         self.differences.is_empty()
+    }
+
+    /// Return the set of 1-based line numbers that participate in a
+    /// difference, from either side.
+    pub fn difference_line_numbers(&self) -> HashSet<usize> {
+        let mut numbers = HashSet::new();
+        for diff in &self.differences {
+            match diff {
+                TextDifference::LineDifferent(left, right) => {
+                    numbers.insert(left.number);
+                    numbers.insert(right.number);
+                }
+                TextDifference::LinesAdded(_, lines)
+                | TextDifference::LinesRemoved(_, lines) => {
+                    numbers.extend(lines.iter().map(|l| l.number));
+                }
+                TextDifference::LinesChanged(_, removed, added) => {
+                    numbers.extend(removed.iter().map(|l| l.number));
+                    numbers.extend(added.iter().map(|l| l.number));
+                }
+                TextDifference::BlankLine => {}
+            }
+        }
+        numbers
+    }
+
+    /// Return the first row index (0-based) of each contiguous difference
+    /// group in a side-by-side view where row `i` shows line `i + 1` of each
+    /// side.
+    ///
+    /// These are the jump targets for next/previous-difference navigation: a
+    /// row belongs to a difference when its line number appears in
+    /// [`Self::difference_line_numbers`], and adjacent such rows collapse
+    /// into a single group.
+    pub fn group_starts(&self) -> Vec<usize> {
+        // A row is a difference row exactly when its 1-based line number is
+        // part of a difference; collect those rows in ascending order.
+        let mut diff_rows: Vec<usize> = self
+            .difference_line_numbers()
+            .into_iter()
+            .filter(|&n| n > 0)
+            .map(|n| n - 1)
+            .collect();
+        diff_rows.sort_unstable();
+
+        // Keep only the first row of each run of consecutive rows.
+        let mut groups: Vec<usize> = Vec::new();
+        let mut prev: Option<usize> = None;
+        for row in diff_rows {
+            if prev.is_none_or(|p| row != p + 1) {
+                groups.push(row);
+            }
+            prev = Some(row);
+        }
+        groups
+    }
+
+    /// Return `(group, total)` for the row under the cursor: the 1-based index
+    /// of the difference group the row falls in, and the total number of
+    /// groups.
+    ///
+    /// Returns `(0, total)` when `row` precedes the first group and `(0, 0)`
+    /// when there are no differences.
+    pub fn position_of(&self, row: usize) -> (usize, usize) {
+        let groups = self.group_starts();
+        let total = groups.len();
+        if total == 0 {
+            return (0, 0);
+        }
+        // The cursor sits in the last group that starts at or before it.
+        for (i, &start) in groups.iter().enumerate().rev() {
+            if row >= start {
+                return (i + 1, total);
+            }
+        }
+        (0, total)
     }
 
     /// Iterate over differences, skipping those below the given importance
@@ -615,5 +691,64 @@ mod tests {
     fn single_line_texts() {
         let diff = compare_texts("a", "b", &default_settings());
         assert!(!diff.is_empty());
+    }
+
+    /// A diff with line 3 differing, lines 4 and 5 added, line 7 differing.
+    fn grouped_diff() -> TextDiff {
+        TextDiff {
+            differences: vec![
+                TextDifference::LineDifferent(
+                    LineInfo::new(3, "a".into()),
+                    LineInfo::new(3, "b".into()),
+                ),
+                TextDifference::LinesAdded(
+                    4,
+                    vec![
+                        LineInfo::new(4, "c".into()),
+                        LineInfo::new(5, "d".into()),
+                    ],
+                ),
+                TextDifference::LineDifferent(
+                    LineInfo::new(7, "e".into()),
+                    LineInfo::new(7, "f".into()),
+                ),
+            ],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn difference_line_numbers_collects_both_sides() {
+        let numbers = grouped_diff().difference_line_numbers();
+        for n in [3, 4, 5, 7] {
+            assert!(numbers.contains(&n), "missing line {n}");
+        }
+        assert!(!numbers.contains(&1));
+        assert!(!numbers.contains(&10));
+    }
+
+    #[test]
+    fn group_starts_merges_contiguous_rows() {
+        // Diff rows 2, 3, 4 (0-based) form one group, row 6 another.
+        assert_eq!(grouped_diff().group_starts(), vec![2, 6]);
+    }
+
+    #[test]
+    fn group_starts_is_empty_without_differences() {
+        assert!(TextDiff::default().group_starts().is_empty());
+    }
+
+    #[test]
+    fn position_of_reports_one_based_group() {
+        let diff = grouped_diff();
+        // Before the first group.
+        assert_eq!(diff.position_of(0), (0, 2));
+        assert_eq!(diff.position_of(3), (1, 2));
+        assert_eq!(diff.position_of(9), (2, 2));
+    }
+
+    #[test]
+    fn position_of_without_differences_is_zero() {
+        assert_eq!(TextDiff::default().position_of(0), (0, 0));
     }
 }

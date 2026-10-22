@@ -41,6 +41,8 @@
 //! - [`patch`] — Unified diff generation and patch application.
 //! - [`grammar`] — Syntax-aware grammar rules for smart diffing.
 //! - [`format`] — File format registry and format-specific settings.
+//! - [`human`] — Human-readable size and date formatting shared by the
+//!   frontends.
 //! - [`error`] — Structured [`FsError`] with operation context.
 //! - [`meta`] — [`Metadata`] for files and directories.
 //! - [`file`] — [`FsFile`] trait for opened file handles.
@@ -61,6 +63,7 @@ pub mod fs;
 pub mod ftp;
 pub mod grammar;
 pub mod hash;
+pub mod human;
 pub mod identity;
 pub mod local;
 pub mod meta;
@@ -103,6 +106,7 @@ pub use hash::{
     ContentCache, ContentCacheConfig, ContentId, hash_and_cache_node,
     hash_bytes, hash_file, hash_file_node,
 };
+pub use human::{format_date, format_size};
 pub use identity::{DirId, FileId, FileSystemId, NodeId};
 pub use local::LocalFs;
 pub use meta::Metadata;
@@ -122,7 +126,8 @@ pub use scan::{
 pub use secrets::{NullPrompter, Prompter, Secrets, TtyPrompter};
 pub use session::{
     ProviderRef, Session, SessionConfig, SessionManager, SessionSettings,
-    SessionType,
+    SessionType, default_session_dir, list_saved_sessions,
+    list_saved_sessions_in,
 };
 pub use sftp::{SftpConfig, SftpDirId, SftpFileId, SftpFs, SftpNodeId};
 // `capture_snapshot` is deprecated in favour of `capture_snapshot_node`

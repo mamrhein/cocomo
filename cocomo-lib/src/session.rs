@@ -27,7 +27,7 @@
 //! node IDs.
 
 use std::{
-    fmt,
+    fmt, io,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -38,7 +38,7 @@ use uuid::Uuid;
 
 use crate::{
     Result,
-    error::FsError,
+    error::{FsError, FsOperation},
     fs::NodeFileSystem,
     identity::NodeId,
     text::{TextCompareSettings, WhitespaceMode},
@@ -242,6 +242,56 @@ impl SessionConfig {
             })?;
         Self::from_toml(&content)
     }
+}
+
+// ---------------------------------------------------------------------------
+// Session-file location and listing
+// ---------------------------------------------------------------------------
+
+/// Return the default directory for saved session files.
+///
+/// Falls back to `~/.config/cocomo/sessions` when the platform reports no
+/// configuration directory.
+pub fn default_session_dir() -> PathBuf {
+    dirs::config_dir()
+        .unwrap_or_else(|| PathBuf::from("~/.config"))
+        .join("cocomo")
+        .join("sessions")
+}
+
+/// List the saved session files (`.toml`) in the default session directory.
+pub async fn list_saved_sessions() -> Result<Vec<PathBuf>> {
+    list_saved_sessions_in(&default_session_dir()).await
+}
+
+/// List the saved session files (`.toml`) in `dir`, sorted by path.
+///
+/// A directory that does not exist yet simply means "no saved sessions"; any
+/// other I/O failure is returned with path context.
+pub async fn list_saved_sessions_in(dir: &Path) -> Result<Vec<PathBuf>> {
+    let mut entries = match fs_err::tokio::read_dir(dir).await {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => {
+            return Err(crate::error::wrap(
+                e,
+                FsOperation::ReadDir,
+                dir.to_path_buf(),
+            ));
+        }
+    };
+
+    let mut sessions = Vec::new();
+    while let Some(entry) = entries.next_entry().await.map_err(|e| {
+        crate::error::wrap(e, FsOperation::ReadDir, dir.to_path_buf())
+    })? {
+        let path = entry.path();
+        if path.extension().is_some_and(|ext| ext == "toml") {
+            sessions.push(path);
+        }
+    }
+    sessions.sort();
+    Ok(sessions)
 }
 
 // ---------------------------------------------------------------------------
@@ -792,5 +842,41 @@ mod tests {
         assert!(mgr.remove_session(&id));
         assert!(!mgr.remove_session(&id));
         assert_eq!(mgr.sessions().len(), 0);
+    }
+
+    #[test]
+    fn default_session_dir_ends_in_cocomo_sessions() {
+        let dir = default_session_dir();
+        assert!(dir.ends_with("cocomo/sessions"), "unexpected: {dir:?}");
+    }
+
+    #[tokio::test]
+    async fn list_saved_sessions_in_missing_dir_is_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("does-not-exist");
+        let sessions = list_saved_sessions_in(&missing).await.unwrap();
+        assert!(sessions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_saved_sessions_in_returns_sorted_toml_files() {
+        let dir = tempfile::tempdir().unwrap();
+        fs_err::tokio::write(dir.path().join("beta.toml"), "")
+            .await
+            .unwrap();
+        fs_err::tokio::write(dir.path().join("alpha.toml"), "")
+            .await
+            .unwrap();
+        // Non-session files are ignored.
+        fs_err::tokio::write(dir.path().join("notes.txt"), "")
+            .await
+            .unwrap();
+
+        let sessions = list_saved_sessions_in(dir.path()).await.unwrap();
+        let names: Vec<_> = sessions
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(names, vec!["alpha.toml", "beta.toml"]);
     }
 }

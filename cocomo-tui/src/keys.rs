@@ -688,16 +688,7 @@ fn handle_enter(session: &SessionView) -> SessionAction {
 
 /// Cycle through sync operations.
 fn cycle_sync_op(current: &SyncOperation, delta: isize) -> SyncOperation {
-    let ops = [
-        SyncOperation::MirrorLeft,
-        SyncOperation::MirrorRight,
-        SyncOperation::UpdateNewer,
-        SyncOperation::UpdateBoth,
-        SyncOperation::CopyLeft,
-        SyncOperation::CopyRight,
-        SyncOperation::CopyNewer,
-        SyncOperation::DeleteOrphans,
-    ];
+    let ops = SyncOperation::ALL;
     let len = ops.len() as isize;
     let idx = ops.iter().position(|x| x == current).unwrap_or(0) as isize;
     let new_idx = ((idx + delta) % len + len) % len;

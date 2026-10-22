@@ -14,7 +14,10 @@
 
 use std::fmt::Write;
 
-use crate::compare::{DirComparison, DirEntry, DirEntryStatus};
+use crate::{
+    compare::{DirComparison, DirEntry, DirEntryStatus},
+    human::format_size,
+};
 
 /// Supported report output formats.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -428,18 +431,6 @@ fn escape_csv_field(field: &str) -> String {
     }
 }
 
-fn format_size(size: u64) -> String {
-    if size >= 1_073_741_824 {
-        format!("{:.1}G", size as f64 / 1_073_741_824.0)
-    } else if size >= 1_048_576 {
-        format!("{:.1}M", size as f64 / 1_048_576.0)
-    } else if size >= 1024 {
-        format!("{:.1}K", size as f64 / 1024.0)
-    } else {
-        format!("{}B", size)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -548,13 +539,5 @@ mod tests {
 
         let report = generate_report(&comparison, ReportFormat::Csv, &config);
         assert!(report.contains("\"file,with,commas.txt\""));
-    }
-
-    #[test]
-    fn format_size_human_readable() {
-        assert_eq!(format_size(512), "512B");
-        assert_eq!(format_size(1024), "1.0K");
-        assert_eq!(format_size(1_048_576), "1.0M");
-        assert_eq!(format_size(1_073_741_824), "1.0G");
     }
 }
