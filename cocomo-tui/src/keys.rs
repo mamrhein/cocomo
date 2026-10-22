@@ -43,7 +43,7 @@ const CTRL: KeyModifiers = KeyModifiers::CONTROL;
 
 /// Which handler owns a binding.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) enum KeyScope {
+pub enum KeyScope {
     /// The App shell: tab management, menu navigation, quit.
     Global,
     /// A directory-comparison session in normal mode.
@@ -58,7 +58,7 @@ pub(crate) enum KeyScope {
 
 /// The command a [`KeyBinding`] performs.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) enum Cmd {
+pub enum Cmd {
     // -- Global scope: executed by the App shell. --
     /// Close the active tab (quit when it was the last one).
     CloseTab,
@@ -421,7 +421,7 @@ const KEYMAP: &[KeyBinding] = &[
 /// A binding matches when the key code is equal, the required modifiers are
 /// present, and — for unmodified bindings — no Ctrl/Alt modifier is set, so
 /// `Ctrl+Tab` never fires the plain `Tab` binding.
-pub(crate) fn lookup(scope: KeyScope, key: KeyEvent) -> Option<Cmd> {
+pub fn lookup(scope: KeyScope, key: KeyEvent) -> Option<Cmd> {
     KEYMAP
         .iter()
         .find(|b| {
@@ -439,7 +439,7 @@ pub(crate) fn lookup(scope: KeyScope, key: KeyEvent) -> Option<Cmd> {
 /// Bindings appear in [`KEYMAP`] order; aliases without a help label are
 /// skipped. Because the labels come from the same table that drives
 /// dispatch, the help bar cannot drift from the actual bindings.
-pub(crate) fn help_line(scopes: &[KeyScope]) -> Line<'static> {
+pub fn help_line(scopes: &[KeyScope]) -> Line<'static> {
     let mut spans: Vec<Span<'static>> = Vec::new();
     for binding in KEYMAP {
         if let Some((keys, description)) = binding.help {
@@ -465,7 +465,7 @@ pub(crate) fn help_line(scopes: &[KeyScope]) -> Line<'static> {
 /// so the caller can report `EventResult::Ignored` and let sibling handlers
 /// see the key. Otherwise returns the [`SessionAction`] the controller must
 /// dispatch.
-pub(crate) fn handle_session_key(
+pub fn handle_session_key(
     session: &mut SessionView,
     key: KeyEvent,
 ) -> Option<SessionAction> {
@@ -768,10 +768,10 @@ mod tests {
             PathBuf::from("/right"),
             false,
         );
-        session.comparison = Some(DirComparison {
+        session.set_comparison(Some(DirComparison {
             entries,
             ..Default::default()
-        });
+        }));
         session
     }
 

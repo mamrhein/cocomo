@@ -24,8 +24,9 @@ use std::{
 };
 
 use cocomo_lib::{
-    CompareConfig, ContentCache, Grammar, LineInfo, LocalFs, SessionConfig,
-    SyncOperation, SyncResult, SyncRules, TextCompareSettings, compare_texts,
+    CompareConfig, ContentCache, DirComparison, Grammar, LineInfo, LocalFs,
+    SessionConfig, SyncOperation, SyncResult, SyncRules, TextCompareSettings,
+    compare_texts,
 };
 use ratatui_kit::crossterm::event::KeyEvent;
 
@@ -40,33 +41,36 @@ use crate::{
     },
 };
 
-/// Run a directory comparison and populate a [`SessionView`].
-pub(crate) async fn run_comparison(
-    session: &mut SessionView,
-) -> anyhow::Result<()> {
+/// Compare two directories and return the raw result.
+///
+/// Takes explicit paths instead of a `&mut SessionView` so callers can run
+/// it inside a spawned task without holding the `APP_STATE` lock across an
+/// `await` — and without constructing a throwaway session just to satisfy
+/// the signature. Use [`SessionView::set_comparison`] to put the result
+/// into a session.
+pub(crate) async fn compare(
+    left: &Path,
+    right: &Path,
+    compare_content: bool,
+) -> anyhow::Result<DirComparison> {
     let fs = LocalFs::new("local");
     let cache = ContentCache::default_config();
 
-    let mut config = if session.compare_content {
+    let mut config = if compare_content {
         CompareConfig::full()
     } else {
         CompareConfig::meta_data_only()
     };
     config.max_depth = Some(1);
 
-    let comparison = cocomo_lib::compare_directories_node(
+    Ok(cocomo_lib::compare_directories_node(
         &fs,
-        &session.left_path,
-        &session.right_path,
+        left,
+        right,
         &config,
         Some(&cache),
     )
-    .await?;
-
-    session.comparison = Some(comparison);
-    session.table_state.select(Some(0));
-
-    Ok(())
+    .await?)
 }
 
 /// Detect a suitable grammar for syntax classification based on file
@@ -201,15 +205,17 @@ async fn create_session_from_config(
     let right_path = &config.right.path;
 
     let compare_files = config.settings.compare_files;
+
+    // Run the comparison; propagate failures so the caller can report them
+    // instead of opening a session with a permanently empty view.
+    let comparison = compare(left_path, right_path, compare_files).await?;
+
     let mut session = SessionView::new_dir_compare(
         left_path.clone(),
         right_path.clone(),
         compare_files,
     );
-
-    // Run the comparison; propagate failures so the caller can report them
-    // instead of opening a session with a permanently empty view.
-    run_comparison(&mut session).await?;
+    session.set_comparison(Some(comparison));
 
     // Restore filter settings.
     if !config.settings.name_filter.is_empty() {
@@ -330,12 +336,14 @@ pub(crate) fn process_session_action(action: SessionAction) {
                     Some((left, right, compare_content))
                 },
                 move |(left, right, compare_content)| async move {
+                    let comparison =
+                        compare(&left, &right, compare_content).await?;
                     let mut session = SessionView::new_dir_compare(
                         left,
                         right,
                         compare_content,
                     );
-                    run_comparison(&mut session).await?;
+                    session.set_comparison(Some(comparison));
                     Ok(session)
                 },
                 |app, session| app.add_session(session),
@@ -363,12 +371,14 @@ pub(crate) fn process_session_action(action: SessionAction) {
                     Some((left, right, session.compare_content))
                 },
                 move |(left, right, compare_content)| async move {
+                    let comparison =
+                        compare(&left, &right, compare_content).await?;
                     let mut session = SessionView::new_dir_compare(
                         left,
                         right,
                         compare_content,
                     );
-                    run_comparison(&mut session).await?;
+                    session.set_comparison(Some(comparison));
                     Ok(session)
                 },
                 |app, session| app.add_session(session),
@@ -384,20 +394,18 @@ pub(crate) fn process_session_action(action: SessionAction) {
                 move |snapshot| async move {
                     // Clear the comparison so the view shows a loading
                     // state.
-                    update_session(id, |s| s.comparison = None);
+                    update_session(id, |s| s.set_comparison(None));
 
-                    let mut session = SessionView::new_dir_compare(
-                        snapshot.left_path,
-                        snapshot.right_path,
+                    compare(
+                        &snapshot.left_path,
+                        &snapshot.right_path,
                         snapshot.compare_content,
-                    );
-                    run_comparison(&mut session).await?;
-                    Ok(session.comparison)
+                    )
+                    .await
                 },
                 move |app, comparison| {
                     if let Some(s) = app.session_mut(id) {
-                        s.comparison = comparison;
-                        s.table_state.select(Some(0));
+                        s.set_comparison(Some(comparison));
                     }
                 },
                 "Comparison failed",

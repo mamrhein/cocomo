@@ -70,3 +70,51 @@ pub(crate) fn grammar_style(importance: Importance) -> Style {
         Importance::Ignored => Style::default().fg(Color::DarkGray),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_size_uses_binary_units() {
+        assert_eq!(format_size(0), "0B");
+        assert_eq!(format_size(999), "999B");
+        assert_eq!(format_size(1024), "1.0K");
+        assert_eq!(format_size(1536), "1.5K");
+        assert_eq!(format_size(3 * 1024 * 1024), "3.0M");
+        assert_eq!(format_size(2 * 1024 * 1024 * 1024), "2.0G");
+    }
+
+    #[test]
+    fn format_date_truncates_to_minutes() {
+        assert_eq!(
+            format_date("2026-10-22T09:47:08+02:00"),
+            "2026-10-22 09:47"
+        );
+        // Strings at or below the cut length pass through unchanged.
+        assert_eq!(format_date("2026-10-22T09:47"), "2026-10-22T09:47");
+        assert_eq!(format_date(""), "");
+    }
+
+    #[test]
+    fn status_style_distinguishes_all_statuses() {
+        let statuses = [
+            DirEntryStatus::Same,
+            DirEntryStatus::SameBinary,
+            DirEntryStatus::Similar,
+            DirEntryStatus::Different,
+            DirEntryStatus::LeftOnly,
+            DirEntryStatus::RightOnly,
+            DirEntryStatus::CenterOnly,
+            DirEntryStatus::Mergeable,
+            DirEntryStatus::Conflict,
+            DirEntryStatus::IdenticalNameDifferentType,
+        ];
+        let mut colors: Vec<Color> =
+            statuses.iter().copied().map(status_style).collect();
+        // `Same` and `SameBinary` intentionally share a color; every other
+        // status must be visually distinct.
+        colors.dedup();
+        assert_eq!(colors.len(), statuses.len() - 1);
+    }
+}

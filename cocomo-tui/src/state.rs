@@ -27,7 +27,7 @@ use ratatui_kit::{Atom, components::table::TableState};
 
 /// Which pane currently has keyboard focus within a session.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub(crate) enum Focus {
+pub enum Focus {
     #[default]
     Left,
     Right,
@@ -38,7 +38,7 @@ pub(crate) enum Focus {
 /// Each text-entry mode owns its input buffers, so a buffer cannot leak
 /// from one mode into another: leaving a mode drops its state with it.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub(crate) enum SessionMode {
+pub enum SessionMode {
     #[default]
     Normal,
     /// The user is typing a filter pattern (buffer:
@@ -70,7 +70,7 @@ impl SessionMode {
 
 /// The type of content a session displays.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) enum SessionType {
+pub enum SessionType {
     /// Two-way folder comparison.
     DirCompare,
     /// Two-way text diff (stub for future implementation).
@@ -79,7 +79,7 @@ pub(crate) enum SessionType {
 
 /// Actions that a session's key handler can request from the App component.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) enum SessionAction {
+pub enum SessionAction {
     /// Open a subdirectory comparison in a new session.
     OpenDir { left: PathBuf, right: PathBuf },
     /// Open a file comparison (text diff) in a new session.
@@ -107,7 +107,7 @@ pub(crate) enum SessionAction {
 /// Each tab in the TUI corresponds to one `SessionView`. It owns the
 /// comparison results, selection state, filters, and UI preferences for
 /// that session.
-pub(crate) struct SessionView {
+pub struct SessionView {
     /// Stable identity of this session.
     ///
     /// Spawned async tasks capture this id at spawn time and write their
@@ -223,6 +223,18 @@ impl SessionView {
         }
     }
 
+    /// Set the directory comparison result and reset the table selection to
+    /// the first row.
+    ///
+    /// `None` puts the session into the loading state, `Some(result)` shows
+    /// a fresh comparison. The selection is reset in both cases so content
+    /// and selection can never disagree; callers no longer pair the
+    /// assignment with a manual `select(Some(0))`.
+    pub fn set_comparison(&mut self, comparison: Option<DirComparison>) {
+        self.comparison = comparison;
+        self.table_state.select(Some(0));
+    }
+
     /// Generate a short tab title from two paths.
     fn tab_title_for_paths(left: &Path, right: &Path) -> String {
         let left_name = left
@@ -303,7 +315,8 @@ impl SessionView {
 /// Manages multiple [`SessionView`] instances as tabs and tracks which tab
 /// is currently active.
 #[allow(dead_code)] // reload_pending and session_count are stubs for M5.2+.
-pub(crate) struct AppState {
+#[derive(Default)]
+pub struct AppState {
     /// All open session tabs.
     pub sessions: Vec<SessionView>,
     /// Index of the currently active tab.
@@ -418,5 +431,161 @@ impl AppState {
     /// Return the index of the active tab.
     pub fn active_index(&self) -> usize {
         self.active_tab
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use cocomo_lib::{DirComparison, DirEntry, DirEntryStatus};
+
+    use super::*;
+
+    fn dir_session() -> SessionView {
+        SessionView::new_dir_compare(
+            PathBuf::from("/left"),
+            PathBuf::from("/right"),
+            false,
+        )
+    }
+
+    fn comparison(entries: &[(&str, DirEntryStatus)]) -> DirComparison {
+        DirComparison {
+            entries: entries
+                .iter()
+                .map(|(name, status)| DirEntry {
+                    name: (*name).to_string(),
+                    status: *status,
+                    left: None,
+                    right: None,
+                    center: None,
+                    sub_entries: None,
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn set_comparison_resets_selection() {
+        let mut session = dir_session();
+        session.table_state.select(Some(7));
+        session.set_comparison(Some(comparison(&[(
+            "a",
+            DirEntryStatus::Different,
+        )])));
+        assert!(session.comparison.is_some());
+        assert_eq!(session.table_state.selected(), Some(0));
+
+        // The loading state resets the selection, too.
+        session.table_state.select(Some(3));
+        session.set_comparison(None);
+        assert!(session.comparison.is_none());
+        assert_eq!(session.table_state.selected(), Some(0));
+    }
+
+    #[test]
+    fn filtered_entries_applies_hide_same_and_name_filter() {
+        let mut session = dir_session();
+        session.set_comparison(Some(comparison(&[
+            ("alpha", DirEntryStatus::Same),
+            ("Beta", DirEntryStatus::Different),
+            ("gamma", DirEntryStatus::LeftOnly),
+        ])));
+        assert_eq!(session.filtered_entries().len(), 3);
+
+        session.hide_same = true;
+        assert_eq!(session.filtered_entries().len(), 2);
+
+        // The name filter is case-insensitive and combines with hide_same.
+        session.active_filter = Some("b".into());
+        let names: Vec<&str> = session
+            .filtered_entries()
+            .iter()
+            .map(|e| e.name.as_str())
+            .collect();
+        assert_eq!(names, ["Beta"]);
+    }
+
+    #[test]
+    fn row_count_tracks_filtered_entries() {
+        let mut session = dir_session();
+        assert_eq!(session.row_count(), 0);
+        session.set_comparison(Some(comparison(&[
+            ("a", DirEntryStatus::Same),
+            ("b", DirEntryStatus::Different),
+        ])));
+        assert_eq!(session.row_count(), 2);
+        session.hide_same = true;
+        assert_eq!(session.row_count(), 1);
+    }
+
+    #[test]
+    fn tab_title_uses_file_names() {
+        let session = SessionView::new_dir_compare(
+            PathBuf::from("/a/b"),
+            PathBuf::from("/x/y"),
+            false,
+        );
+        assert_eq!(session.tab_title(), "b vs y");
+    }
+
+    #[test]
+    fn add_session_activates_the_new_tab() {
+        let mut app = AppState::new();
+        app.add_session(dir_session());
+        app.add_session(dir_session());
+        assert_eq!(app.active_index(), 1);
+        assert_eq!(app.session_count(), 2);
+    }
+
+    #[test]
+    fn switch_tab_wraps_at_both_ends() {
+        let mut app = AppState::new();
+        for _ in 0..3 {
+            app.add_session(dir_session());
+        }
+        assert_eq!(app.active_index(), 2);
+        app.switch_tab(1);
+        assert_eq!(app.active_index(), 0);
+        app.switch_tab(-1);
+        assert_eq!(app.active_index(), 2);
+    }
+
+    #[test]
+    fn close_active_clamps_then_empties() {
+        let mut app = AppState::new();
+        let ids: Vec<usize> = (0..3)
+            .map(|_| {
+                let session = dir_session();
+                let id = session.id;
+                app.add_session(session);
+                id
+            })
+            .collect();
+
+        // The last tab is active; closing it activates the previous one.
+        app.close_active();
+        assert_eq!(app.active_index(), 1);
+        assert_eq!(app.active().map(|s| s.id), Some(ids[1]));
+        app.close_active();
+        app.close_active();
+        assert!(app.sessions.is_empty());
+        assert!(app.active().is_none());
+
+        // Closing with no sessions left is a no-op.
+        app.close_active();
+    }
+
+    #[test]
+    fn session_lookup_by_id_survives_tab_switch() {
+        let mut app = AppState::new();
+        app.add_session(dir_session());
+        let id = app.active().unwrap().id;
+        app.add_session(dir_session());
+        app.switch_tab(-1);
+        assert_eq!(app.active().map(|s| s.id), Some(id));
+        assert!(app.session(id).is_some());
+        assert!(app.session_mut(id).is_some());
+        assert!(app.session(id + 1000).is_none());
     }
 }
