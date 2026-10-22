@@ -25,7 +25,7 @@ use ratatui_kit::{
     },
 };
 
-use super::{rows::TextDiffRow, style};
+use super::{rows::TextDiffRow, style, use_session_table_state};
 use crate::{
     controller::dispatch_session_key,
     diff_model::{current_diff_position, diff_line_numbers},
@@ -43,10 +43,10 @@ pub(super) struct TextCompareViewProps;
 ///
 /// Renders a side-by-side text diff with grammar-based syntax styling and
 /// red/green diff highlighting.  Subscribes to the global [`APP_STATE`] atom
-/// for reactive reads, uses a local `State<TableState>` for table selection
-/// that is synced from the session on each render, and registers an event
-/// handler that delegates to the controller (`dispatch_session_key`, which
-/// routes text-compare keys to `handle_text_key`).
+/// for reactive reads, mirrors the session-owned table selection through
+/// [`use_session_table_state`], and registers an event handler that
+/// delegates to the controller (`dispatch_session_key`, which routes
+/// text-compare keys to `handle_text_key`).
 #[component]
 pub(super) fn TextCompareView(
     mut hooks: Hooks,
@@ -54,12 +54,17 @@ pub(super) fn TextCompareView(
     // Subscribe to global state for re-render notifications on writes.
     let app_handle = hooks.use_atom(&APP_STATE);
 
-    // Local table selection state, synced from the session's table_state.
-    let table_state = hooks.use_state(TableState::default);
-
     // Read session data from the atom.
     let app = app_handle.read();
-    let active_tab = app.active_tab;
+    let session_selected = app
+        .active()
+        .filter(|s| s.session_type == SessionType::TextCompare)
+        .and_then(|s| s.table_state.selected());
+
+    // Mirror the session-owned selection into the `Table` handle. Called
+    // before the early return below so the hook order stays stable.
+    let table_state = use_session_table_state(&mut hooks, session_selected);
+
     let session = match app.active() {
         Some(s) if s.session_type == SessionType::TextCompare => s,
         _ => {
@@ -67,13 +72,6 @@ pub(super) fn TextCompareView(
             return element!(View {});
         }
     };
-
-    // Sync local table state from the session's table_state (no re-render
-    // trigger).
-    let session_selected = session.table_state.selected();
-    if table_state.read().selected() != session_selected {
-        table_state.write_no_update().select(session_selected);
-    }
 
     // Extract rendering data from the session.
     let left_path_str = session.left_path.to_string_lossy().to_string();
@@ -182,22 +180,6 @@ pub(super) fn TextCompareView(
         .unwrap_or_default();
 
     drop(app);
-
-    // Tab-switch sync: when the active tab changes, re-sync local table state
-    // from the new session's table_state.
-    let ts_for_effect = table_state;
-    hooks.use_effect(
-        move || {
-            let app_read = app_handle.read();
-            if let Some(s) = app_read.active()
-                && s.session_type == SessionType::TextCompare
-            {
-                let selected = s.table_state.selected();
-                ts_for_effect.write_no_update().select(selected);
-            }
-        },
-        active_tab,
-    );
 
     // Event handler for session-level keys (j/k, g/G, n/N, l/Tab).
     // The App component's global handler runs first and consumes global keys

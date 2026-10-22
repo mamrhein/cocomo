@@ -34,16 +34,24 @@ pub(crate) enum Focus {
 }
 
 /// The current input mode of a session.
+///
+/// Each text-entry mode owns its input buffers, so a buffer cannot leak
+/// from one mode into another: leaving a mode drops its state with it.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) enum SessionMode {
     #[default]
     Normal,
-    /// The user is typing a filter pattern.
+    /// The user is typing a filter pattern (buffer:
+    /// [`SessionView::filter_input`]).
     Filter,
     /// The user is typing a session name to save.
-    SaveSession,
-    /// The user is browsing saved sessions to load one.
-    LoadSession,
+    SaveSession { name: String },
+    /// The user is picking a saved session to load. `saved_sessions` is
+    /// filled asynchronously by the `ListSessions` action.
+    LoadSession {
+        name: String,
+        saved_sessions: Vec<String>,
+    },
 }
 
 impl SessionMode {
@@ -53,7 +61,10 @@ impl SessionMode {
     /// the shell and session handlers must not claim them (e.g. `q` must
     /// not quit).
     pub fn is_editing(&self) -> bool {
-        matches!(self, Self::Filter | Self::SaveSession | Self::LoadSession)
+        matches!(
+            self,
+            Self::Filter | Self::SaveSession { .. } | Self::LoadSession { .. }
+        )
     }
 }
 
@@ -128,9 +139,10 @@ pub(crate) struct SessionView {
     pub table_state: TableState,
     /// Which pane has keyboard focus.
     pub focus: Focus,
-    /// Current input mode.
+    /// Current input mode (owns the save/load name buffers).
     pub mode: SessionMode,
-    /// Filter text input buffer.
+    /// Filter text input buffer, used only while [`SessionMode::Filter`]
+    /// is active.
     pub filter_input: String,
     /// Active filter pattern. `None` means no filter.
     pub active_filter: Option<String>,

@@ -12,9 +12,6 @@
 use std::sync::Arc;
 
 use cocomo_lib::{DirEntry, TransferAction, TransferItem};
-// `tui_input::Input` is the underlying input-state type used by the Input
-// component and for manual save/load session name entry.
-use ratatui_kit::components::tui_input;
 use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEventKind},
     prelude::*,
@@ -27,21 +24,16 @@ use ratatui_kit::{
         widgets::{Block, Borders},
     },
 };
-// The `EventHandler` trait provides `handle_event` on `tui_input::Input`
-// for processing crossterm key events (character insertion, backspace,
-// etc.).
-use tui_input::backend::crossterm::EventHandler as _;
 
-use super::style;
+use super::{style, use_session_table_state};
 use crate::{
     controller::{
-        dispatch_session_key, process_session_action, set_active_mode,
-        set_filter_input, submit_filter,
+        dispatch_session_key, set_active_mode, set_filter_input,
+        set_mode_name, submit_filter, submit_load_name, submit_save_name,
     },
     format::{format_date, format_size, status_style},
     keys::{self, KeyScope},
-    session_store::default_session_dir,
-    state::{APP_STATE, Focus, SessionAction, SessionMode, SessionType},
+    state::{APP_STATE, Focus, SessionMode, SessionType},
 };
 
 /// Props for [`DirCompareView`] — none; state is read from the global atom.
@@ -51,11 +43,12 @@ pub(super) struct DirCompareViewProps;
 
 /// Directory comparison view using ratatui-kit's `Table` component.
 ///
-/// Subscribes to the global [`APP_STATE`] atom for reactive reads, uses a
-/// local `State<TableState>` for table selection that is synced from the
-/// session on each render, and registers an event handler that delegates to
-/// the controller (`dispatch_session_key`); all state mutations go through
-/// controller functions.
+/// Subscribes to the global [`APP_STATE`] atom for reactive reads, mirrors
+/// the session-owned table selection through [`use_session_table_state`],
+/// and registers an event handler that delegates to the controller
+/// (`dispatch_session_key`); all state mutations go through controller
+/// functions. All text entry (filter, save and load names) uses
+/// `SearchInput`, which owns its exclusive input layer.
 #[component]
 pub(super) fn DirCompareView(
     mut hooks: Hooks,
@@ -63,12 +56,17 @@ pub(super) fn DirCompareView(
     // Subscribe to global state for re-render notifications on writes.
     let app_handle = hooks.use_atom(&APP_STATE);
 
-    // Local table selection state, synced from the session's table_state.
-    let table_state = hooks.use_state(TableState::default);
-
     // Read session data from the atom.
     let app = app_handle.read();
-    let active_tab = app.active_tab;
+    let session_selected = app
+        .active()
+        .filter(|s| s.session_type == SessionType::DirCompare)
+        .and_then(|s| s.table_state.selected());
+
+    // Mirror the session-owned selection into the `Table` handle. Called
+    // before the early return below so the hook order stays stable.
+    let table_state = use_session_table_state(&mut hooks, session_selected);
+
     let session = match app.active() {
         Some(s) if s.session_type == SessionType::DirCompare => s,
         _ => {
@@ -76,13 +74,6 @@ pub(super) fn DirCompareView(
             return element!(View {});
         }
     };
-
-    // Sync local table state from the session's table_state (no re-render
-    // trigger).
-    let session_selected = session.table_state.selected();
-    if table_state.read().selected() != session_selected {
-        table_state.write_no_update().select(session_selected);
-    }
 
     // Extract rendering data from the session.
     let sync_active = session.sync_planned.is_some();
@@ -127,42 +118,6 @@ pub(super) fn DirCompareView(
 
     drop(app);
 
-    // Tab-switch sync: when the active tab changes, re-sync local table state
-    // from the new session's table_state.
-    let ts_for_effect = table_state;
-    hooks.use_effect(
-        move || {
-            let app_read = app_handle.read();
-            if let Some(s) = app_read.active()
-                && s.session_type == SessionType::DirCompare
-            {
-                let selected = s.table_state.selected();
-                ts_for_effect.write_no_update().select(selected);
-            }
-        },
-        active_tab,
-    );
-
-    // Local state for the save/load session name input (tui_input::Input).
-    // Synced from session.filter_input when entering SaveSession/LoadSession
-    // mode.
-    let save_input = hooks.use_state(tui_input::Input::default);
-
-    // Sync save_input from session.filter_input when in
-    // SaveSession/LoadSession mode.
-    if (mode == SessionMode::SaveSession || mode == SessionMode::LoadSession)
-        && save_input.read().value() != filter_input.as_str()
-    {
-        *save_input.write() = tui_input::Input::new(filter_input.clone());
-    }
-
-    // Input layer for save/load session name entry.  Active only when the
-    // session is in SaveSession or LoadSession mode.
-    let input_layer = hooks.use_input_layer(
-        mode == SessionMode::SaveSession || mode == SessionMode::LoadSession,
-        true,
-    );
-
     // Event handler for session-level keys (j/k, g/G, Enter, f, F, etc.).
     // The App component's global handler runs first and consumes global keys
     // (Ctrl+W, Ctrl+Tab, Left/Right, q). For remaining keys, the controller
@@ -183,78 +138,6 @@ pub(super) fn DirCompareView(
                 EventResult::Consumed
             } else {
                 EventResult::Ignored
-            }
-        },
-    );
-
-    // Custom input layer handler for save/load session name entry.
-    // Uses the Input component with manual tui_input::Input state management.
-    let si = save_input;
-    hooks.use_event_handler(
-        EventScope::Layer(input_layer),
-        EventPriority::High,
-        move |event| {
-            let Event::Key(key) = event else {
-                return EventResult::Ignored;
-            };
-            if key.kind != KeyEventKind::Press {
-                return EventResult::Ignored;
-            }
-
-            // Only active when in SaveSession/LoadSession mode.
-            let current_mode = app_handle
-                .read()
-                .active()
-                .map(|s| s.mode.clone())
-                .unwrap_or(SessionMode::Normal);
-            if current_mode != SessionMode::SaveSession
-                && current_mode != SessionMode::LoadSession
-            {
-                return EventResult::Ignored;
-            }
-
-            match key.code {
-                KeyCode::Char(_) | KeyCode::Backspace => {
-                    si.write().handle_event(&Event::Key(key));
-                    set_filter_input(si.read().value().to_string());
-                    EventResult::Consumed
-                }
-                KeyCode::Enter => {
-                    let name = si.read().value().to_string();
-                    set_active_mode(SessionMode::Normal);
-
-                    match current_mode {
-                        SessionMode::SaveSession => {
-                            let save_name = if name.is_empty() {
-                                app_handle
-                                    .read()
-                                    .active()
-                                    .map(|s| s.name.clone())
-                                    .unwrap_or_default()
-                            } else {
-                                name
-                            };
-                            process_session_action(
-                                SessionAction::SaveSession { name: save_name },
-                            );
-                        }
-                        SessionMode::LoadSession => {
-                            let session_dir = default_session_dir();
-                            let path =
-                                session_dir.join(format!("{}.toml", name));
-                            process_session_action(
-                                SessionAction::LoadSession { path },
-                            );
-                        }
-                        _ => {}
-                    }
-                    EventResult::Consumed
-                }
-                KeyCode::Esc => {
-                    set_active_mode(SessionMode::Normal);
-                    EventResult::Consumed
-                }
-                _ => EventResult::Ignored,
             }
         },
     );
@@ -307,8 +190,7 @@ pub(super) fn DirCompareView(
 
     // -- Build status bar line -----------------------------------------------
     // When in Filter, SaveSession, or LoadSession mode, the status bar is
-    // replaced by SearchInput or Input components rendered in the element!
-    // tree.
+    // replaced by a SearchInput rendered in the element! tree.
 
     let status_bar_line: Line<'static> = if sync_active {
         let count = sync_planned_count;
@@ -349,10 +231,10 @@ pub(super) fn DirCompareView(
 
     let help_bar_line: Line<'static> = if mode == SessionMode::Filter {
         Line::from("f=activate  Enter=apply  Esc=cancel")
-    } else if mode == SessionMode::SaveSession {
-        Line::from("Enter=save  Esc=cancel")
-    } else if mode == SessionMode::LoadSession {
-        Line::from("Enter=load  Esc=cancel")
+    } else if matches!(mode, SessionMode::SaveSession { .. }) {
+        Line::from("s=activate  Enter=save  Esc=cancel")
+    } else if matches!(mode, SessionMode::LoadSession { .. }) {
+        Line::from("O=activate  Enter=load  Esc=cancel")
     } else if sync_active {
         Line::from(vec![
             Span::styled("j/k", Style::new().add_modifier(Modifier::BOLD)),
@@ -506,7 +388,9 @@ pub(super) fn DirCompareView(
                     header_style: style::title_style(),
                 )
             }
-            // Status bar or input component depending on mode.
+            // Status bar or input component depending on mode. All text
+            // entry uses SearchInput, which owns its exclusive input layer;
+            // the activate key matches the key that entered the mode.
             if mode == SessionMode::Filter {
                 SearchInput(
                     value: filter_input,
@@ -525,16 +409,47 @@ pub(super) fn DirCompareView(
                         set_active_mode(SessionMode::Normal);
                     }),
                 )
-            } else if mode == SessionMode::SaveSession
-                || mode == SessionMode::LoadSession
+            } else if let SessionMode::SaveSession { name } = &mode {
+                SearchInput(
+                    value: name.clone(),
+                    placeholder: "Session name...".to_string(),
+                    is_editing: true,
+                    activate_key: KeyCode::Char('s'),
+                    on_change: Handler::from(move |val: String| {
+                        set_mode_name(val);
+                    }),
+                    on_submit: Handler::from(move |val: String| -> bool {
+                        submit_save_name(val)
+                    }),
+                    clear_on_escape: true,
+                    on_clear: Handler::from(move |_: ()| {
+                        set_active_mode(SessionMode::Normal);
+                    }),
+                )
+            } else if let SessionMode::LoadSession {
+                name,
+                saved_sessions,
+            } = &mode
             {
-                Border(height: Constraint::Length(3), border_style: border_style) {
-                    Input(
-                        input: save_input.read().clone(),
-                        placeholder: "Session name...".to_string(),
-                        hide_cursor: false,
-                    )
+                if !saved_sessions.is_empty() {
+                    Text(text: Line::from(format!("Saved: {}", saved_sessions.join(", "))))
                 }
+                SearchInput(
+                    value: name.clone(),
+                    placeholder: "Session name to load...".to_string(),
+                    is_editing: true,
+                    activate_key: KeyCode::Char('O'),
+                    on_change: Handler::from(move |val: String| {
+                        set_mode_name(val);
+                    }),
+                    on_submit: Handler::from(move |val: String| -> bool {
+                        submit_load_name(val)
+                    }),
+                    clear_on_escape: true,
+                    on_clear: Handler::from(move |_: ()| {
+                        set_active_mode(SessionMode::Normal);
+                    }),
+                )
             } else {
                 Border(height: Constraint::Length(3), border_style: border_style) {
                     Text(text: status_bar_line)

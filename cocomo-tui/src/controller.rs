@@ -487,12 +487,17 @@ pub(crate) fn process_session_action(action: SessionAction) {
                                 .to_string_lossy()
                                 .to_string()
                         })
-                        .collect::<Vec<_>>()
-                        .join(","))
+                        .collect::<Vec<_>>())
                 },
                 move |app, names| {
-                    if let Some(s) = app.session_mut(id) {
-                        s.filter_input = names;
+                    // Only apply the listing while the session is still
+                    // in load mode; the buffer lives in the mode.
+                    if let Some(s) = app.session_mut(id)
+                        && let SessionMode::LoadSession {
+                            saved_sessions, ..
+                        } = &mut s.mode
+                    {
+                        *saved_sessions = names;
                     }
                 },
                 "Failed to list saved sessions",
@@ -555,6 +560,69 @@ pub(crate) fn set_filter_input(value: String) {
     if let Some(session) = APP_STATE.state().write().active_mut() {
         session.filter_input = value;
     }
+}
+
+/// Update the name buffer of the active session's save/load mode.
+pub(crate) fn set_mode_name(name: String) {
+    if let Some(session) = APP_STATE.state().write().active_mut() {
+        match &mut session.mode {
+            SessionMode::SaveSession { name: buf }
+            | SessionMode::LoadSession { name: buf, .. } => *buf = name,
+            _ => {}
+        }
+    }
+}
+
+/// Submit the typed name for saving the active session.
+///
+/// An empty name falls back to the session's tab title. Returns `true`
+/// when the save was dispatched (so the input component may close its
+/// editing layer), `false` when the session was not in save mode.
+pub(crate) fn submit_save_name(name: String) -> bool {
+    let name = {
+        let state = APP_STATE.state();
+        let mut app = state.write();
+        let Some(session) = app.active_mut() else {
+            return false;
+        };
+        if !matches!(session.mode, SessionMode::SaveSession { .. }) {
+            return false;
+        }
+        let name = if name.is_empty() {
+            session.name.clone()
+        } else {
+            name
+        };
+        session.mode = SessionMode::Normal;
+        name
+    };
+    process_session_action(SessionAction::SaveSession { name });
+    true
+}
+
+/// Submit the typed name for loading a saved session.
+///
+/// Returns `true` when the load was dispatched, `false` when the session
+/// was not in load mode or the name is still empty (keeping the input
+/// open for the user to type one).
+pub(crate) fn submit_load_name(name: String) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    let path = {
+        let state = APP_STATE.state();
+        let mut app = state.write();
+        let Some(session) = app.active_mut() else {
+            return false;
+        };
+        if !matches!(session.mode, SessionMode::LoadSession { .. }) {
+            return false;
+        }
+        session.mode = SessionMode::Normal;
+        default_session_dir().join(format!("{name}.toml"))
+    };
+    process_session_action(SessionAction::LoadSession { path });
+    true
 }
 
 /// Apply `value` as the active session's filter and return to normal mode.

@@ -546,14 +546,18 @@ fn execute(cmd: Cmd, session: &mut SessionView) -> SessionAction {
             SessionAction::ExecuteSync
         }
         Cmd::StartSaveSession => {
-            // Enter input mode for the session name.
-            session.mode = SessionMode::SaveSession;
-            session.filter_input.clear();
+            // Enter input mode; the name buffer lives in the mode itself.
+            session.mode = SessionMode::SaveSession {
+                name: String::new(),
+            };
             SessionAction::None
         }
         Cmd::StartLoadSession => {
             // Enter load mode and list saved sessions for it.
-            session.mode = SessionMode::LoadSession;
+            session.mode = SessionMode::LoadSession {
+                name: String::new(),
+                saved_sessions: Vec::new(),
+            };
             SessionAction::ListSessions
         }
         Cmd::Reload => SessionAction::Reload,
@@ -868,6 +872,38 @@ mod tests {
         // `q` cancels the mode instead of quitting.
         assert!(press(&mut session, KeyCode::Char('q')).is_some());
         assert_eq!(session.mode, SessionMode::Normal);
+    }
+
+    #[test]
+    fn save_and_load_modes_carry_their_own_buffers() {
+        let mut session = dir_session();
+        session.filter_input = "keep me".into();
+
+        // Save mode owns its name buffer; the filter buffer is untouched.
+        assert_eq!(
+            press(&mut session, KeyCode::Char('s')),
+            Some(SessionAction::None)
+        );
+        assert!(
+            matches!(&session.mode, SessionMode::SaveSession { name } if name.is_empty())
+        );
+        assert_eq!(session.filter_input, "keep me");
+
+        // Cancelling drops the mode and its buffer with it.
+        assert!(press(&mut session, KeyCode::Char('q')).is_some());
+        assert_eq!(session.mode, SessionMode::Normal);
+
+        // Load mode carries its own name buffer and saved-session list,
+        // and asks the controller to fill the list.
+        assert_eq!(
+            press(&mut session, KeyCode::Char('O')),
+            Some(SessionAction::ListSessions)
+        );
+        assert!(matches!(
+            &session.mode,
+            SessionMode::LoadSession { name, saved_sessions }
+                if name.is_empty() && saved_sessions.is_empty()
+        ));
     }
 
     #[test]
