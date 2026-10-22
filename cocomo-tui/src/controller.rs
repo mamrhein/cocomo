@@ -17,9 +17,15 @@
 //! operation outside any lock, write the result back under a fresh write
 //! lock (targeting the originating session by id) — implemented once in
 //! [`spawn_task`].
+//!
+//! All `cocomo-lib` and filesystem access in this module returns the typed
+//! [`TuiError`], whose variants carry path context; failures surface in the
+//! `AlertModal` via [`report_error`]. File I/O uses `fs_err::tokio` so
+//! every error names the path it operated on.
 
 use std::{
     future::Future,
+    io,
     path::{Path, PathBuf},
 };
 
@@ -31,6 +37,7 @@ use cocomo_lib::{
 use ratatui_kit::crossterm::event::KeyEvent;
 
 use crate::{
+    error::{Result, TuiError},
     keys::handle_session_key,
     session_store::{
         default_session_dir, list_saved_sessions, session_to_config,
@@ -52,7 +59,7 @@ pub(crate) async fn compare(
     left: &Path,
     right: &Path,
     compare_content: bool,
-) -> anyhow::Result<DirComparison> {
+) -> Result<DirComparison> {
     let fs = LocalFs::new("local");
     let cache = ContentCache::default_config();
 
@@ -94,27 +101,39 @@ fn build_text_settings(grammar: &Grammar) -> TextCompareSettings {
     }
 }
 
-/// Read a file and split it into line info entries with grammar
-/// classification.
-async fn read_file_lines(
-    path: &Path,
-    grammar: &Grammar,
-) -> anyhow::Result<Vec<LineInfo>> {
-    let content = tokio::fs::read_to_string(path).await?;
-    let mut lines = Vec::new();
-    for (i, line) in content.lines().enumerate() {
-        lines.push(
-            LineInfo::new(i + 1, line.to_string()).with_grammar(grammar),
-        );
+/// Read a text file for comparison.
+///
+/// A missing file yields empty content: one side of a comparison can
+/// legitimately not exist (an orphan entry), and the diff then shows the
+/// other side as entirely added. Any other I/O failure is propagated with
+/// path context instead of being swallowed.
+async fn read_text_file(path: &Path) -> Result<String> {
+    match fs_err::tokio::read_to_string(path).await {
+        Ok(content) => Ok(content),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(String::new()),
+        Err(e) => Err(TuiError::io(path, e)),
     }
-    Ok(lines)
+}
+
+/// Split file content into line info entries with grammar classification.
+///
+/// Derives the lines from an already-read string so each file is read
+/// exactly once per comparison.
+fn line_infos(content: &str, grammar: &Grammar) -> Vec<LineInfo> {
+    content
+        .lines()
+        .enumerate()
+        .map(|(i, line)| {
+            LineInfo::new(i + 1, line.to_string()).with_grammar(grammar)
+        })
+        .collect()
 }
 
 /// Run a text comparison and create a new [`SessionView`].
 async fn run_text_comparison(
     left: PathBuf,
     right: PathBuf,
-) -> anyhow::Result<SessionView> {
+) -> Result<SessionView> {
     // Detect grammar from the left file (fall back to right if left is
     // missing).
     let grammar = if left.exists() {
@@ -123,21 +142,12 @@ async fn run_text_comparison(
         detect_grammar(&right)
     };
 
-    // Read file contents.
-    let left_content = if left.exists() {
-        tokio::fs::read_to_string(&left).await.unwrap_or_default()
-    } else {
-        String::new()
-    };
-    let right_content = if right.exists() {
-        tokio::fs::read_to_string(&right).await.unwrap_or_default()
-    } else {
-        String::new()
-    };
-
-    // Build line info for both sides.
-    let left_lines = read_file_lines(&left, &grammar).await?;
-    let right_lines = read_file_lines(&right, &grammar).await?;
+    // Read each file exactly once and derive both the raw content and the
+    // line info from the same string.
+    let left_content = read_text_file(&left).await?;
+    let right_content = read_text_file(&right).await?;
+    let left_lines = line_infos(&left_content, &grammar);
+    let right_lines = line_infos(&right_content, &grammar);
 
     // Run the text comparison.
     let settings = build_text_settings(&grammar);
@@ -163,7 +173,7 @@ async fn plan_sync_session(
     right: &Path,
     operation: SyncOperation,
     compare_content: bool,
-) -> anyhow::Result<SyncResult> {
+) -> Result<SyncResult> {
     let fs = LocalFs::new("local");
     let rules = SyncRules {
         operation,
@@ -184,7 +194,7 @@ async fn execute_sync_session(
     right: &Path,
     operation: SyncOperation,
     compare_content: bool,
-) -> anyhow::Result<SyncResult> {
+) -> Result<SyncResult> {
     let fs = LocalFs::new("local");
     let rules = SyncRules {
         operation,
@@ -199,7 +209,7 @@ async fn execute_sync_session(
 /// Create a directory comparison session from a saved config.
 async fn create_session_from_config(
     config: &SessionConfig,
-) -> anyhow::Result<SessionView> {
+) -> Result<SessionView> {
     // Resolve the paths from the provider ref.
     let left_path = &config.left.path;
     let right_path = &config.right.path;
@@ -295,7 +305,7 @@ fn spawn_task<In, Out, Fut, Extract, Work, Apply>(
 ) where
     In: Send + 'static,
     Out: Send + 'static,
-    Fut: Future<Output = anyhow::Result<Out>> + Send + 'static,
+    Fut: Future<Output = Result<Out>> + Send + 'static,
     Extract: FnOnce(&AppState) -> Option<In> + Send + 'static,
     Work: FnOnce(In) -> Fut + Send + 'static,
     Apply: FnOnce(&mut AppState, Out) + Send + 'static,
@@ -470,7 +480,9 @@ pub(crate) fn process_session_action(action: SessionAction) {
                 move |app| app.session(id).map(session_to_config),
                 move |config| async move {
                     let session_dir = default_session_dir();
-                    std::fs::create_dir_all(&session_dir)?;
+                    fs_err::tokio::create_dir_all(&session_dir)
+                        .await
+                        .map_err(|e| TuiError::io(&session_dir, e))?;
                     let path = session_dir.join(format!("{name}.toml"));
                     config.save_to_file(&path).await?;
                     Ok(())
@@ -671,4 +683,61 @@ pub(crate) fn set_menu_selection(index: usize) {
 /// Dismiss the pending top-level error message.
 pub(crate) fn dismiss_error() {
     APP_STATE.state().write().error_message = None;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn read_text_file_returns_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.txt");
+        fs_err::tokio::write(&path, "hello\nworld\n").await.unwrap();
+        let content = read_text_file(&path).await.unwrap();
+        assert_eq!(content, "hello\nworld\n");
+    }
+
+    #[tokio::test]
+    async fn read_text_file_treats_missing_file_as_empty() {
+        // One side of a comparison may legitimately not exist (orphan
+        // entry); that must not fail the comparison.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("missing.txt");
+        let content = read_text_file(&path).await.unwrap();
+        assert!(content.is_empty());
+    }
+
+    #[tokio::test]
+    async fn read_text_file_propagates_other_io_errors() {
+        // Reading a directory is not a NotFound failure, so the error must
+        // be propagated instead of swallowed.
+        let dir = tempfile::tempdir().unwrap();
+        let err = read_text_file(dir.path()).await.unwrap_err();
+        assert!(matches!(err, TuiError::Io { .. }));
+    }
+
+    #[test]
+    fn line_infos_are_one_based_and_complete() {
+        let grammar = Grammar::plain_text();
+        let lines = line_infos("alpha\nbeta", &grammar);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].number, 1);
+        assert_eq!(lines[0].content, "alpha");
+        assert_eq!(lines[1].number, 2);
+        assert_eq!(lines[1].content, "beta");
+    }
+
+    #[tokio::test]
+    async fn run_text_comparison_reads_missing_left_as_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let left = dir.path().join("gone.rs");
+        let right = dir.path().join("here.rs");
+        fs_err::tokio::write(&right, "fn a() {}\n").await.unwrap();
+        let session = run_text_comparison(left, right).await.unwrap();
+        assert!(session.left_lines.is_empty());
+        assert_eq!(session.right_lines.len(), 1);
+        assert_eq!(session.right_lines[0].content, "fn a() {}");
+        assert!(session.text_diff.is_some());
+    }
 }

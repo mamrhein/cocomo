@@ -16,10 +16,10 @@
 //!
 //! The crate is split by layer: [`state`] owns the state types and the global
 //! `APP_STATE` atom, [`controller`] is the single owner of all state
-//! mutations and the bridge to `cocomo-lib`, [`keys`] is the single source of
-//! truth for key bindings, [`ui`] holds the ratatui-kit components, and
-//! [`run`] wires everything together. The binary in `main.rs` only calls
-//! [`run`].
+//! mutations and the bridge to `cocomo-lib`, [`error`] types the
+//! service-layer failures, [`keys`] is the single source of truth for key
+//! bindings, [`ui`] holds the ratatui-kit components, and [`run`] wires
+//! everything together. The binary in `main.rs` only calls [`run`].
 //!
 //! The pure-logic modules ([`state`], [`keys`], [`diff_model`]) are public so
 //! the integration tests under `tests/` can drive the state machine directly,
@@ -33,6 +33,7 @@ pub mod state;
 
 pub(crate) mod cli;
 pub(crate) mod controller;
+pub(crate) mod error;
 pub(crate) mod format;
 pub(crate) mod session_store;
 pub(crate) mod ui;
@@ -59,12 +60,12 @@ pub async fn run() -> Result<()> {
     let (left, right) = if has_paths {
         let l = cli.left.unwrap();
         let r = cli.right.unwrap();
-        let left = tokio::fs::canonicalize(&l).await?;
-        let right = tokio::fs::canonicalize(&r).await?;
+        let left = fs_err::tokio::canonicalize(&l).await?;
+        let right = fs_err::tokio::canonicalize(&r).await?;
 
         // Validate that both paths exist and are of the same type.
-        let left_meta = tokio::fs::metadata(&left).await?;
-        let right_meta = tokio::fs::metadata(&right).await?;
+        let left_meta = fs_err::tokio::metadata(&left).await?;
+        let right_meta = fs_err::tokio::metadata(&right).await?;
 
         if left_meta.is_file() && right_meta.is_file() {
             return Err(anyhow::anyhow!(
