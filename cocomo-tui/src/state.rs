@@ -328,7 +328,7 @@ pub struct AppState {
     /// Top-level error message to display in an `AlertModal`.
     ///
     /// Set when an operation that cannot be attributed to a specific session
-    /// fails (e.g. the initial comparison launched from `main`).
+    /// fails (e.g. the initial comparison launched at startup).
     pub error_message: Option<String>,
 }
 

@@ -18,8 +18,9 @@
 //! `APP_STATE` atom, [`controller`] is the single owner of all state
 //! mutations and the bridge to `cocomo-lib`, [`error`] types the
 //! service-layer failures, [`keys`] is the single source of truth for key
-//! bindings, [`ui`] holds the ratatui-kit components, and [`run`] wires
-//! everything together. The binary in `main.rs` only calls [`run`].
+//! bindings, [`ui`] holds the ratatui-kit components, [`cli`] turns the
+//! command-line arguments into the [`cli::Startup`] decision, and [`run`]
+//! wires everything together. The binary in `main.rs` only calls [`run`].
 //!
 //! The pure-logic modules ([`state`], [`keys`], [`diff_model`]) are public so
 //! the integration tests under `tests/` can drive the state machine directly,
@@ -38,71 +39,33 @@ pub(crate) mod format;
 pub(crate) mod session_store;
 pub(crate) mod ui;
 
-use std::path::PathBuf;
-
 use anyhow::Result;
 use clap::Parser;
 use ratatui_kit::prelude::*;
 
 use crate::{
-    cli::Cli,
-    controller::compare,
-    state::{APP_STATE, AppState, SessionView},
+    cli::{Cli, Startup},
+    state::{APP_STATE, AppState},
     ui::app::App,
 };
 
 /// Parse the CLI arguments, seed the global [`APP_STATE`], and run the root
 /// [`App`] component on the full screen.
+///
+/// All startup policy lives in [`cli::Cli::startup`]; this function only
+/// translates the resulting [`Startup`] decision into the initial
+/// [`AppState`] and enters the render loop.
 pub async fn run() -> Result<()> {
     let cli = Cli::parse();
 
-    let has_paths = cli.left.is_some() && cli.right.is_some();
-    let (left, right) = if has_paths {
-        let l = cli.left.unwrap();
-        let r = cli.right.unwrap();
-        let left = fs_err::tokio::canonicalize(&l).await?;
-        let right = fs_err::tokio::canonicalize(&r).await?;
-
-        // Validate that both paths exist and are of the same type.
-        let left_meta = fs_err::tokio::metadata(&left).await?;
-        let right_meta = fs_err::tokio::metadata(&right).await?;
-
-        if left_meta.is_file() && right_meta.is_file() {
-            return Err(anyhow::anyhow!(
-                "Comparing individual files is not yet implemented. Please \
-                 provide directories."
-            ));
-        }
-
-        if !left_meta.is_dir() || !right_meta.is_dir() {
-            return Err(anyhow::anyhow!(
-                "Both --left and --right must be directories, or both must \
-                 be files."
-            ));
-        }
-
-        (left, right)
-    } else {
-        (PathBuf::from("."), PathBuf::from("."))
-    };
-
     let mut app = AppState::new();
-
-    // Create the initial comparison session if paths were provided.
-    if has_paths {
-        let comparison = match compare(&left, &right, cli.content).await {
-            Ok(comparison) => Some(comparison),
-            Err(e) => {
-                app.error_message = Some(format!("Comparison failed: {e}"));
-                None
-            }
-        };
-        let mut session =
-            SessionView::new_dir_compare(left, right, cli.content);
-        session.set_comparison(comparison);
-        app.add_session(session);
+    match cli.startup().await? {
+        Startup::Welcome => {}
+        Startup::Session(session) => app.add_session(*session),
+        Startup::ComparisonFailed(err) => {
+            app.error_message = Some(format!("Comparison failed: {err}"));
+        }
     }
-
     APP_STATE.set(app);
 
     element!(App).fullscreen().await?;
