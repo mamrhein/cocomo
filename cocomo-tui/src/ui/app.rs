@@ -10,7 +10,7 @@
 //! Root `App` component: menu bar, tab bar, active view, and error modal.
 
 use ratatui_kit::{
-    crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers},
+    crossterm::event::{Event, KeyEventKind, KeyModifiers},
     prelude::*,
     ratatui::{
         layout::{Constraint, Direction},
@@ -27,7 +27,8 @@ use super::{
 };
 use crate::{
     controller,
-    state::{APP_STATE, SessionMode, SessionType},
+    keys::{self, Cmd, KeyScope},
+    state::{APP_STATE, SessionType},
 };
 
 /// Root component: subscribes to global state, registers global key handlers,
@@ -37,15 +38,14 @@ pub(crate) fn App(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let app_state = hooks.use_atom(&APP_STATE);
     let mut exit = hooks.use_exit();
 
-    // Register global key handler: Ctrl+W (close tab), Ctrl+Tab (switch
-    // tabs), Left/Right (menu nav), q (quit). All state mutations go
-    // through the controller; the atom handle is only used for reads.
+    // Register the global key handler. Which keys the shell owns is defined
+    // by the `Global` scope of the keymap (`keys::KEYMAP`); the help bar is
+    // generated from the same table. All state mutations go through the
+    // controller; the atom handle is only used for reads.
     hooks.use_event_handler(
         EventScope::Current,
         EventPriority::Normal,
         move |event| {
-            const MENU_COUNT: usize = 6; // Sessions, Compare, Sync, View, Filter, Help
-
             let Event::Key(key) = event else {
                 return EventResult::Ignored;
             };
@@ -53,63 +53,54 @@ pub(crate) fn App(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 return EventResult::Ignored;
             }
 
-            // Ctrl+W — close active tab; quit when it was the last one.
-            if key.code == KeyCode::Char('w')
-                && key.modifiers.contains(KeyModifiers::CONTROL)
-            {
-                if controller::close_active_tab() {
+            let Some(cmd) = keys::lookup(KeyScope::Global, key) else {
+                return EventResult::Ignored;
+            };
+
+            match cmd {
+                // Close active tab; quit when it was the last one.
+                Cmd::CloseTab => {
+                    if controller::close_active_tab() {
+                        exit();
+                    }
+                }
+                // Switch tabs (Shift reverses direction).
+                Cmd::SwitchTab => {
+                    let is_shift = key.modifiers.contains(KeyModifiers::SHIFT);
+                    controller::switch_tab(if is_shift { -1 } else { 1 });
+                }
+                Cmd::MenuPrev => {
+                    let current = app_state.read().menu_selection;
+                    controller::set_menu_selection(if current > 0 {
+                        current - 1
+                    } else {
+                        MENU_TITLES.len() - 1
+                    });
+                }
+                Cmd::MenuNext => {
+                    let current = app_state.read().menu_selection;
+                    controller::set_menu_selection(
+                        (current + 1) % MENU_TITLES.len(),
+                    );
+                }
+                Cmd::Quit => {
+                    // Text-entry modes own `q` for their input fields;
+                    // their input layers normally block this handler
+                    // already, so the guard is belt and braces.
+                    if app_state
+                        .read()
+                        .active()
+                        .is_some_and(|s| s.mode.is_editing())
+                    {
+                        return EventResult::Ignored;
+                    }
                     exit();
                 }
-                return EventResult::Consumed;
+                // Session keys are owned by the session view components.
+                _ => return EventResult::Ignored,
             }
 
-            // Ctrl+Tab — switch tabs (Shift reverses direction).
-            if key.code == KeyCode::Tab
-                && key.modifiers.contains(KeyModifiers::CONTROL)
-            {
-                let is_shift = key.modifiers.contains(KeyModifiers::SHIFT);
-                controller::switch_tab(if is_shift { -1 } else { 1 });
-                return EventResult::Consumed;
-            }
-
-            // Left/Right arrow keys — navigate the menu bar.
-            if key.modifiers == KeyModifiers::NONE {
-                match key.code {
-                    KeyCode::Left => {
-                        let current = app_state.read().menu_selection;
-                        controller::set_menu_selection(if current > 0 {
-                            current - 1
-                        } else {
-                            MENU_COUNT - 1
-                        });
-                        return EventResult::Consumed;
-                    }
-                    KeyCode::Right => {
-                        let current = app_state.read().menu_selection;
-                        controller::set_menu_selection(
-                            (current + 1) % MENU_COUNT,
-                        );
-                        return EventResult::Consumed;
-                    }
-                    _ => {}
-                }
-            }
-
-            // q — quit (unless the active session is in filter mode, where
-            // the session's input layer handles the key).
-            if key.code == KeyCode::Char('q') || key.code == KeyCode::Char('Q')
-            {
-                let quit = match app_state.read().active() {
-                    Some(session) => session.mode != SessionMode::Filter,
-                    None => true,
-                };
-                if quit {
-                    exit();
-                    return EventResult::Consumed;
-                }
-            }
-
-            EventResult::Ignored
+            EventResult::Consumed
         },
     );
 

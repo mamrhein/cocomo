@@ -39,6 +39,7 @@ use crate::{
         set_filter_input, submit_filter,
     },
     format::{format_date, format_size, status_style},
+    keys::{self, KeyScope},
     session_store::default_session_dir,
     state::{APP_STATE, Focus, SessionAction, SessionMode, SessionType},
 };
@@ -343,6 +344,8 @@ pub(super) fn DirCompareView(
     };
 
     // -- Build help bar line -------------------------------------------------
+    // Mode-specific hints stay hand-written; the normal-mode bindings come
+    // from the keymap so the bar cannot drift from the actual dispatch.
 
     let help_bar_line: Line<'static> = if mode == SessionMode::Filter {
         Line::from("f=activate  Enter=apply  Esc=cancel")
@@ -358,49 +361,7 @@ pub(super) fn DirCompareView(
             Span::raw(" cancel"),
         ])
     } else {
-        Line::from(vec![
-            Span::styled("j/k", Style::new().add_modifier(Modifier::BOLD)),
-            Span::raw(" navigate  "),
-            Span::styled("l/Tab", Style::new().add_modifier(Modifier::BOLD)),
-            Span::raw(" focus  "),
-            Span::styled("f", Style::new().add_modifier(Modifier::BOLD)),
-            Span::raw(" filter  "),
-            Span::styled("F", Style::new().add_modifier(Modifier::BOLD)),
-            Span::raw(" hide same  "),
-            Span::styled("C", Style::new().add_modifier(Modifier::BOLD)),
-            Span::raw(" cont. on/off  "),
-            Span::styled("m/M", Style::new().add_modifier(Modifier::BOLD)),
-            Span::raw(" sync op  "),
-            Span::styled("P", Style::new().add_modifier(Modifier::BOLD)),
-            Span::raw(" plan  "),
-            Span::styled("e", Style::new().add_modifier(Modifier::BOLD)),
-            Span::raw(" execute  "),
-            Span::styled("r", Style::new().add_modifier(Modifier::BOLD)),
-            Span::raw(" reload  "),
-            Span::styled("s", Style::new().add_modifier(Modifier::BOLD)),
-            Span::raw(" save  "),
-            Span::styled("O", Style::new().add_modifier(Modifier::BOLD)),
-            Span::raw(" load  "),
-            Span::styled(
-                "\u{21A5}",
-                Style::new().add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(" open dir  "),
-            Span::styled(
-                "\u{232B}",
-                Style::new().add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(" up  "),
-            Span::styled("Ctrl+W", Style::new().add_modifier(Modifier::BOLD)),
-            Span::raw(" close  "),
-            Span::styled(
-                "Ctrl+Tab",
-                Style::new().add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(" tabs  "),
-            Span::styled("q", Style::new().add_modifier(Modifier::BOLD)),
-            Span::raw(" quit"),
-        ])
+        keys::help_line(&[KeyScope::DirNormal, KeyScope::Global])
     };
 
     // -- Build the element tree ----------------------------------------------

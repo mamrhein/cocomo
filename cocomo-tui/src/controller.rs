@@ -27,7 +27,7 @@ use cocomo_lib::{
     CompareConfig, ContentCache, Grammar, LineInfo, LocalFs, SessionConfig,
     SyncOperation, SyncResult, SyncRules, TextCompareSettings, compare_texts,
 };
-use ratatui_kit::crossterm::event::{KeyCode, KeyEvent};
+use ratatui_kit::crossterm::event::KeyEvent;
 
 use crate::{
     keys::handle_session_key,
@@ -521,7 +521,10 @@ pub(crate) fn process_session_action(action: SessionAction) {
 ///
 /// Locks `APP_STATE` briefly so [`handle_session_key`] can mutate the
 /// session, releases the lock, then dispatches the resulting intent via
-/// [`process_session_action`]. Returns `true` when the key was consumed.
+/// [`process_session_action`]. Returns `true` only when the key is bound
+/// in the session's current scope; unbound keys are reported as not
+/// consumed so sibling handlers in the same input layer still get a
+/// chance.
 pub(crate) fn dispatch_session_key(
     expected: SessionType,
     key: KeyEvent,
@@ -535,23 +538,16 @@ pub(crate) fn dispatch_session_key(
             return false;
         };
 
-        // Input modes (Filter, SaveSession, LoadSession) are handled by
-        // the input components' own layers; only Esc and q exit the mode
-        // here as a fallback.
-        if session.mode != SessionMode::Normal {
-            if matches!(key.code, KeyCode::Esc | KeyCode::Char('q')) {
-                session.mode = SessionMode::Normal;
-                session.filter_input.clear();
-                return true;
-            }
-            return false;
-        }
-
         handle_session_key(session, key)
     };
 
-    process_session_action(action);
-    true
+    match action {
+        Some(action) => {
+            process_session_action(action);
+            true
+        }
+        None => false,
+    }
 }
 
 /// Set the filter input buffer of the active session.

@@ -46,6 +46,17 @@ pub(crate) enum SessionMode {
     LoadSession,
 }
 
+impl SessionMode {
+    /// Returns `true` when the user is typing into a text field.
+    ///
+    /// While editing, printable keys belong to the input component's layer;
+    /// the shell and session handlers must not claim them (e.g. `q` must
+    /// not quit).
+    pub fn is_editing(&self) -> bool {
+        matches!(self, Self::Filter | Self::SaveSession | Self::LoadSession)
+    }
+}
+
 /// The type of content a session displays.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum SessionType {
@@ -56,7 +67,7 @@ pub(crate) enum SessionType {
 }
 
 /// Actions that a session's key handler can request from the App component.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) enum SessionAction {
     /// Open a subdirectory comparison in a new session.
     OpenDir { left: PathBuf, right: PathBuf },
@@ -216,6 +227,21 @@ impl SessionView {
     /// Return the tab title for this session.
     pub fn tab_title(&self) -> &str {
         &self.name
+    }
+
+    /// Number of table rows this session currently displays.
+    ///
+    /// Directory sessions show the filtered entries; text sessions show one
+    /// row per line of the merged side-by-side view. Navigation must clamp
+    /// against this count, not against [`SessionView::filtered_entries`],
+    /// which is empty for text sessions.
+    pub fn row_count(&self) -> usize {
+        match self.session_type {
+            SessionType::DirCompare => self.filtered_entries().len(),
+            SessionType::TextCompare => {
+                std::cmp::max(self.left_lines.len(), self.right_lines.len())
+            }
+        }
     }
 
     /// Return the filtered entries for display.

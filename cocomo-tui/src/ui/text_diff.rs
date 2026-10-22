@@ -30,6 +30,7 @@ use crate::{
     controller::dispatch_session_key,
     diff_model::{current_diff_position, diff_line_numbers},
     format::{grammar_style, importance_for_line},
+    keys::{self, KeyScope},
     state::{APP_STATE, SessionType},
 };
 
@@ -163,21 +164,10 @@ pub(super) fn TextCompareView(
          {right_line_count} lines"
     ));
 
-    // Build help bar line.
-    let help_bar_line: Line<'static> = Line::from(vec![
-        Span::styled("j/k", Style::new().add_modifier(Modifier::BOLD)),
-        Span::raw(" navigate  "),
-        Span::styled("n/N", Style::new().add_modifier(Modifier::BOLD)),
-        Span::raw(" next/prev diff  "),
-        Span::styled("l/Tab", Style::new().add_modifier(Modifier::BOLD)),
-        Span::raw(" focus  "),
-        Span::styled("Ctrl+W", Style::new().add_modifier(Modifier::BOLD)),
-        Span::raw(" close  "),
-        Span::styled("Ctrl+Tab", Style::new().add_modifier(Modifier::BOLD)),
-        Span::raw(" tabs  "),
-        Span::styled("q", Style::new().add_modifier(Modifier::BOLD)),
-        Span::raw(" quit"),
-    ]);
+    // Build help bar line from the keymap so it cannot drift from the
+    // actual bindings.
+    let help_bar_line: Line<'static> =
+        keys::help_line(&[KeyScope::TextNormal, KeyScope::Global]);
 
     // File names for table column headers.
     let left_name = session
