@@ -31,12 +31,14 @@ pub(super) fn WelcomeScreen(hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let title_line = Line::from("cocomo \u{2014} COmpare, COpy & MOve")
         .set_style(theme.brand)
         .centered();
-    let hint_line_1 =
-        Line::from("Provide --left and --right to start a comparison.")
-            .set_style(theme.dim)
-            .centered();
-    let hint_line_2 =
-        Line::from("Press q to quit.").set_style(theme.dim).centered();
+    let hint_line_1 = Line::from(
+        "Provide a left and a right directory to start a comparison.",
+    )
+    .set_style(theme.dim)
+    .centered();
+    let hint_line_2 = Line::from("Press q to quit.")
+        .set_style(theme.dim)
+        .centered();
     let welcome_title =
         Line::from(" Welcome ").set_style(theme.title).centered();
 

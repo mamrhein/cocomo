@@ -24,12 +24,11 @@ use crate::{controller::compare, error::TuiError, state::SessionView};
 #[derive(Parser, Debug)]
 #[command(name = "cocomo-tui", version, about)]
 pub(crate) struct Cli {
-    /// Left directory path (requires --right).
-    #[arg(short, long, requires = "right")]
+    /// Left directory path.
+    #[arg(requires = "right")]
     pub left: Option<PathBuf>,
 
-    /// Right directory path (requires --left).
-    #[arg(short, long, requires = "left")]
+    /// Right directory path.
     pub right: Option<PathBuf>,
 
     /// Compare file content (using hashing).
@@ -63,8 +62,8 @@ impl Cli {
     /// message; a comparison that fails on otherwise valid paths is
     /// reported as [`Startup::ComparisonFailed`] so the UI can show it.
     pub(crate) async fn startup(&self) -> anyhow::Result<Startup> {
-        // clap's `requires` guarantees `--left` and `--right` come as a
-        // pair, so anything but "both present" means "no paths given".
+        // clap's `requires` guarantees the positional pair comes together,
+        // so anything but "both present" means "no paths given".
         let (Some(left), Some(right)) =
             (self.left.as_deref(), self.right.as_deref())
         else {
@@ -87,8 +86,7 @@ impl Cli {
 
         if !left_meta.is_dir() || !right_meta.is_dir() {
             return Err(anyhow::anyhow!(
-                "Both --left and --right must be directories, or both must \
-                 be files."
+                "Both paths must be directories, or both must be files."
             ));
         }
 
@@ -110,8 +108,7 @@ mod tests {
 
     #[test]
     fn half_specified_pair_is_a_parse_error() {
-        assert!(Cli::try_parse_from(["cocomo-tui", "--left", "/a"]).is_err());
-        assert!(Cli::try_parse_from(["cocomo-tui", "--right", "/b"]).is_err());
+        assert!(Cli::try_parse_from(["cocomo-tui", "/a"]).is_err());
     }
 
     #[test]
@@ -124,15 +121,8 @@ mod tests {
 
     #[test]
     fn full_pair_parses() {
-        let cli = Cli::try_parse_from([
-            "cocomo-tui",
-            "--left",
-            "/a",
-            "--right",
-            "/b",
-            "-c",
-        ])
-        .unwrap();
+        let cli =
+            Cli::try_parse_from(["cocomo-tui", "/a", "/b", "-c"]).unwrap();
         assert_eq!(cli.left.as_deref(), Some(std::path::Path::new("/a")));
         assert_eq!(cli.right.as_deref(), Some(std::path::Path::new("/b")));
         assert!(cli.content);
@@ -150,9 +140,7 @@ mod tests {
         let right = tempfile::tempdir().unwrap();
         let cli = Cli::try_parse_from([
             "cocomo-tui",
-            "--left",
             left.path().to_str().unwrap(),
-            "--right",
             right.path().to_str().unwrap(),
         ])
         .unwrap();
@@ -164,9 +152,7 @@ mod tests {
         let right = tempfile::tempdir().unwrap();
         let cli = Cli::try_parse_from([
             "cocomo-tui",
-            "--left",
             "/definitely-not-here",
-            "--right",
             right.path().to_str().unwrap(),
         ])
         .unwrap();
@@ -188,9 +174,7 @@ mod tests {
         fs_err::tokio::write(&right, b"b").await.unwrap();
         let cli = Cli::try_parse_from([
             "cocomo-tui",
-            "--left",
             left.to_str().unwrap(),
-            "--right",
             right.to_str().unwrap(),
         ])
         .unwrap();
