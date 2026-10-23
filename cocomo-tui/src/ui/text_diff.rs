@@ -11,56 +11,74 @@
 
 use std::sync::Arc;
 
-use cocomo_lib::Importance;
 use ratatui_kit::{
     crossterm::event::{Event, KeyEventKind},
     prelude::*,
     ratatui::{
-        layout::{Alignment, Constraint, Direction},
-        prelude::Stylize,
-        style::{Color, Modifier, Style},
-        symbols,
-        text::{Line, Span},
-        widgets::{Block, Borders},
+        layout::{Constraint, Direction},
+        text::Line,
     },
 };
 
-use super::{rows::TextDiffRow, style, use_session_table_state};
+use super::{
+    diff_list::SessionDiffList,
+    frame::{Frame, HelpBar, StatusBar},
+    rows::{TextDiffRow, text_diff_rows},
+    theme::CocomoTheme,
+};
 use crate::{
     controller::dispatch_text_key,
     diff_model::{current_diff_position, diff_line_numbers},
-    format::{grammar_style, importance_for_line},
     keys::{self, KeyScope},
     state::APP_STATE,
 };
 
-/// Text comparison view using ratatui-kit's `Table` component.
+/// Text comparison view using a windowed side-by-side diff list.
 ///
-/// Renders a side-by-side text diff with grammar-based syntax styling and
-/// red/green diff highlighting.  Subscribes to the global [`APP_STATE`] atom
-/// for reactive reads, mirrors the session-owned table selection through
-/// [`use_session_table_state`], and registers an event handler that
-/// delegates to the controller (`dispatch_text_key`, which routes
-/// text-compare keys to `handle_session_key`).
+/// Renders the diff with grammar-based syntax styling and red/green diff
+/// highlighting.  Subscribes to the global [`APP_STATE`] atom for reactive
+/// reads, registers an event handler that delegates to the controller
+/// (`dispatch_text_key`, which routes text-compare keys to
+/// `handle_session_key`), and memoizes the diff rows: they are rebuilt
+/// only when the session or its line counts change, and the list renders
+/// just the visible window.
 #[component]
 pub(super) fn TextCompareView(
     mut hooks: Hooks,
 ) -> impl Into<AnyElement<'static>> {
     // Subscribe to global state for re-render notifications on writes.
     let app_handle = hooks.use_atom(&APP_STATE);
+    let theme = hooks.use_component_theme::<CocomoTheme>();
 
     // Read session data from the atom.
     let app = app_handle.read();
-    let session_selected = app
-        .active()
-        .filter(|s| s.content.is_text())
-        .and_then(|s| s.ui.table_state.selected());
+    let session = app.active().filter(|s| s.content.is_text());
+    let session_selected = session.and_then(|s| s.ui.table_state.selected());
 
-    // Mirror the session-owned selection into the `Table` handle. Called
-    // before the early return below so the hook order stays stable.
-    let table_state = use_session_table_state(&mut hooks, session_selected);
+    // Memo key: the session identity plus the line counts. The text
+    // content is immutable once the session is created, so the counts
+    // fully determine the rows.
+    let rows_key = session.and_then(|s| {
+        let text = s.text()?;
+        Some((s.core.id, text.left_lines.len(), text.right_lines.len()))
+    });
+    let rows: Arc<Vec<TextDiffRow>> = hooks.use_memo(
+        || match session {
+            Some(s) => match s.text() {
+                Some(text) => text_diff_rows(
+                    &text.left_lines,
+                    &text.right_lines,
+                    &diff_line_numbers(s),
+                    &theme,
+                ),
+                None => Arc::new(Vec::new()),
+            },
+            None => Arc::new(Vec::new()),
+        },
+        rows_key,
+    );
 
-    let Some(session) = app.active().filter(|s| s.content.is_text()) else {
+    let Some(session) = session else {
         drop(app);
         return element!(View {});
     };
@@ -78,65 +96,9 @@ pub(super) fn TextCompareView(
     let left_line_count = text.left_lines.len();
     let right_line_count = text.right_lines.len();
 
-    // Compute diff line numbers and current diff-group position for the
-    // status bar.
-    let diff_numbers = diff_line_numbers(session);
+    // Compute the current diff-group position for the status bar. The row
+    // styles already carry the per-line diff highlighting from the memo.
     let (current_group, total_groups) = current_diff_position(session);
-
-    // Build row data with pre-computed styles (let bindings are not allowed
-    // in element! children blocks).
-    let max_lines = std::cmp::max(left_line_count, right_line_count);
-    let rows: Vec<TextDiffRow> = (0..max_lines)
-        .map(|i| {
-            let left_line = text.left_lines.get(i);
-            let right_line = text.right_lines.get(i);
-
-            // Left side formatting.
-            let left_num = left_line.map(|l| l.number).unwrap_or(0);
-            let left_content = left_line
-                .as_ref()
-                .map(|l| l.content.clone())
-                .unwrap_or_default();
-            let left_is_diff =
-                left_line.is_some_and(|l| diff_numbers.contains(&l.number));
-            let left_importance = left_line
-                .map(importance_for_line)
-                .unwrap_or(Importance::Ignored);
-            let left_style = if left_is_diff {
-                Style::new().fg(Color::Red).add_modifier(Modifier::BOLD)
-            } else {
-                grammar_style(left_importance)
-            };
-
-            // Right side formatting.
-            let right_num = right_line.map(|l| l.number).unwrap_or(0);
-            let right_content = right_line
-                .as_ref()
-                .map(|l| l.content.clone())
-                .unwrap_or_default();
-            let right_is_diff =
-                right_line.is_some_and(|l| diff_numbers.contains(&l.number));
-            let right_importance = right_line
-                .map(importance_for_line)
-                .unwrap_or(Importance::Ignored);
-            let right_style = if right_is_diff {
-                Style::new().fg(Color::Green).add_modifier(Modifier::BOLD)
-            } else {
-                grammar_style(right_importance)
-            };
-
-            TextDiffRow {
-                left_num: format!("{left_num:<6}"),
-                left_marker: if left_is_diff { "\u{25B6} " } else { "  " },
-                left_content,
-                left_style,
-                right_num: format!("{right_num:<6}"),
-                right_marker: if right_is_diff { "\u{25B6} " } else { "  " },
-                right_content,
-                right_style,
-            }
-        })
-        .collect();
 
     // Build header line.
     let header_line = Line::from(format!(
@@ -165,7 +127,7 @@ pub(super) fn TextCompareView(
     let help_bar_line: Line<'static> =
         keys::help_line(&[KeyScope::TextNormal, KeyScope::Global]);
 
-    // File names for table column headers.
+    // File names for the diff column headers.
     let left_name = session
         .core
         .left_path
@@ -207,88 +169,23 @@ pub(super) fn TextCompareView(
 
     // -- Build the element tree ----------------------------------------------
 
-    let border_style = style::border_style();
-    let title_style = style::title_style();
-    let text_block = Block::default()
-        .borders(Borders::ALL)
-        .title(Span::styled(" Text Diff ", title_style))
-        .border_style(border_style);
-
     element!(
         View(flex_direction: Direction::Vertical, height: Constraint::Fill(1)) {
             // Header (1 content line + 2 border lines = 3).
-            Border(
-                height: Constraint::Length(3),
-                border_style: border_style,
-            ) {
-                Text(text: header_line)
-            }
-            // Main content area.
-            if rows.is_empty() {
-                Border(
-                    height: Constraint::Fill(1),
-                    border_style: border_style,
-                    top_title: Line::from(" Text Diff ").fg(Color::Yellow).bold().centered(),
-                ) {
-                    Text(
-                        text: Line::from("Empty file(s)."),
-                        alignment: Alignment::Center,
-                    )
-                }
-            } else {
-                Table<TextDiffRow>(
-                    height: Constraint::Fill(1),
-                    state: Some(table_state),
-                    active: false,
-                    default_index: Some(0),
-                    columns: vec![
-                        TableColumn::new("Num", Constraint::Length(7)),
-                        TableColumn::new("", Constraint::Length(2)),
-                        TableColumn::new(
-                            Line::from(vec![Span::styled(
-                                left_name.clone(),
-                                Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-                            )]),
-                            Constraint::Min(20),
-                        ),
-                        TableColumn::new("Num", Constraint::Length(7)),
-                        TableColumn::new("", Constraint::Length(2)),
-                        TableColumn::new(
-                            Line::from(vec![Span::styled(
-                                right_name.clone(),
-                                Style::new().fg(Color::Magenta).add_modifier(Modifier::BOLD),
-                            )]),
-                            Constraint::Min(20),
-                        ),
-                    ],
-                    rows: rows,
-                    render_row: Some(Arc::new(|row: &TextDiffRow, _is_selected: bool| {
-                        vec![
-                            TableCell::new(row.left_num.clone())
-                                .style(Style::new().fg(Color::DarkGray)),
-                            TableCell::new(row.left_marker).style(row.left_style),
-                            TableCell::new(row.left_content.clone()).style(row.left_style),
-                            TableCell::new(row.right_num.clone())
-                                .style(Style::new().fg(Color::DarkGray)),
-                            TableCell::new(row.right_marker).style(row.right_style),
-                            TableCell::new(row.right_content.clone()).style(row.right_style),
-                        ]
-                    }) as RenderTableRow<TextDiffRow>),
-                    block: Some(text_block),
-                    highlight_style: style::highlight_style(),
-                    highlight_symbol: Some(symbols::block::FULL),
-                    column_spacing: 1u16,
-                    header_style: style::title_style(),
-                )
-            }
+            Frame(height: Constraint::Length(3), lines: vec![header_line])
+            // Main content area: windowed side-by-side diff.
+            SessionDiffList(
+                selected: session_selected,
+                title: "Text Diff",
+                empty_message: "Empty file(s).",
+                rows: rows,
+                left_name: left_name,
+                right_name: right_name,
+            )
             // Status bar.
-            Border(height: Constraint::Length(3), border_style: border_style) {
-                Text(text: status_bar_line)
-            }
+            StatusBar(line: status_bar_line)
             // Help bar.
-            Border(height: Constraint::Length(3), border_style: border_style) {
-                Text(text: help_bar_line)
-            }
+            HelpBar(line: help_bar_line)
         }
     )
 }

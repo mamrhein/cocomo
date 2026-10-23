@@ -454,10 +454,7 @@ pub(crate) fn process_session_action(action: SessionAction) {
                 },
                 move |app, result| {
                     if let Some(s) = app.session_mut(id) {
-                        if let Some(dir) = s.dir_mut() {
-                            dir.sync = Some(SyncStage::Planned(result));
-                        }
-                        s.ui.table_state.select(Some(0));
+                        s.set_sync(SyncStage::Planned(result));
                     }
                 },
                 "Sync planning failed",
@@ -482,10 +479,7 @@ pub(crate) fn process_session_action(action: SessionAction) {
                 },
                 move |app, result| {
                     if let Some(s) = app.session_mut(id) {
-                        if let Some(dir) = s.dir_mut() {
-                            dir.sync = Some(SyncStage::Executed(result));
-                        }
-                        s.ui.table_state.select(Some(0));
+                        s.set_sync(SyncStage::Executed(result));
                     }
                 },
                 "Sync execution failed",

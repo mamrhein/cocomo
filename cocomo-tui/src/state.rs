@@ -149,6 +149,14 @@ pub struct DirView {
     /// Directory comparison result, or `None` if still loading or not yet
     /// run.
     pub comparison: Option<DirComparison>,
+    /// Bumped on every replacement of [`Self::comparison`].
+    ///
+    /// `DirComparison` does not implement `PartialEq`, so this counter is
+    /// the change signal the dir view uses as its row-memoization key.
+    pub comparison_revision: u64,
+    /// Bumped on every sync outcome recorded through
+    /// [`SessionView::set_sync`]. Keys the sync-preview row memoization.
+    pub sync_revision: u64,
     /// Compare file contents (vs. meta data only).
     pub compare_content: bool,
     /// Hide identical entries.
@@ -248,6 +256,8 @@ impl SessionView {
             core: SessionCore::new(left, right),
             content: SessionContent::Dir(DirView {
                 comparison: None,
+                comparison_revision: 0,
+                sync_revision: 0,
                 compare_content,
                 hide_same: false,
                 sync: None,
@@ -323,6 +333,21 @@ impl SessionView {
     pub fn set_comparison(&mut self, comparison: Option<DirComparison>) {
         if let Some(dir) = self.dir_mut() {
             dir.comparison = comparison;
+            dir.comparison_revision += 1;
+            self.ui.table_state.select(Some(0));
+        }
+    }
+
+    /// Record the outcome of a sync run and reset the selection.
+    ///
+    /// Single owner of the `dir.sync` mutation: bumps the revision counter
+    /// that keys the sync-preview row memoization and resets the table
+    /// selection, mirroring [`SessionView::set_comparison`]. A no-op on a
+    /// text session, which has no sync state.
+    pub fn set_sync(&mut self, stage: SyncStage) {
+        if let Some(dir) = self.dir_mut() {
+            dir.sync = Some(stage);
+            dir.sync_revision += 1;
             self.ui.table_state.select(Some(0));
         }
     }

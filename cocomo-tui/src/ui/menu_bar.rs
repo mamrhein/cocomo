@@ -18,7 +18,7 @@ use ratatui_kit::{
     },
 };
 
-use super::style;
+use super::theme::CocomoTheme;
 
 /// Menu bar item labels, in order: Sessions, Compare, Sync, View, Filter,
 /// Help.
@@ -37,15 +37,19 @@ pub(super) struct MenuBarProps {
 /// Top menu bar with tab-like navigation items (Sessions, Compare, Sync,
 /// View, Filter, Help).
 #[component]
-pub(super) fn MenuBar(props: &MenuBarProps) -> impl Into<AnyElement<'static>> {
+pub(super) fn MenuBar(
+    props: &MenuBarProps,
+    hooks: Hooks,
+) -> impl Into<AnyElement<'static>> {
+    let theme = hooks.use_component_theme::<CocomoTheme>();
     let menu_tabs = Tabs::new(props.menu_titles.clone())
         .select(props.selected)
-        .highlight_style(style::title_style())
+        .highlight_style(theme.title)
         .divider(Span::raw(" | "))
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .border_style(style::border_style()),
+                .border_style(theme.border),
         );
 
     element!(

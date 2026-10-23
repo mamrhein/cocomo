@@ -18,7 +18,7 @@ use ratatui_kit::{
     },
 };
 
-use super::style;
+use super::theme::CocomoTheme;
 
 /// Props for [`TabBar`].
 #[derive(Default, Props)]
@@ -32,17 +32,21 @@ pub(super) struct TabBarProps {
 /// Session tab bar showing open comparison sessions. When no sessions are
 /// open, an empty bordered block is rendered.
 #[component]
-pub(super) fn TabBar(props: &TabBarProps) -> impl Into<AnyElement<'static>> {
+pub(super) fn TabBar(
+    props: &TabBarProps,
+    hooks: Hooks,
+) -> impl Into<AnyElement<'static>> {
+    let theme = hooks.use_component_theme::<CocomoTheme>();
     // One `Tabs` value serves both cases: with no titles it renders just
     // the empty bordered block, so the branches do not need to differ.
     let tab_tabs = Tabs::new(props.tab_titles.clone())
         .select(props.active_index)
-        .highlight_style(style::title_style())
+        .highlight_style(theme.title)
         .divider(Span::raw(" | "))
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .border_style(style::border_style()),
+                .border_style(theme.border),
         );
 
     element!(

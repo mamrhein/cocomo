@@ -9,68 +9,96 @@
 
 //! Directory comparison view component.
 
-use std::sync::Arc;
-
-use cocomo_lib::{
-    DirEntry, TransferAction, TransferItem, format_date, format_size,
-};
 use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEventKind},
     prelude::*,
     ratatui::{
-        layout::{Alignment, Constraint, Direction},
-        prelude::Stylize,
-        style::{Color, Modifier, Style},
-        symbols,
+        layout::{Constraint, Direction},
+        style::{Modifier, Style},
         text::{Line, Span},
-        widgets::{Block, Borders},
     },
 };
 
-use super::{style, use_session_table_state};
+use super::{
+    frame::{Frame, HelpBar, StatusBar},
+    rows::{CellRow, cell_row_renderer, dir_rows, sync_rows},
+    session_table::SessionTable,
+    theme::CocomoTheme,
+};
 use crate::{
     controller::{
         dispatch_dir_key, set_active_mode, set_filter_input, set_mode_name,
         submit_filter, submit_load_name, submit_save_name,
     },
-    format::status_style,
     keys::{self, KeyScope},
     state::{APP_STATE, SessionMode, SyncStage},
 };
 
 /// Directory comparison view using ratatui-kit's `Table` component.
 ///
-/// Subscribes to the global [`APP_STATE`] atom for reactive reads, mirrors
-/// the session-owned table selection through [`use_session_table_state`],
-/// and registers an event handler that delegates to the controller
+/// Subscribes to the global [`APP_STATE`] atom for reactive reads and
+/// registers an event handler that delegates to the controller
 /// (`dispatch_dir_key`); all state mutations go through controller
-/// functions. All text entry (filter, save and load names) uses
-/// `SearchInput`, which owns its exclusive input layer.
+/// functions. The table rows are memoized view models ([`CellRow`]) that
+/// are rebuilt only when the comparison revision, the hide-identical
+/// toggle, or the active filter changes. All text entry (filter, save and
+/// load names) uses `SearchInput`, which owns its exclusive input layer.
 #[component]
 pub(super) fn DirCompareView(
     mut hooks: Hooks,
 ) -> impl Into<AnyElement<'static>> {
     // Subscribe to global state for re-render notifications on writes.
     let app_handle = hooks.use_atom(&APP_STATE);
+    let theme = hooks.use_component_theme::<CocomoTheme>();
 
     // Read session data from the atom.
     let app = app_handle.read();
-    let session_selected = app
-        .active()
-        .filter(|s| s.content.is_dir())
-        .and_then(|s| s.ui.table_state.selected());
+    let session = app.active().filter(|s| s.content.is_dir());
+    let dir = session.and_then(|s| s.dir());
+    let session_selected = session.and_then(|s| s.ui.table_state.selected());
 
-    // Mirror the session-owned selection into the `Table` handle. Called
-    // before the early return below so the hook order stays stable.
-    let table_state = use_session_table_state(&mut hooks, session_selected);
+    // Memo keys: the session identity plus the revision counters and the
+    // filters that change the visible rows. `DirComparison` has no
+    // `PartialEq`, so the counters (bumped by `set_comparison` and
+    // `set_sync`) are the change signal.
+    let (rows_key, preview_key) = match session {
+        Some(s) => match s.dir() {
+            Some(d) => (
+                Some((
+                    s.core.id,
+                    d.comparison_revision,
+                    d.hide_same,
+                    s.ui.active_filter.clone(),
+                )),
+                d.sync.as_ref().map(|_| (s.core.id, d.sync_revision)),
+            ),
+            None => (None, None),
+        },
+        None => (None, None),
+    };
 
-    let Some(session) = app.active().filter(|s| s.content.is_dir()) else {
+    let entry_rows: Vec<CellRow> = hooks.use_memo(
+        || match session {
+            Some(s) => dir_rows(&s.filtered_entries(), &theme),
+            None => Vec::new(),
+        },
+        rows_key,
+    );
+    let preview_rows: Vec<CellRow> = hooks.use_memo(
+        || match session.and_then(|s| s.dir()).and_then(|d| d.sync.as_ref()) {
+            Some(stage) => sync_rows(&stage.result().planned, &theme),
+            None => Vec::new(),
+        },
+        preview_key,
+    );
+
+    let Some(session) = session else {
         drop(app);
         return element!(View {});
     };
     // The filter above guarantees a dir session; the binding keeps the
     // borrow checker happy without a panic path.
-    let Some(dir) = session.dir() else {
+    let Some(dir) = dir else {
         drop(app);
         return element!(View {});
     };
@@ -92,13 +120,6 @@ pub(super) fn DirCompareView(
     let left_path_str = session.core.left_path.to_string_lossy().to_string();
     let right_path_str = session.core.right_path.to_string_lossy().to_string();
     let sync_operation = dir.sync_operation;
-    let entries: Vec<DirEntry> =
-        session.filtered_entries().into_iter().cloned().collect();
-    let sync_items: Vec<TransferItem> = dir
-        .sync
-        .as_ref()
-        .map(|stage| stage.result().planned.clone())
-        .unwrap_or_default();
 
     // Extract data needed after dropping the app handle (for status bar and
     // element! rendering). All session references below use these locals.
@@ -142,14 +163,11 @@ pub(super) fn DirCompareView(
 
     // -- Build header lines --------------------------------------------------
 
-    let header_lines = [
+    let header_lines = vec![
         Line::from(vec![
-            Span::styled("cocomo", Style::new().add_modifier(Modifier::BOLD)),
+            Span::styled("cocomo", theme.brand),
             Span::raw(" \u{2014} "),
-            Span::styled(
-                "Folder Compare",
-                Style::new().add_modifier(Modifier::DIM),
-            ),
+            Span::styled("Folder Compare", theme.dim),
         ]),
         Line::from(format!("Left:  {left_path_str}")),
         Line::from(format!("Right: {right_path_str}")),
@@ -164,7 +182,7 @@ pub(super) fn DirCompareView(
             let op_label = sync_operation.label();
             Line::from(Span::styled(
                 format!("Sync: {op_label}  |  {status_text}"),
-                Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                theme.sync_status,
             ))
         } else {
             let stats = comparison_stats;
@@ -221,79 +239,27 @@ pub(super) fn DirCompareView(
         "Directories are identical."
     };
 
-    let border_style = style::border_style();
-    let title_style = style::title_style();
-    let comparison_block = Block::default()
-        .borders(Borders::ALL)
-        .title(Span::styled(" Comparison ", title_style))
-        .border_style(border_style);
-    let sync_block = Block::default()
-        .borders(Borders::ALL)
-        .title(Span::styled(" Sync Preview (dry-run) ", title_style))
-        .border_style(border_style);
-
     element!(
         View(flex_direction: Direction::Vertical, height: Constraint::Fill(1)) {
             // Header (3 content lines + 2 border lines = 5).
-            Border(
-                height: Constraint::Length(5),
-                flex_direction: Direction::Vertical,
-                border_style: border_style,
-            ) {
-                Text(text: header_lines[0].clone())
-                Text(text: header_lines[1].clone())
-                Text(text: header_lines[2].clone())
-            }
-            // Main content area.
+            Frame(height: Constraint::Length(5), lines: header_lines)
+            // Main content area: sync preview or comparison table.
             if sync_active {
-                Table<TransferItem>(
-                    height: Constraint::Fill(1),
-                    state: Some(table_state),
-                    active: false,
-                    default_index: Some(0),
+                SessionTable(
+                    selected: session_selected,
+                    title: "Sync Preview (dry-run)",
                     columns: vec![
                         TableColumn::new("Action", Constraint::Length(30)),
                         TableColumn::new("Path", Constraint::Min(20)),
                     ],
-                    rows: sync_items,
-                    render_row: Some(Arc::new(|item: &TransferItem, _is_selected: bool| {
-                        let action_str = item.action.label().to_string();
-                        let dir_indicator = if item.is_dir { "\u{1F4C4} " } else { "  " };
-                        let action_color = match item.action {
-                            TransferAction::CopyLeft | TransferAction::CopyRight => Color::Green,
-                            TransferAction::CopyCenter => Color::Yellow,
-                            TransferAction::DeleteLeft | TransferAction::DeleteRight => Color::Red,
-                            TransferAction::MoveLeft | TransferAction::MoveRight => Color::Magenta,
-                        };
-                        vec![
-                            TableCell::new(action_str)
-                                .style(Style::new().fg(action_color).add_modifier(Modifier::BOLD)),
-                            TableCell::new(format!("{}{}", dir_indicator, item.rel_path)),
-                        ]
-                    }) as RenderTableRow<TransferItem>),
-                    block: Some(sync_block),
-                    highlight_style: style::highlight_style(),
-                    highlight_symbol: Some(symbols::block::FULL),
-                    column_spacing: 1u16,
-                    header_style: style::title_style(),
+                    rows: preview_rows,
+                    render_row: Some(cell_row_renderer()),
+                    empty_message: Line::from("No transfers planned."),
                 )
-            } else if entries.is_empty() {
-                Border(
-                    height: Constraint::Fill(1),
-                    border_style: border_style,
-                    top_title: Line::from(" Comparison ").fg(Color::Yellow).bold().centered(),
-                ) {
-                    Text(
-                        text: Line::from(empty_msg),
-                        alignment: Alignment::Center,
-                    )
-                }
             } else {
-                Table<DirEntry>(
-                    height: Constraint::Fill(1),
-                    state: Some(table_state),
-                    active: false,
-                    default_index: Some(0),
+                SessionTable(
+                    selected: session_selected,
+                    title: "Comparison",
                     columns: vec![
                         TableColumn::new("T Name", Constraint::Min(20)),
                         TableColumn::new(
@@ -306,47 +272,9 @@ pub(super) fn DirCompareView(
                             Constraint::Length(24),
                         ),
                     ],
-                    rows: entries,
-                    render_row: Some(Arc::new(|entry: &DirEntry, _is_selected: bool| {
-                        let status_color = status_style(entry.status);
-
-                        let left_meta = entry.left.as_ref().map(|l| {
-                            format!(
-                                "{:>6} {}",
-                                format_size(l.size),
-                                format_date(&l.modified)
-                            )
-                        }).unwrap_or_else(|| "-             ".to_string());
-
-                        let right_meta = entry.right.as_ref().map(|r| {
-                            format!(
-                                "{:>6} {}",
-                                format_size(r.size),
-                                format_date(&r.modified)
-                            )
-                        }).unwrap_or_else(|| "-             ".to_string());
-
-                        let dir_indicator = if entry.left.as_ref().is_some_and(|l| l.is_dir)
-                            || entry.right.as_ref().is_some_and(|r| r.is_dir)
-                        {
-                            "\u{1F5C0}"
-                        } else {
-                            " "
-                        };
-
-                        vec![
-                            TableCell::new(format!("{} {}", dir_indicator, entry.name)),
-                            TableCell::new(left_meta),
-                            TableCell::new(entry.status.symbol())
-                                .style(Style::new().fg(status_color).add_modifier(Modifier::BOLD)),
-                            TableCell::new(right_meta),
-                        ]
-                    }) as RenderTableRow<DirEntry>),
-                    block: Some(comparison_block),
-                    highlight_style: style::highlight_style(),
-                    highlight_symbol: Some(symbols::block::FULL),
-                    column_spacing: 1u16,
-                    header_style: style::title_style(),
+                    rows: entry_rows,
+                    render_row: Some(cell_row_renderer()),
+                    empty_message: Line::from(empty_msg),
                 )
             }
             // Status bar or input component depending on mode. All text
@@ -412,14 +340,10 @@ pub(super) fn DirCompareView(
                     }),
                 )
             } else {
-                Border(height: Constraint::Length(3), border_style: border_style) {
-                    Text(text: status_bar_line)
-                }
+                StatusBar(line: status_bar_line)
             }
             // Help bar.
-            Border(height: Constraint::Length(3), border_style: border_style) {
-                Text(text: help_bar_line)
-            }
+            HelpBar(line: help_bar_line)
         }
     )
 }

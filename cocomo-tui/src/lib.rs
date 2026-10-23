@@ -35,7 +35,6 @@ pub mod state;
 pub(crate) mod cli;
 pub(crate) mod controller;
 pub(crate) mod error;
-pub(crate) mod format;
 pub(crate) mod session_store;
 pub(crate) mod ui;
 
@@ -46,7 +45,7 @@ use ratatui_kit::prelude::*;
 use crate::{
     cli::{Cli, Startup},
     state::{APP_STATE, AppState},
-    ui::app::App,
+    ui::{app::App, theme::cocomo_palette},
 };
 
 /// Parse the CLI arguments, seed the global [`APP_STATE`], and run the root
@@ -68,7 +67,14 @@ pub async fn run() -> Result<()> {
     }
     APP_STATE.set(app);
 
-    element!(App).fullscreen().await?;
+    // Inject the app palette at the root so every component (framework
+    // built-ins and `CocomoTheme` readers alike) resolves its styles from
+    // the central scheme.
+    element!(PaletteProvider(palette: cocomo_palette()) {
+        App()
+    })
+    .fullscreen()
+    .await?;
 
     Ok(())
 }
