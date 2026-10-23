@@ -250,7 +250,8 @@ pub(super) fn DirCompareView(
                     title: "Sync Preview (dry-run)",
                     columns: vec![
                         TableColumn::new("Action", Constraint::Length(30)),
-                        TableColumn::new("Path", Constraint::Min(20)),
+                        // `Fill` so the path column absorbs the remaining width.
+                        TableColumn::new("Path", Constraint::Fill(1)),
                     ],
                     rows: preview_rows,
                     render_row: Some(cell_row_renderer()),
@@ -261,7 +262,7 @@ pub(super) fn DirCompareView(
                     selected: session_selected,
                     title: "Comparison",
                     columns: vec![
-                        TableColumn::new("T Name", Constraint::Min(20)),
+                        TableColumn::new("T Name", Constraint::Fill(1)),
                         TableColumn::new(
                             format!("{:>6} {:^17}", "Size", "Modified"),
                             Constraint::Length(24),

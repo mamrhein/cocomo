@@ -111,6 +111,14 @@ pub(super) fn SessionTable(
             rows: props.rows.clone(),
             render_row: props.render_row.clone(),
             block: Some(block),
+            // The block already draws the outer border; the table must not
+            // draw its own. With `Outer`, ratatui-kit 0.12 reserves (n-1)
+            // cells for inter-column separators in the border lines but
+            // writes none in the content rows, so the rows' right border
+            // ends short of the panel's right edge. `None` keeps the
+            // layout math and the rendered rows consistent, filling the
+            // block's inner width exactly.
+            border_mode: TableBorderMode::None,
             highlight_style: theme.highlight,
             highlight_symbol: Some(symbols::block::FULL),
             column_spacing: 1u16,
