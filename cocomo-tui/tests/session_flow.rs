@@ -23,7 +23,7 @@ use cocomo_lib::{
 };
 use cocomo_tui::{
     keys::{Cmd, KeyScope, handle_session_key, lookup},
-    state::{AppState, SessionAction, SessionMode, SessionType, SessionView},
+    state::{AppState, SessionAction, SessionMode, SessionView, SyncStage},
 };
 use ratatui_kit::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -84,7 +84,7 @@ fn dir_session() -> SessionView {
 #[test]
 fn enter_on_directory_entry_requests_open_dir() {
     let mut session = dir_session();
-    session.table_state.select(Some(0));
+    session.ui.table_state.select(Some(0));
     assert_eq!(
         press(&mut session, KeyCode::Enter),
         Some(SessionAction::OpenDir {
@@ -97,7 +97,7 @@ fn enter_on_directory_entry_requests_open_dir() {
 #[test]
 fn enter_on_file_entry_requests_open_file() {
     let mut session = dir_session();
-    session.table_state.select(Some(1));
+    session.ui.table_state.select(Some(1));
     assert_eq!(
         press(&mut session, KeyCode::Enter),
         Some(SessionAction::OpenFile {
@@ -112,7 +112,10 @@ fn enter_on_file_entry_requests_open_file() {
 #[test]
 fn sync_operation_cycles_forward_and_back() {
     let mut session = dir_session();
-    assert_eq!(session.sync_operation, SyncOperation::default());
+    assert_eq!(
+        session.dir().unwrap().sync_operation,
+        SyncOperation::default()
+    );
 
     // A full forward cycle returns to the start.
     for _ in 0..8 {
@@ -121,21 +124,27 @@ fn sync_operation_cycles_forward_and_back() {
             Some(SessionAction::None)
         );
     }
-    assert_eq!(session.sync_operation, SyncOperation::default());
+    assert_eq!(
+        session.dir().unwrap().sync_operation,
+        SyncOperation::default()
+    );
 
     // One backward step wraps to the last operation.
     assert_eq!(
         press(&mut session, KeyCode::Char('M')),
         Some(SessionAction::None)
     );
-    assert_eq!(session.sync_operation, SyncOperation::DeleteOrphans);
+    assert_eq!(
+        session.dir().unwrap().sync_operation,
+        SyncOperation::DeleteOrphans
+    );
 }
 
 #[test]
 fn session_keys_report_their_controller_actions() {
     let mut session = dir_session();
     press(&mut session, KeyCode::Char('m'));
-    let op = session.sync_operation;
+    let op = session.dir().unwrap().sync_operation;
     assert_eq!(
         press(&mut session, KeyCode::Char('P')),
         Some(SessionAction::PlanSync { operation: op })
@@ -157,18 +166,27 @@ fn session_keys_report_their_controller_actions() {
 #[test]
 fn cancel_clears_sync_preview_before_filter() {
     let mut session = dir_session();
-    session.active_filter = Some("txt".into());
+    session.ui.active_filter = Some("txt".into());
 
     // Without a preview, Esc clears the filter.
     assert_eq!(press(&mut session, KeyCode::Esc), Some(SessionAction::None));
-    assert_eq!(session.active_filter, None);
+    assert_eq!(session.ui.active_filter, None);
 
-    // With a preview, Esc drops the preview and keeps the filter.
-    session.active_filter = Some("txt".into());
-    session.sync_planned = Some(SyncResult::default());
-    assert_eq!(press(&mut session, KeyCode::Esc), Some(SessionAction::None));
-    assert!(session.sync_planned.is_none());
-    assert_eq!(session.active_filter.as_deref(), Some("txt"));
+    // With a preview, Esc drops the preview and keeps the filter; the stage
+    // variant (planned vs. executed) makes no difference to the cancel.
+    for stage in [
+        SyncStage::Planned(SyncResult::default()),
+        SyncStage::Executed(SyncResult::default()),
+    ] {
+        session.ui.active_filter = Some("txt".into());
+        session.dir_mut().unwrap().sync = Some(stage);
+        assert_eq!(
+            press(&mut session, KeyCode::Esc),
+            Some(SessionAction::None)
+        );
+        assert!(session.dir().unwrap().sync.is_none());
+        assert_eq!(session.ui.active_filter.as_deref(), Some("txt"));
+    }
 }
 
 #[test]
@@ -180,20 +198,20 @@ fn editing_scope_preempts_session_commands() {
         lookup(KeyScope::DirNormal, key(KeyCode::Char('j'))),
         Some(Cmd::NextRow)
     );
-    assert_eq!(session.table_state.selected(), Some(0));
+    assert_eq!(session.ui.table_state.selected(), Some(0));
     assert_eq!(
         press(&mut session, KeyCode::Char('j')),
         Some(SessionAction::None)
     );
-    assert_eq!(session.table_state.selected(), Some(1));
+    assert_eq!(session.ui.table_state.selected(), Some(1));
 
     // ...but while a text-entry mode is active it belongs to the input
     // component, so the session handler must not claim it.
-    session.mode = SessionMode::Filter;
+    session.ui.mode = SessionMode::Filter;
     assert_eq!(press(&mut session, KeyCode::Char('j')), None);
     // Esc (Editing scope) cancels the mode.
     assert_eq!(press(&mut session, KeyCode::Esc), Some(SessionAction::None));
-    assert_eq!(session.mode, SessionMode::Normal);
+    assert_eq!(session.ui.mode, SessionMode::Normal);
 }
 
 #[test]
@@ -203,10 +221,7 @@ fn tab_lifecycle_through_app_state() {
         app.add_session(dir_session());
     }
     assert_eq!(app.active_index(), 2);
-    assert_eq!(
-        app.active().map(|s| s.session_type),
-        Some(SessionType::DirCompare)
-    );
+    assert!(app.active().is_some_and(|s| s.content.is_dir()));
 
     app.switch_tab(1);
     assert_eq!(app.active_index(), 0); // wraps forward

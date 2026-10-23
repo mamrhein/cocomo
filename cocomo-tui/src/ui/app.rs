@@ -28,8 +28,18 @@ use super::{
 use crate::{
     controller,
     keys::{self, Cmd, KeyScope},
-    state::{APP_STATE, SessionType},
+    state::{APP_STATE, SessionContent},
 };
+
+/// Which view the main content area renders, derived from the active
+/// session's [`SessionContent`] (the enum is the single source of truth for
+/// the session type).
+#[derive(Clone, Copy)]
+enum ActiveView {
+    Dir,
+    Text,
+    Welcome,
+}
 
 /// Root component: subscribes to global state, registers global key handlers,
 /// and renders the menu bar, tab bar, and main content.
@@ -90,7 +100,7 @@ pub(crate) fn App(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     if app_state
                         .read()
                         .active()
-                        .is_some_and(|s| s.mode.is_editing())
+                        .is_some_and(|s| s.ui.mode.is_editing())
                     {
                         return EventResult::Ignored;
                     }
@@ -108,7 +118,11 @@ pub(crate) fn App(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let app = app_state.read();
     let menu_selection = app.menu_selection;
     let active_index = app.active_index();
-    let active_session_type = app.active().map(|s| s.session_type);
+    let active_view = match app.active().map(|s| &s.content) {
+        Some(SessionContent::Dir(_)) => ActiveView::Dir,
+        Some(SessionContent::Text(_)) => ActiveView::Text,
+        None => ActiveView::Welcome,
+    };
 
     // Extract error message for the AlertModal (cloned to avoid holding the
     // read guard across element! rendering).
@@ -132,10 +146,10 @@ pub(crate) fn App(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             MenuBar(menu_titles: menu_titles, selected: menu_selection)
             TabBar(tab_titles: tab_titles, active_index: active_index)
             View(height: Constraint::Min(1)) {
-                match active_session_type {
-                    Some(SessionType::DirCompare) => { DirCompareView() }
-                    Some(SessionType::TextCompare) => { TextCompareView() }
-                    None => { WelcomeScreen() }
+                match active_view {
+                    ActiveView::Dir => { DirCompareView() }
+                    ActiveView::Text => { TextCompareView() }
+                    ActiveView::Welcome => { WelcomeScreen() }
                 }
             }
             AlertModal(

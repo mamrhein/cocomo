@@ -30,12 +30,12 @@ use ratatui_kit::{
 use super::{style, use_session_table_state};
 use crate::{
     controller::{
-        dispatch_session_key, set_active_mode, set_filter_input,
-        set_mode_name, submit_filter, submit_load_name, submit_save_name,
+        dispatch_dir_key, set_active_mode, set_filter_input, set_mode_name,
+        submit_filter, submit_load_name, submit_save_name,
     },
     format::status_style,
     keys::{self, KeyScope},
-    state::{APP_STATE, Focus, SessionMode, SessionType},
+    state::{APP_STATE, Focus, SessionMode, SyncStage},
 };
 
 /// Props for [`DirCompareView`] — none; state is read from the global atom.
@@ -48,7 +48,7 @@ pub(super) struct DirCompareViewProps;
 /// Subscribes to the global [`APP_STATE`] atom for reactive reads, mirrors
 /// the session-owned table selection through [`use_session_table_state`],
 /// and registers an event handler that delegates to the controller
-/// (`dispatch_session_key`); all state mutations go through controller
+/// (`dispatch_dir_key`); all state mutations go through controller
 /// functions. All text entry (filter, save and load names) uses
 /// `SearchInput`, which owns its exclusive input layer.
 #[component]
@@ -62,52 +62,54 @@ pub(super) fn DirCompareView(
     let app = app_handle.read();
     let session_selected = app
         .active()
-        .filter(|s| s.session_type == SessionType::DirCompare)
-        .and_then(|s| s.table_state.selected());
+        .filter(|s| s.content.is_dir())
+        .and_then(|s| s.ui.table_state.selected());
 
     // Mirror the session-owned selection into the `Table` handle. Called
     // before the early return below so the hook order stays stable.
     let table_state = use_session_table_state(&mut hooks, session_selected);
 
-    let session = match app.active() {
-        Some(s) if s.session_type == SessionType::DirCompare => s,
-        _ => {
-            drop(app);
-            return element!(View {});
-        }
+    let Some(session) = app.active().filter(|s| s.content.is_dir()) else {
+        drop(app);
+        return element!(View {});
+    };
+    // The filter above guarantees a dir session; the binding keeps the
+    // borrow checker happy without a panic path.
+    let Some(dir) = session.dir() else {
+        drop(app);
+        return element!(View {});
     };
 
-    // Extract rendering data from the session.
-    let sync_active = session.sync_planned.is_some();
-    let mode = session.mode.clone();
-    let focus = session.focus;
-    let hide_same = session.hide_same;
-    let active_filter = session.active_filter.clone();
-    let left_path_str = session.left_path.to_string_lossy().to_string();
-    let right_path_str = session.right_path.to_string_lossy().to_string();
-    let sync_operation = session.sync_operation;
+    // Extract rendering data from the session. The sync status label reads
+    // from a single match on the `SyncStage`, so "Planned" vs. "Executed"
+    // is decided by the variant, not by inspecting the `SyncResult`.
+    let sync_status: Option<String> =
+        dir.sync.as_ref().map(|stage| match stage {
+            SyncStage::Planned(result) => {
+                format!("Planned: {} transfers", result.planned_count())
+            }
+            SyncStage::Executed(_) => "Executed".to_string(),
+        });
+    let sync_active = dir.sync.is_some();
+    let mode = session.ui.mode.clone();
+    let focus = session.ui.focus;
+    let hide_same = dir.hide_same;
+    let active_filter = session.ui.active_filter.clone();
+    let left_path_str = session.core.left_path.to_string_lossy().to_string();
+    let right_path_str = session.core.right_path.to_string_lossy().to_string();
+    let sync_operation = dir.sync_operation;
     let entries: Vec<DirEntry> =
         session.filtered_entries().into_iter().cloned().collect();
-    let sync_items: Vec<TransferItem> = session
-        .sync_planned
+    let sync_items: Vec<TransferItem> = dir
+        .sync
         .as_ref()
-        .map(|s| s.planned.clone())
+        .map(|stage| stage.result().planned.clone())
         .unwrap_or_default();
 
     // Extract data needed after dropping the app handle (for status bar and
     // element! rendering). All session references below use these locals.
-    let filter_input = session.filter_input.clone();
-    let sync_planned_count = session
-        .sync_planned
-        .as_ref()
-        .map(|s| s.planned_count())
-        .unwrap_or(0);
-    let sync_executed = session
-        .sync_planned
-        .as_ref()
-        .map(|s| s.transfer.is_some())
-        .unwrap_or(false);
-    let comparison_stats = session.comparison.as_ref().map(|c| {
+    let filter_input = session.ui.filter_input.clone();
+    let comparison_stats = dir.comparison.as_ref().map(|c| {
         format!(
             "Total: {}  Same: {}  Diff: {}  Orphans: {}",
             c.total(),
@@ -116,7 +118,7 @@ pub(super) fn DirCompareView(
             c.orphan_count(),
         )
     });
-    let comparison_is_none = session.comparison.is_none();
+    let comparison_is_none = dir.comparison.is_none();
 
     drop(app);
 
@@ -136,7 +138,7 @@ pub(super) fn DirCompareView(
                 return EventResult::Ignored;
             }
 
-            if dispatch_session_key(SessionType::DirCompare, key) {
+            if dispatch_dir_key(key) {
                 EventResult::Consumed
             } else {
                 EventResult::Ignored
@@ -194,38 +196,32 @@ pub(super) fn DirCompareView(
     // When in Filter, SaveSession, or LoadSession mode, the status bar is
     // replaced by a SearchInput rendered in the element! tree.
 
-    let status_bar_line: Line<'static> = if sync_active {
-        let count = sync_planned_count;
-        let executed = sync_executed;
-        let op_label = sync_operation.label();
-        let status_text = if executed {
-            "Executed".to_string()
+    let status_bar_line: Line<'static> =
+        if let Some(status_text) = &sync_status {
+            let op_label = sync_operation.label();
+            Line::from(Span::styled(
+                format!("Sync: {op_label}  |  {status_text}"),
+                Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            ))
         } else {
-            format!("Planned: {} transfers", count)
+            let stats = comparison_stats;
+            let filter_info = active_filter
+                .as_ref()
+                .map(|f| format!("*{f}*"))
+                .unwrap_or_else(|| "No filter".to_string());
+            let display = if hide_same {
+                "Hiding identical"
+            } else {
+                "Showing all"
+            };
+            Line::from(vec![
+                Span::raw(stats.unwrap_or_else(|| "No data".to_string())),
+                Span::raw("  |  "),
+                Span::raw(filter_info),
+                Span::raw("  |  "),
+                Span::raw(display),
+            ])
         };
-        Line::from(Span::styled(
-            format!("Sync: {op_label}  |  {status_text}"),
-            Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-        ))
-    } else {
-        let stats = comparison_stats;
-        let filter_info = active_filter
-            .as_ref()
-            .map(|f| format!("*{f}*"))
-            .unwrap_or_else(|| "No filter".to_string());
-        let display = if hide_same {
-            "Hiding identical"
-        } else {
-            "Showing all"
-        };
-        Line::from(vec![
-            Span::raw(stats.unwrap_or_else(|| "No data".to_string())),
-            Span::raw("  |  "),
-            Span::raw(filter_info),
-            Span::raw("  |  "),
-            Span::raw(display),
-        ])
-    };
 
     // -- Build help bar line -------------------------------------------------
     // Mode-specific hints stay hand-written; the normal-mode bindings come

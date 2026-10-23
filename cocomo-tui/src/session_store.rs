@@ -21,23 +21,30 @@ use cocomo_lib::{
 use crate::state::SessionView;
 
 /// Convert a directory comparison session to a serializable config.
-pub(crate) fn session_to_config(session: &SessionView) -> SessionConfig {
-    SessionConfig {
-        name: session.name.clone(),
+///
+/// Returns `None` for a text session, which has no directory settings to
+/// persist.
+pub(crate) fn session_to_config(
+    session: &SessionView,
+) -> Option<SessionConfig> {
+    let dir = session.dir()?;
+    Some(SessionConfig {
+        name: session.core.name.clone(),
         session_type: LibSessionType::DirCompare,
         left: ProviderRef {
             provider: "local".to_string(),
-            path: session.left_path.clone(),
+            path: session.core.left_path.clone(),
         },
         right: ProviderRef {
             provider: "local".to_string(),
-            path: session.right_path.clone(),
+            path: session.core.right_path.clone(),
         },
         center: None,
         settings: SessionSettings {
-            compare_files: session.compare_content,
+            compare_files: dir.compare_content,
             compare_structure: true,
             name_filter: session
+                .ui
                 .active_filter
                 .as_ref()
                 .map(|f| vec![f.clone()])
@@ -45,9 +52,9 @@ pub(crate) fn session_to_config(session: &SessionView) -> SessionConfig {
             ignore_whitespace: false,
             skip_blank_lines: false,
             skip_comments: false,
-            show_same: !session.hide_same,
+            show_same: !dir.hide_same,
             show_different: true,
             show_orphans: true,
         },
-    }
+    })
 }

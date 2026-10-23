@@ -27,11 +27,11 @@ use ratatui_kit::{
 
 use super::{rows::TextDiffRow, style, use_session_table_state};
 use crate::{
-    controller::dispatch_session_key,
+    controller::dispatch_text_key,
     diff_model::{current_diff_position, diff_line_numbers},
     format::{grammar_style, importance_for_line},
     keys::{self, KeyScope},
-    state::{APP_STATE, SessionType},
+    state::APP_STATE,
 };
 
 /// Props for [`TextCompareView`] — none; state is read from the global atom.
@@ -45,8 +45,8 @@ pub(super) struct TextCompareViewProps;
 /// red/green diff highlighting.  Subscribes to the global [`APP_STATE`] atom
 /// for reactive reads, mirrors the session-owned table selection through
 /// [`use_session_table_state`], and registers an event handler that
-/// delegates to the controller (`dispatch_session_key`, which routes
-/// text-compare keys to `handle_text_key`).
+/// delegates to the controller (`dispatch_text_key`, which routes
+/// text-compare keys to `handle_session_key`).
 #[component]
 pub(super) fn TextCompareView(
     mut hooks: Hooks,
@@ -58,27 +58,30 @@ pub(super) fn TextCompareView(
     let app = app_handle.read();
     let session_selected = app
         .active()
-        .filter(|s| s.session_type == SessionType::TextCompare)
-        .and_then(|s| s.table_state.selected());
+        .filter(|s| s.content.is_text())
+        .and_then(|s| s.ui.table_state.selected());
 
     // Mirror the session-owned selection into the `Table` handle. Called
     // before the early return below so the hook order stays stable.
     let table_state = use_session_table_state(&mut hooks, session_selected);
 
-    let session = match app.active() {
-        Some(s) if s.session_type == SessionType::TextCompare => s,
-        _ => {
-            drop(app);
-            return element!(View {});
-        }
+    let Some(session) = app.active().filter(|s| s.content.is_text()) else {
+        drop(app);
+        return element!(View {});
+    };
+    // The filter above guarantees a text session; the binding keeps the
+    // borrow checker happy without a panic path.
+    let Some(text) = session.text() else {
+        drop(app);
+        return element!(View {});
     };
 
     // Extract rendering data from the session.
-    let left_path_str = session.left_path.to_string_lossy().to_string();
-    let right_path_str = session.right_path.to_string_lossy().to_string();
-    let grammar_name = session.grammar.name.clone();
-    let left_line_count = session.left_lines.len();
-    let right_line_count = session.right_lines.len();
+    let left_path_str = session.core.left_path.to_string_lossy().to_string();
+    let right_path_str = session.core.right_path.to_string_lossy().to_string();
+    let grammar_name = text.grammar.name.clone();
+    let left_line_count = text.left_lines.len();
+    let right_line_count = text.right_lines.len();
 
     // Compute diff line numbers and current diff-group position for the
     // status bar.
@@ -90,8 +93,8 @@ pub(super) fn TextCompareView(
     let max_lines = std::cmp::max(left_line_count, right_line_count);
     let rows: Vec<TextDiffRow> = (0..max_lines)
         .map(|i| {
-            let left_line = session.left_lines.get(i);
-            let right_line = session.right_lines.get(i);
+            let left_line = text.left_lines.get(i);
+            let right_line = text.right_lines.get(i);
 
             // Left side formatting.
             let left_num = left_line.map(|l| l.number).unwrap_or(0);
@@ -169,11 +172,13 @@ pub(super) fn TextCompareView(
 
     // File names for table column headers.
     let left_name = session
+        .core
         .left_path
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_default();
     let right_name = session
+        .core
         .right_path
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
@@ -184,9 +189,8 @@ pub(super) fn TextCompareView(
     // Event handler for session-level keys (j/k, g/G, n/N, l/Tab).
     // The App component's global handler runs first and consumes global keys
     // (Ctrl+W, Ctrl+Tab, Left/Right, q).  For remaining keys, the controller
-    // locks the state briefly, lets `handle_session_key` (which routes
-    // text-compare keys to `handle_text_key`) mutate the session, and
-    // dispatches the resulting intent.
+    // locks the state briefly, lets `handle_session_key` mutate the session,
+    // and dispatches the resulting intent.
     hooks.use_event_handler(
         EventScope::Current,
         EventPriority::Normal,
@@ -198,7 +202,7 @@ pub(super) fn TextCompareView(
                 return EventResult::Ignored;
             }
 
-            if dispatch_session_key(SessionType::TextCompare, key) {
+            if dispatch_text_key(key) {
                 EventResult::Consumed
             } else {
                 EventResult::Ignored

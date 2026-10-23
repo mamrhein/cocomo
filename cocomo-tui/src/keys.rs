@@ -33,7 +33,7 @@ use ratatui_kit::{
 
 use crate::{
     diff_model::diff_group_starts,
-    state::{Focus, SessionAction, SessionMode, SessionType, SessionView},
+    state::{Focus, SessionAction, SessionContent, SessionMode, SessionView},
 };
 
 /// Shorthand for an unmodified key binding.
@@ -469,12 +469,12 @@ pub fn handle_session_key(
     session: &mut SessionView,
     key: KeyEvent,
 ) -> Option<SessionAction> {
-    let scope = if session.mode.is_editing() {
+    let scope = if session.ui.mode.is_editing() {
         KeyScope::Editing
     } else {
-        match session.session_type {
-            SessionType::DirCompare => KeyScope::DirNormal,
-            SessionType::TextCompare => KeyScope::TextNormal,
+        match &session.content {
+            SessionContent::Dir(_) => KeyScope::DirNormal,
+            SessionContent::Text(_) => KeyScope::TextNormal,
         }
     };
     let cmd = lookup(scope, key)?;
@@ -494,50 +494,61 @@ fn execute(cmd: Cmd, session: &mut SessionView) -> SessionAction {
             SessionAction::None
         }
         Cmd::FirstRow => {
-            session.table_state.select(Some(0));
+            session.ui.table_state.select(Some(0));
             SessionAction::None
         }
         Cmd::LastRow => {
             let count = session.row_count();
             if count > 0 {
-                session.table_state.select(Some(count - 1));
+                session.ui.table_state.select(Some(count - 1));
             }
             SessionAction::None
         }
         Cmd::ToggleFocus => {
-            session.focus = match session.focus {
+            session.ui.focus = match session.ui.focus {
                 Focus::Left => Focus::Right,
                 Focus::Right => Focus::Left,
             };
             SessionAction::None
         }
         Cmd::StartFilter => {
-            session.mode = SessionMode::Filter;
-            session.filter_input.clear();
+            session.ui.mode = SessionMode::Filter;
+            session.ui.filter_input.clear();
             SessionAction::None
         }
         Cmd::ToggleHideSame => {
-            session.hide_same = !session.hide_same;
-            session.table_state.select(Some(0));
+            if let Some(dir) = session.dir_mut() {
+                dir.hide_same = !dir.hide_same;
+            }
+            session.ui.table_state.select(Some(0));
             SessionAction::None
         }
         Cmd::ToggleCompareContent => {
-            session.compare_content = !session.compare_content;
+            if let Some(dir) = session.dir_mut() {
+                dir.compare_content = !dir.compare_content;
+            }
             SessionAction::None
         }
         Cmd::PlanSync => {
-            // Plan sync with the current operation (dry-run).
+            // Plan sync with the current operation (dry-run). Bound in the
+            // dir scope only, so the dir state is present.
             SessionAction::PlanSync {
-                operation: session.sync_operation,
+                operation: session
+                    .dir()
+                    .map(|d| d.sync_operation)
+                    .unwrap_or_default(),
             }
         }
         Cmd::CycleSyncOpForward => {
-            session.sync_operation = cycle_sync_op(&session.sync_operation, 1);
+            if let Some(dir) = session.dir_mut() {
+                dir.sync_operation = cycle_sync_op(&dir.sync_operation, 1);
+            }
             SessionAction::None
         }
         Cmd::CycleSyncOpBackward => {
-            session.sync_operation =
-                cycle_sync_op(&session.sync_operation, -1);
+            if let Some(dir) = session.dir_mut() {
+                dir.sync_operation = cycle_sync_op(&dir.sync_operation, -1);
+            }
             SessionAction::None
         }
         Cmd::ExecuteSync => {
@@ -547,14 +558,14 @@ fn execute(cmd: Cmd, session: &mut SessionView) -> SessionAction {
         }
         Cmd::StartSaveSession => {
             // Enter input mode; the name buffer lives in the mode itself.
-            session.mode = SessionMode::SaveSession {
+            session.ui.mode = SessionMode::SaveSession {
                 name: String::new(),
             };
             SessionAction::None
         }
         Cmd::StartLoadSession => {
             // Enter load mode and list saved sessions for it.
-            session.mode = SessionMode::LoadSession {
+            session.ui.mode = SessionMode::LoadSession {
                 name: String::new(),
                 saved_sessions: Vec::new(),
             };
@@ -564,14 +575,15 @@ fn execute(cmd: Cmd, session: &mut SessionView) -> SessionAction {
         Cmd::OpenEntry => handle_enter(session),
         Cmd::GoUp => SessionAction::GoUp,
         Cmd::Cancel => {
-            // If sync preview is active, cancel it. Otherwise, clear the
+            // If a sync preview is active, cancel it. Otherwise, clear the
             // filter.
-            if session.sync_planned.is_some() {
-                session.sync_planned = None;
-            } else {
-                session.active_filter = None;
+            let cancelled_sync = session
+                .dir_mut()
+                .is_some_and(|dir| dir.sync.take().is_some());
+            if !cancelled_sync {
+                session.ui.active_filter = None;
             }
-            session.table_state.select(Some(0));
+            session.ui.table_state.select(Some(0));
             SessionAction::None
         }
         Cmd::NextDiff => {
@@ -583,8 +595,8 @@ fn execute(cmd: Cmd, session: &mut SessionView) -> SessionAction {
             SessionAction::None
         }
         Cmd::CancelEdit => {
-            session.mode = SessionMode::Normal;
-            session.filter_input.clear();
+            session.ui.mode = SessionMode::Normal;
+            session.ui.filter_input.clear();
             SessionAction::None
         }
         // Global commands are dispatched by the App shell, never here.
@@ -600,17 +612,17 @@ fn execute(cmd: Cmd, session: &mut SessionView) -> SessionAction {
 fn navigate(session: &mut SessionView, delta: isize) {
     let rows = session.row_count();
     if delta > 0 {
-        if let Some(selected) = session.table_state.selected() {
+        if let Some(selected) = session.ui.table_state.selected() {
             if selected + 1 < rows {
-                session.table_state.select(Some(selected + 1));
+                session.ui.table_state.select(Some(selected + 1));
             }
         } else if rows > 0 {
-            session.table_state.select(Some(0));
+            session.ui.table_state.select(Some(0));
         }
     } else if let Some(selected) =
-        session.table_state.selected().filter(|s| *s > 0)
+        session.ui.table_state.selected().filter(|s| *s > 0)
     {
-        session.table_state.select(Some(selected - 1));
+        session.ui.table_state.select(Some(selected - 1));
     }
 }
 
@@ -624,7 +636,7 @@ fn jump_diff(session: &mut SessionView, delta: isize) {
         return;
     }
 
-    let current = session.table_state.selected().unwrap_or(0);
+    let current = session.ui.table_state.selected().unwrap_or(0);
     let target = if delta > 0 {
         // First group start after the cursor.
         groups.iter().copied().find(|&g| g > current)
@@ -640,13 +652,16 @@ fn jump_diff(session: &mut SessionView, delta: isize) {
     } else {
         *groups.last().expect("groups was checked to be non-empty")
     };
-    session.table_state.select(Some(target.unwrap_or(fallback)));
+    session
+        .ui
+        .table_state
+        .select(Some(target.unwrap_or(fallback)));
 }
 
 /// Handle Enter key — open the selected directory in a new session.
 fn handle_enter(session: &SessionView) -> SessionAction {
     let entries = session.filtered_entries();
-    let selected = match session.table_state.selected() {
+    let selected = match session.ui.table_state.selected() {
         Some(i) if i < entries.len() => entries[i],
         _ => return SessionAction::None,
     };
@@ -658,7 +673,7 @@ fn handle_enter(session: &SessionView) -> SessionAction {
         .map(|l| std::path::PathBuf::from(&l.path))
         .or_else(|| {
             // Entry only exists on the right; use a non-existent left path.
-            Some(session.left_path.join(&selected.name))
+            Some(session.core.left_path.join(&selected.name))
         });
     let right_sub = selected
         .right
@@ -666,7 +681,7 @@ fn handle_enter(session: &SessionView) -> SessionAction {
         .map(|r| std::path::PathBuf::from(&r.path))
         .or_else(|| {
             // Entry only exists on the left; use a non-existent right path.
-            Some(session.right_path.join(&selected.name))
+            Some(session.core.right_path.join(&selected.name))
         });
 
     let (left, right) = match (left_sub, right_sub) {
@@ -785,39 +800,39 @@ mod tests {
         // `filtered_entries()`, which is empty for text sessions.
         let mut session = text_session();
         assert!(press(&mut session, KeyCode::Char('j')).is_some());
-        assert_eq!(session.table_state.selected(), Some(0));
+        assert_eq!(session.ui.table_state.selected(), Some(0));
         press(&mut session, KeyCode::Char('j'));
-        assert_eq!(session.table_state.selected(), Some(1));
+        assert_eq!(session.ui.table_state.selected(), Some(1));
         press(&mut session, KeyCode::Char('k'));
-        assert_eq!(session.table_state.selected(), Some(0));
+        assert_eq!(session.ui.table_state.selected(), Some(0));
         // Clamped at the top.
         press(&mut session, KeyCode::Char('k'));
-        assert_eq!(session.table_state.selected(), Some(0));
+        assert_eq!(session.ui.table_state.selected(), Some(0));
     }
 
     #[test]
     fn shift_g_jumps_to_bounds() {
         let mut session = text_session();
         press(&mut session, KeyCode::Char('G'));
-        assert_eq!(session.table_state.selected(), Some(9));
+        assert_eq!(session.ui.table_state.selected(), Some(9));
         press(&mut session, KeyCode::Char('j'));
         // Clamped at the bottom.
-        assert_eq!(session.table_state.selected(), Some(9));
+        assert_eq!(session.ui.table_state.selected(), Some(9));
         press(&mut session, KeyCode::Char('g'));
-        assert_eq!(session.table_state.selected(), Some(0));
+        assert_eq!(session.ui.table_state.selected(), Some(0));
     }
 
     #[test]
     fn n_jumps_to_next_diff_and_wraps() {
         let mut session = text_session();
-        session.table_state.select(Some(0));
+        session.ui.table_state.select(Some(0));
         press(&mut session, KeyCode::Char('n'));
-        assert_eq!(session.table_state.selected(), Some(2));
+        assert_eq!(session.ui.table_state.selected(), Some(2));
         press(&mut session, KeyCode::Char('n'));
-        assert_eq!(session.table_state.selected(), Some(6));
+        assert_eq!(session.ui.table_state.selected(), Some(6));
         // Wrap to the first group.
         press(&mut session, KeyCode::Char('n'));
-        assert_eq!(session.table_state.selected(), Some(2));
+        assert_eq!(session.ui.table_state.selected(), Some(2));
     }
 
     #[test]
@@ -825,14 +840,14 @@ mod tests {
         // Regression: N used to search for groups *after* the cursor, so it
         // jumped forward instead of backward.
         let mut session = text_session();
-        session.table_state.select(Some(9));
+        session.ui.table_state.select(Some(9));
         press(&mut session, KeyCode::Char('N'));
-        assert_eq!(session.table_state.selected(), Some(6));
+        assert_eq!(session.ui.table_state.selected(), Some(6));
         press(&mut session, KeyCode::Char('N'));
-        assert_eq!(session.table_state.selected(), Some(2));
+        assert_eq!(session.ui.table_state.selected(), Some(2));
         // Wrap to the last group.
         press(&mut session, KeyCode::Char('N'));
-        assert_eq!(session.table_state.selected(), Some(6));
+        assert_eq!(session.ui.table_state.selected(), Some(6));
     }
 
     #[test]
@@ -850,39 +865,40 @@ mod tests {
     #[test]
     fn editing_mode_esc_cancels_and_other_keys_pass_through() {
         let mut session = dir_session();
-        session.mode = SessionMode::Filter;
-        session.filter_input = "partial".into();
+        session.ui.mode = SessionMode::Filter;
+        session.ui.filter_input = "partial".into();
         let action = press(&mut session, KeyCode::Esc);
         assert_eq!(action, Some(SessionAction::None));
-        assert_eq!(session.mode, SessionMode::Normal);
-        assert!(session.filter_input.is_empty());
+        assert_eq!(session.ui.mode, SessionMode::Normal);
+        assert!(session.ui.filter_input.is_empty());
 
         // While editing, printable keys are not owned by this handler.
-        session.mode = SessionMode::Filter;
+        session.ui.mode = SessionMode::Filter;
         assert_eq!(press(&mut session, KeyCode::Char('x')), None);
         // `q` cancels the mode instead of quitting.
         assert!(press(&mut session, KeyCode::Char('q')).is_some());
-        assert_eq!(session.mode, SessionMode::Normal);
+        assert_eq!(session.ui.mode, SessionMode::Normal);
     }
 
     #[test]
     fn save_and_load_modes_carry_their_own_buffers() {
         let mut session = dir_session();
-        session.filter_input = "keep me".into();
+        session.ui.filter_input = "keep me".into();
 
         // Save mode owns its name buffer; the filter buffer is untouched.
         assert_eq!(
             press(&mut session, KeyCode::Char('s')),
             Some(SessionAction::None)
         );
-        assert!(
-            matches!(&session.mode, SessionMode::SaveSession { name } if name.is_empty())
-        );
-        assert_eq!(session.filter_input, "keep me");
+        assert!(matches!(
+            &session.ui.mode,
+            SessionMode::SaveSession { name } if name.is_empty()
+        ));
+        assert_eq!(session.ui.filter_input, "keep me");
 
         // Cancelling drops the mode and its buffer with it.
         assert!(press(&mut session, KeyCode::Char('q')).is_some());
-        assert_eq!(session.mode, SessionMode::Normal);
+        assert_eq!(session.ui.mode, SessionMode::Normal);
 
         // Load mode carries its own name buffer and saved-session list,
         // and asks the controller to fill the list.
@@ -891,7 +907,7 @@ mod tests {
             Some(SessionAction::ListSessions)
         );
         assert!(matches!(
-            &session.mode,
+            &session.ui.mode,
             SessionMode::LoadSession { name, saved_sessions }
                 if name.is_empty() && saved_sessions.is_empty()
         ));

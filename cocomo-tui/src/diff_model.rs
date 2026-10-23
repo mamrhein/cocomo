@@ -25,8 +25,8 @@ use crate::state::SessionView;
 /// Build the set of line numbers that are part of a difference.
 pub fn diff_line_numbers(session: &SessionView) -> HashSet<usize> {
     session
-        .text_diff
-        .as_ref()
+        .text()
+        .and_then(|text| text.text_diff.as_ref())
         .map_or_else(HashSet::new, TextDiff::difference_line_numbers)
 }
 
@@ -36,8 +36,8 @@ pub fn diff_line_numbers(session: &SessionView) -> HashSet<usize> {
 /// difference group starts. These are the targets for n/N navigation.
 pub fn diff_group_starts(session: &SessionView) -> Vec<usize> {
     session
-        .text_diff
-        .as_ref()
+        .text()
+        .and_then(|text| text.text_diff.as_ref())
         .map_or_else(Vec::new, TextDiff::group_starts)
 }
 
@@ -47,9 +47,9 @@ pub fn diff_group_starts(session: &SessionView) -> Vec<usize> {
 /// cursor precedes the first group, and `(0, 0)` for a session with no text
 /// diff.
 pub fn current_diff_position(session: &SessionView) -> (usize, usize) {
-    match session.text_diff.as_ref() {
+    match session.text().and_then(|text| text.text_diff.as_ref()) {
         Some(diff) => {
-            let selected = session.table_state.selected().unwrap_or(0);
+            let selected = session.ui.table_state.selected().unwrap_or(0);
             diff.position_of(selected)
         }
         None => (0, 0),
@@ -121,18 +121,18 @@ mod tests {
     #[test]
     fn current_diff_position_uses_the_selected_row() {
         let mut session = session();
-        session.table_state.select(Some(0));
+        session.ui.table_state.select(Some(0));
         assert_eq!(current_diff_position(&session), (0, 2));
-        session.table_state.select(Some(3));
+        session.ui.table_state.select(Some(3));
         assert_eq!(current_diff_position(&session), (1, 2));
-        session.table_state.select(Some(9));
+        session.ui.table_state.select(Some(9));
         assert_eq!(current_diff_position(&session), (2, 2));
     }
 
     #[test]
     fn session_without_a_text_diff_is_empty() {
         let mut session = session();
-        session.text_diff = None;
+        session.text_mut().unwrap().text_diff = None;
         assert!(diff_line_numbers(&session).is_empty());
         assert!(diff_group_starts(&session).is_empty());
         assert_eq!(current_diff_position(&session), (0, 0));
