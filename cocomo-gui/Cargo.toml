@@ -21,8 +21,13 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
+clap = { version = "4", features = ["derive"] }
 cocomo-lib = { path = "../cocomo-lib" }
 dirs = "7"
+fs-err = "3"
 gpui = { package = "gpui-kit", version = "0.7" }
 log = "0.4"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+[dev-dependencies]
+tempfile = "3"

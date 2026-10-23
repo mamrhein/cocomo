@@ -207,6 +207,7 @@ impl AppState {
         let title = self.title.clone();
         let left_display = left.to_string_lossy().to_string();
         let right_display = right.to_string_lossy().to_string();
+        let compare_files = self.settings.compare_files;
         let weak = cx.entity().downgrade();
 
         // Spawn the comparison on the tokio runtime because LocalFs uses
@@ -214,7 +215,11 @@ impl AppState {
         let join_handle = crate::runtime::spawn_on_tokio(async move {
             let fs = LocalFs::new("local");
             let cache = ContentCache::default_config();
-            let config = CompareConfig::full();
+            let config = if compare_files {
+                CompareConfig::full()
+            } else {
+                CompareConfig::meta_data_only()
+            };
 
             compare_directories_node(&fs, &left, &right, &config, Some(&cache))
                 .await

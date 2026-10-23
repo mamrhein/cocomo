@@ -228,19 +228,37 @@ impl GuiSessionManager {
         right_path: PathBuf,
         cx: &mut Context<Self>,
     ) {
+        self.add_folder_tab(left_path, right_path, true, cx);
+    }
+
+    /// Open a folder-compare tab for the given directories and make it
+    /// active.
+    ///
+    /// `content` enables file-content comparison (hashing); without it
+    /// the comparison uses metadata only.
+    pub fn add_folder_tab(
+        &mut self,
+        left_path: PathBuf,
+        right_path: PathBuf,
+        content: bool,
+        cx: &mut Context<Self>,
+    ) {
         let config = SessionConfig {
             name: "dir diff".to_string(),
             session_type: SessionType::DirCompare,
             left: ProviderRef {
                 provider: "local".to_string(),
-                path: left_path.clone(),
+                path: left_path,
             },
             right: ProviderRef {
                 provider: "local".to_string(),
-                path: right_path.clone(),
+                path: right_path,
             },
             center: None,
-            settings: SessionSettings::default(),
+            settings: SessionSettings {
+                compare_files: content,
+                ..SessionSettings::default()
+            },
         };
         self.open_folder_tab(config, cx);
     }

@@ -14,6 +14,7 @@
 //! rendering.
 
 mod chrome;
+mod cli;
 mod menus;
 mod runtime;
 mod session_manager;
@@ -22,15 +23,15 @@ mod tabview;
 mod text_diff;
 mod ui;
 
-use std::path::PathBuf;
-
 use anyhow::Result;
+use clap::Parser;
 use gpui::{
     App, AppContext, Bounds, WindowBounds, WindowOptions,
     application as create_application, px, size,
 };
 
 use crate::{
+    cli::{Cli, Startup},
     menus::{menu_bindings, register_menu_handlers, set_app_menus},
     session_manager::create_default_manager,
     tabview::WindowRoot,
@@ -42,13 +43,11 @@ use crate::{
 // ---------------------------------------------------------------------------
 
 fn main() -> Result<()> {
-    // Parse CLI arguments for left and right paths.
-    let args: Vec<String> = std::env::args().collect();
-    let (left, right) = parse_args(&args)?;
-
-    // Clone paths for the closure.
-    let left_path = left.clone();
-    let right_path = right.clone();
+    // Parse the CLI arguments and resolve them into the startup decision.
+    // Argument-level problems (unresolvable paths, wrong types) exit with a
+    // message before any window is opened.
+    let cli = Cli::parse();
+    let startup = cli.startup()?;
 
     // Start a tokio multi-thread runtime so that tokio::fs operations work.
     // gpui uses its own executor, but cocomo-lib's async fs operations rely
@@ -65,8 +64,6 @@ fn main() -> Result<()> {
 
     create_application().run(move |cx: &mut App| {
         gpui::init(cx);
-        let left = left_path;
-        let right = right_path;
         // Center the window on screen.
         let bounds = Bounds::centered(None, size(px(1200.), px(800.)), cx);
 
@@ -85,24 +82,19 @@ fn main() -> Result<()> {
         // Register folder compare key bindings.
         cx.bind_keys(folder_compare_bindings());
 
-        // Add an initial folder-compare tab with the CLI-provided paths.
-        session_manager.update(cx, |mgr, cx| {
-            mgr.add_new_folder_tab(cx);
-            // Override the default paths with CLI args.
-            mgr.set_active_paths(left.clone(), right.clone());
-            // Re-create the tab entity with correct paths.
-            let title = gpui::SharedString::from("cocomo — compare");
-            let config = mgr.active_config().unwrap().clone();
-            let state = cx.new(|cx| {
-                crate::state::AppState::from_config(&config, title, cx)
-            });
-            let mgr_clone = cx.entity().clone();
-            let view = cx.new(|cx| {
-                crate::ui::FolderCompareView::new(state, mgr_clone, cx)
-            });
-            mgr.replace_active_tab(crate::tabview::TabEntity::from_folder(
-                view,
-            ));
+        // Seed the initial tab from the startup decision: without CLI
+        // paths an empty untitled tab (the GUI equivalent of the TUI's
+        // welcome screen); with paths a folder-compare tab whose
+        // comparison loads asynchronously (failures surface in the UI).
+        session_manager.update(cx, |mgr, cx| match startup {
+            Startup::Welcome => mgr.add_new_folder_tab(cx),
+            Startup::Session {
+                left,
+                right,
+                content,
+            } => {
+                mgr.add_folder_tab(left, right, content, cx);
+            }
         });
 
         gpui::open_window(
@@ -120,61 +112,4 @@ fn main() -> Result<()> {
     });
 
     Ok(())
-}
-
-/// Parse command-line arguments for left and right directory paths.
-fn parse_args(args: &[String]) -> Result<(PathBuf, PathBuf)> {
-    let mut left: Option<PathBuf> = None;
-    let mut right: Option<PathBuf> = None;
-
-    let mut i = 1;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--left" | "-l" => {
-                i += 1;
-                if i < args.len() {
-                    left = Some(PathBuf::from(&args[i]));
-                }
-            }
-            "--right" | "-r" => {
-                i += 1;
-                if i < args.len() {
-                    right = Some(PathBuf::from(&args[i]));
-                }
-            }
-            "--" => {
-                // Positional args after --.
-                i += 1;
-                if i < args.len() && left.is_none() {
-                    left = Some(PathBuf::from(&args[i]));
-                }
-                i += 1;
-                if i < args.len() && right.is_none() {
-                    right = Some(PathBuf::from(&args[i]));
-                }
-            }
-            _ => {
-                // Positional args.
-                if left.is_none() {
-                    left = Some(PathBuf::from(&args[i]));
-                } else if right.is_none() {
-                    right = Some(PathBuf::from(&args[i]));
-                }
-            }
-        }
-        i += 1;
-    }
-
-    // Validate and canonicalize.
-    let left = left.ok_or_else(|| anyhow::anyhow!("--left is required"))?;
-    let right = right.ok_or_else(|| anyhow::anyhow!("--right is required"))?;
-
-    if !left.is_dir() {
-        return Err(anyhow::anyhow!("{} is not a directory", left.display()));
-    }
-    if !right.is_dir() {
-        return Err(anyhow::anyhow!("{} is not a directory", right.display()));
-    }
-
-    Ok((left.canonicalize()?, right.canonicalize()?))
 }
