@@ -28,14 +28,6 @@ use cocomo_lib::{
 };
 use ratatui_kit::{Atom, components::table::TableState};
 
-/// Which pane currently has keyboard focus within a session.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub enum Focus {
-    #[default]
-    Left,
-    Right,
-}
-
 /// The current input mode of a session.
 ///
 /// Each text-entry mode owns its input buffers, so a buffer cannot leak
@@ -206,8 +198,6 @@ pub struct TextDiffView {
 pub struct UiState {
     /// Selected row in the entry table.
     pub table_state: TableState,
-    /// Which pane has keyboard focus.
-    pub focus: Focus,
     /// Current input mode (owns the save/load name buffers).
     pub mode: SessionMode,
     /// Filter text input buffer, used only while [`SessionMode::Filter`]
@@ -399,15 +389,12 @@ impl SessionView {
 ///
 /// Manages multiple [`SessionView`] instances as tabs and tracks which tab
 /// is currently active.
-#[allow(dead_code)] // reload_pending and session_count are stubs for M5.2+.
 #[derive(Default)]
 pub struct AppState {
     /// All open session tabs.
     pub sessions: Vec<SessionView>,
     /// Index of the currently active tab.
     pub active_tab: usize,
-    /// Session index that needs an async reload.
-    pub reload_pending: Option<usize>,
     /// Index of the currently selected menu item.
     pub menu_selection: usize,
     /// Top-level error message to display in an `AlertModal`.
@@ -434,7 +421,6 @@ impl AppState {
         Self {
             sessions: Vec::new(),
             active_tab: 0,
-            reload_pending: None,
             menu_selection: 0,
             error_message: None,
         }
@@ -505,12 +491,6 @@ impl AppState {
     /// Return a mutable reference to the session with the given stable id.
     pub fn session_mut(&mut self, id: usize) -> Option<&mut SessionView> {
         self.sessions.iter_mut().find(|s| s.core.id == id)
-    }
-
-    /// Return the number of open sessions.
-    #[allow(dead_code)] // Used by M5.4+ for sync progress display.
-    pub fn session_count(&self) -> usize {
-        self.sessions.len()
     }
 
     /// Return the index of the active tab.
@@ -659,7 +639,7 @@ mod tests {
         app.add_session(dir_session());
         app.add_session(dir_session());
         assert_eq!(app.active_index(), 1);
-        assert_eq!(app.session_count(), 2);
+        assert_eq!(app.sessions.len(), 2);
     }
 
     #[test]

@@ -19,19 +19,13 @@ use ratatui_kit::{
     },
 };
 
-/// Props for [`WelcomeScreen`] — none; state is read from the global atom.
-#[derive(Default, Props)]
-pub(super) struct WelcomeScreenProps;
-
 /// Welcome screen rendered when no sessions are open.
 ///
 /// Displays the application name, a short description, and usage hints using
 /// ratatui-kit layout components (`Center`, `Border`, `Text`) instead of
 /// legacy Frame-based rendering.
 #[component]
-pub(super) fn WelcomeScreen(
-    _props: &WelcomeScreenProps,
-) -> impl Into<AnyElement<'static>> {
+pub(super) fn WelcomeScreen(_hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let title_line = Line::from("cocomo \u{2014} COmpare, COpy & MOve")
         .bold()
         .cyan()

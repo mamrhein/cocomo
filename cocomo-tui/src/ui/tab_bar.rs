@@ -33,23 +33,17 @@ pub(super) struct TabBarProps {
 /// open, an empty bordered block is rendered.
 #[component]
 pub(super) fn TabBar(props: &TabBarProps) -> impl Into<AnyElement<'static>> {
-    let tab_tabs = if !props.tab_titles.is_empty() {
-        Tabs::new(props.tab_titles.clone())
-            .select(props.active_index)
-            .highlight_style(style::title_style())
-            .divider(Span::raw(" | "))
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(style::border_style()),
-            )
-    } else {
-        Tabs::new(Vec::<Line>::new()).block(
+    // One `Tabs` value serves both cases: with no titles it renders just
+    // the empty bordered block, so the branches do not need to differ.
+    let tab_tabs = Tabs::new(props.tab_titles.clone())
+        .select(props.active_index)
+        .highlight_style(style::title_style())
+        .divider(Span::raw(" | "))
+        .block(
             Block::default()
                 .borders(Borders::ALL)
                 .border_style(style::border_style()),
-        )
-    };
+        );
 
     element!(
         View(height: Constraint::Length(3)) {

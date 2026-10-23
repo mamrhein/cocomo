@@ -33,7 +33,7 @@ use ratatui_kit::{
 
 use crate::{
     diff_model::diff_group_starts,
-    state::{Focus, SessionAction, SessionContent, SessionMode, SessionView},
+    state::{SessionAction, SessionContent, SessionMode, SessionView},
 };
 
 /// Shorthand for an unmodified key binding.
@@ -79,8 +79,6 @@ pub enum Cmd {
     FirstRow,
     /// Select the last row.
     LastRow,
-    /// Toggle keyboard focus between the left and right pane.
-    ToggleFocus,
     /// Enter filter mode.
     StartFilter,
     /// Toggle hiding identical entries.
@@ -177,20 +175,6 @@ const KEYMAP: &[KeyBinding] = &[
         modifiers: NONE,
         scope: KeyScope::DirNormal,
         cmd: Cmd::LastRow,
-        help: None,
-    },
-    KeyBinding {
-        key: KeyCode::Char('l'),
-        modifiers: NONE,
-        scope: KeyScope::DirNormal,
-        cmd: Cmd::ToggleFocus,
-        help: Some(("l/Tab", "focus")),
-    },
-    KeyBinding {
-        key: KeyCode::Tab,
-        modifiers: NONE,
-        scope: KeyScope::DirNormal,
-        cmd: Cmd::ToggleFocus,
         help: None,
     },
     KeyBinding {
@@ -341,20 +325,6 @@ const KEYMAP: &[KeyBinding] = &[
         cmd: Cmd::PrevDiff,
         help: None,
     },
-    KeyBinding {
-        key: KeyCode::Char('l'),
-        modifiers: NONE,
-        scope: KeyScope::TextNormal,
-        cmd: Cmd::ToggleFocus,
-        help: Some(("l/Tab", "focus")),
-    },
-    KeyBinding {
-        key: KeyCode::Tab,
-        modifiers: NONE,
-        scope: KeyScope::TextNormal,
-        cmd: Cmd::ToggleFocus,
-        help: None,
-    },
     // -- Text-entry modes (root-layer fallback; the input layers normally
     //    capture keys exclusively). --
     KeyBinding {
@@ -502,13 +472,6 @@ fn execute(cmd: Cmd, session: &mut SessionView) -> SessionAction {
             if count > 0 {
                 session.ui.table_state.select(Some(count - 1));
             }
-            SessionAction::None
-        }
-        Cmd::ToggleFocus => {
-            session.ui.focus = match session.ui.focus {
-                Focus::Left => Focus::Right,
-                Focus::Right => Focus::Left,
-            };
             SessionAction::None
         }
         Cmd::StartFilter => {
@@ -914,15 +877,15 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_tab_is_not_the_plain_tab_binding() {
-        // Ctrl+Tab belongs to the shell; plain Tab toggles focus.
+    fn ctrl_tab_is_only_bound_in_the_shell() {
+        // Ctrl+Tab belongs to the shell; plain Tab is unbound in the
+        // session scopes, and a NONE-modifier binding never fires for a
+        // Ctrl combination.
         let ctrl_tab = KeyEvent::new(KeyCode::Tab, CTRL | KeyModifiers::SHIFT);
         assert_eq!(lookup(KeyScope::Global, ctrl_tab), Some(Cmd::SwitchTab));
         assert_eq!(lookup(KeyScope::DirNormal, ctrl_tab), None);
-        assert_eq!(
-            lookup(KeyScope::DirNormal, key(KeyCode::Tab)),
-            Some(Cmd::ToggleFocus)
-        );
+        assert_eq!(lookup(KeyScope::DirNormal, key(KeyCode::Tab)), None);
+        assert_eq!(lookup(KeyScope::TextNormal, key(KeyCode::Tab)), None);
     }
 
     #[test]
@@ -930,8 +893,7 @@ mod tests {
         let line = help_line(&[KeyScope::TextNormal, KeyScope::Global]);
         let text: String =
             line.spans.iter().map(|s| s.content.as_ref()).collect();
-        for label in ["j/k", "g/G", "n/N", "l/Tab", "Ctrl+W", "Ctrl+Tab", "q"]
-        {
+        for label in ["j/k", "g/G", "n/N", "Ctrl+W", "Ctrl+Tab", "q"] {
             assert!(text.contains(label), "missing `{label}` in `{text}`");
         }
         // Dir-only labels must not appear in the text help bar.

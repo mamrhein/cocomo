@@ -35,13 +35,8 @@ use crate::{
     },
     format::status_style,
     keys::{self, KeyScope},
-    state::{APP_STATE, Focus, SessionMode, SyncStage},
+    state::{APP_STATE, SessionMode, SyncStage},
 };
-
-/// Props for [`DirCompareView`] — none; state is read from the global atom.
-#[allow(dead_code)]
-#[derive(Default, Props)]
-pub(super) struct DirCompareViewProps;
 
 /// Directory comparison view using ratatui-kit's `Table` component.
 ///
@@ -92,7 +87,6 @@ pub(super) fn DirCompareView(
         });
     let sync_active = dir.sync.is_some();
     let mode = session.ui.mode.clone();
-    let focus = session.ui.focus;
     let hide_same = dir.hide_same;
     let active_filter = session.ui.active_filter.clone();
     let left_path_str = session.core.left_path.to_string_lossy().to_string();
@@ -157,40 +151,9 @@ pub(super) fn DirCompareView(
                 Style::new().add_modifier(Modifier::DIM),
             ),
         ]),
-        Line::from(vec![Span::styled(
-            format!("Left:  {left_path_str}"),
-            if focus == Focus::Left {
-                Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD)
-            } else {
-                Style::new()
-            },
-        )]),
-        Line::from(vec![Span::styled(
-            format!("Right: {right_path_str}"),
-            if focus == Focus::Right {
-                Style::new().fg(Color::Magenta).add_modifier(Modifier::BOLD)
-            } else {
-                Style::new()
-            },
-        )]),
+        Line::from(format!("Left:  {left_path_str}")),
+        Line::from(format!("Right: {right_path_str}")),
     ];
-
-    // -- Build filter bar line -----------------------------------------------
-
-    let _filter_bar_line: Line<'static> = if hide_same {
-        Line::from(Span::styled("No Orphans", Style::new().fg(Color::Yellow)))
-    } else {
-        Line::from(Span::raw("Show Orphans"))
-    };
-    let _filter_bar_line = if let Some(filter) = &active_filter {
-        Line::from(vec![
-            Span::raw("Show Orphans".to_string()),
-            Span::raw(" | "),
-            Span::styled(format!("*{filter}*"), Style::new().fg(Color::Cyan)),
-        ])
-    } else {
-        _filter_bar_line
-    };
 
     // -- Build status bar line -----------------------------------------------
     // When in Filter, SaveSession, or LoadSession mode, the status bar is

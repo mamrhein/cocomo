@@ -34,11 +34,6 @@ use crate::{
     state::APP_STATE,
 };
 
-/// Props for [`TextCompareView`] — none; state is read from the global atom.
-#[allow(dead_code)]
-#[derive(Default, Props)]
-pub(super) struct TextCompareViewProps;
-
 /// Text comparison view using ratatui-kit's `Table` component.
 ///
 /// Renders a side-by-side text diff with grammar-based syntax styling and
