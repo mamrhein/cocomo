@@ -9,16 +9,16 @@
 
 use std::{path::PathBuf, sync::Arc};
 
+pub use cocomo_lib::resolver::EndpointPair;
 use cocomo_lib::{
     FileSystem, ProviderId, WritableFileSystem,
-    profile::ProfileStore,
     provider::Provider,
-    secrets::{Secrets, TtyPrompter},
+    resolver::{endpoint_identity, resolve_provider},
+    secrets::TtyPrompter,
     url::Url,
 };
 
 use crate::error::CliError;
-
 // ---------------------------------------------------------------------------
 // Endpoint resolution
 // ---------------------------------------------------------------------------
@@ -51,7 +51,8 @@ pub trait EndpointResolver {
 }
 
 /// The production [`EndpointResolver`]: resolves endpoints to live
-/// [`Provider`] instances.
+/// [`Provider`] instances, prompting on the terminal for credentials that
+/// the profile store, the environment, and the keychain do not supply.
 pub struct ProductionResolver;
 
 impl EndpointResolver for ProductionResolver {
@@ -62,46 +63,16 @@ impl EndpointResolver for ProductionResolver {
         url: &Url,
         profile_id: Option<&str>,
     ) -> Result<Arc<Provider>, CliError> {
-        Ok(Arc::new(resolve_provider(url, profile_id)?))
+        Ok(Arc::new(resolve_provider(
+            url,
+            profile_id,
+            &TtyPrompter::new(),
+        )?))
     }
 
     fn provider_id(&self, fs: &Provider) -> ProviderId {
         fs.provider_id()
     }
-}
-
-/// Return the identity of the endpoint `url` addresses. Two URLs with
-/// equal identities are serviced by the same provider, so one filesystem
-/// instance can serve both sides of a comparison.
-pub(crate) fn endpoint_identity(
-    url: &Url,
-) -> (String, Option<String>, Option<u16>) {
-    (url.scheme.clone(), url.host.clone(), url.effective_port())
-}
-
-/// Resolve the provider that services `url`, letting `Provider::resolve`
-/// consult the default profile store, the environment, and the keychain.
-/// The store is only opened for remote endpoints, so local-only runs
-/// neither read nor create the profile configuration files.
-pub(crate) fn resolve_provider(
-    url: &Url,
-    profile_id: Option<&str>,
-) -> Result<Provider, CliError> {
-    let store = if url.scheme == Url::LOCAL_SCHEME {
-        None
-    } else {
-        Some(ProfileStore::open_default()?)
-    };
-    let secrets = Secrets::new();
-    let prompter = TtyPrompter::new();
-    let provider = Provider::resolve(
-        url,
-        store.as_ref(),
-        profile_id,
-        &secrets,
-        &prompter,
-    )?;
-    Ok(provider)
 }
 
 /// Resolve one path-like CLI argument into a filesystem instance and the
@@ -114,19 +85,6 @@ pub(crate) fn resolve_endpoint<R: EndpointResolver>(
     let url = Url::parse(arg)?;
     let fs = resolver.resolve(&url, profile_id)?;
     Ok((fs, url.path))
-}
-
-/// The filesystem(s) addressing the two sides of a pair command. Both
-/// variants hold `Arc`s, so the size difference is a single pointer and no
-/// padding is needed.
-pub(crate) enum EndpointPair<N> {
-    /// One instance addressing both sides: the endpoints share an identity,
-    /// so one connection services both and cross-boundary transfers keep
-    /// the same-provider fast path.
-    Shared(Arc<N>),
-    /// Two distinct instances: the endpoints address different providers,
-    /// so each side resolves and connects on its own.
-    Separate(Arc<N>, Arc<N>),
 }
 
 /// Resolve a pair of path-like CLI arguments into the filesystem(s) that

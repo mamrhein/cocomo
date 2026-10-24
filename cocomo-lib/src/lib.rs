@@ -31,6 +31,8 @@
 //! - [`webdav`] — [`WebDavFs`], the WebDAV provider.
 //! - [`provider`] — [`Provider`] enum and [`ProviderRegistry`] for unified
 //!   access to all backends.
+//! - [`resolver`] — Shared endpoint resolution: turns frontend path/URL
+//!   arguments into live [`Provider`] instances.
 //! - [`hash`] — Content hashing (blake3) and LRU [`ContentCache`].
 //! - [`scan`] — Directory scanning that produces a tree of [`ScanEntry`]
 //!   nodes.
@@ -73,6 +75,7 @@ pub mod patch;
 pub mod profile;
 pub mod provider;
 pub mod report;
+pub mod resolver;
 pub mod s3;
 pub mod scan;
 pub mod secrets;
@@ -119,6 +122,10 @@ pub use profile::{
     derive_master_key,
 };
 pub use provider::{Credentials, Provider, ProviderError, ProviderRegistry};
+pub use resolver::{
+    EndpointIdentity, EndpointPair, ResolverError, endpoint_identity,
+    resolve_endpoint, resolve_endpoint_pair, resolve_provider,
+};
 pub use s3::{S3Config, S3DirId, S3FileId, S3Fs, S3NodeId};
 pub use scan::{
     ScanConfig, ScanEntry, ScanResult, scan_directory, scan_directory_node,
@@ -153,3 +160,4 @@ pub use url::{Url, UrlError};
 pub use webdav::{
     WebDavConfig, WebDavDirId, WebDavFileId, WebDavFs, WebDavNodeId,
 };
+x

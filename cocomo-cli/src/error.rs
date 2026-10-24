@@ -9,7 +9,7 @@
 
 use cocomo_lib::{
     error::FsError, profile::ProfileError, provider::ProviderError,
-    url::UrlError,
+    resolver::ResolverError, url::UrlError,
 };
 
 // ---------------------------------------------------------------------------
@@ -40,6 +40,19 @@ pub enum CliError {
     /// this variant is returned.
     #[error("operation incomplete due to filesystem errors")]
     FsErrors(Vec<FsError>),
+}
+
+/// Map a shared [`ResolverError`] onto the corresponding [`CliError`]
+/// variant so endpoint resolution failures display exactly like the
+/// individual errors they wrap.
+impl From<ResolverError> for CliError {
+    fn from(err: ResolverError) -> Self {
+        match err {
+            ResolverError::Url(e) => Self::Url(e),
+            ResolverError::Provider(e) => Self::Provider(e),
+            ResolverError::Profile(e) => Self::Profile(e),
+        }
+    }
 }
 
 /// Convert a filesystem error into a [`CliError`], printing the individual
