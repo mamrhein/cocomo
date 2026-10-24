@@ -197,21 +197,18 @@ impl FolderCompareView {
             None => return,
         };
 
-        // Determine sub-endpoints for both sides.
+        // Determine sub-endpoints for both sides. An entry's `path` is
+        // relative to the current comparison root, so it must be joined onto
+        // the endpoint path rather than used as the endpoint path directly
+        // (which would drop the root and resolve to a non-existent location).
         let left_sub = match &entry.left {
-            Some(left_info) => self
-                .state
-                .read(cx)
-                .left()
-                .with_path(PathBuf::from(&left_info.path)),
+            Some(left_info) => self.state.read(cx).left().join(&left_info.path),
             None => self.state.read(cx).left().join(&entry.name),
         };
         let right_sub = match &entry.right {
-            Some(right_info) => self
-                .state
-                .read(cx)
-                .right()
-                .with_path(PathBuf::from(&right_info.path)),
+            Some(right_info) => {
+                self.state.read(cx).right().join(&right_info.path)
+            }
             None => self.state.read(cx).right().join(&entry.name),
         };
 

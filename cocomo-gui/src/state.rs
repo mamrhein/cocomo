@@ -14,8 +14,6 @@
 //! compare directories asynchronously, and the UI observes this entity
 //! for updates.
 
-use std::path::PathBuf;
-
 use cocomo_lib::{
     CompareConfig, ContentCache, DirComparison, DirEntry, DirEntryStatus,
     Endpoint, ProviderRef, SessionConfig, SessionSettings, SessionType,
@@ -330,17 +328,16 @@ impl AppState {
             return;
         }
 
-        // Determine sub-endpoints for both sides.
+        // Determine sub-endpoints for both sides. An entry's `path` is
+        // relative to the current comparison root, so it must be joined onto
+        // the endpoint path rather than used as the endpoint path directly
+        // (which would drop the root and resolve to a non-existent location).
         let left_sub = match &entry.left {
-            Some(left_info) => {
-                self.left.with_path(PathBuf::from(&left_info.path))
-            }
+            Some(left_info) => self.left.join(&left_info.path),
             None => self.left.join(&entry.name),
         };
         let right_sub = match &entry.right {
-            Some(right_info) => {
-                self.right.with_path(PathBuf::from(&right_info.path))
-            }
+            Some(right_info) => self.right.join(&right_info.path),
             None => self.right.join(&entry.name),
         };
 
