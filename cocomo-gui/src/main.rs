@@ -26,7 +26,7 @@ mod ui;
 use anyhow::Result;
 use clap::Parser;
 use gpui::{
-    App, AppContext, Bounds, WindowBounds, WindowOptions,
+    App, AppContext, Bounds, QuitMode, WindowBounds, WindowOptions,
     application as create_application, px, size,
 };
 
@@ -68,6 +68,12 @@ fn main() -> Result<()> {
 
     create_application().run(move |cx: &mut App| {
         gpui::init(cx);
+
+        // Quit the application when the last window is closed. Without
+        // this, the default quit mode on macOS is `Explicit`, keeping the
+        // process alive (with no window) after the user closes the window.
+        cx.set_quit_mode(QuitMode::LastWindowClosed);
+
         // Center the window on screen.
         let bounds = Bounds::centered(None, size(px(1200.), px(800.)), cx);
 
