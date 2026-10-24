@@ -70,6 +70,8 @@ pub enum Cmd {
     MenuNext,
     /// Quit the application.
     Quit,
+    /// Toggle the bottom help bar.
+    ToggleHelp,
     // -- Session scopes: executed by `execute`. --
     /// Move the selection one row down.
     NextRow,
@@ -384,6 +386,20 @@ const KEYMAP: &[KeyBinding] = &[
         cmd: Cmd::Quit,
         help: None,
     },
+    KeyBinding {
+        key: KeyCode::Char('?'),
+        modifiers: NONE,
+        scope: KeyScope::Global,
+        cmd: Cmd::ToggleHelp,
+        help: Some(("?", "help")),
+    },
+    KeyBinding {
+        key: KeyCode::F(1),
+        modifiers: NONE,
+        scope: KeyScope::Global,
+        cmd: Cmd::ToggleHelp,
+        help: None,
+    },
 ];
 
 /// Return the command bound to `key` in `scope`, if any.
@@ -567,7 +583,8 @@ fn execute(cmd: Cmd, session: &mut SessionView) -> SessionAction {
         | Cmd::SwitchTab
         | Cmd::MenuPrev
         | Cmd::MenuNext
-        | Cmd::Quit => SessionAction::None,
+        | Cmd::Quit
+        | Cmd::ToggleHelp => SessionAction::None,
     }
 }
 
@@ -910,5 +927,18 @@ mod tests {
         }
         // Dir-only labels must not appear in the text help bar.
         assert!(!text.contains("filter"));
+    }
+
+    #[test]
+    fn help_toggle_is_bound_in_the_shell() {
+        // `?` (typed with Shift on US layouts) and F1 both toggle the help
+        // bar; a NONE-modifier binding still fires for the Shift combo.
+        let question = KeyEvent::new(KeyCode::Char('?'), KeyModifiers::SHIFT);
+        assert_eq!(lookup(KeyScope::Global, question), Some(Cmd::ToggleHelp));
+        assert_eq!(
+            lookup(KeyScope::Global, key(KeyCode::F(1))),
+            Some(Cmd::ToggleHelp)
+        );
+        assert_eq!(lookup(KeyScope::DirNormal, key(KeyCode::F(1))), None);
     }
 }

@@ -768,6 +768,13 @@ pub(crate) fn set_menu_selection(index: usize) {
     APP_STATE.state().write().menu_selection = index;
 }
 
+/// Toggle the bottom help bar.
+pub(crate) fn toggle_help() {
+    let state = APP_STATE.state();
+    let mut app = state.write();
+    app.show_help = !app.show_help;
+}
+
 /// Dismiss the pending top-level error message.
 pub(crate) fn dismiss_error() {
     APP_STATE.state().write().error_message = None;

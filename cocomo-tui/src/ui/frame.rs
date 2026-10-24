@@ -7,62 +7,17 @@
 // $Source$
 // $Revision$
 
-//! Shared bordered scaffolding: the header `Frame` and the one-line
-//! `StatusBar` / `HelpBar` used by both comparison views.
+//! Shared one-line scaffolding: the `StatusBar` and `HelpBar` used by both
+//! comparison views.
+//!
+//! Both bars are rendered borderless so each costs a single row; the panel
+//! above them already draws the separating border, so a full box would only
+//! steal vertical space from the main view area.
 
 use ratatui_kit::{
     prelude::*,
-    ratatui::{
-        layout::{Constraint, Direction},
-        style::Styled,
-        text::Line,
-    },
+    ratatui::{layout::Constraint, text::Line},
 };
-
-use super::theme::CocomoTheme;
-
-/// Props for [`Frame`].
-#[derive(Default, Props)]
-pub(super) struct FrameProps {
-    /// Panel title rendered centered in the top border, styled with the
-    /// theme's title style.
-    pub(super) title: Option<Line<'static>>,
-    /// Height constraint for the panel.
-    pub(super) height: Constraint,
-    /// Content lines rendered inside the panel, one `Text` per line.
-    pub(super) lines: Vec<Line<'static>>,
-}
-
-/// Bordered panel with an optional centered title and content lines.
-///
-/// The shared header/status/help scaffolding of the comparison views
-/// (F16): the border and title styles come from [`CocomoTheme`], so a view
-/// only supplies geometry and content.
-#[component]
-pub(super) fn Frame(
-    props: &FrameProps,
-    hooks: Hooks,
-) -> impl Into<AnyElement<'static>> {
-    let theme = hooks.use_component_theme::<CocomoTheme>();
-    let top_title = props
-        .title
-        .clone()
-        .map(|title| title.set_style(theme.title).centered());
-    let lines = props.lines.clone();
-
-    element!(
-        Border(
-            height: props.height,
-            flex_direction: Direction::Vertical,
-            border_style: theme.border,
-            top_title: top_title,
-        ) {
-            for (i, line) in lines.into_iter().enumerate() {
-                Text(key: i, text: line)
-            }
-        }
-    )
-}
 
 /// Props for [`StatusBar`] and [`HelpBar`].
 #[derive(Default, Props)]
@@ -75,20 +30,21 @@ pub(super) struct BarProps {
 #[component]
 pub(super) fn StatusBar(props: &BarProps) -> impl Into<AnyElement<'static>> {
     element!(
-        Frame(
-            height: Constraint::Length(3),
-            lines: vec![props.line.clone()],
-        )
+        View(height: Constraint::Length(1)) {
+            Text(text: props.line.clone())
+        }
     )
 }
 
 /// One-line help bar at the very bottom of a comparison view.
+///
+/// Only rendered when the user toggles it on (`?`); when hidden the main
+/// view area gains the row.
 #[component]
 pub(super) fn HelpBar(props: &BarProps) -> impl Into<AnyElement<'static>> {
     element!(
-        Frame(
-            height: Constraint::Length(3),
-            lines: vec![props.line.clone()],
-        )
+        View(height: Constraint::Length(1)) {
+            Text(text: props.line.clone())
+        }
     )
 }

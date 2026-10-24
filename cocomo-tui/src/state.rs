@@ -424,6 +424,11 @@ pub struct AppState {
     pub active_tab: usize,
     /// Index of the currently selected menu item.
     pub menu_selection: usize,
+    /// Whether the bottom help bar is shown.
+    ///
+    /// Hidden by default so the main view area gets the row; toggled with
+    /// `?` (see [`crate::keys::Cmd::ToggleHelp`]).
+    pub show_help: bool,
     /// Top-level error message to display in an `AlertModal`.
     ///
     /// Set when an operation that cannot be attributed to a specific session
@@ -449,6 +454,7 @@ impl AppState {
             sessions: Vec::new(),
             active_tab: 0,
             menu_selection: 0,
+            show_help: false,
             error_message: None,
         }
     }

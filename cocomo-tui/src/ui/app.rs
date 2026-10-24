@@ -106,6 +106,9 @@ pub(crate) fn App(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     }
                     exit();
                 }
+                Cmd::ToggleHelp => {
+                    controller::toggle_help();
+                }
                 // Session keys are owned by the session view components.
                 _ => return EventResult::Ignored,
             }

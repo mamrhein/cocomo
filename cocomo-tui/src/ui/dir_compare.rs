@@ -20,7 +20,7 @@ use ratatui_kit::{
 };
 
 use super::{
-    frame::{Frame, HelpBar, StatusBar},
+    frame::{HelpBar, StatusBar},
     rows::{CellRow, cell_row_renderer, dir_rows, sync_rows},
     session_table::SessionTable,
     theme::CocomoTheme,
@@ -117,9 +117,10 @@ pub(super) fn DirCompareView(
     let mode = session.ui.mode.clone();
     let hide_same = dir.hide_same;
     let active_filter = session.ui.active_filter.clone();
-    let left_path_str = session.core.left.display();
-    let right_path_str = session.core.right.display();
+    let left_path_str = session.core.left.display().to_string();
+    let right_path_str = session.core.right.display().to_string();
     let sync_operation = dir.sync_operation;
+    let show_help = app.show_help;
 
     // Extract data needed after dropping the app handle (for status bar and
     // element! rendering). All session references below use these locals.
@@ -161,23 +162,11 @@ pub(super) fn DirCompareView(
         },
     );
 
-    // -- Build header lines --------------------------------------------------
-
-    let header_lines = vec![
-        Line::from(vec![
-            Span::styled("cocomo", theme.brand),
-            Span::raw(" \u{2014} "),
-            Span::styled("Folder Compare", theme.dim),
-        ]),
-        Line::from(format!("Left:  {left_path_str}")),
-        Line::from(format!("Right: {right_path_str}")),
-    ];
-
     // -- Build status bar line -----------------------------------------------
     // When in Filter, SaveSession, or LoadSession mode, the status bar is
     // replaced by a SearchInput rendered in the element! tree.
 
-    let status_bar_line: Line<'static> =
+    let mut status_bar_line: Line<'static> =
         if let Some(status_text) = &sync_status {
             let op_label = sync_operation.label();
             Line::from(Span::styled(
@@ -203,6 +192,14 @@ pub(super) fn DirCompareView(
                 Span::raw(display),
             ])
         };
+
+    // When the help bar is hidden, hint at the toggle key in the status bar
+    // so the binding stays discoverable without spending a row on it.
+    if !show_help {
+        status_bar_line
+            .spans
+            .push(Span::styled("  ? help", theme.dim));
+    }
 
     // -- Build help bar line -------------------------------------------------
     // Mode-specific hints stay hand-written; the normal-mode bindings come
@@ -239,15 +236,17 @@ pub(super) fn DirCompareView(
         "Directories are identical."
     };
 
+    // The header's path information now lives in the table's border title,
+    // so the view spends no rows on a separate header panel.
+    let compare_title = format!("{left_path_str} \u{21c4} {right_path_str}");
+
     element!(
         View(flex_direction: Direction::Vertical, height: Constraint::Fill(1)) {
-            // Header (3 content lines + 2 border lines = 5).
-            Frame(height: Constraint::Length(5), lines: header_lines)
             // Main content area: sync preview or comparison table.
             if sync_active {
                 SessionTable(
                     selected: session_selected,
-                    title: "Sync Preview (dry-run)",
+                    title: "Sync Preview (dry-run)".to_string(),
                     columns: vec![
                         TableColumn::new("Action", Constraint::Length(30)),
                         // `Fill` so the path column absorbs the remaining width.
@@ -260,7 +259,7 @@ pub(super) fn DirCompareView(
             } else {
                 SessionTable(
                     selected: session_selected,
-                    title: "Comparison",
+                    title: compare_title,
                     columns: vec![
                         TableColumn::new("T Name", Constraint::Fill(1)),
                         TableColumn::new(
@@ -343,8 +342,11 @@ pub(super) fn DirCompareView(
             } else {
                 StatusBar(line: status_bar_line)
             }
-            // Help bar.
-            HelpBar(line: help_bar_line)
+            // Help bar: only rendered when toggled on (`?`), so the main
+            // view area keeps the row by default.
+            if show_help {
+                HelpBar(line: help_bar_line)
+            }
         }
     )
 }

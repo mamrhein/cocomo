@@ -14,7 +14,7 @@ use ratatui_kit::{
     ratatui::{
         layout::Constraint,
         text::{Line, Span},
-        widgets::{Block, Borders, Tabs},
+        widgets::Tabs,
     },
 };
 
@@ -36,6 +36,9 @@ pub(super) struct MenuBarProps {
 
 /// Top menu bar with tab-like navigation items (Sessions, Compare, Sync,
 /// View, Filter, Help).
+///
+/// Rendered borderless on a single row to keep the chrome compact; the
+/// selected item is highlighted with the theme's title style.
 #[component]
 pub(super) fn MenuBar(
     props: &MenuBarProps,
@@ -45,15 +48,10 @@ pub(super) fn MenuBar(
     let menu_tabs = Tabs::new(props.menu_titles.clone())
         .select(props.selected)
         .highlight_style(theme.title)
-        .divider(Span::raw(" | "))
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(theme.border),
-        );
+        .divider(Span::raw(" | "));
 
     element!(
-        View(height: Constraint::Length(3)) {
+        View(height: Constraint::Length(1)) {
             widget(menu_tabs)
         }
     )

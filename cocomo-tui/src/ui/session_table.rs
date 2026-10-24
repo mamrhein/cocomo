@@ -53,7 +53,7 @@ pub(super) struct SessionTableProps {
     /// Session-owned selection mirrored into the table handle.
     pub(super) selected: Option<usize>,
     /// Panel title rendered in the table block's top border.
-    pub(super) title: &'static str,
+    pub(super) title: String,
     /// Column definitions.
     pub(super) columns: Vec<TableColumn>,
     /// Pre-rendered rows to display (memoized by the owning view).
@@ -121,6 +121,14 @@ pub(super) fn SessionTable(
             border_mode: TableBorderMode::None,
             highlight_style: theme.highlight,
             highlight_symbol: Some(symbols::block::FULL),
+            // No reserved leading gutter: the reversed `highlight_style`
+            // already marks the selected row, so the first column can sit
+            // flush against the border.
+            highlight_spacing: HighlightSpacing::Never,
+            // Zero cell padding: columns are separated only by
+            // `column_spacing` (one char) and the outer columns hug the
+            // block border.
+            cell_padding: 0u16,
             column_spacing: 1u16,
             header_style: theme.title,
         )

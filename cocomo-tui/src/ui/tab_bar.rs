@@ -14,7 +14,7 @@ use ratatui_kit::{
     ratatui::{
         layout::Constraint,
         text::{Line, Span},
-        widgets::{Block, Borders, Tabs},
+        widgets::Tabs,
     },
 };
 
@@ -29,28 +29,25 @@ pub(super) struct TabBarProps {
     pub(super) active_index: usize,
 }
 
-/// Session tab bar showing open comparison sessions. When no sessions are
-/// open, an empty bordered block is rendered.
+/// Session tab bar showing open comparison sessions.
+///
+/// Rendered borderless on a single row to keep the chrome compact. When no
+/// sessions are open the bar collapses to zero height, so the welcome
+/// screen gets the full main view area.
 #[component]
 pub(super) fn TabBar(
     props: &TabBarProps,
     hooks: Hooks,
 ) -> impl Into<AnyElement<'static>> {
     let theme = hooks.use_component_theme::<CocomoTheme>();
-    // One `Tabs` value serves both cases: with no titles it renders just
-    // the empty bordered block, so the branches do not need to differ.
     let tab_tabs = Tabs::new(props.tab_titles.clone())
         .select(props.active_index)
         .highlight_style(theme.title)
-        .divider(Span::raw(" | "))
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(theme.border),
-        );
+        .divider(Span::raw(" | "));
+    let height = Constraint::Length(u16::from(!props.tab_titles.is_empty()));
 
     element!(
-        View(height: Constraint::Length(3)) {
+        View(height: height) {
             widget(tab_tabs)
         }
     )

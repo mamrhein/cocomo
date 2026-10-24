@@ -16,13 +16,13 @@ use ratatui_kit::{
     prelude::*,
     ratatui::{
         layout::{Constraint, Direction},
-        text::Line,
+        text::{Line, Span},
     },
 };
 
 use super::{
     diff_list::SessionDiffList,
-    frame::{Frame, HelpBar, StatusBar},
+    frame::{HelpBar, StatusBar},
     rows::{TextDiffRow, text_diff_rows},
     theme::CocomoTheme,
 };
@@ -90,11 +90,12 @@ pub(super) fn TextCompareView(
     };
 
     // Extract rendering data from the session.
-    let left_path_str = session.core.left.display();
-    let right_path_str = session.core.right.display();
+    let left_path_str = session.core.left.display().to_string();
+    let right_path_str = session.core.right.display().to_string();
     let grammar_name = text.grammar.name.clone();
     let left_line_count = text.left_lines.len();
     let right_line_count = text.right_lines.len();
+    let show_help = app.show_help;
 
     // Compute the current diff-group position for the status bar. The row
     // styles already carry the per-line diff highlighting from the memo.
@@ -117,10 +118,18 @@ pub(super) fn TextCompareView(
     } else {
         "No differences".to_string()
     };
-    let status_bar_line = Line::from(format!(
+    let mut status_bar_line = Line::from(format!(
         "{position_str}  |  Left: {left_line_count} lines  |  Right: \
          {right_line_count} lines"
     ));
+
+    // When the help bar is hidden, hint at the toggle key so the binding
+    // stays discoverable without spending a row on it.
+    if !show_help {
+        status_bar_line
+            .spans
+            .push(Span::styled("  ? help", theme.dim));
+    }
 
     // Build help bar line from the keymap so it cannot drift from the
     // actual bindings.
@@ -173,8 +182,11 @@ pub(super) fn TextCompareView(
 
     element!(
         View(flex_direction: Direction::Vertical, height: Constraint::Fill(1)) {
-            // Header (1 content line + 2 border lines = 3).
-            Frame(height: Constraint::Length(3), lines: vec![header_line])
+            // Header: a single borderless line (the diff panel below draws
+            // the separating border).
+            View(height: Constraint::Length(1)) {
+                Text(text: header_line)
+            }
             // Main content area: windowed side-by-side diff.
             SessionDiffList(
                 selected: session_selected,
@@ -186,8 +198,10 @@ pub(super) fn TextCompareView(
             )
             // Status bar.
             StatusBar(line: status_bar_line)
-            // Help bar.
-            HelpBar(line: help_bar_line)
+            // Help bar: only rendered when toggled on (`?`).
+            if show_help {
+                HelpBar(line: help_bar_line)
+            }
         }
     )
 }
