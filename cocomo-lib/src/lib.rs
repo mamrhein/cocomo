@@ -123,8 +123,9 @@ pub use profile::{
 };
 pub use provider::{Credentials, Provider, ProviderError, ProviderRegistry};
 pub use resolver::{
-    EndpointIdentity, EndpointPair, ResolverError, endpoint_identity,
-    resolve_endpoint, resolve_endpoint_pair, resolve_provider,
+    Endpoint, EndpointIdentity, EndpointPair, ResolverError,
+    endpoint_identity, resolve_endpoint, resolve_endpoint_pair,
+    resolve_provider,
 };
 pub use s3::{S3Config, S3DirId, S3FileId, S3Fs, S3NodeId};
 pub use scan::{

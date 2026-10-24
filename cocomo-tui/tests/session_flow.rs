@@ -16,14 +16,12 @@
 //! by their own tests in `cocomo-lib`.
 
 use cocomo_lib::{
-    DirComparison, DirEntry, DirEntryStatus, EntryInfo, SyncOperation,
-    SyncResult,
+    DirComparison, DirEntry, DirEntryStatus, Endpoint, EntryInfo,
+    SyncOperation, SyncResult,
 };
 use cocomo_tui::{
     keys::{Cmd, KeyScope, handle_session_key, lookup},
-    state::{
-        AppState, Endpoint, SessionAction, SessionMode, SessionView, SyncStage,
-    },
+    state::{AppState, SessionAction, SessionMode, SessionView, SyncStage},
 };
 use ratatui_kit::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 

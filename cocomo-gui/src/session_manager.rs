@@ -20,11 +20,16 @@ use std::{
 
 use anyhow::{Context as _, Result};
 use cocomo_lib::{
-    LocalFs, ProviderRef, Session, SessionConfig, SessionSettings, SessionType,
+    Endpoint, FsError, NullPrompter, ProviderRef, Session, SessionConfig,
+    SessionSettings, SessionType,
 };
 use gpui::{App, AppContext, Context, Entity, Task};
 
 use crate::tabview::TabEntity;
+
+/// Type-erased node filesystem, matching what [`Session`] accepts.
+type AnyNodeFs =
+    dyn cocomo_lib::fs::NodeFileSystem<Nid = u64, FsId = u64, Error = FsError>;
 
 /// A single open tab in the GUI.
 ///
@@ -131,37 +136,45 @@ impl GuiSessionManager {
 
     /// Add a new empty dir-compare tab and make it active.
     pub fn add_new_folder_tab(&mut self, cx: &mut Context<Self>) {
+        let left = Endpoint::local("/");
+        let right = Endpoint::local("/");
         let config = SessionConfig {
             name: "untitled".to_string(),
             session_type: SessionType::DirCompare,
             left: ProviderRef {
-                provider: "local".to_string(),
-                path: PathBuf::from("/"),
+                provider: left.provider_ref(),
+                path: left.path().to_path_buf(),
             },
             right: ProviderRef {
-                provider: "local".to_string(),
-                path: PathBuf::from("/"),
+                provider: right.provider_ref(),
+                path: right.path().to_path_buf(),
             },
             center: None,
             settings: SessionSettings::default(),
         };
-        self.open_folder_tab(config, cx);
+        self.open_folder_tab(config, left, right, cx);
     }
 
-    /// Open a folder-compare tab from a session config and make it active.
+    /// Open a folder-compare tab from a session config and its rebuilt
+    /// endpoints, and make it active.
     fn open_folder_tab(
         &mut self,
         config: SessionConfig,
+        left: Endpoint,
+        right: Endpoint,
         cx: &mut Context<Self>,
     ) {
         let title = gpui::SharedString::from(format!(
             "cocomo — {} vs {}",
-            config.left.path.display(),
-            config.right.path.display()
+            left.display(),
+            right.display()
         ));
 
-        let state = cx
-            .new(|cx| crate::state::AppState::from_config(&config, title, cx));
+        let state = cx.new(|cx| {
+            crate::state::AppState::from_config(
+                &config, left, right, title, cx,
+            )
+        });
 
         let mgr = cx.entity().clone();
         let view =
@@ -181,27 +194,31 @@ impl GuiSessionManager {
         cx.notify();
     }
 
-    /// Add a text diff tab for the given file paths and make it active.
+    /// Add a text diff tab for the given file endpoints and make it
+    /// active.
     pub fn add_text_diff_tab(
         &mut self,
-        left_path: PathBuf,
-        right_path: PathBuf,
+        left: Endpoint,
+        right: Endpoint,
         cx: &mut Context<Self>,
     ) {
         let view = crate::text_diff::new_text_diff_view(
-            left_path, right_path, None, cx,
+            left.clone(),
+            right.clone(),
+            None,
+            cx,
         );
 
         let config = SessionConfig {
             name: "text diff".to_string(),
             session_type: SessionType::TextCompare,
             left: ProviderRef {
-                provider: "local".to_string(),
-                path: PathBuf::from("/"),
+                provider: left.provider_ref(),
+                path: left.path().to_path_buf(),
             },
             right: ProviderRef {
-                provider: "local".to_string(),
-                path: PathBuf::from("/"),
+                provider: right.provider_ref(),
+                path: right.path().to_path_buf(),
             },
             center: None,
             settings: SessionSettings::default(),
@@ -224,11 +241,11 @@ impl GuiSessionManager {
     /// Open a directory compare in a new tab.
     pub fn add_dir_diff_tab(
         &mut self,
-        left_path: PathBuf,
-        right_path: PathBuf,
+        left: Endpoint,
+        right: Endpoint,
         cx: &mut Context<Self>,
     ) {
-        self.add_folder_tab(left_path, right_path, true, cx);
+        self.add_folder_tab(left, right, true, cx);
     }
 
     /// Open a folder-compare tab for the given directories and make it
@@ -238,8 +255,8 @@ impl GuiSessionManager {
     /// the comparison uses metadata only.
     pub fn add_folder_tab(
         &mut self,
-        left_path: PathBuf,
-        right_path: PathBuf,
+        left: Endpoint,
+        right: Endpoint,
         content: bool,
         cx: &mut Context<Self>,
     ) {
@@ -247,12 +264,12 @@ impl GuiSessionManager {
             name: "dir diff".to_string(),
             session_type: SessionType::DirCompare,
             left: ProviderRef {
-                provider: "local".to_string(),
-                path: left_path,
+                provider: left.provider_ref(),
+                path: left.path().to_path_buf(),
             },
             right: ProviderRef {
-                provider: "local".to_string(),
-                path: right_path,
+                provider: right.provider_ref(),
+                path: right.path().to_path_buf(),
             },
             center: None,
             settings: SessionSettings {
@@ -260,7 +277,7 @@ impl GuiSessionManager {
                 ..SessionSettings::default()
             },
         };
-        self.open_folder_tab(config, cx);
+        self.open_folder_tab(config, left, right, cx);
     }
 
     /// Return the active tab's content, if any.
@@ -278,11 +295,13 @@ impl GuiSessionManager {
             .collect()
     }
 
-    /// Update the active session's paths.
-    pub fn set_active_paths(&mut self, left: PathBuf, right: PathBuf) {
+    /// Update the active session's endpoints.
+    pub fn set_active_paths(&mut self, left: Endpoint, right: Endpoint) {
         if let Some(session) = self.open_sessions.get_mut(self.active_index) {
-            session.config.left.path = left;
-            session.config.right.path = right;
+            session.config.left.provider = left.provider_ref();
+            session.config.left.path = left.path().to_path_buf();
+            session.config.right.provider = right.provider_ref();
+            session.config.right.path = right.path().to_path_buf();
         }
     }
 
@@ -524,46 +543,41 @@ impl GuiSessionManager {
         .detach();
     }
 
-    /// Build a runtime [`Session`] from a config using local filesystem
-    /// providers.
+    /// Build a runtime [`Session`] from a config, rebuilding the providers
+    /// from the refs recorded in it.
+    ///
+    /// Remote refs re-resolve without prompting: the GUI has no reliable
+    /// terminal, so credentials must come from a profile, the environment,
+    /// or the keychain.
     pub async fn build_session(
         &self,
         config: &SessionConfig,
     ) -> Result<Session> {
-        let left_fs: Arc<
-            dyn cocomo_lib::fs::NodeFileSystem<
-                    Nid = u64,
-                    FsId = u64,
-                    Error = cocomo_lib::FsError,
-                >,
-        > = Arc::new(LocalFs::new("local"));
+        let prompter = NullPrompter;
+        let left = Endpoint::from_ref(
+            &config.left.provider,
+            config.left.path.clone(),
+            &prompter,
+        )?;
+        let right = Endpoint::from_ref(
+            &config.right.provider,
+            config.right.path.clone(),
+            &prompter,
+        )?;
 
-        let right_fs: Arc<
-            dyn cocomo_lib::fs::NodeFileSystem<
-                    Nid = u64,
-                    FsId = u64,
-                    Error = cocomo_lib::FsError,
-                >,
-        > = Arc::new(LocalFs::new("local"));
-
-        let center_fs: Option<
-            Arc<
-                dyn cocomo_lib::fs::NodeFileSystem<
-                        Nid = u64,
-                        FsId = u64,
-                        Error = cocomo_lib::FsError,
-                    >,
-            >,
-        > = config.center.as_ref().map(|_| {
-            Arc::new(LocalFs::new("local"))
-                as Arc<
-                    dyn cocomo_lib::fs::NodeFileSystem<
-                            Nid = u64,
-                            FsId = u64,
-                            Error = cocomo_lib::FsError,
-                        >,
-                >
-        });
+        let left_fs: Arc<AnyNodeFs> = left.fs_arc();
+        let right_fs: Arc<AnyNodeFs> = right.fs_arc();
+        let center_fs: Option<Arc<AnyNodeFs>> = match &config.center {
+            Some(center) => Some(
+                Endpoint::from_ref(
+                    &center.provider,
+                    center.path.clone(),
+                    &prompter,
+                )?
+                .fs_arc(),
+            ),
+            None => None,
+        };
 
         Session::from_config_and_providers(
             config, left_fs, right_fs, center_fs,

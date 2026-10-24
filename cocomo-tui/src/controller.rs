@@ -26,14 +26,13 @@
 use std::{
     future::Future,
     path::{Path, PathBuf},
-    sync::Arc,
 };
 
 use cocomo_lib::{
-    CompareConfig, ContentCache, DirComparison, FileSystem, FsError, Grammar,
-    LineInfo, NullPrompter, Prompter, Provider, SessionConfig, SyncOperation,
-    SyncResult, SyncRules, TextCompareSettings, Url, compare_texts,
-    default_session_dir, list_saved_sessions, resolve_provider,
+    CompareConfig, ContentCache, DirComparison, Endpoint, FileSystem, FsError,
+    Grammar, LineInfo, NullPrompter, Prompter, Provider, SessionConfig,
+    SyncOperation, SyncResult, SyncRules, TextCompareSettings, compare_texts,
+    default_session_dir, list_saved_sessions,
 };
 use ratatui_kit::crossterm::event::KeyEvent;
 
@@ -42,8 +41,8 @@ use crate::{
     keys::handle_session_key,
     session_store::session_to_config,
     state::{
-        APP_STATE, AppState, Endpoint, SessionAction, SessionMode,
-        SessionView, SyncStage,
+        APP_STATE, AppState, SessionAction, SessionMode, SessionView,
+        SyncStage,
     },
 };
 
@@ -262,14 +261,7 @@ fn resolve_endpoint_ref(
     path: PathBuf,
     prompter: &dyn Prompter,
 ) -> Result<Endpoint> {
-    if provider == Url::LOCAL_SCHEME || provider == "local" {
-        return Ok(Endpoint::local(path));
-    }
-    let mut url =
-        Url::parse(provider).map_err(|e| TuiError::Resolve(e.into()))?;
-    url.path = path;
-    let fs = Arc::new(resolve_provider(&url, None, prompter)?);
-    Ok(Endpoint::new(fs, url))
+    Ok(Endpoint::from_ref(provider, path, prompter)?)
 }
 
 /// Create a directory comparison session from a saved config.

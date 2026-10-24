@@ -43,12 +43,6 @@ use crate::{
 // ---------------------------------------------------------------------------
 
 fn main() -> Result<()> {
-    // Parse the CLI arguments and resolve them into the startup decision.
-    // Argument-level problems (unresolvable paths, wrong types) exit with a
-    // message before any window is opened.
-    let cli = Cli::parse();
-    let startup = cli.startup()?;
-
     // Start a tokio multi-thread runtime so that tokio::fs operations work.
     // gpui uses its own executor, but cocomo-lib's async fs operations rely
     // on tokio's reactor for non-blocking IO.
@@ -57,10 +51,20 @@ fn main() -> Result<()> {
     // storage, and `set_handle()` to store it globally so background tasks
     // can use `Handle::block_on`. The runtime guard is kept alive for the
     // entire duration of the gpui event loop.
+    //
+    // The runtime must exist before the startup decision is resolved:
+    // remote endpoint arguments connect through tokio-based providers and
+    // validate via async metadata.
     let rt = tokio::runtime::Runtime::new()
         .expect("failed to create tokio runtime");
     let _rt_guard = rt.enter();
     runtime::set_handle();
+
+    // Parse the CLI arguments and resolve them into the startup decision.
+    // Argument-level problems (unresolvable endpoints, wrong types) exit
+    // with a message before any window is opened.
+    let cli = Cli::parse();
+    let startup = rt.block_on(cli.startup())?;
 
     create_application().run(move |cx: &mut App| {
         gpui::init(cx);

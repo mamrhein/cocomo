@@ -13,9 +13,10 @@
 //! indicators. Opens as a new session tab when a file is double-clicked
 //! in the folder compare view.
 
-use std::path::PathBuf;
-
-use cocomo_lib::{LineInfo, TextCompareSettings, TextDiff, compare_texts};
+use cocomo_lib::{
+    Endpoint, FileSystem, FsError, LineInfo, TextCompareSettings, TextDiff,
+    compare_texts,
+};
 use gpui::{
     App, Context, Entity, FocusHandle, Render, SharedString, Window, actions,
     div, prelude::*, px, rgb,
@@ -37,10 +38,10 @@ pub struct TextDiffState {
     focus_handle: FocusHandle,
     /// Window / tab title.
     title: SharedString,
-    /// Left file path.
-    left_path: PathBuf,
-    /// Right file path.
-    right_path: PathBuf,
+    /// Left file endpoint.
+    left: Endpoint,
+    /// Right file endpoint.
+    right: Endpoint,
     /// Text diff result.
     diff: Option<TextDiff>,
     /// Left file lines.
@@ -57,18 +58,18 @@ pub struct TextDiffState {
 
 #[allow(dead_code)]
 impl TextDiffState {
-    /// Create a new text diff state for the given file paths.
+    /// Create a new text diff state for the given file endpoints.
     pub fn new(
-        left_path: PathBuf,
-        right_path: PathBuf,
+        left: Endpoint,
+        right: Endpoint,
         title: SharedString,
         cx: &mut Context<Self>,
     ) -> Self {
         Self {
             focus_handle: cx.focus_handle(),
             title,
-            left_path,
-            right_path,
+            left,
+            right,
             diff: None,
             left_lines: Vec::new(),
             right_lines: Vec::new(),
@@ -152,19 +153,26 @@ impl TextDiffState {
         self.selected_index = 0;
         cx.notify();
 
-        let left_path = self.left_path.clone();
-        let right_path = self.right_path.clone();
+        let left = self.left.clone();
+        let right = self.right.clone();
         let weak = cx.entity().downgrade();
 
-        // Spawn file I/O on the tokio runtime because tokio::fs requires
-        // a tokio reactor.
+        // Spawn file I/O on the tokio runtime because the providers use
+        // tokio-based IO internally and require a tokio reactor. A missing
+        // file yields empty content: one side of a comparison can
+        // legitimately not exist (an orphan entry).
         let join_handle = crate::runtime::spawn_on_tokio(async move {
-            let left_content = tokio::fs::read_to_string(&left_path)
-                .await
-                .unwrap_or_default();
-            let right_content = tokio::fs::read_to_string(&right_path)
-                .await
-                .unwrap_or_default();
+            let read = |endpoint: Endpoint| async move {
+                match endpoint.fs().read(endpoint.path(), None).await {
+                    Ok(bytes) => Ok::<_, anyhow::Error>(
+                        String::from_utf8_lossy(&bytes).into_owned(),
+                    ),
+                    Err(FsError::NotFound { .. }) => Ok(String::new()),
+                    Err(e) => Err(anyhow::anyhow!("{e}")),
+                }
+            };
+            let left_content = read(left).await?;
+            let right_content = read(right).await?;
 
             let settings = TextCompareSettings::new();
 
@@ -200,21 +208,28 @@ impl TextDiffState {
         cx.spawn(|_, cx: &mut gpui::AsyncApp| {
             let async_app = cx.clone();
             async move {
-                // Silently ignore errors when loading the diff.
-                if let Ok(Ok((diff, left_lines, right_lines))) =
-                    join_handle.await
-                {
-                    async_app.update(|cx| {
-                        if let Some(state) = weak.upgrade() {
-                            state.update(cx, |state, _| {
-                                state.loading = false;
-                                state.diff = Some(diff);
-                                state.left_lines = left_lines;
-                                state.right_lines = right_lines;
-                            });
-                        }
-                    });
-                }
+                let result = match join_handle.await {
+                    Ok(r) => r,
+                    Err(e) => Err(anyhow::anyhow!("task panicked: {e}")),
+                };
+                async_app.update(|cx| {
+                    if let Some(state) = weak.upgrade() {
+                        state.update(cx, |state, _| {
+                            state.loading = false;
+                            match result {
+                                Ok((diff, left_lines, right_lines)) => {
+                                    state.diff = Some(diff);
+                                    state.left_lines = left_lines;
+                                    state.right_lines = right_lines;
+                                }
+                                Err(e) => {
+                                    state.error =
+                                        Some(format!("Diff failed: {e}"));
+                                }
+                            }
+                        });
+                    }
+                });
             }
         })
         .detach();
@@ -469,30 +484,27 @@ impl TextDiffView {
 // Public API
 // ---------------------------------------------------------------------------
 
-/// Create a new text diff view entity for the given file paths.
+/// Create a new text diff view entity for the given file endpoints.
 pub fn new_text_diff_view(
-    left_path: PathBuf,
-    right_path: PathBuf,
+    left: Endpoint,
+    right: Endpoint,
     _grammar: Option<cocomo_lib::Grammar>,
     cx: &mut App,
 ) -> Entity<TextDiffView> {
-    let left_name = left_path
+    let left_name = left
+        .path()
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "left".to_string());
-    let right_name = right_path
+    let right_name = right
+        .path()
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "right".to_string());
     let title = format!("{left_name} vs {right_name}");
 
     let state = cx.new(|cx| {
-        TextDiffState::new(
-            left_path,
-            right_path,
-            SharedString::from(title),
-            cx,
-        )
+        TextDiffState::new(left, right, SharedString::from(title), cx)
     });
 
     cx.new(|cx| TextDiffView::new(state, cx))

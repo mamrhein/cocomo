@@ -690,13 +690,12 @@ mod tests {
     use std::path::PathBuf;
 
     use cocomo_lib::{
-        DirComparison, DirEntry, DirEntryStatus, Grammar, LineInfo, TextDiff,
-        TextDifference,
+        DirComparison, DirEntry, DirEntryStatus, Endpoint, Grammar, LineInfo,
+        TextDiff, TextDifference,
     };
     use ratatui_kit::crossterm::event::KeyEvent;
 
     use super::*;
-    use crate::state::Endpoint;
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, NONE)

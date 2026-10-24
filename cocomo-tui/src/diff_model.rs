@@ -60,10 +60,9 @@ pub fn current_diff_position(session: &SessionView) -> (usize, usize) {
 mod tests {
     use std::path::PathBuf;
 
-    use cocomo_lib::{Grammar, LineInfo, TextDiff, TextDifference};
+    use cocomo_lib::{Endpoint, Grammar, LineInfo, TextDiff, TextDifference};
 
     use super::*;
-    use crate::state::Endpoint;
 
     /// Text session with 10 merged rows: line 3 differs, lines 4 and 5 were
     /// added on the right, line 7 differs.

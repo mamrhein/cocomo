@@ -14,16 +14,18 @@
 
 use std::{ops::Range, path::PathBuf};
 
-use cocomo_lib::DirEntryStatus;
+use cocomo_lib::{DirEntryStatus, Endpoint};
 use gpui::{
     App, Context, Entity, FocusHandle, Focusable, FontWeight, KeyBinding,
     Render, SharedString, UniformListScrollHandle, Window, actions, div,
     prelude::*, px, rgb, uniform_list,
 };
 
-use crate::{menus::{ReloadCompare, SaveSession},
+use crate::{
+    menus::{ReloadCompare, SaveSession},
     session_manager::GuiSessionManager,
-    state::{AppState, StatusSummary},};
+    state::{AppState, StatusSummary},
+};
 
 // ---------------------------------------------------------------------------
 // Actions
@@ -36,10 +38,10 @@ actions!(
 
 /// Action to open a text diff for a file in a new tab.
 pub struct OpenFileDiff {
-    /// Left file path.
-    pub left_path: PathBuf,
-    /// Right file path (optional).
-    pub right_path: Option<PathBuf>,
+    /// Left file endpoint.
+    pub left_path: Endpoint,
+    /// Right file endpoint (optional).
+    pub right_path: Option<Endpoint>,
 }
 impl gpui::Action for OpenFileDiff {
     fn boxed_clone(&self) -> Box<dyn gpui::Action> {
@@ -71,10 +73,10 @@ impl Clone for OpenFileDiff {
 
 /// Action to open a directory compare in a new tab.
 pub struct OpenDirDiff {
-    /// Left directory path.
-    pub left_path: PathBuf,
-    /// Right directory path.
-    pub right_path: PathBuf,
+    /// Left directory endpoint.
+    pub left_path: Endpoint,
+    /// Right directory endpoint.
+    pub right_path: Endpoint,
 }
 impl gpui::Action for OpenDirDiff {
     fn boxed_clone(&self) -> Box<dyn gpui::Action> {
@@ -195,14 +197,22 @@ impl FolderCompareView {
             None => return,
         };
 
-        // Determine sub-paths for both sides.
+        // Determine sub-endpoints for both sides.
         let left_sub = match &entry.left {
-            Some(left_info) => PathBuf::from(&left_info.path),
-            None => self.state.read(cx).left_path().join(&entry.name),
+            Some(left_info) => self
+                .state
+                .read(cx)
+                .left()
+                .with_path(PathBuf::from(&left_info.path)),
+            None => self.state.read(cx).left().join(&entry.name),
         };
         let right_sub = match &entry.right {
-            Some(right_info) => PathBuf::from(&right_info.path),
-            None => self.state.read(cx).right_path().join(&entry.name),
+            Some(right_info) => self
+                .state
+                .read(cx)
+                .right()
+                .with_path(PathBuf::from(&right_info.path)),
+            None => self.state.read(cx).right().join(&entry.name),
         };
 
         // Dispatch action to open a new dir-diff tab.
@@ -364,8 +374,8 @@ impl FolderCompareView {
     /// Render the header bar showing paths.
     fn render_header(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let state = self.state.read(cx);
-        let left_path = state.left_path().to_string_lossy().to_string();
-        let right_path = state.right_path().to_string_lossy().to_string();
+        let left_path = state.left().display();
+        let right_path = state.right().display();
 
         div()
             .flex()

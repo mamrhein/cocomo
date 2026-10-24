@@ -9,16 +9,17 @@
 
 //! Application state for the GUI.
 //!
-//! The [`AppState`] entity holds the left and right directory paths and the
-//! results of the comparison. It provides methods to load and compare
-//! directories asynchronously, and the UI observes this entity for updates.
+//! The [`AppState`] entity holds the left and right comparison endpoints
+//! and the results of the comparison. It provides methods to load and
+//! compare directories asynchronously, and the UI observes this entity
+//! for updates.
 
 use std::path::PathBuf;
 
 use cocomo_lib::{
     CompareConfig, ContentCache, DirComparison, DirEntry, DirEntryStatus,
-    LocalFs, ProviderRef, SessionConfig, SessionSettings, SessionType,
-    compare_directories_node,
+    Endpoint, ProviderRef, SessionConfig, SessionSettings, SessionType,
+    compare_directories_node, compare_directories_pair_node,
 };
 use gpui::{App, Context, FocusHandle, SharedString};
 
@@ -32,10 +33,10 @@ pub struct AppState {
     focus_handle: FocusHandle,
     /// Window title.
     title: SharedString,
-    /// Left directory path.
-    left_path: PathBuf,
-    /// Right directory path.
-    right_path: PathBuf,
+    /// Left-side endpoint (directory).
+    left: Endpoint,
+    /// Right-side endpoint (directory).
+    right: Endpoint,
     /// Comparison result, or `None` if not yet loaded.
     comparison: Option<DirComparison>,
     /// Selected row index.
@@ -53,18 +54,18 @@ pub struct AppState {
 // TODO: remove this
 #[allow(dead_code)]
 impl AppState {
-    /// Create a new application state with the given paths.
+    /// Create a new application state for the given endpoints.
     pub fn new(
-        left: PathBuf,
-        right: PathBuf,
+        left: Endpoint,
+        right: Endpoint,
         title: SharedString,
         cx: &mut Context<Self>,
     ) -> Self {
         Self {
             focus_handle: cx.focus_handle(),
             title,
-            left_path: left,
-            right_path: right,
+            left,
+            right,
             comparison: None,
             selected_index: 0,
             loading: false,
@@ -74,17 +75,20 @@ impl AppState {
         }
     }
 
-    /// Create a new application state from a session config.
+    /// Create a new application state from a session config whose
+    /// endpoints were rebuilt from the config's provider refs.
     pub fn from_config(
         config: &SessionConfig,
+        left: Endpoint,
+        right: Endpoint,
         title: SharedString,
         cx: &mut Context<Self>,
     ) -> Self {
         Self {
             focus_handle: cx.focus_handle(),
             title,
-            left_path: config.left.path.clone(),
-            right_path: config.right.path.clone(),
+            left,
+            right,
             comparison: None,
             selected_index: 0,
             loading: false,
@@ -108,14 +112,14 @@ impl AppState {
         &self.title
     }
 
-    /// Return the left directory path.
-    pub fn left_path(&self) -> &PathBuf {
-        &self.left_path
+    /// Return the left-side endpoint.
+    pub fn left(&self) -> &Endpoint {
+        &self.left
     }
 
-    /// Return the right directory path.
-    pub fn right_path(&self) -> &PathBuf {
-        &self.right_path
+    /// Return the right-side endpoint.
+    pub fn right(&self) -> &Endpoint {
+        &self.right
     }
 
     /// Return the comparison result, if loaded.
@@ -168,22 +172,22 @@ impl AppState {
             name,
             session_type: self.session_type,
             left: ProviderRef {
-                provider: "local".to_string(),
-                path: self.left_path.clone(),
+                provider: self.left.provider_ref(),
+                path: self.left.path().to_path_buf(),
             },
             right: ProviderRef {
-                provider: "local".to_string(),
-                path: self.right_path.clone(),
+                provider: self.right.provider_ref(),
+                path: self.right.path().to_path_buf(),
             },
             center: None,
             settings: self.settings.clone(),
         }
     }
 
-    /// Update the paths from new values (e.g., after navigating).
-    pub fn update_paths(&mut self, left: PathBuf, right: PathBuf) {
-        self.left_path = left;
-        self.right_path = right;
+    /// Update the endpoints from new values (e.g., after navigating).
+    pub fn update_paths(&mut self, left: Endpoint, right: Endpoint) {
+        self.left = left;
+        self.right = right;
     }
 
     // -----------------------------------------------------------------------
@@ -202,18 +206,19 @@ impl AppState {
         self.selected_index = 0;
         cx.notify();
 
-        let left = self.left_path.clone();
-        let right = self.right_path.clone();
+        let left = self.left.clone();
+        let right = self.right.clone();
         let title = self.title.clone();
-        let left_display = left.to_string_lossy().to_string();
-        let right_display = right.to_string_lossy().to_string();
+        let left_display = left.display();
+        let right_display = right.display();
         let compare_files = self.settings.compare_files;
         let weak = cx.entity().downgrade();
 
-        // Spawn the comparison on the tokio runtime because LocalFs uses
-        // tokio::fs internally and requires a tokio reactor.
+        // Spawn the comparison on the tokio runtime because the providers
+        // use tokio::fs internally and require a tokio reactor. Both sides
+        // on the same provider instance compare through the single-
+        // filesystem path; a mixed pair compares across providers.
         let join_handle = crate::runtime::spawn_on_tokio(async move {
-            let fs = LocalFs::new("local");
             let cache = ContentCache::default_config();
             let config = if compare_files {
                 CompareConfig::full()
@@ -221,9 +226,28 @@ impl AppState {
                 CompareConfig::meta_data_only()
             };
 
-            compare_directories_node(&fs, &left, &right, &config, Some(&cache))
+            if left.same_provider(&right) {
+                compare_directories_node(
+                    left.fs(),
+                    left.path(),
+                    right.path(),
+                    &config,
+                    Some(&cache),
+                )
                 .await
                 .map_err(|e| anyhow::anyhow!("{e}"))
+            } else {
+                compare_directories_pair_node(
+                    left.fs(),
+                    right.fs(),
+                    left.path(),
+                    right.path(),
+                    &config,
+                    Some(&cache),
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))
+            }
         });
 
         // Await the JoinHandle inside a gpui Task. Awaiting a JoinHandle
@@ -306,40 +330,32 @@ impl AppState {
             return;
         }
 
-        // Determine sub-paths for both sides.
+        // Determine sub-endpoints for both sides.
         let left_sub = match &entry.left {
-            Some(left_info) => PathBuf::from(&left_info.path),
-            None => self.left_path.join(&entry.name),
+            Some(left_info) => {
+                self.left.with_path(PathBuf::from(&left_info.path))
+            }
+            None => self.left.join(&entry.name),
         };
         let right_sub = match &entry.right {
-            Some(right_info) => PathBuf::from(&right_info.path),
-            None => self.right_path.join(&entry.name),
+            Some(right_info) => {
+                self.right.with_path(PathBuf::from(&right_info.path))
+            }
+            None => self.right.join(&entry.name),
         };
 
-        // Only navigate if at least one side is a directory.
-        if !left_sub.is_dir() && !right_sub.is_dir() {
-            return;
-        }
-
-        self.left_path = left_sub;
-        self.right_path = right_sub;
+        self.left = left_sub;
+        self.right = right_sub;
         self.load_comparison(cx);
     }
 
     /// Navigate to parent directories.
     pub fn navigate_up(&mut self, cx: &mut Context<Self>) {
-        let left_parent = self.left_path.parent().map(PathBuf::from);
-        let right_parent = self.right_path.parent().map(PathBuf::from);
-
-        match (left_parent, right_parent) {
-            (Some(lp), Some(rp))
-                if lp != self.left_path && rp != self.right_path =>
-            {
-                self.left_path = lp;
-                self.right_path = rp;
-                self.load_comparison(cx);
-            }
-            _ => {}
+        if let (Some(lp), Some(rp)) = (self.left.parent(), self.right.parent())
+        {
+            self.left = lp;
+            self.right = rp;
+            self.load_comparison(cx);
         }
     }
 

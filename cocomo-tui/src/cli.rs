@@ -24,13 +24,11 @@
 use std::sync::Arc;
 
 use clap::Parser;
-use cocomo_lib::{FileSystem, Url, resolve_provider, secrets::TtyPrompter};
-
-use crate::{
-    controller::compare,
-    error::TuiError,
-    state::{Endpoint, SessionView},
+use cocomo_lib::{
+    Endpoint, FileSystem, Url, resolve_provider, secrets::TtyPrompter,
 };
+
+use crate::{controller::compare, error::TuiError, state::SessionView};
 
 /// cocomo — COmpare, COpy & MOve directories and files.
 #[derive(Parser, Debug)]
