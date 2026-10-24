@@ -50,6 +50,9 @@ pub(super) fn DirCompareView(
     // Subscribe to global state for re-render notifications on writes.
     let app_handle = hooks.use_atom(&APP_STATE);
     let theme = hooks.use_component_theme::<CocomoTheme>();
+    // Terminal width drives the help bar wrapping; the hook re-renders on
+    // resize. Must stay above the early returns below (stable hook order).
+    let (term_width, _) = hooks.use_terminal_size();
 
     // Read session data from the atom.
     let app = app_handle.read();
@@ -201,25 +204,27 @@ pub(super) fn DirCompareView(
             .push(Span::styled("  ? help", theme.dim));
     }
 
-    // -- Build help bar line -------------------------------------------------
-    // Mode-specific hints stay hand-written; the normal-mode bindings come
-    // from the keymap so the bar cannot drift from the actual dispatch.
+    // -- Build help bar lines ------------------------------------------------
+    // Mode-specific hints stay hand-written (they fit a single line); the
+    // normal-mode bindings come from the keymap, wrapped to the terminal
+    // width so the bar cannot drift from the actual dispatch and never
+    // truncates an item.
 
-    let help_bar_line: Line<'static> = if mode == SessionMode::Filter {
-        Line::from("f=activate  Enter=apply  Esc=cancel")
+    let help_bar_lines: Vec<Line<'static>> = if mode == SessionMode::Filter {
+        vec![Line::from("f=activate  Enter=apply  Esc=cancel")]
     } else if matches!(mode, SessionMode::SaveSession { .. }) {
-        Line::from("s=activate  Enter=save  Esc=cancel")
+        vec![Line::from("s=activate  Enter=save  Esc=cancel")]
     } else if matches!(mode, SessionMode::LoadSession { .. }) {
-        Line::from("O=activate  Enter=load  Esc=cancel")
+        vec![Line::from("O=activate  Enter=load  Esc=cancel")]
     } else if sync_active {
-        Line::from(vec![
+        vec![Line::from(vec![
             Span::styled("j/k", Style::new().add_modifier(Modifier::BOLD)),
             Span::raw(" navigate  "),
             Span::styled("Esc", Style::new().add_modifier(Modifier::BOLD)),
             Span::raw(" cancel"),
-        ])
+        ])]
     } else {
-        keys::help_line(&[KeyScope::DirNormal, KeyScope::Global])
+        keys::help_lines(&[KeyScope::DirNormal, KeyScope::Global], term_width)
     };
 
     // -- Build the element tree ----------------------------------------------
@@ -343,9 +348,9 @@ pub(super) fn DirCompareView(
                 StatusBar(line: status_bar_line)
             }
             // Help bar: only rendered when toggled on (`?`), so the main
-            // view area keeps the row by default.
+            // view area keeps the rows by default.
             if show_help {
-                HelpBar(line: help_bar_line)
+                HelpBar(lines: help_bar_lines)
             }
         }
     )

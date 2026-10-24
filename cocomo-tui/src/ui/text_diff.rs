@@ -49,6 +49,9 @@ pub(super) fn TextCompareView(
     // Subscribe to global state for re-render notifications on writes.
     let app_handle = hooks.use_atom(&APP_STATE);
     let theme = hooks.use_component_theme::<CocomoTheme>();
+    // Terminal width drives the help bar wrapping; the hook re-renders on
+    // resize. Must stay above the early returns below (stable hook order).
+    let (term_width, _) = hooks.use_terminal_size();
 
     // Read session data from the atom.
     let app = app_handle.read();
@@ -131,10 +134,11 @@ pub(super) fn TextCompareView(
             .push(Span::styled("  ? help", theme.dim));
     }
 
-    // Build help bar line from the keymap so it cannot drift from the
-    // actual bindings.
-    let help_bar_line: Line<'static> =
-        keys::help_line(&[KeyScope::TextNormal, KeyScope::Global]);
+    // Build help bar lines from the keymap, wrapped to the terminal width,
+    // so the bar cannot drift from the actual bindings and never truncates
+    // an item.
+    let help_bar_lines: Vec<Line<'static>> =
+        keys::help_lines(&[KeyScope::TextNormal, KeyScope::Global], term_width);
 
     // File names for the diff column headers.
     let left_name = session
@@ -200,7 +204,7 @@ pub(super) fn TextCompareView(
             StatusBar(line: status_bar_line)
             // Help bar: only rendered when toggled on (`?`).
             if show_help {
-                HelpBar(line: help_bar_line)
+                HelpBar(lines: help_bar_lines)
             }
         }
     )

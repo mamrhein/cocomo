@@ -420,29 +420,50 @@ pub fn lookup(scope: KeyScope, key: KeyEvent) -> Option<Cmd> {
         .map(|b| b.cmd)
 }
 
-/// Build the help bar line for the given scopes from the keymap.
+/// Build the help bar lines for the given scopes from the keymap.
 ///
 /// Bindings appear in [`KEYMAP`] order; aliases without a help label are
-/// skipped. Because the labels come from the same table that drives
-/// dispatch, the help bar cannot drift from the actual bindings.
-pub fn help_line(scopes: &[KeyScope]) -> Line<'static> {
+/// skipped. Items are packed greedily into lines of at most `width` cells
+/// (an item wider than `width` gets a line of its own instead of being
+/// split), so every labelled binding stays visible at any terminal width.
+/// Because the labels come from the same table that drives dispatch, the
+/// help bar cannot drift from the actual bindings.
+pub fn help_lines(scopes: &[KeyScope], width: u16) -> Vec<Line<'static>> {
+    /// Cells separating two items on the same line.
+    const SEP_WIDTH: usize = 2;
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
     let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut line_width = 0usize;
     for binding in KEYMAP {
-        if let Some((keys, description)) = binding.help {
-            if !scopes.contains(&binding.scope) {
-                continue;
-            }
-            if !spans.is_empty() {
-                spans.push(Span::raw("  "));
-            }
-            spans.push(Span::styled(
-                keys,
-                Style::new().add_modifier(Modifier::BOLD),
-            ));
-            spans.push(Span::raw(format!(" {description}")));
+        let Some((keys, description)) = binding.help else {
+            continue;
+        };
+        if !scopes.contains(&binding.scope) {
+            continue;
         }
+        let key_span =
+            Span::styled(keys, Style::new().add_modifier(Modifier::BOLD));
+        let desc_span = Span::raw(format!(" {description}"));
+        let item_width = key_span.width() + desc_span.width();
+        if !spans.is_empty()
+            && line_width + SEP_WIDTH + item_width > usize::from(width)
+        {
+            lines.push(Line::from(std::mem::take(&mut spans)));
+            line_width = 0;
+        }
+        if !spans.is_empty() {
+            spans.push(Span::raw("  "));
+            line_width += SEP_WIDTH;
+        }
+        line_width += item_width;
+        spans.push(key_span);
+        spans.push(desc_span);
     }
-    Line::from(spans)
+    if !spans.is_empty() {
+        lines.push(Line::from(spans));
+    }
+    lines
 }
 
 /// Handle key input for a session.
@@ -981,15 +1002,47 @@ mod tests {
     }
 
     #[test]
-    fn help_line_contains_all_labelled_bindings_of_its_scopes() {
-        let line = help_line(&[KeyScope::TextNormal, KeyScope::Global]);
-        let text: String =
-            line.spans.iter().map(|s| s.content.as_ref()).collect();
+    fn help_lines_contain_all_labelled_bindings_of_their_scopes() {
+        let lines =
+            help_lines(&[KeyScope::TextNormal, KeyScope::Global], u16::MAX);
+        let text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect();
         for label in ["j/k", "g/G", "n/N", "Ctrl+W", "Ctrl+Tab", "q"] {
             assert!(text.contains(label), "missing `{label}` in `{text}`");
         }
         // Dir-only labels must not appear in the text help bar.
         assert!(!text.contains("filter"));
+    }
+
+    #[test]
+    fn help_lines_wrap_to_the_given_width() {
+        let width: u16 = 40;
+        let scopes = [KeyScope::TextNormal, KeyScope::Global];
+        let wide = help_lines(&scopes, u16::MAX);
+        let narrow = help_lines(&scopes, width);
+        // Premise: the unwrapped bar is wider than the test width.
+        assert!(
+            wide.iter().map(|l| l.width()).sum::<usize>() > usize::from(width),
+            "keymap too small to exercise wrapping",
+        );
+        assert!(narrow.len() > 1, "narrow width must wrap to several lines");
+        for line in &narrow {
+            assert!(
+                line.width() <= usize::from(width),
+                "line wider than `{width}`: `{line}`",
+            );
+        }
+        // Wrapping must not drop items: the same bold key labels appear.
+        let bold_labels = |lines: &[Line<'static>]| {
+            lines
+                .iter()
+                .flat_map(|l| l.spans.iter())
+                .filter(|s| s.style.add_modifier.contains(Modifier::BOLD))
+                .count()
+        };
+        assert_eq!(bold_labels(&narrow), bold_labels(&wide));
     }
 
     #[test]
