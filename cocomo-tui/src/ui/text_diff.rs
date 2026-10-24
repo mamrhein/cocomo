@@ -90,8 +90,8 @@ pub(super) fn TextCompareView(
     };
 
     // Extract rendering data from the session.
-    let left_path_str = session.core.left_path.to_string_lossy().to_string();
-    let right_path_str = session.core.right_path.to_string_lossy().to_string();
+    let left_path_str = session.core.left.display();
+    let right_path_str = session.core.right.display();
     let grammar_name = text.grammar.name.clone();
     let left_line_count = text.left_lines.len();
     let right_line_count = text.right_lines.len();
@@ -130,13 +130,15 @@ pub(super) fn TextCompareView(
     // File names for the diff column headers.
     let left_name = session
         .core
-        .left_path
+        .left
+        .path()
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_default();
     let right_name = session
         .core
-        .right_path
+        .right
+        .path()
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_default();

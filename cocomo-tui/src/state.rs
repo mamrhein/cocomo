@@ -18,13 +18,17 @@
 //! shared by both content types.
 
 use std::{
+    fmt,
     path::{Path, PathBuf},
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::{
+        Arc, OnceLock,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 
 use cocomo_lib::{
-    DirComparison, DirEntry, DirEntryStatus, Grammar, LineInfo, SyncOperation,
-    SyncResult, TextDiff,
+    DirComparison, DirEntry, DirEntryStatus, Grammar, LineInfo, LocalFs,
+    Provider, SyncOperation, SyncResult, TextDiff, Url,
 };
 use ratatui_kit::{Atom, components::table::TableState};
 
@@ -67,9 +71,9 @@ impl SessionMode {
 #[derive(Clone, Debug, PartialEq)]
 pub enum SessionAction {
     /// Open a subdirectory comparison in a new session.
-    OpenDir { left: PathBuf, right: PathBuf },
+    OpenDir { left: Endpoint, right: Endpoint },
     /// Open a file comparison (text diff) in a new session.
-    OpenFile { left: PathBuf, right: PathBuf },
+    OpenFile { left: Endpoint, right: Endpoint },
     /// Navigate to the parent directories in a new session.
     GoUp,
     /// Reload the current session's comparison.
@@ -104,6 +108,130 @@ pub struct SessionView {
     pub ui: UiState,
 }
 
+/// One side of a comparison: the provider servicing it and the location
+/// within that provider.
+///
+/// An endpoint is a cheap handle: the provider is shared (`Arc`), so
+/// navigating into a subdirectory or up to the parent clones only the
+/// parsed [`Url`]. Local endpoints all share one process-wide [`LocalFs`],
+/// so two local sides of a comparison address the same provider instance
+/// and keep the same-provider fast paths of compare and sync.
+#[derive(Clone)]
+pub struct Endpoint {
+    fs: Arc<Provider>,
+    url: Url,
+}
+
+impl Endpoint {
+    /// The provider instance shared by every local endpoint.
+    fn local_provider() -> Arc<Provider> {
+        static LOCAL: OnceLock<Arc<Provider>> = OnceLock::new();
+        LOCAL
+            .get_or_init(|| Arc::new(Provider::Local(LocalFs::new("local"))))
+            .clone()
+    }
+
+    /// A local endpoint at `path`.
+    pub fn local(path: impl Into<PathBuf>) -> Self {
+        Self {
+            fs: Self::local_provider(),
+            url: Url::from_path(path.into()),
+        }
+    }
+
+    /// An endpoint on an already-resolved provider, located by `url`.
+    pub fn new(fs: Arc<Provider>, url: Url) -> Self {
+        Self { fs, url }
+    }
+
+    /// The provider servicing this side.
+    pub fn fs(&self) -> &Provider {
+        &self.fs
+    }
+
+    /// The path within the provider.
+    pub fn path(&self) -> &Path {
+        &self.url.path
+    }
+
+    /// Whether this side is on the local filesystem.
+    pub fn is_local(&self) -> bool {
+        self.url.scheme == Url::LOCAL_SCHEME
+    }
+
+    /// Return `true` when both sides are serviced by the same provider
+    /// instance, which enables the same-filesystem fast paths.
+    pub fn same_provider(&self, other: &Endpoint) -> bool {
+        Arc::ptr_eq(&self.fs, &other.fs)
+    }
+
+    /// Display form: the plain path for local endpoints, the full URL for
+    /// remote ones.
+    pub fn display(&self) -> String {
+        self.url.to_string()
+    }
+
+    /// The same endpoint located at `path`.
+    pub fn with_path(&self, path: impl Into<PathBuf>) -> Self {
+        let mut url = self.url.clone();
+        url.path = path.into();
+        Self {
+            fs: self.fs.clone(),
+            url,
+        }
+    }
+
+    /// The same endpoint one directory up; `None` at the provider root.
+    pub fn parent(&self) -> Option<Self> {
+        Some(self.with_path(self.url.path.parent()?))
+    }
+
+    /// The same endpoint with `name` appended to its path.
+    pub fn join(&self, name: &str) -> Self {
+        let mut path = self.url.path.clone();
+        path.push(name);
+        self.with_path(path)
+    }
+
+    /// The provider identity recorded in saved sessions: the bare `file`
+    /// scheme for local endpoints, the scheme plus authority (without the
+    /// path) for remote ones.
+    pub fn provider_ref(&self) -> String {
+        if self.is_local() {
+            return Url::LOCAL_SCHEME.to_string();
+        }
+        let host = self.url.host.clone().unwrap_or_default();
+        // Bracket IPv6 literals so the authority re-parses as a host.
+        let host = if host.contains(':') {
+            format!("[{host}]")
+        } else {
+            host
+        };
+        match self.url.port {
+            Some(port) => {
+                format!("{}://{host}:{port}", self.url.scheme)
+            }
+            None => format!("{}://{host}", self.url.scheme),
+        }
+    }
+}
+
+impl fmt::Debug for Endpoint {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Endpoint")
+            .field("url", &self.url)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PartialEq for Endpoint {
+    /// Two endpoints are equal when they address the same provider
+    /// instance at the same location.
+    fn eq(&self, other: &Self) -> bool {
+        self.same_provider(other) && self.url == other.url
+    }
+}
+
 /// The domain identity of a session: what is compared and how it is named.
 pub struct SessionCore {
     /// Stable identity of this session.
@@ -114,10 +242,10 @@ pub struct SessionCore {
     pub id: usize,
     /// Display name shown in the tab bar.
     pub name: String,
-    /// Left-side path (directory or file).
-    pub left_path: PathBuf,
-    /// Right-side path (directory or file).
-    pub right_path: PathBuf,
+    /// Left-side endpoint (directory or file).
+    pub left: Endpoint,
+    /// Right-side endpoint (directory or file).
+    pub right: Endpoint,
 }
 
 /// The content of a session.
@@ -220,24 +348,26 @@ static NEXT_SESSION_ID: AtomicUsize = AtomicUsize::new(1);
 
 impl SessionCore {
     /// Create the core for a session comparing `left` with `right`, deriving
-    /// the tab title from the two paths.
-    fn new(left_path: PathBuf, right_path: PathBuf) -> Self {
-        let name = Self::tab_title_for_paths(&left_path, &right_path);
+    /// the tab title from the two endpoints.
+    fn new(left: Endpoint, right: Endpoint) -> Self {
+        let name = Self::tab_title_for(&left, &right);
         Self {
             id: NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed),
             name,
-            left_path,
-            right_path,
+            left,
+            right,
         }
     }
 
-    /// Generate a short tab title from two paths.
-    fn tab_title_for_paths(left: &Path, right: &Path) -> String {
+    /// Generate a short tab title from the two endpoints' entry names.
+    fn tab_title_for(left: &Endpoint, right: &Endpoint) -> String {
         let left_name = left
+            .path()
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "…".to_string());
         let right_name = right
+            .path()
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "…".to_string());
@@ -248,8 +378,8 @@ impl SessionCore {
 impl SessionView {
     /// Create a new directory comparison session.
     pub fn new_dir_compare(
-        left: PathBuf,
-        right: PathBuf,
+        left: Endpoint,
+        right: Endpoint,
         compare_content: bool,
     ) -> Self {
         Self {
@@ -269,8 +399,8 @@ impl SessionView {
 
     /// Create a new text comparison session.
     pub fn new_text_compare(
-        left: PathBuf,
-        right: PathBuf,
+        left: Endpoint,
+        right: Endpoint,
         left_lines: Vec<LineInfo>,
         right_lines: Vec<LineInfo>,
         text_diff: TextDiff,
@@ -532,8 +662,8 @@ mod tests {
 
     fn dir_session() -> SessionView {
         SessionView::new_dir_compare(
-            PathBuf::from("/left"),
-            PathBuf::from("/right"),
+            Endpoint::local("/left"),
+            Endpoint::local("/right"),
             false,
         )
     }
@@ -584,8 +714,8 @@ mod tests {
         assert!(dir.content.is_dir());
 
         let mut text = SessionView::new_text_compare(
-            PathBuf::from("/left"),
-            PathBuf::from("/right"),
+            Endpoint::local("/left"),
+            Endpoint::local("/right"),
             Vec::new(),
             Vec::new(),
             TextDiff::default(),
@@ -651,8 +781,8 @@ mod tests {
     #[test]
     fn tab_title_uses_file_names() {
         let session = SessionView::new_dir_compare(
-            PathBuf::from("/a/b"),
-            PathBuf::from("/x/y"),
+            Endpoint::local("/a/b"),
+            Endpoint::local("/x/y"),
             false,
         );
         assert_eq!(session.tab_title(), "b vs y");

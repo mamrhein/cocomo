@@ -10,30 +10,46 @@
 //! Command-line argument definitions and startup policy.
 //!
 //! [`Cli`] parses the arguments; [`Cli::startup`] resolves them into a
-//! [`Startup`] decision — canonicalize and validate the paths, then run
-//! the initial comparison — so [`crate::run`] only has to seed
-//! [`APP_STATE`](crate::state::APP_STATE) and enter the loop.
+//! [`Startup`] decision — parse each side as a path or URL, resolve it to
+//! an [`Endpoint`], validate the pair, then run the initial comparison — so
+//! [`crate::run`] only has to seed [`APP_STATE`](crate::state::APP_STATE)
+//! and enter the loop.
+//!
+//! Remote endpoints resolve through the shared `cocomo-lib` resolver
+//! (profile store, environment, keychain, then a terminal prompt). The
+//! prompt is safe at startup because it runs before the alternate screen is
+//! entered; once the UI is up, credential entry must come from a profile or
+//! the keychain instead.
 
-use std::path::PathBuf;
+use std::sync::Arc;
 
 use clap::Parser;
+use cocomo_lib::{FileSystem, Url, resolve_provider, secrets::TtyPrompter};
 
-use crate::{controller::compare, error::TuiError, state::SessionView};
+use crate::{
+    controller::compare,
+    error::TuiError,
+    state::{Endpoint, SessionView},
+};
 
 /// cocomo — COmpare, COpy & MOve directories and files.
 #[derive(Parser, Debug)]
 #[command(name = "cocomo-tui", version, about)]
 pub(crate) struct Cli {
-    /// Left directory path.
+    /// Left directory path or URL (e.g. `ftp://host/pub/src`).
     #[arg(requires = "right")]
-    pub left: Option<PathBuf>,
+    pub left: Option<String>,
 
-    /// Right directory path.
-    pub right: Option<PathBuf>,
+    /// Right directory path or URL (e.g. `ftp://host/pub/src`).
+    pub right: Option<String>,
 
     /// Compare file content (using hashing).
     #[arg(short = 'c', long, default_value_t = false)]
     pub content: bool,
+
+    /// Profile id to authenticate the addressed provider(s) with.
+    #[arg(short = 'P', long)]
+    pub profile: Option<String>,
 }
 
 /// The startup decision derived from the parsed [`Cli`] arguments.
@@ -52,15 +68,37 @@ pub(crate) enum Startup {
     ComparisonFailed(TuiError),
 }
 
+/// Resolve one startup argument into an [`Endpoint`].
+///
+/// Local paths are canonicalized so the session shows absolute paths and
+/// symlinks are followed; remote URLs resolve their provider through the
+/// shared resolver chain, authenticated with `profile_id` if given and
+/// prompting on the terminal for whatever the profile store, the
+/// environment, and the keychain do not supply.
+async fn resolve_startup_side(
+    arg: &str,
+    profile_id: Option<&str>,
+) -> anyhow::Result<Endpoint> {
+    let url = Url::parse(arg)?;
+    if url.scheme == Url::LOCAL_SCHEME {
+        let path = fs_err::tokio::canonicalize(&url.path).await?;
+        return Ok(Endpoint::local(path));
+    }
+    let fs =
+        Arc::new(resolve_provider(&url, profile_id, &TtyPrompter::new())?);
+    Ok(Endpoint::new(fs, url))
+}
+
 impl Cli {
-    /// Resolve the parsed arguments into a [`Startup`] decision:
-    /// canonicalize and validate the paths, then run the initial
+    /// Resolve the parsed arguments into a [`Startup`] decision: resolve
+    /// both sides to endpoints, validate them, then run the initial
     /// comparison.
     ///
-    /// Argument-level problems (a path that cannot be resolved or is not
-    /// a directory) are returned as errors so the binary exits with a
-    /// message; a comparison that fails on otherwise valid paths is
-    /// reported as [`Startup::ComparisonFailed`] so the UI can show it.
+    /// Argument-level problems (an unparsable URL, a path that cannot be
+    /// resolved, a missing directory) are returned as errors so the binary
+    /// exits with a message; a comparison that fails on otherwise valid
+    /// endpoints is reported as [`Startup::ComparisonFailed`] so the UI can
+    /// show it.
     pub(crate) async fn startup(&self) -> anyhow::Result<Startup> {
         // clap's `requires` guarantees the positional pair comes together,
         // so anything but "both present" means "no paths given".
@@ -70,12 +108,13 @@ impl Cli {
             return Ok(Startup::Welcome);
         };
 
-        let left = fs_err::tokio::canonicalize(left).await?;
-        let right = fs_err::tokio::canonicalize(right).await?;
+        let left = resolve_startup_side(left, self.profile.as_deref()).await?;
+        let right =
+            resolve_startup_side(right, self.profile.as_deref()).await?;
 
-        // Validate that both paths exist and are of the same type.
-        let left_meta = fs_err::tokio::metadata(&left).await?;
-        let right_meta = fs_err::tokio::metadata(&right).await?;
+        // Validate that both endpoints exist and are of the same type.
+        let left_meta = left.fs().metadata(left.path()).await?;
+        let right_meta = right.fs().metadata(right.path()).await?;
 
         if left_meta.is_file() && right_meta.is_file() {
             return Err(anyhow::anyhow!(
@@ -84,7 +123,7 @@ impl Cli {
             ));
         }
 
-        if !left_meta.is_dir() || !right_meta.is_dir() {
+        if !left_meta.is_dir || !right_meta.is_dir {
             return Err(anyhow::anyhow!(
                 "Both paths must be directories, or both must be files."
             ));
@@ -117,15 +156,31 @@ mod tests {
         assert!(cli.left.is_none());
         assert!(cli.right.is_none());
         assert!(!cli.content);
+        assert!(cli.profile.is_none());
     }
 
     #[test]
     fn full_pair_parses() {
         let cli =
             Cli::try_parse_from(["cocomo-tui", "/a", "/b", "-c"]).unwrap();
-        assert_eq!(cli.left.as_deref(), Some(std::path::Path::new("/a")));
-        assert_eq!(cli.right.as_deref(), Some(std::path::Path::new("/b")));
+        assert_eq!(cli.left.as_deref(), Some("/a"));
+        assert_eq!(cli.right.as_deref(), Some("/b"));
         assert!(cli.content);
+    }
+
+    #[test]
+    fn url_pair_and_profile_parse() {
+        let cli = Cli::try_parse_from([
+            "cocomo-tui",
+            "ftp://host.example/pub",
+            "./mirror",
+            "--profile",
+            "prod",
+        ])
+        .unwrap();
+        assert_eq!(cli.left.as_deref(), Some("ftp://host.example/pub"));
+        assert_eq!(cli.right.as_deref(), Some("./mirror"));
+        assert_eq!(cli.profile.as_deref(), Some("prod"));
     }
 
     #[tokio::test]
@@ -148,6 +203,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn file_url_pair_starts_a_session() {
+        let left = tempfile::tempdir().unwrap();
+        let right = tempfile::tempdir().unwrap();
+        let cli = Cli::try_parse_from([
+            "cocomo-tui",
+            &format!("file://{}", left.path().display()),
+            &format!("file://{}", right.path().display()),
+        ])
+        .unwrap();
+        assert!(matches!(cli.startup().await.unwrap(), Startup::Session(_)));
+    }
+
+    #[tokio::test]
     async fn missing_path_is_a_startup_error() {
         let right = tempfile::tempdir().unwrap();
         let cli = Cli::try_parse_from([
@@ -162,6 +230,24 @@ mod tests {
         assert!(
             err.to_string().contains("definitely-not-here"),
             "error should name the offending path: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn unsupported_scheme_is_a_startup_error() {
+        let right = tempfile::tempdir().unwrap();
+        let cli = Cli::try_parse_from([
+            "cocomo-tui",
+            "gopher://host.example/pub",
+            right.path().to_str().unwrap(),
+        ])
+        .unwrap();
+        let Err(err) = cli.startup().await else {
+            panic!("an unsupported scheme must fail startup");
+        };
+        assert!(
+            err.to_string().contains("unsupported URL scheme"),
+            "error should name the offending scheme: {err}"
         );
     }
 

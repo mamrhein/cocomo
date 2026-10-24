@@ -15,15 +15,15 @@
 //! modules (`state` and `keys`); the async `cocomo-lib` calls are exercised
 //! by their own tests in `cocomo-lib`.
 
-use std::path::PathBuf;
-
 use cocomo_lib::{
     DirComparison, DirEntry, DirEntryStatus, EntryInfo, SyncOperation,
     SyncResult,
 };
 use cocomo_tui::{
     keys::{Cmd, KeyScope, handle_session_key, lookup},
-    state::{AppState, SessionAction, SessionMode, SessionView, SyncStage},
+    state::{
+        AppState, Endpoint, SessionAction, SessionMode, SessionView, SyncStage,
+    },
 };
 use ratatui_kit::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -38,8 +38,8 @@ fn press(session: &mut SessionView, code: KeyCode) -> Option<SessionAction> {
 /// Dir session with one directory and one left-only file entry.
 fn dir_session() -> SessionView {
     let mut session = SessionView::new_dir_compare(
-        PathBuf::from("/base/left"),
-        PathBuf::from("/base/right"),
+        Endpoint::local("/base/left"),
+        Endpoint::local("/base/right"),
         false,
     );
     session.set_comparison(Some(DirComparison {
@@ -88,8 +88,8 @@ fn enter_on_directory_entry_requests_open_dir() {
     assert_eq!(
         press(&mut session, KeyCode::Enter),
         Some(SessionAction::OpenDir {
-            left: PathBuf::from("/base/left/sub"),
-            right: PathBuf::from("/base/right/sub"),
+            left: Endpoint::local("/base/left/sub"),
+            right: Endpoint::local("/base/right/sub"),
         })
     );
 }
@@ -101,10 +101,10 @@ fn enter_on_file_entry_requests_open_file() {
     assert_eq!(
         press(&mut session, KeyCode::Enter),
         Some(SessionAction::OpenFile {
-            left: PathBuf::from("/base/left/file.txt"),
+            left: Endpoint::local("/base/left/file.txt"),
             // The entry is absent on the right; the handler falls back to
             // the joined right path.
-            right: PathBuf::from("/base/right/file.txt"),
+            right: Endpoint::local("/base/right/file.txt"),
         })
     );
 }

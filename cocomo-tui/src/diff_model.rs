@@ -63,6 +63,7 @@ mod tests {
     use cocomo_lib::{Grammar, LineInfo, TextDiff, TextDifference};
 
     use super::*;
+    use crate::state::Endpoint;
 
     /// Text session with 10 merged rows: line 3 differs, lines 4 and 5 were
     /// added on the right, line 7 differs.
@@ -94,8 +95,8 @@ mod tests {
             ..Default::default()
         };
         SessionView::new_text_compare(
-            PathBuf::from("/left"),
-            PathBuf::from("/right"),
+            Endpoint::local(PathBuf::from("/left")),
+            Endpoint::local(PathBuf::from("/right")),
             left_lines,
             right_lines,
             diff,

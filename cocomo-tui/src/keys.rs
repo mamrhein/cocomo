@@ -629,22 +629,34 @@ fn handle_enter(session: &SessionView) -> SessionAction {
         _ => return SessionAction::None,
     };
 
-    // Build the sub-paths for the new comparison.
+    // Build the sub-endpoints for the new comparison. An entry that only
+    // exists on one side falls back to the joined path on the other side,
+    // which then reads as a non-existent file or directory.
     let left_sub = selected
         .left
         .as_ref()
-        .map(|l| std::path::PathBuf::from(&l.path))
+        .map(|l| {
+            session
+                .core
+                .left
+                .with_path(std::path::PathBuf::from(&l.path))
+        })
         .or_else(|| {
             // Entry only exists on the right; use a non-existent left path.
-            Some(session.core.left_path.join(&selected.name))
+            Some(session.core.left.join(&selected.name))
         });
     let right_sub = selected
         .right
         .as_ref()
-        .map(|r| std::path::PathBuf::from(&r.path))
+        .map(|r| {
+            session
+                .core
+                .right
+                .with_path(std::path::PathBuf::from(&r.path))
+        })
         .or_else(|| {
             // Entry only exists on the left; use a non-existent right path.
-            Some(session.core.right_path.join(&selected.name))
+            Some(session.core.right.join(&selected.name))
         });
 
     let (left, right) = match (left_sub, right_sub) {
@@ -684,6 +696,7 @@ mod tests {
     use ratatui_kit::crossterm::event::KeyEvent;
 
     use super::*;
+    use crate::state::Endpoint;
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, NONE)
@@ -711,8 +724,8 @@ mod tests {
             ..Default::default()
         };
         SessionView::new_text_compare(
-            PathBuf::from("/left"),
-            PathBuf::from("/right"),
+            Endpoint::local(PathBuf::from("/left")),
+            Endpoint::local(PathBuf::from("/right")),
             left_lines,
             right_lines,
             diff,
@@ -733,8 +746,8 @@ mod tests {
             })
             .collect();
         let mut session = SessionView::new_dir_compare(
-            PathBuf::from("/left"),
-            PathBuf::from("/right"),
+            Endpoint::local(PathBuf::from("/left")),
+            Endpoint::local(PathBuf::from("/right")),
             false,
         );
         session.set_comparison(Some(DirComparison {

@@ -25,14 +25,15 @@
 
 use std::{
     future::Future,
-    io,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use cocomo_lib::{
-    CompareConfig, ContentCache, DirComparison, Grammar, LineInfo, LocalFs,
-    SessionConfig, SyncOperation, SyncResult, SyncRules, TextCompareSettings,
-    compare_texts, default_session_dir, list_saved_sessions,
+    CompareConfig, ContentCache, DirComparison, FileSystem, FsError, Grammar,
+    LineInfo, NullPrompter, Prompter, Provider, SessionConfig, SyncOperation,
+    SyncResult, SyncRules, TextCompareSettings, Url, compare_texts,
+    default_session_dir, list_saved_sessions, resolve_provider,
 };
 use ratatui_kit::crossterm::event::KeyEvent;
 
@@ -41,24 +42,25 @@ use crate::{
     keys::handle_session_key,
     session_store::session_to_config,
     state::{
-        APP_STATE, AppState, SessionAction, SessionMode, SessionView,
-        SyncStage,
+        APP_STATE, AppState, Endpoint, SessionAction, SessionMode,
+        SessionView, SyncStage,
     },
 };
 
 /// Compare two directories and return the raw result.
 ///
-/// Takes explicit paths instead of a `&mut SessionView` so callers can run
-/// it inside a spawned task without holding the `APP_STATE` lock across an
-/// `await` — and without constructing a throwaway session just to satisfy
+/// Takes explicit endpoints instead of a `&mut SessionView` so callers can
+/// run it inside a spawned task without holding the `APP_STATE` lock across
+/// an `await` — and without constructing a throwaway session just to satisfy
 /// the signature. Use [`SessionView::set_comparison`] to put the result
-/// into a session.
+/// into a session. Both sides on the same provider instance compare
+/// through the single-filesystem path; a mixed pair compares across
+/// providers.
 pub(crate) async fn compare(
-    left: &Path,
-    right: &Path,
+    left: &Endpoint,
+    right: &Endpoint,
     compare_content: bool,
 ) -> Result<DirComparison> {
-    let fs = LocalFs::new("local");
     let cache = ContentCache::default_config();
 
     let mut config = if compare_content {
@@ -68,14 +70,26 @@ pub(crate) async fn compare(
     };
     config.max_depth = Some(1);
 
-    Ok(cocomo_lib::compare_directories_node(
-        &fs,
-        left,
-        right,
-        &config,
-        Some(&cache),
-    )
-    .await?)
+    if left.same_provider(right) {
+        Ok(cocomo_lib::compare_directories_node(
+            left.fs(),
+            left.path(),
+            right.path(),
+            &config,
+            Some(&cache),
+        )
+        .await?)
+    } else {
+        Ok(cocomo_lib::compare_directories_pair_node(
+            left.fs(),
+            right.fs(),
+            left.path(),
+            right.path(),
+            &config,
+            Some(&cache),
+        )
+        .await?)
+    }
 }
 
 /// Detect a suitable grammar for syntax classification based on file
@@ -99,17 +113,17 @@ fn build_text_settings(grammar: &Grammar) -> TextCompareSettings {
     }
 }
 
-/// Read a text file for comparison.
+/// Read a text file for comparison through its endpoint's provider.
 ///
 /// A missing file yields empty content: one side of a comparison can
 /// legitimately not exist (an orphan entry), and the diff then shows the
-/// other side as entirely added. Any other I/O failure is propagated with
-/// path context instead of being swallowed.
-async fn read_text_file(path: &Path) -> Result<String> {
-    match fs_err::tokio::read_to_string(path).await {
-        Ok(content) => Ok(content),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(String::new()),
-        Err(e) => Err(TuiError::io(path, e)),
+/// other side as entirely added. Any other failure is propagated with the
+/// provider's structured error context instead of being swallowed.
+async fn read_text_file(fs: &Provider, path: &Path) -> Result<String> {
+    match fs.read(path, None).await {
+        Ok(bytes) => Ok(String::from_utf8_lossy(&bytes).into_owned()),
+        Err(FsError::NotFound { .. }) => Ok(String::new()),
+        Err(e) => Err(TuiError::Lib(e)),
     }
 }
 
@@ -129,21 +143,22 @@ fn line_infos(content: &str, grammar: &Grammar) -> Vec<LineInfo> {
 
 /// Run a text comparison and create a new [`SessionView`].
 async fn run_text_comparison(
-    left: PathBuf,
-    right: PathBuf,
+    left: Endpoint,
+    right: Endpoint,
 ) -> Result<SessionView> {
-    // Detect grammar from the left file (fall back to right if left is
-    // missing).
-    let grammar = if left.exists() {
-        detect_grammar(&left)
+    // Detect grammar from the left file (fall back to right if the left
+    // file is known to be missing; a remote left side is assumed present
+    // since probing it would cost a round trip).
+    let grammar = if left.is_local() && !left.path().exists() {
+        detect_grammar(right.path())
     } else {
-        detect_grammar(&right)
+        detect_grammar(left.path())
     };
 
     // Read each file exactly once and derive both the raw content and the
     // line info from the same string.
-    let left_content = read_text_file(&left).await?;
-    let right_content = read_text_file(&right).await?;
+    let left_content = read_text_file(left.fs(), left.path()).await?;
+    let right_content = read_text_file(right.fs(), right.path()).await?;
     let left_lines = line_infos(&left_content, &grammar);
     let right_lines = line_infos(&right_content, &grammar);
 
@@ -161,18 +176,17 @@ async fn run_text_comparison(
     ))
 }
 
-/// Plan a sync operation (dry-run) for the given directories.
+/// Plan a sync operation (dry-run) for the given endpoints.
 ///
-/// Takes explicit paths instead of a `&mut SessionView` so callers can run
-/// it inside a spawned task without holding the `APP_STATE` lock across an
-/// `await`.
+/// Takes explicit endpoints instead of a `&mut SessionView` so callers can
+/// run it inside a spawned task without holding the `APP_STATE` lock across
+/// an `await`.
 async fn plan_sync_session(
-    left: &Path,
-    right: &Path,
+    left: &Endpoint,
+    right: &Endpoint,
     operation: SyncOperation,
     compare_content: bool,
 ) -> Result<SyncResult> {
-    let fs = LocalFs::new("local");
     let rules = SyncRules {
         operation,
         dry_run: true,
@@ -180,20 +194,37 @@ async fn plan_sync_session(
         compare_content,
     };
 
-    Ok(cocomo_lib::plan_sync(&fs, left, right, &rules).await?)
+    if left.same_provider(right) {
+        Ok(
+            cocomo_lib::plan_sync(
+                left.fs(),
+                left.path(),
+                right.path(),
+                &rules,
+            )
+            .await?,
+        )
+    } else {
+        Ok(cocomo_lib::plan_sync_pair(
+            cocomo_lib::FsPair::Separate(left.fs(), right.fs()),
+            left.path(),
+            right.path(),
+            &rules,
+        )
+        .await?)
+    }
 }
 
-/// Execute a sync operation for the given directories.
+/// Execute a sync operation for the given endpoints.
 ///
-/// Like [`plan_sync_session`], takes explicit paths so it can run in a
+/// Like [`plan_sync_session`], takes explicit endpoints so it can run in a
 /// spawned task without holding a lock across an `await`.
 async fn execute_sync_session(
-    left: &Path,
-    right: &Path,
+    left: &Endpoint,
+    right: &Endpoint,
     operation: SyncOperation,
     compare_content: bool,
 ) -> Result<SyncResult> {
-    let fs = LocalFs::new("local");
     let rules = SyncRules {
         operation,
         dry_run: false,
@@ -201,28 +232,73 @@ async fn execute_sync_session(
         compare_content,
     };
 
-    Ok(cocomo_lib::sync_directories(&fs, left, right, &rules).await?)
+    if left.same_provider(right) {
+        Ok(cocomo_lib::sync_directories(
+            left.fs(),
+            left.path(),
+            right.path(),
+            &rules,
+        )
+        .await?)
+    } else {
+        Ok(cocomo_lib::sync_directories_pair(
+            cocomo_lib::FsPair::Separate(left.fs(), right.fs()),
+            left.path(),
+            right.path(),
+            &rules,
+        )
+        .await?)
+    }
+}
+
+/// Rebuild an endpoint from a saved session's provider reference.
+///
+/// Local refs resolve without any I/O. Remote refs re-resolve their
+/// credentials through `prompter`; the running TUI must pass a
+/// [`NullPrompter`] because a terminal prompt would corrupt the alternate
+/// screen.
+fn resolve_endpoint_ref(
+    provider: &str,
+    path: PathBuf,
+    prompter: &dyn Prompter,
+) -> Result<Endpoint> {
+    if provider == Url::LOCAL_SCHEME || provider == "local" {
+        return Ok(Endpoint::local(path));
+    }
+    let mut url =
+        Url::parse(provider).map_err(|e| TuiError::Resolve(e.into()))?;
+    url.path = path;
+    let fs = Arc::new(resolve_provider(&url, None, prompter)?);
+    Ok(Endpoint::new(fs, url))
 }
 
 /// Create a directory comparison session from a saved config.
 async fn create_session_from_config(
     config: &SessionConfig,
 ) -> Result<SessionView> {
-    // Resolve the paths from the provider ref.
-    let left_path = &config.left.path;
-    let right_path = &config.right.path;
+    // Rebuild both endpoints from their provider refs. Remote endpoints
+    // re-resolve without prompting: the UI owns the terminal while this
+    // runs, so credentials must come from a profile, the environment, or
+    // the keychain.
+    let prompter = NullPrompter;
+    let left = resolve_endpoint_ref(
+        &config.left.provider,
+        config.left.path.clone(),
+        &prompter,
+    )?;
+    let right = resolve_endpoint_ref(
+        &config.right.provider,
+        config.right.path.clone(),
+        &prompter,
+    )?;
 
     let compare_files = config.settings.compare_files;
 
     // Run the comparison; propagate failures so the caller can report them
     // instead of opening a session with a permanently empty view.
-    let comparison = compare(left_path, right_path, compare_files).await?;
+    let comparison = compare(&left, &right, compare_files).await?;
 
-    let mut session = SessionView::new_dir_compare(
-        left_path.clone(),
-        right_path.clone(),
-        compare_files,
-    );
+    let mut session = SessionView::new_dir_compare(left, right, compare_files);
     session.set_comparison(Some(comparison));
 
     // Restore filter settings.
@@ -259,8 +335,8 @@ fn active_dir_session_id() -> Option<usize> {
 /// The session inputs an async task needs, captured under a single read
 /// lock so that no guard is ever held across an `await`.
 struct SessionSnapshot {
-    left_path: PathBuf,
-    right_path: PathBuf,
+    left: Endpoint,
+    right: Endpoint,
     compare_content: bool,
     sync_operation: SyncOperation,
 }
@@ -271,8 +347,8 @@ impl SessionSnapshot {
     fn from_session(session: &SessionView) -> Option<Self> {
         let dir = session.dir()?;
         Some(Self {
-            left_path: session.core.left_path.clone(),
-            right_path: session.core.right_path.clone(),
+            left: session.core.left.clone(),
+            right: session.core.right.clone(),
             compare_content: dir.compare_content,
             sync_operation: dir.sync_operation,
         })
@@ -379,10 +455,8 @@ pub(crate) fn process_session_action(action: SessionAction) {
                 |app| {
                     let session =
                         app.active().filter(|s| s.content.is_dir())?;
-                    let left =
-                        session.core.left_path.parent().map(PathBuf::from)?;
-                    let right =
-                        session.core.right_path.parent().map(PathBuf::from)?;
+                    let left = session.core.left.parent()?;
+                    let right = session.core.right.parent()?;
                     Some((left, right, session.dir()?.compare_content))
                 },
                 move |(left, right, compare_content)| async move {
@@ -414,8 +488,8 @@ pub(crate) fn process_session_action(action: SessionAction) {
                     update_session(id, |s| s.set_comparison(None));
 
                     compare(
-                        &snapshot.left_path,
-                        &snapshot.right_path,
+                        &snapshot.left,
+                        &snapshot.right,
                         snapshot.compare_content,
                     )
                     .await
@@ -445,8 +519,8 @@ pub(crate) fn process_session_action(action: SessionAction) {
                     });
 
                     plan_sync_session(
-                        &snapshot.left_path,
-                        &snapshot.right_path,
+                        &snapshot.left,
+                        &snapshot.right,
                         operation,
                         snapshot.compare_content,
                     )
@@ -470,8 +544,8 @@ pub(crate) fn process_session_action(action: SessionAction) {
                 },
                 move |snapshot| async move {
                     execute_sync_session(
-                        &snapshot.left_path,
-                        &snapshot.right_path,
+                        &snapshot.left,
+                        &snapshot.right,
                         snapshot.sync_operation,
                         snapshot.compare_content,
                     )
@@ -716,7 +790,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("a.txt");
         fs_err::tokio::write(&path, "hello\nworld\n").await.unwrap();
-        let content = read_text_file(&path).await.unwrap();
+        let content = read_text_file(Endpoint::local("/").fs(), &path)
+            .await
+            .unwrap();
         assert_eq!(content, "hello\nworld\n");
     }
 
@@ -726,7 +802,9 @@ mod tests {
         // entry); that must not fail the comparison.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("missing.txt");
-        let content = read_text_file(&path).await.unwrap();
+        let content = read_text_file(Endpoint::local("/").fs(), &path)
+            .await
+            .unwrap();
         assert!(content.is_empty());
     }
 
@@ -735,8 +813,10 @@ mod tests {
         // Reading a directory is not a NotFound failure, so the error must
         // be propagated instead of swallowed.
         let dir = tempfile::tempdir().unwrap();
-        let err = read_text_file(dir.path()).await.unwrap_err();
-        assert!(matches!(err, TuiError::Io { .. }));
+        let err = read_text_file(Endpoint::local("/").fs(), dir.path())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, TuiError::Lib(_)));
     }
 
     #[test]
@@ -753,9 +833,11 @@ mod tests {
     #[tokio::test]
     async fn run_text_comparison_reads_missing_left_as_empty() {
         let dir = tempfile::tempdir().unwrap();
-        let left = dir.path().join("gone.rs");
-        let right = dir.path().join("here.rs");
-        fs_err::tokio::write(&right, "fn a() {}\n").await.unwrap();
+        let left = Endpoint::local(dir.path().join("gone.rs"));
+        let right = Endpoint::local(dir.path().join("here.rs"));
+        fs_err::tokio::write(right.path(), "fn a() {}\n")
+            .await
+            .unwrap();
         let session = run_text_comparison(left, right).await.unwrap();
         let text = session.text().expect("a text session was created");
         assert!(text.left_lines.is_empty());

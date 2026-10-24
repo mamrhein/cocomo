@@ -17,7 +17,7 @@
 
 use std::{io, path::PathBuf, result};
 
-use cocomo_lib::FsError;
+use cocomo_lib::{FsError, ResolverError};
 use thiserror::Error;
 
 /// Result alias for the TUI service layer.
@@ -33,6 +33,12 @@ pub(crate) enum TuiError {
     /// An error surfaced by the `cocomo-lib` filesystem layer.
     #[error(transparent)]
     Lib(#[from] FsError),
+
+    /// An endpoint argument could not be resolved to a provider: the URL
+    /// is malformed, the scheme has no backend, or credentials are
+    /// missing.
+    #[error(transparent)]
+    Resolve(#[from] ResolverError),
 
     /// The targeted path does not exist.
     #[error("not found: {path}")]

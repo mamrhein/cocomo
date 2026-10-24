@@ -32,12 +32,12 @@ pub(crate) fn session_to_config(
         name: session.core.name.clone(),
         session_type: LibSessionType::DirCompare,
         left: ProviderRef {
-            provider: "local".to_string(),
-            path: session.core.left_path.clone(),
+            provider: session.core.left.provider_ref(),
+            path: session.core.left.path().to_path_buf(),
         },
         right: ProviderRef {
-            provider: "local".to_string(),
-            path: session.core.right_path.clone(),
+            provider: session.core.right.provider_ref(),
+            path: session.core.right.path().to_path_buf(),
         },
         center: None,
         settings: SessionSettings {

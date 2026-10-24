@@ -117,8 +117,8 @@ pub(super) fn DirCompareView(
     let mode = session.ui.mode.clone();
     let hide_same = dir.hide_same;
     let active_filter = session.ui.active_filter.clone();
-    let left_path_str = session.core.left_path.to_string_lossy().to_string();
-    let right_path_str = session.core.right_path.to_string_lossy().to_string();
+    let left_path_str = session.core.left.display();
+    let right_path_str = session.core.right.display();
     let sync_operation = dir.sync_operation;
 
     // Extract data needed after dropping the app handle (for status bar and
