@@ -22,13 +22,7 @@ cocomo-lib = { path = "../cocomo-lib" }
 dirs = "7"
 fs-err = { version = "3", features = ["tokio"] }
 ratatui-kit = { version = "0.12", features = ["full"] }
-tokio = {
-  version = "1",
-  features = [
-    "macros",
-    "rt-multi-thread",
-  ]
-}
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 thiserror = "2"
 
 [dev-dependencies]
