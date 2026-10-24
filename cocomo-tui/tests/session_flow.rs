@@ -34,6 +34,9 @@ fn press(session: &mut SessionView, code: KeyCode) -> Option<SessionAction> {
 }
 
 /// Dir session with one directory and one left-only file entry.
+///
+/// Entry `path`s are relative to the comparison root, exactly as the scanner
+/// produces them, so opening an entry must join them onto the endpoint path.
 fn dir_session() -> SessionView {
     let mut session = SessionView::new_dir_compare(
         Endpoint::local("/base/left"),
@@ -47,13 +50,13 @@ fn dir_session() -> SessionView {
                 status: DirEntryStatus::Different,
                 left: Some(EntryInfo {
                     name: "sub".into(),
-                    path: "/base/left/sub".into(),
+                    path: "sub".into(),
                     is_dir: true,
                     ..Default::default()
                 }),
                 right: Some(EntryInfo {
                     name: "sub".into(),
-                    path: "/base/right/sub".into(),
+                    path: "sub".into(),
                     is_dir: true,
                     ..Default::default()
                 }),
@@ -65,7 +68,7 @@ fn dir_session() -> SessionView {
                 status: DirEntryStatus::LeftOnly,
                 left: Some(EntryInfo {
                     name: "file.txt".into(),
-                    path: "/base/left/file.txt".into(),
+                    path: "file.txt".into(),
                     is_dir: false,
                     ..Default::default()
                 }),

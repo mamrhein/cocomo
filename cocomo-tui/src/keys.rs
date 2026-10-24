@@ -646,18 +646,16 @@ fn handle_enter(session: &SessionView) -> SessionAction {
         _ => return SessionAction::None,
     };
 
-    // Build the sub-endpoints for the new comparison. An entry that only
-    // exists on one side falls back to the joined path on the other side,
-    // which then reads as a non-existent file or directory.
+    // Build the sub-endpoints for the new comparison. An entry's `path` is
+    // relative to the current comparison root, so it must be joined onto the
+    // endpoint's path rather than used as the endpoint path directly (which
+    // would drop the root and resolve to a non-existent location). An entry
+    // that only exists on one side falls back to the joined name on the other
+    // side, which then reads as a non-existent file or directory.
     let left_sub = selected
         .left
         .as_ref()
-        .map(|l| {
-            session
-                .core
-                .left
-                .with_path(std::path::PathBuf::from(&l.path))
-        })
+        .map(|l| session.core.left.join(&l.path))
         .or_else(|| {
             // Entry only exists on the right; use a non-existent left path.
             Some(session.core.left.join(&selected.name))
@@ -665,12 +663,7 @@ fn handle_enter(session: &SessionView) -> SessionAction {
     let right_sub = selected
         .right
         .as_ref()
-        .map(|r| {
-            session
-                .core
-                .right
-                .with_path(std::path::PathBuf::from(&r.path))
-        })
+        .map(|r| session.core.right.join(&r.path))
         .or_else(|| {
             // Entry only exists on the left; use a non-existent right path.
             Some(session.core.right.join(&selected.name))
@@ -704,11 +697,11 @@ fn cycle_sync_op(current: &SyncOperation, delta: isize) -> SyncOperation {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     use cocomo_lib::{
-        DirComparison, DirEntry, DirEntryStatus, Endpoint, Grammar, LineInfo,
-        TextDiff, TextDifference,
+        DirComparison, DirEntry, DirEntryStatus, Endpoint, EntryInfo, Grammar,
+        LineInfo, TextDiff, TextDifference,
     };
     use ratatui_kit::crossterm::event::KeyEvent;
 
@@ -784,6 +777,76 @@ mod tests {
     fn row_count_matches_session_type() {
         assert_eq!(dir_session().row_count(), 3);
         assert_eq!(text_session().row_count(), 10);
+    }
+
+    #[test]
+    fn enter_joins_relative_entry_path_onto_root() {
+        // Regression: an entry's `path` is relative to the comparison root,
+        // so opening it must join onto the endpoint path, not replace it
+        // (replacing dropped the root and produced a "not found" error).
+        let mut session = SessionView::new_dir_compare(
+            Endpoint::local(PathBuf::from("/left")),
+            Endpoint::local(PathBuf::from("/right")),
+            false,
+        );
+        session.set_comparison(Some(DirComparison {
+            entries: vec![
+                DirEntry {
+                    name: "sub".into(),
+                    status: DirEntryStatus::Different,
+                    left: Some(EntryInfo {
+                        name: "sub".into(),
+                        path: "sub".into(),
+                        is_dir: true,
+                        ..Default::default()
+                    }),
+                    right: Some(EntryInfo {
+                        name: "sub".into(),
+                        path: "sub".into(),
+                        is_dir: true,
+                        ..Default::default()
+                    }),
+                    center: None,
+                    sub_entries: None,
+                },
+                DirEntry {
+                    name: "orphan.txt".into(),
+                    status: DirEntryStatus::LeftOnly,
+                    left: Some(EntryInfo {
+                        name: "orphan.txt".into(),
+                        path: "orphan.txt".into(),
+                        is_dir: false,
+                        ..Default::default()
+                    }),
+                    right: None,
+                    center: None,
+                    sub_entries: None,
+                },
+            ],
+            ..Default::default()
+        }));
+
+        // A directory present on both sides opens a dir comparison rooted at
+        // `<root>/sub` on each side.
+        session.ui.table_state.select(Some(0));
+        match press(&mut session, KeyCode::Enter) {
+            Some(SessionAction::OpenDir { left, right }) => {
+                assert_eq!(left.path(), Path::new("/left/sub"));
+                assert_eq!(right.path(), Path::new("/right/sub"));
+            }
+            other => panic!("expected OpenDir, got {other:?}"),
+        }
+
+        // A file present only on the left opens a text diff; the missing
+        // right side falls back to `<root>/orphan.txt`.
+        session.ui.table_state.select(Some(1));
+        match press(&mut session, KeyCode::Enter) {
+            Some(SessionAction::OpenFile { left, right }) => {
+                assert_eq!(left.path(), Path::new("/left/orphan.txt"));
+                assert_eq!(right.path(), Path::new("/right/orphan.txt"));
+            }
+            other => panic!("expected OpenFile, got {other:?}"),
+        }
     }
 
     #[test]
