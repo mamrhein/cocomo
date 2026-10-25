@@ -49,6 +49,10 @@ use crate::{
 
 /// Compare two directories and return the raw result.
 ///
+/// The scan runs to full depth so the dir view can expand directories in
+/// place without re-comparing; sync planning is unaffected (it uses its own
+/// [`SyncRules`]).
+///
 /// Takes explicit endpoints instead of a `&mut SessionView` so callers can
 /// run it inside a spawned task without holding the `APP_STATE` lock across
 /// an `await` — and without constructing a throwaway session just to satisfy
@@ -63,12 +67,11 @@ pub(crate) async fn compare(
 ) -> Result<DirComparison> {
     let cache = ContentCache::default_config();
 
-    let mut config = if compare_content {
+    let config = if compare_content {
         CompareConfig::full()
     } else {
         CompareConfig::meta_data_only()
     };
-    config.max_depth = Some(1);
 
     if left.same_provider(right) {
         Ok(cocomo_lib::compare_directories_node(

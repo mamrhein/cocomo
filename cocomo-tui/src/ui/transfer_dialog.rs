@@ -177,14 +177,9 @@ fn summary_lines(
 ) -> Vec<Line<'static>> {
     let mut lines = match &session.content {
         SessionContent::Dir(_) => {
-            let entries = session.filtered_entries();
-            match session
-                .ui
-                .table_state
-                .selected()
-                .and_then(|i| entries.get(i))
-            {
-                Some(entry) => entry_lines(entry, theme),
+            let rows = session.visible_rows();
+            match session.ui.table_state.selected().and_then(|i| rows.get(i)) {
+                Some(row) => entry_lines(row.entry, theme),
                 None => Vec::new(),
             }
         }

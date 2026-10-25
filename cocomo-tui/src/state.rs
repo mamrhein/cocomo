@@ -18,6 +18,7 @@
 //! shared by both content types.
 
 use std::{
+    collections::HashSet,
     path::PathBuf,
     sync::atomic::{AtomicUsize, Ordering},
 };
@@ -340,6 +341,16 @@ pub struct DirView {
     /// Bumped on every sync outcome recorded through
     /// [`SessionView::set_sync`]. Keys the sync-preview row memoization.
     pub sync_revision: u64,
+    /// Relative paths (`/`-separated, comparison-root based) of the
+    /// directories the user has expanded in the tree view.
+    ///
+    /// Keyed by path rather than by entry identity so the set survives a
+    /// reload: directories that still exist in the fresh comparison stay
+    /// open, vanished ones simply never match a row.
+    pub expanded: HashSet<String>,
+    /// Bumped on every expand/collapse. Together with
+    /// [`Self::comparison_revision`] keys the dir-row memoization.
+    pub tree_revision: u64,
     /// Compare file contents (vs. meta data only).
     pub compare_content: bool,
     /// Hide identical entries.
@@ -370,6 +381,25 @@ impl SyncStage {
             Self::Planned(result) | Self::Executed(result) => result,
         }
     }
+}
+
+/// One visible row of the directory view's expandable tree.
+///
+/// The rows are the filtered comparison flattened depth-first: a directory
+/// row is followed by its children exactly while the directory is expanded,
+/// so the table selection indexes into this list, not into the entry tree.
+pub struct DirRow<'a> {
+    /// The comparison entry rendered by this row.
+    pub entry: &'a DirEntry,
+    /// The entry's path relative to the comparison root, `/`-separated.
+    /// This is the key the expand/collapse state is tracked by.
+    pub rel_path: String,
+    /// Nesting level below the comparison root; top-level rows are `0`.
+    pub depth: usize,
+    /// Whether the entry is a directory and can therefore be expanded.
+    pub is_dir: bool,
+    /// Whether the directory row is currently expanded.
+    pub expanded: bool,
 }
 
 /// Text diff state: the diff result plus the file-content cache.
@@ -450,6 +480,8 @@ impl SessionView {
                 comparison: None,
                 comparison_revision: 0,
                 sync_revision: 0,
+                expanded: HashSet::new(),
+                tree_revision: 0,
                 compare_content,
                 hide_same: false,
                 sync: None,
@@ -551,54 +583,109 @@ impl SessionView {
 
     /// Number of table rows this session currently displays.
     ///
-    /// Directory sessions show the filtered entries; text sessions show one
+    /// Directory sessions show the visible tree rows; text sessions show one
     /// row per line of the merged side-by-side view. Navigation must clamp
-    /// against this count, not against [`SessionView::filtered_entries`],
+    /// against this count, not against [`SessionView::visible_rows`],
     /// which is empty for text sessions.
     pub fn row_count(&self) -> usize {
         match &self.content {
-            SessionContent::Dir(_) => self.filtered_entries().len(),
+            SessionContent::Dir(_) => self.visible_rows().len(),
             SessionContent::Text(text) => {
                 std::cmp::max(text.left_lines.len(), text.right_lines.len())
             }
         }
     }
 
-    /// Return the filtered entries for display.
+    /// Return the visible tree rows: the filtered entries flattened
+    /// depth-first, with a directory's children included while the
+    /// directory is expanded.
     ///
     /// Empty for text sessions, which have no directory entries.
-    pub fn filtered_entries(&self) -> Vec<&DirEntry> {
+    pub fn visible_rows(&self) -> Vec<DirRow<'_>> {
         let Some(dir) = self.dir() else {
             return Vec::new();
         };
         let Some(comparison) = dir.comparison.as_ref() else {
             return Vec::new();
         };
+        let mut rows = Vec::new();
+        self.collect_rows(&comparison.entries, "", 0, &mut rows);
+        rows
+    }
 
-        comparison
-            .entries
-            .iter()
-            .filter(|entry| {
-                // Hide same entries if toggled.
-                if dir.hide_same {
-                    match entry.status {
-                        DirEntryStatus::Same | DirEntryStatus::SameBinary => {
-                            return false;
-                        }
-                        _ => {}
-                    }
-                }
+    /// Recursively append the visible rows of one comparison level.
+    ///
+    /// The filters apply at every depth; a directory hidden by the name
+    /// filter hides its whole subtree with it.
+    fn collect_rows<'a>(
+        &self,
+        entries: &'a [DirEntry],
+        prefix: &str,
+        depth: usize,
+        rows: &mut Vec<DirRow<'a>>,
+    ) {
+        let Some(dir) = self.dir() else {
+            return;
+        };
+        for entry in entries {
+            if !self.entry_visible(dir, entry) {
+                continue;
+            }
+            let rel_path = if prefix.is_empty() {
+                entry.name.clone()
+            } else {
+                format!("{prefix}/{}", entry.name)
+            };
+            let is_dir = entry.left.as_ref().is_some_and(|l| l.is_dir)
+                || entry.right.as_ref().is_some_and(|r| r.is_dir);
+            let expanded = is_dir && dir.expanded.contains(&rel_path);
+            rows.push(DirRow {
+                entry,
+                rel_path: rel_path.clone(),
+                depth,
+                is_dir,
+                expanded,
+            });
+            if expanded && let Some(sub) = entry.sub_entries.as_deref() {
+                self.collect_rows(&sub.entries, &rel_path, depth + 1, rows);
+            }
+        }
+    }
 
-                // Apply name filter.
-                if self.ui.active_filter.as_ref().is_some_and(|filter| {
-                    !entry.name.to_lowercase().contains(&filter.to_lowercase())
-                }) {
+    /// Whether an entry passes the hide-identical and name filters.
+    fn entry_visible(&self, dir: &DirView, entry: &DirEntry) -> bool {
+        // Hide same entries if toggled.
+        if dir.hide_same {
+            match entry.status {
+                DirEntryStatus::Same | DirEntryStatus::SameBinary => {
                     return false;
                 }
+                _ => {}
+            }
+        }
 
-                true
-            })
-            .collect()
+        // Apply name filter.
+        if self.ui.active_filter.as_ref().is_some_and(|filter| {
+            !entry.name.to_lowercase().contains(&filter.to_lowercase())
+        }) {
+            return false;
+        }
+
+        true
+    }
+
+    /// The row under the table selection, `None` when nothing is selected
+    /// or the selection is out of range.
+    pub fn selected_row(&self) -> Option<DirRow<'_>> {
+        let selected = self.ui.table_state.selected()?;
+        self.visible_rows().into_iter().nth(selected)
+    }
+
+    /// Return the index of the row with the given relative path.
+    pub fn row_index_of(&self, rel_path: &str) -> Option<usize> {
+        self.visible_rows()
+            .iter()
+            .position(|row| row.rel_path == rel_path)
     }
 
     /// Resolve the transfer target for the current selection.
@@ -614,13 +701,7 @@ impl SessionView {
             && self.core.left.path() == self.core.right.path();
         match &self.content {
             SessionContent::Dir(_) => {
-                let entries = self.filtered_entries();
-                let entry = self
-                    .ui
-                    .table_state
-                    .selected()
-                    .filter(|&i| i < entries.len())
-                    .map(|i| entries[i])?;
+                let entry = self.selected_row()?.entry;
                 let info = entry.left.as_ref().or(entry.right.as_ref())?;
                 Some(TransferTarget {
                     name: entry.name.clone(),
@@ -691,9 +772,9 @@ impl SessionView {
     fn row_matches(&self, i: usize, query: &str) -> bool {
         match &self.content {
             SessionContent::Dir(_) => self
-                .filtered_entries()
+                .visible_rows()
                 .get(i)
-                .is_some_and(|e| e.name.to_lowercase().contains(query)),
+                .is_some_and(|r| r.entry.name.to_lowercase().contains(query)),
             SessionContent::Text(text) => {
                 [text.left_lines.get(i), text.right_lines.get(i)]
                     .into_iter()
@@ -826,6 +907,8 @@ impl AppState {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use cocomo_lib::{
         DirComparison, DirEntry, DirEntryStatus, EntryInfo, SyncResult,
     };
@@ -854,6 +937,29 @@ mod tests {
                 })
                 .collect(),
             ..Default::default()
+        }
+    }
+
+    /// A directory entry present on both sides, with an optional
+    /// sub-comparison attached as its tree children.
+    fn dir_entry(
+        name: &str,
+        status: DirEntryStatus,
+        sub: Option<DirComparison>,
+    ) -> DirEntry {
+        let info = || EntryInfo {
+            name: name.to_string(),
+            path: name.to_string(),
+            is_dir: true,
+            ..Default::default()
+        };
+        DirEntry {
+            name: name.to_string(),
+            status,
+            left: Some(info()),
+            right: Some(info()),
+            center: None,
+            sub_entries: sub.map(Arc::new),
         }
     }
 
@@ -896,7 +1002,7 @@ mod tests {
         assert!(text.text().is_some());
         assert!(text.dir().is_none());
         assert!(text.content.is_text());
-        assert!(text.filtered_entries().is_empty());
+        assert!(text.visible_rows().is_empty());
 
         // `set_comparison` is a no-op on a text session.
         text.set_comparison(Some(comparison(&[(
@@ -915,30 +1021,111 @@ mod tests {
     }
 
     #[test]
-    fn filtered_entries_applies_hide_same_and_name_filter() {
+    fn visible_rows_applies_hide_same_and_name_filter() {
         let mut session = dir_session();
         session.set_comparison(Some(comparison(&[
             ("alpha", DirEntryStatus::Same),
             ("Beta", DirEntryStatus::Different),
             ("gamma", DirEntryStatus::LeftOnly),
         ])));
-        assert_eq!(session.filtered_entries().len(), 3);
+        assert_eq!(session.visible_rows().len(), 3);
 
         session.dir_mut().unwrap().hide_same = true;
-        assert_eq!(session.filtered_entries().len(), 2);
+        assert_eq!(session.visible_rows().len(), 2);
 
         // The name filter is case-insensitive and combines with hide_same.
         session.ui.active_filter = Some("b".into());
         let names: Vec<&str> = session
-            .filtered_entries()
+            .visible_rows()
             .iter()
-            .map(|e| e.name.as_str())
+            .map(|r| r.entry.name.as_str())
             .collect();
         assert_eq!(names, ["Beta"]);
     }
 
     #[test]
-    fn row_count_tracks_filtered_entries() {
+    fn visible_rows_flatten_expanded_directories() {
+        let mut session = dir_session();
+        let sub = comparison(&[("child.txt", DirEntryStatus::Same)]);
+        session.set_comparison(Some(DirComparison {
+            entries: vec![dir_entry(
+                "sub",
+                DirEntryStatus::Different,
+                Some(sub),
+            )],
+            ..Default::default()
+        }));
+
+        // Collapsed: only the directory row is visible.
+        assert_eq!(session.row_count(), 1);
+        let rows = session.visible_rows();
+        assert!(rows[0].is_dir);
+        assert!(!rows[0].expanded);
+
+        // Expanding reveals the children one level deeper, with the
+        // directory row reporting its expanded state.
+        session.dir_mut().unwrap().expanded.insert("sub".into());
+        let rows = session.visible_rows();
+        assert_eq!(rows.len(), 2);
+        assert!(rows[0].expanded);
+        assert_eq!(rows[1].entry.name, "child.txt");
+        assert_eq!(rows[1].depth, 1);
+        assert_eq!(rows[1].rel_path, "sub/child.txt");
+        assert!(!rows[1].is_dir);
+    }
+
+    #[test]
+    fn filters_apply_at_every_depth() {
+        let mut session = dir_session();
+        let sub = comparison(&[
+            ("keep.txt", DirEntryStatus::Different),
+            ("drop.txt", DirEntryStatus::Same),
+        ]);
+        session.set_comparison(Some(DirComparison {
+            entries: vec![dir_entry(
+                "sub",
+                DirEntryStatus::Different,
+                Some(sub),
+            )],
+            ..Default::default()
+        }));
+        session.dir_mut().unwrap().expanded.insert("sub".into());
+        session.dir_mut().unwrap().hide_same = true;
+
+        let names: Vec<&str> = session
+            .visible_rows()
+            .iter()
+            .map(|r| r.entry.name.as_str())
+            .collect();
+        assert_eq!(names, ["sub", "keep.txt"]);
+
+        // A directory hidden by the name filter hides its whole subtree.
+        session.ui.active_filter = Some("keep".into());
+        assert!(session.visible_rows().is_empty());
+    }
+
+    #[test]
+    fn row_index_of_finds_the_row_for_a_path() {
+        let mut session = dir_session();
+        let sub = comparison(&[("child.txt", DirEntryStatus::Same)]);
+        session.set_comparison(Some(DirComparison {
+            entries: vec![dir_entry(
+                "sub",
+                DirEntryStatus::Different,
+                Some(sub),
+            )],
+            ..Default::default()
+        }));
+        assert_eq!(session.row_index_of("sub"), Some(0));
+        // The child only has a row while the directory is expanded.
+        assert_eq!(session.row_index_of("sub/child.txt"), None);
+        session.dir_mut().unwrap().expanded.insert("sub".into());
+        assert_eq!(session.row_index_of("sub/child.txt"), Some(1));
+        assert_eq!(session.row_index_of("missing"), None);
+    }
+
+    #[test]
+    fn row_count_tracks_visible_rows() {
         let mut session = dir_session();
         assert_eq!(session.row_count(), 0);
         session.set_comparison(Some(comparison(&[

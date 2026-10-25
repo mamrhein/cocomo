@@ -18,7 +18,7 @@
 use std::{collections::HashSet, sync::Arc};
 
 use cocomo_lib::{
-    DirEntry, Importance, LineInfo, TransferAction, TransferItem, format_date,
+    Importance, LineInfo, TransferAction, TransferItem, format_date,
     format_size,
 };
 use ratatui_kit::{
@@ -30,6 +30,7 @@ use ratatui_kit::{
 };
 
 use super::theme::CocomoTheme;
+use crate::state::DirRow;
 
 /// A pre-rendered table row: the cells are computed once when the
 /// underlying data changes and shared through an `Arc` across frames.
@@ -50,14 +51,15 @@ pub(super) fn cell_row_renderer() -> RenderTableRow<CellRow> {
     Arc::new(|row: &CellRow, _is_selected: bool| row.cells())
 }
 
-/// Build the directory-comparison rows from the filtered entries.
-pub(super) fn dir_rows(
-    entries: &[&DirEntry],
-    theme: &CocomoTheme,
-) -> Vec<CellRow> {
-    entries
-        .iter()
-        .map(|entry| {
+/// Build the directory-comparison rows from the visible tree rows.
+///
+/// The name cell carries the tree indent and the `+`/`-` toggle indicator;
+/// file rows use a same-width blank so all names start at the same column
+/// within a level.
+pub(super) fn dir_rows(rows: &[DirRow], theme: &CocomoTheme) -> Vec<CellRow> {
+    rows.iter()
+        .map(|row| {
+            let entry = row.entry;
             let status_style = theme.status_style(entry.status);
 
             let left_meta = entry
@@ -84,17 +86,15 @@ pub(super) fn dir_rows(
                 })
                 .unwrap_or_else(|| "-             ".to_string());
 
-            let dir_indicator =
-                if entry.left.as_ref().is_some_and(|l| l.is_dir)
-                    || entry.right.as_ref().is_some_and(|r| r.is_dir)
-                {
-                    "\u{1F5C0}"
-                } else {
-                    " "
-                };
+            let toggle = match (row.is_dir, row.expanded) {
+                (true, true) => "-",
+                (true, false) => "+",
+                (false, _) => " ",
+            };
+            let indent = "  ".repeat(row.depth);
 
             CellRow(Arc::from(vec![
-                TableCell::new(format!("{} {}", dir_indicator, entry.name)),
+                TableCell::new(format!("{indent}{toggle} {}", entry.name)),
                 TableCell::new(left_meta),
                 TableCell::new(entry.status.symbol()).style(status_style),
                 TableCell::new(right_meta),

@@ -42,12 +42,12 @@ pub fn diff_line_numbers(session: &SessionView) -> HashSet<usize> {
 pub fn diff_group_starts(session: &SessionView) -> Vec<usize> {
     match &session.content {
         SessionContent::Dir(_) => session
-            .filtered_entries()
+            .visible_rows()
             .iter()
             .enumerate()
-            .filter(|(_, entry)| {
+            .filter(|(_, row)| {
                 !matches!(
-                    entry.status,
+                    row.entry.status,
                     DirEntryStatus::Same | DirEntryStatus::SameBinary
                 )
             })

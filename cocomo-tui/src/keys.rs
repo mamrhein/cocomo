@@ -119,6 +119,10 @@ pub enum Cmd {
     NextDiff,
     /// Jump to the previous difference group.
     PrevDiff,
+    /// Expand the selected directory in place (`+`).
+    ExpandDir,
+    /// Collapse the selected directory in place (`-`).
+    CollapseDir,
     /// Open the copy dialog for the selected entry (`c`).
     CopyDialog,
     /// Open the delete dialog for the selected entry (`d`).
@@ -213,6 +217,20 @@ const KEYMAP: &[KeyBinding] = &[
         scope: KeyScope::DirNormal,
         cmd: Cmd::PrevDiff,
         help: None,
+    },
+    KeyBinding {
+        key: KeyCode::Char('+'),
+        modifiers: NONE,
+        scope: KeyScope::DirNormal,
+        cmd: Cmd::ExpandDir,
+        help: Some(("+", "expand")),
+    },
+    KeyBinding {
+        key: KeyCode::Char('-'),
+        modifiers: NONE,
+        scope: KeyScope::DirNormal,
+        cmd: Cmd::CollapseDir,
+        help: Some(("-", "collapse")),
     },
     KeyBinding {
         key: KeyCode::Char('f'),
@@ -722,7 +740,23 @@ fn execute(cmd: Cmd, session: &mut SessionView) -> SessionAction {
         }
         Cmd::Reload => SessionAction::Reload,
         Cmd::OpenEntry => handle_enter(session),
-        Cmd::GoUp => SessionAction::GoUp,
+        Cmd::GoUp => {
+            // Inside an expanded subtree, Backspace collapses the
+            // containing directory and lands on its row; at the top level
+            // it still asks the controller to open the parent comparison.
+            let parent = session.selected_row().and_then(|row| {
+                row.rel_path
+                    .rsplit_once('/')
+                    .map(|(parent, _)| parent.to_string())
+            });
+            match parent {
+                Some(parent) => {
+                    collapse_dir(session, &parent);
+                    SessionAction::None
+                }
+                None => SessionAction::GoUp,
+            }
+        }
         Cmd::Cancel => {
             // If a sync preview is active, cancel it. Otherwise, clear the
             // filter.
@@ -741,6 +775,14 @@ fn execute(cmd: Cmd, session: &mut SessionView) -> SessionAction {
         }
         Cmd::PrevDiff => {
             jump_diff(session, -1);
+            SessionAction::None
+        }
+        Cmd::ExpandDir => {
+            toggle_selected_dir(session, true);
+            SessionAction::None
+        }
+        Cmd::CollapseDir => {
+            toggle_selected_dir(session, false);
             SessionAction::None
         }
         Cmd::CopyDialog => open_dialog(session, TransferOp::Copy),
@@ -829,36 +871,31 @@ fn jump_diff(session: &mut SessionView, delta: isize) {
         .select(Some(target.unwrap_or(fallback)));
 }
 
-/// Handle Enter key — open the selected directory in a new session.
+/// Handle Enter key — open the selected entry in a new session, leaving
+/// the tree of the current session in place.
 fn handle_enter(session: &SessionView) -> SessionAction {
-    let entries = session.filtered_entries();
-    let selected = match session.ui.table_state.selected() {
-        Some(i) if i < entries.len() => entries[i],
-        _ => return SessionAction::None,
+    let Some(row) = session.selected_row() else {
+        return SessionAction::None;
     };
+    let selected = row.entry;
 
     // Build the sub-endpoints for the new comparison. An entry's `path` is
     // relative to the current comparison root, so it must be joined onto the
     // endpoint's path rather than used as the endpoint path directly (which
     // would drop the root and resolve to a non-existent location). An entry
-    // that only exists on one side falls back to the joined name on the other
-    // side, which then reads as a non-existent file or directory.
+    // that only exists on one side falls back to the row's root-relative
+    // path on the other side, which then reads as a non-existent file or
+    // directory.
     let left_sub = selected
         .left
         .as_ref()
         .map(|l| session.core.left.join(&l.path))
-        .or_else(|| {
-            // Entry only exists on the right; use a non-existent left path.
-            Some(session.core.left.join(&selected.name))
-        });
+        .or_else(|| Some(session.core.left.join(&row.rel_path)));
     let right_sub = selected
         .right
         .as_ref()
         .map(|r| session.core.right.join(&r.path))
-        .or_else(|| {
-            // Entry only exists on the left; use a non-existent right path.
-            Some(session.core.right.join(&selected.name))
-        });
+        .or_else(|| Some(session.core.right.join(&row.rel_path)));
 
     let (left, right) = match (left_sub, right_sub) {
         (Some(l), Some(r)) => (l, r),
@@ -874,6 +911,45 @@ fn handle_enter(session: &SessionView) -> SessionAction {
     } else {
         // It's a file — open a text diff session.
         SessionAction::OpenFile { left, right }
+    }
+}
+
+/// Expand (`open`) or collapse the directory on the selected row.
+///
+/// A no-op on a file row, on a row that is already in the requested
+/// state, or when nothing is selected.
+fn toggle_selected_dir(session: &mut SessionView, open: bool) {
+    let Some((rel_path, is_dir)) =
+        session.selected_row().map(|row| (row.rel_path, row.is_dir))
+    else {
+        return;
+    };
+    if !is_dir {
+        return;
+    }
+    let Some(dir) = session.dir_mut() else {
+        return;
+    };
+    let changed = if open {
+        dir.expanded.insert(rel_path)
+    } else {
+        dir.expanded.remove(&rel_path)
+    };
+    if changed {
+        dir.tree_revision += 1;
+    }
+}
+
+/// Collapse the expanded directory at `path` and move the selection onto
+/// its row, so stepping out of a subtree lands on its parent.
+fn collapse_dir(session: &mut SessionView, path: &str) {
+    if let Some(dir) = session.dir_mut()
+        && dir.expanded.remove(path)
+    {
+        dir.tree_revision += 1;
+    }
+    if let Some(index) = session.row_index_of(path) {
+        session.ui.table_state.select(Some(index));
     }
 }
 
@@ -930,7 +1006,10 @@ pub fn dialog_choice(
 
 #[cfg(test)]
 mod tests {
-    use std::path::{Path, PathBuf};
+    use std::{
+        path::{Path, PathBuf},
+        sync::Arc,
+    };
 
     use cocomo_lib::{
         DirComparison, DirEntry, DirEntryStatus, Endpoint, EntryInfo, Grammar,
@@ -1039,6 +1118,49 @@ mod tests {
                 ),
                 entry("both.txt", DirEntryStatus::Different, true, true),
             ],
+            ..Default::default()
+        }));
+        session
+    }
+
+    /// Dir session with one expandable directory (`sub/` with two files)
+    /// and one top-level file.
+    fn dir_session_with_tree() -> SessionView {
+        let file = |name: &str, path: &str| DirEntry {
+            name: name.into(),
+            status: DirEntryStatus::Different,
+            left: Some(EntryInfo {
+                name: name.into(),
+                path: path.into(),
+                ..Default::default()
+            }),
+            right: Some(EntryInfo {
+                name: name.into(),
+                path: path.into(),
+                ..Default::default()
+            }),
+            center: None,
+            sub_entries: None,
+        };
+        let mut sub = file("sub", "sub");
+        sub.left.as_mut().unwrap().is_dir = true;
+        sub.right.as_mut().unwrap().is_dir = true;
+        // Sub-entries carry bare names and root-relative paths, exactly as
+        // the scanner produces them.
+        sub.sub_entries = Some(Arc::new(DirComparison {
+            entries: vec![
+                file("a.txt", "sub/a.txt"),
+                file("b.txt", "sub/b.txt"),
+            ],
+            ..Default::default()
+        }));
+        let mut session = SessionView::new_dir_compare(
+            Endpoint::local(PathBuf::from("/left")),
+            Endpoint::local(PathBuf::from("/right")),
+            false,
+        );
+        session.set_comparison(Some(DirComparison {
+            entries: vec![sub, file("top.txt", "top.txt")],
             ..Default::default()
         }));
         session
@@ -1253,6 +1375,85 @@ mod tests {
         assert_eq!(lookup(KeyScope::DirNormal, ctrl_tab), None);
         assert_eq!(lookup(KeyScope::DirNormal, key(KeyCode::Tab)), None);
         assert_eq!(lookup(KeyScope::TextNormal, key(KeyCode::Tab)), None);
+    }
+
+    #[test]
+    fn plus_expands_and_minus_collapses_the_selected_dir() {
+        let mut session = dir_session_with_tree();
+        assert_eq!(session.row_count(), 2);
+        session.ui.table_state.select(Some(0));
+        assert_eq!(
+            press(&mut session, KeyCode::Char('+')),
+            Some(SessionAction::None)
+        );
+        assert_eq!(session.row_count(), 4);
+        assert!(session.dir().unwrap().expanded.contains("sub"));
+        // The children are visible and reachable by navigation.
+        let rows = session.visible_rows();
+        assert_eq!(rows[1].rel_path, "sub/a.txt");
+        assert_eq!(rows[1].depth, 1);
+
+        assert_eq!(
+            press(&mut session, KeyCode::Char('-')),
+            Some(SessionAction::None)
+        );
+        assert_eq!(session.row_count(), 2);
+        assert!(session.dir().unwrap().expanded.is_empty());
+        // The selection stays on the directory row throughout.
+        assert_eq!(session.ui.table_state.selected(), Some(0));
+    }
+
+    #[test]
+    fn plus_on_a_file_row_is_a_noop() {
+        let mut session = dir_session_with_tree();
+        session.ui.table_state.select(Some(1));
+        press(&mut session, KeyCode::Char('+'));
+        assert!(session.dir().unwrap().expanded.is_empty());
+        assert_eq!(session.row_count(), 2);
+    }
+
+    #[test]
+    fn backspace_collapses_the_containing_directory() {
+        let mut session = dir_session_with_tree();
+        session.ui.table_state.select(Some(0));
+        press(&mut session, KeyCode::Char('+'));
+        // Select the second child (`sub/b.txt`, row 2).
+        session.ui.table_state.select(Some(2));
+        assert_eq!(
+            press(&mut session, KeyCode::Backspace),
+            Some(SessionAction::None)
+        );
+        // The subtree collapsed and the selection landed on the parent.
+        assert_eq!(session.row_count(), 2);
+        assert_eq!(session.ui.table_state.selected(), Some(0));
+        assert!(session.dir().unwrap().expanded.is_empty());
+    }
+
+    #[test]
+    fn backspace_at_the_root_still_steps_out() {
+        let mut session = dir_session_with_tree();
+        session.ui.table_state.select(Some(1));
+        assert_eq!(
+            press(&mut session, KeyCode::Backspace),
+            Some(SessionAction::GoUp)
+        );
+    }
+
+    #[test]
+    fn enter_on_a_child_joins_its_root_relative_path() {
+        // A nested entry's `path` is relative to the comparison root, so
+        // opening it in a new tab must produce `<root>/sub/a.txt`.
+        let mut session = dir_session_with_tree();
+        session.ui.table_state.select(Some(0));
+        press(&mut session, KeyCode::Char('+'));
+        session.ui.table_state.select(Some(1));
+        match press(&mut session, KeyCode::Enter) {
+            Some(SessionAction::OpenFile { left, right }) => {
+                assert_eq!(left.path(), Path::new("/left/sub/a.txt"));
+                assert_eq!(right.path(), Path::new("/right/sub/a.txt"));
+            }
+            other => panic!("expected OpenFile, got {other:?}"),
+        }
     }
 
     #[test]

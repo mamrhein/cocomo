@@ -15,6 +15,8 @@
 //! modules (`state` and `keys`); the async `cocomo-lib` calls are exercised
 //! by their own tests in `cocomo-lib`.
 
+use std::sync::Arc;
+
 use cocomo_lib::{
     DirComparison, DirEntry, DirEntryStatus, Endpoint, EntryInfo,
     SyncOperation, SyncResult,
@@ -76,6 +78,60 @@ fn dir_session() -> SessionView {
                 center: None,
                 sub_entries: None,
             },
+        ],
+        ..Default::default()
+    }));
+    session
+}
+
+/// Dir session whose `sub` directory carries nested children, mirroring
+/// what a full-depth scan materializes in `sub_entries`.
+fn tree_session() -> SessionView {
+    let mut session = SessionView::new_dir_compare(
+        Endpoint::local("/base/left"),
+        Endpoint::local("/base/right"),
+        false,
+    );
+    let file = |name: &str, path: &str| DirEntry {
+        name: name.into(),
+        status: DirEntryStatus::LeftOnly,
+        left: Some(EntryInfo {
+            name: name.into(),
+            path: path.into(),
+            is_dir: false,
+            ..Default::default()
+        }),
+        right: None,
+        center: None,
+        sub_entries: None,
+    };
+    session.set_comparison(Some(DirComparison {
+        entries: vec![
+            DirEntry {
+                name: "sub".into(),
+                status: DirEntryStatus::Different,
+                left: Some(EntryInfo {
+                    name: "sub".into(),
+                    path: "sub".into(),
+                    is_dir: true,
+                    ..Default::default()
+                }),
+                right: Some(EntryInfo {
+                    name: "sub".into(),
+                    path: "sub".into(),
+                    is_dir: true,
+                    ..Default::default()
+                }),
+                center: None,
+                sub_entries: Some(Arc::new(DirComparison {
+                    entries: vec![
+                        file("a.txt", "sub/a.txt"),
+                        file("b.txt", "sub/b.txt"),
+                    ],
+                    ..Default::default()
+                })),
+            },
+            file("top.txt", "top.txt"),
         ],
         ..Default::default()
     }));
@@ -213,6 +269,41 @@ fn editing_scope_preempts_session_commands() {
     // Esc (Editing scope) cancels the mode.
     assert_eq!(press(&mut session, KeyCode::Esc), Some(SessionAction::None));
     assert_eq!(session.ui.mode, SessionMode::Normal);
+}
+
+#[test]
+fn tree_expands_navigates_and_collapses_in_place() {
+    let mut session = tree_session();
+    // Collapsed by default: only the top-level rows are visible.
+    assert_eq!(session.visible_rows().len(), 2);
+
+    // `+` expands the directory under the cursor in place.
+    session.ui.table_state.select(Some(0));
+    assert_eq!(
+        press(&mut session, KeyCode::Char('+')),
+        Some(SessionAction::None)
+    );
+    assert_eq!(session.visible_rows().len(), 4);
+
+    // Enter on a nested child joins its root-relative path onto the
+    // endpoints, exactly like a top-level entry.
+    press(&mut session, KeyCode::Char('j'));
+    assert_eq!(
+        press(&mut session, KeyCode::Enter),
+        Some(SessionAction::OpenFile {
+            left: Endpoint::local("/base/left/sub/a.txt"),
+            right: Endpoint::local("/base/right/sub/a.txt"),
+        })
+    );
+
+    // Backspace collapses the containing directory and selects its row
+    // instead of stepping out to the parent session.
+    assert_eq!(
+        press(&mut session, KeyCode::Backspace),
+        Some(SessionAction::None)
+    );
+    assert_eq!(session.visible_rows().len(), 2);
+    assert_eq!(session.ui.table_state.selected(), Some(0));
 }
 
 #[test]

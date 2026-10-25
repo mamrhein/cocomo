@@ -40,10 +40,14 @@ use crate::{
 /// Subscribes to the global [`APP_STATE`] atom for reactive reads and
 /// registers an event handler that delegates to the controller
 /// (`dispatch_dir_key`); all state mutations go through controller
-/// functions. The table rows are memoized view models ([`CellRow`]) that
-/// are rebuilt only when the comparison revision, the hide-identical
-/// toggle, or the active filter changes. All text entry (filter, save and
-/// load names) uses `SearchInput`, which owns its exclusive input layer.
+/// functions. The table renders the comparison as an expandable tree:
+/// directory rows carry `+`/`-` indicators, `+`/`-` expand or collapse
+/// the selected directory in place, and `Enter` opens a new tab rooted at
+/// the selection. The table rows are memoized view models ([`CellRow`])
+/// that are rebuilt only when the comparison revision, the tree revision,
+/// the hide-identical toggle, or the active filter changes. All text entry
+/// (filter, save and load names) uses `SearchInput`, which owns its
+/// exclusive input layer.
 #[component]
 pub(super) fn DirCompareView(
     mut hooks: Hooks,
@@ -90,14 +94,15 @@ pub(super) fn DirCompareView(
 
     // Memo keys: the session identity plus the revision counters and the
     // filters that change the visible rows. `DirComparison` has no
-    // `PartialEq`, so the counters (bumped by `set_comparison` and
-    // `set_sync`) are the change signal.
+    // `PartialEq`, so the counters (bumped by `set_comparison`, `set_sync`
+    // and expand/collapse) are the change signal.
     let (rows_key, preview_key) = match session {
         Some(s) => match s.dir() {
             Some(d) => (
                 Some((
                     s.core.id,
                     d.comparison_revision,
+                    d.tree_revision,
                     d.hide_same,
                     s.ui.active_filter.clone(),
                 )),
@@ -110,7 +115,7 @@ pub(super) fn DirCompareView(
 
     let entry_rows: Vec<CellRow> = hooks.use_memo(
         || match session {
-            Some(s) => dir_rows(&s.filtered_entries(), &theme),
+            Some(s) => dir_rows(&s.visible_rows(), &theme),
             None => Vec::new(),
         },
         rows_key,
