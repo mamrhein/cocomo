@@ -21,4 +21,5 @@ mod session_table;
 mod tab_bar;
 mod text_diff;
 pub(crate) mod theme;
+mod transfer_dialog;
 mod welcome;

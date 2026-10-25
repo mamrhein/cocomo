@@ -23,6 +23,7 @@ use super::{
     menu_bar::{MENU_TITLES, MenuBar},
     tab_bar::TabBar,
     text_diff::TextCompareView,
+    transfer_dialog::TransferDialog,
     welcome::WelcomeScreen,
 };
 use crate::{
@@ -164,6 +165,9 @@ pub(crate) fn App(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     controller::dismiss_error();
                 },
             )
+            // Copy/delete confirmation, driven by the active session's
+            // transfer mode.
+            TransferDialog()
         }
     )
 }

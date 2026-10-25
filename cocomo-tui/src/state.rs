@@ -24,11 +24,9 @@ use std::{
 
 use cocomo_lib::{
     DirComparison, DirEntry, DirEntryStatus, Endpoint, Grammar, LineInfo,
-    SyncOperation, SyncResult, TextDiff, TransferItem,
+    SyncOperation, SyncResult, TextDiff, TransferAction, TransferItem,
 };
-use ratatui_kit::{
-    Atom, components::table::TableState, crossterm::event::KeyCode,
-};
+use ratatui_kit::{Atom, components::table::TableState};
 
 /// The current input mode of a session.
 ///
@@ -54,6 +52,167 @@ pub enum SessionMode {
     Search { query: String },
     /// The user is typing a command-line command (`:`).
     Command { input: String },
+    /// The transfer dialog (`c` copy, `d` delete) is open for the selected
+    /// entry. Not a text-entry mode: the dialog's own input layer keeps the
+    /// shell and the table from seeing keys, so `is_editing` stays `false`.
+    Transfer { op: TransferOp },
+}
+
+/// Which transfer the [`SessionMode::Transfer`] dialog offers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TransferOp {
+    /// Copy the entry to the other side.
+    Copy,
+    /// Delete the entry from one or both sides.
+    Delete,
+}
+
+impl TransferOp {
+    /// Title of the dialog for this operation.
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Copy => "Copy",
+            Self::Delete => "Delete",
+        }
+    }
+
+    /// Return the options this operation offers for an entry present on the
+    /// given sides, in display order and always ending with
+    /// [`TransferChoice::Abort`].
+    ///
+    /// Options that cannot apply to the entry are omitted rather than shown
+    /// dead: copying left → right needs a left side, and `both` only makes
+    /// sense when both sides hold the entry.
+    pub fn choices(
+        self,
+        has_left: bool,
+        has_right: bool,
+    ) -> Vec<TransferChoice> {
+        let mut choices = Vec::new();
+        if has_left {
+            choices.push(TransferChoice::Left);
+        }
+        if has_right {
+            choices.push(TransferChoice::Right);
+        }
+        if self == Self::Delete && has_left && has_right {
+            choices.push(TransferChoice::Both);
+        }
+        choices.push(TransferChoice::Abort);
+        choices
+    }
+}
+
+/// One option of the transfer dialog.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TransferChoice {
+    /// Copy left → right, respectively delete the left side.
+    Left,
+    /// Copy right → left, respectively delete the right side.
+    Right,
+    /// Delete both sides; only offered by [`TransferOp::Delete`].
+    Both,
+    /// Close the dialog without transferring.
+    Abort,
+}
+
+impl TransferChoice {
+    /// Return the dialog label of this option under `op`.
+    pub fn label(self, op: TransferOp) -> &'static str {
+        match (self, op) {
+            (Self::Left, TransferOp::Copy) => "left \u{2192} right",
+            (Self::Right, TransferOp::Copy) => "right \u{2192} left",
+            (Self::Left, TransferOp::Delete) => "left",
+            (Self::Right, TransferOp::Delete) => "right",
+            (Self::Both, _) => "both",
+            (Self::Abort, _) => "abort",
+        }
+    }
+
+    /// Return the accelerator key shown next to the option.
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Left => "l",
+            Self::Right => "r",
+            Self::Both => "b",
+            Self::Abort => "Esc",
+        }
+    }
+}
+
+/// The entry a transfer acts on, resolved from the current selection.
+///
+/// Carries exactly what the dialog needs to offer its options (which sides
+/// hold the entry) and what the executor needs to run the transfer, so the
+/// two cannot disagree about the target.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TransferTarget {
+    /// Entry name; the executor addresses both sides by it.
+    pub name: String,
+    /// Path of the entry relative to the comparison root.
+    pub rel_path: String,
+    /// Whether the entry is a directory.
+    pub is_dir: bool,
+    /// The entry exists on the left side.
+    pub has_left: bool,
+    /// The entry exists on the right side.
+    pub has_right: bool,
+    /// Both endpoints address the same root, so one delete removes the entry
+    /// for both sides.
+    pub same_side: bool,
+    /// Why no side option could be offered, shown dimmed in the dialog.
+    pub note: Option<&'static str>,
+}
+
+impl TransferTarget {
+    /// Build the [`TransferItem`]s for `choice`.
+    ///
+    /// Empty for [`TransferChoice::Abort`] and for options the entry does
+    /// not support, so a stale accelerator can never transfer something the
+    /// dialog never offered.
+    pub fn items(
+        &self,
+        op: TransferOp,
+        choice: TransferChoice,
+    ) -> Vec<TransferItem> {
+        let actions: Vec<TransferAction> = match (op, choice) {
+            (TransferOp::Copy, TransferChoice::Left) if self.has_left => {
+                vec![TransferAction::CopyRight]
+            }
+            (TransferOp::Copy, TransferChoice::Right) if self.has_right => {
+                vec![TransferAction::CopyLeft]
+            }
+            (TransferOp::Delete, TransferChoice::Left) if self.has_left => {
+                vec![TransferAction::DeleteLeft]
+            }
+            (TransferOp::Delete, TransferChoice::Right) if self.has_right => {
+                vec![TransferAction::DeleteRight]
+            }
+            (TransferOp::Delete, TransferChoice::Both)
+                if self.has_left && self.has_right =>
+            {
+                // On a shared root the two sides are the same entry, so a
+                // second delete would fail on the file the first removed.
+                let mut actions = vec![TransferAction::DeleteLeft];
+                if !self.same_side {
+                    actions.push(TransferAction::DeleteRight);
+                }
+                actions
+            }
+            _ => Vec::new(),
+        };
+        actions
+            .into_iter()
+            .map(|action| {
+                TransferItem::new(
+                    action,
+                    self.name.clone(),
+                    self.is_dir,
+                    self.rel_path.clone(),
+                )
+            })
+            .collect()
+    }
 }
 
 impl SessionMode {
@@ -95,9 +254,9 @@ pub enum SessionAction {
     ListSessions,
     /// Load a session config from a file.
     LoadSession { path: PathBuf },
-    /// Execute a single transfer (copy or delete) on the selected entry,
-    /// then re-run the comparison so the table reflects the change.
-    Transfer { item: TransferItem },
+    /// Execute the transfers the dialog confirmed on the selected entry,
+    /// then re-run the comparison so the view reflects the change.
+    Transfer { items: Vec<TransferItem> },
     /// No action required.
     None,
 }
@@ -227,10 +386,6 @@ pub struct UiState {
     pub filter_input: String,
     /// Active filter pattern. `None` means no filter.
     pub active_filter: Option<String>,
-    /// Prefix key of a two-key sequence awaiting its second key (e.g. the
-    /// `D` of `D l`). Set by the key handler when a prefix-only binding
-    /// fires, cleared on the next key press whatever it does.
-    pub pending_prefix: Option<KeyCode>,
 }
 
 /// Monotonic counter assigning stable ids to sessions.
@@ -436,6 +591,67 @@ impl SessionView {
             .collect()
     }
 
+    /// Resolve the transfer target for the current selection.
+    ///
+    /// A directory session targets the selected entry. A text session
+    /// targets the compared files: the executor addresses both sides by one
+    /// name, so a transfer is only possible when the two sides share a file
+    /// name — otherwise the target carries no side options and a note
+    /// explaining why. `None` when nothing is selected or the selected entry
+    /// exists on neither side.
+    pub fn transfer_target(&self) -> Option<TransferTarget> {
+        let same_side = self.core.left.same_provider(&self.core.right)
+            && self.core.left.path() == self.core.right.path();
+        match &self.content {
+            SessionContent::Dir(_) => {
+                let entries = self.filtered_entries();
+                let entry = self
+                    .ui
+                    .table_state
+                    .selected()
+                    .filter(|&i| i < entries.len())
+                    .map(|i| entries[i])?;
+                let info = entry.left.as_ref().or(entry.right.as_ref())?;
+                Some(TransferTarget {
+                    name: entry.name.clone(),
+                    rel_path: info.path.clone(),
+                    is_dir: info.is_dir,
+                    has_left: entry.left.is_some(),
+                    has_right: entry.right.is_some(),
+                    same_side,
+                    note: None,
+                })
+            }
+            SessionContent::Text(_) => {
+                let left_name = self
+                    .core
+                    .left
+                    .path()
+                    .file_name()?
+                    .to_string_lossy()
+                    .to_string();
+                let right_name = self
+                    .core
+                    .right
+                    .path()
+                    .file_name()?
+                    .to_string_lossy()
+                    .to_string();
+                let shared = left_name == right_name;
+                Some(TransferTarget {
+                    rel_path: left_name.clone(),
+                    name: left_name,
+                    is_dir: false,
+                    has_left: shared,
+                    has_right: shared,
+                    same_side,
+                    note: (!shared)
+                        .then_some("the two sides have different file names"),
+                })
+            }
+        }
+    }
+
     /// Return the first row at or after `after + 1` whose displayed text
     /// contains `query` (case-insensitive), wrapping around at the end.
     ///
@@ -600,7 +816,9 @@ impl AppState {
 
 #[cfg(test)]
 mod tests {
-    use cocomo_lib::{DirComparison, DirEntry, DirEntryStatus, SyncResult};
+    use cocomo_lib::{
+        DirComparison, DirEntry, DirEntryStatus, EntryInfo, SyncResult,
+    };
 
     use super::*;
 
@@ -847,5 +1065,286 @@ mod tests {
         // is the last candidate of the search).
         assert_eq!(session.find_row_matching("two", 1), Some(1));
         assert_eq!(session.find_row_matching("nine", 0), None);
+    }
+
+    fn entry_with_sides(
+        name: &str,
+        status: DirEntryStatus,
+        left: bool,
+        right: bool,
+    ) -> DirEntry {
+        let info = |side: &str| EntryInfo {
+            name: name.to_string(),
+            path: format!("/{side}/{name}"),
+            ..Default::default()
+        };
+        DirEntry {
+            name: name.to_string(),
+            status,
+            left: left.then(|| info("left")),
+            right: right.then(|| info("right")),
+            center: None,
+            sub_entries: None,
+        }
+    }
+
+    fn target(
+        has_left: bool,
+        has_right: bool,
+        same_side: bool,
+    ) -> TransferTarget {
+        TransferTarget {
+            name: "a.txt".into(),
+            rel_path: "a.txt".into(),
+            is_dir: false,
+            has_left,
+            has_right,
+            same_side,
+            note: None,
+        }
+    }
+
+    #[test]
+    fn choices_offer_only_the_options_the_sides_support() {
+        assert_eq!(
+            TransferOp::Copy.choices(true, true),
+            vec![
+                TransferChoice::Left,
+                TransferChoice::Right,
+                TransferChoice::Abort,
+            ]
+        );
+        assert_eq!(
+            TransferOp::Copy.choices(true, false),
+            vec![TransferChoice::Left, TransferChoice::Abort]
+        );
+        assert_eq!(
+            TransferOp::Copy.choices(false, true),
+            vec![TransferChoice::Right, TransferChoice::Abort]
+        );
+        // Without any side the dialog only offers the way out.
+        assert_eq!(
+            TransferOp::Copy.choices(false, false),
+            vec![TransferChoice::Abort]
+        );
+
+        // `both` is a delete-only option and needs both sides.
+        assert_eq!(
+            TransferOp::Delete.choices(true, true),
+            vec![
+                TransferChoice::Left,
+                TransferChoice::Right,
+                TransferChoice::Both,
+                TransferChoice::Abort,
+            ]
+        );
+        assert_eq!(
+            TransferOp::Delete.choices(true, false),
+            vec![TransferChoice::Left, TransferChoice::Abort]
+        );
+        assert_eq!(
+            TransferOp::Delete.choices(false, true),
+            vec![TransferChoice::Right, TransferChoice::Abort]
+        );
+    }
+
+    #[test]
+    fn items_map_each_choice_to_the_matching_actions() {
+        let target = target(true, true, false);
+
+        let actions = |op, choice| {
+            target
+                .items(op, choice)
+                .iter()
+                .map(|item| item.action)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            actions(TransferOp::Copy, TransferChoice::Left),
+            vec![TransferAction::CopyRight]
+        );
+        assert_eq!(
+            actions(TransferOp::Copy, TransferChoice::Right),
+            vec![TransferAction::CopyLeft]
+        );
+        assert_eq!(
+            actions(TransferOp::Delete, TransferChoice::Left),
+            vec![TransferAction::DeleteLeft]
+        );
+        assert_eq!(
+            actions(TransferOp::Delete, TransferChoice::Right),
+            vec![TransferAction::DeleteRight]
+        );
+        assert_eq!(
+            actions(TransferOp::Delete, TransferChoice::Both),
+            vec![TransferAction::DeleteLeft, TransferAction::DeleteRight]
+        );
+        assert!(actions(TransferOp::Delete, TransferChoice::Abort).is_empty());
+
+        // Every item carries the target's identity.
+        let item = &target.items(TransferOp::Copy, TransferChoice::Left)[0];
+        assert_eq!(item.name, "a.txt");
+        assert_eq!(item.rel_path, "a.txt");
+        assert!(!item.is_dir);
+    }
+
+    #[test]
+    fn delete_both_on_a_shared_root_deletes_only_once() {
+        // On a shared root the two sides are the same entry; a second
+        // delete would fail on the file the first one removed.
+        let target = target(true, true, true);
+        assert_eq!(
+            target.items(TransferOp::Delete, TransferChoice::Both),
+            vec![TransferItem::new(
+                TransferAction::DeleteLeft,
+                "a.txt".into(),
+                false,
+                "a.txt".into(),
+            )]
+        );
+    }
+
+    #[test]
+    fn items_are_empty_for_choices_the_target_does_not_offer() {
+        // A stale accelerator must never transfer something the dialog
+        // never offered.
+        let left_only = target(true, false, false);
+        assert!(
+            left_only
+                .items(TransferOp::Copy, TransferChoice::Right)
+                .is_empty()
+        );
+        assert!(
+            left_only
+                .items(TransferOp::Delete, TransferChoice::Both)
+                .is_empty()
+        );
+
+        let right_only = target(false, true, false);
+        assert!(
+            right_only
+                .items(TransferOp::Copy, TransferChoice::Left)
+                .is_empty()
+        );
+        assert!(
+            right_only
+                .items(TransferOp::Delete, TransferChoice::Both)
+                .is_empty()
+        );
+
+        let neither = target(false, false, false);
+        assert!(
+            neither
+                .items(TransferOp::Copy, TransferChoice::Left)
+                .is_empty()
+        );
+        assert!(
+            neither
+                .items(TransferOp::Delete, TransferChoice::Right)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn transfer_target_resolves_the_selected_dir_entry() {
+        let mut session = dir_session();
+        session.set_comparison(Some(DirComparison {
+            entries: vec![
+                entry_with_sides(
+                    "only-left",
+                    DirEntryStatus::LeftOnly,
+                    true,
+                    false,
+                ),
+                entry_with_sides(
+                    "both",
+                    DirEntryStatus::Different,
+                    true,
+                    true,
+                ),
+            ],
+            ..Default::default()
+        }));
+
+        session.ui.table_state.select(Some(0));
+        let target = session.transfer_target().unwrap();
+        assert_eq!(target.name, "only-left");
+        assert!(target.has_left);
+        assert!(!target.has_right);
+        assert!(!target.same_side);
+        assert_eq!(target.note, None);
+
+        session.ui.table_state.select(Some(1));
+        let target = session.transfer_target().unwrap();
+        assert_eq!(target.name, "both");
+        assert!(target.has_left && target.has_right);
+
+        // Nothing selected, or a selection past the end, yields no target.
+        session.ui.table_state.select(None);
+        assert!(session.transfer_target().is_none());
+        session.ui.table_state.select(Some(2));
+        assert!(session.transfer_target().is_none());
+    }
+
+    #[test]
+    fn transfer_target_requires_the_entry_to_exist_on_a_side() {
+        // The shared `comparison()` helper builds entries without any side
+        // metadata, so there is nothing to transfer.
+        let mut session = dir_session();
+        session.set_comparison(Some(comparison(&[(
+            "a",
+            DirEntryStatus::Different,
+        )])));
+        assert!(session.transfer_target().is_none());
+    }
+
+    #[test]
+    fn transfer_target_detects_a_shared_root() {
+        let mut session = SessionView::new_dir_compare(
+            Endpoint::local("/same"),
+            Endpoint::local("/same"),
+            false,
+        );
+        session.set_comparison(Some(DirComparison {
+            entries: vec![entry_with_sides(
+                "a",
+                DirEntryStatus::Different,
+                true,
+                true,
+            )],
+            ..Default::default()
+        }));
+        session.ui.table_state.select(Some(0));
+        assert!(session.transfer_target().unwrap().same_side);
+    }
+
+    #[test]
+    fn text_transfer_target_gates_on_matching_file_names() {
+        let text = SessionView::new_text_compare(
+            Endpoint::local("/left/a.txt"),
+            Endpoint::local("/right/a.txt"),
+            Vec::new(),
+            Vec::new(),
+            TextDiff::default(),
+            Grammar::plain_text(),
+        );
+        let target = text.transfer_target().unwrap();
+        assert_eq!(target.name, "a.txt");
+        assert!(target.has_left && target.has_right);
+        assert_eq!(target.note, None);
+
+        // The executor addresses both sides by one name, so differing file
+        // names disable all side options and explain why.
+        let mismatched = SessionView::new_text_compare(
+            Endpoint::local("/left/a.txt"),
+            Endpoint::local("/right/b.txt"),
+            Vec::new(),
+            Vec::new(),
+            TextDiff::default(),
+            Grammar::plain_text(),
+        );
+        let target = mismatched.transfer_target().unwrap();
+        assert!(!target.has_left && !target.has_right);
+        assert!(target.note.is_some());
     }
 }

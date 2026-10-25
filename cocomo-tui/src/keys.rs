@@ -11,13 +11,11 @@
 //!
 //! The [`KEYMAP`] table maps (key, scope) pairs to [`Cmd`] values and to
 //! their help-bar labels, so dispatch and documentation cannot drift apart.
-//! Bindings may also declare a prefix key, forming two-key sequences such
-//! as `D l` (delete left); the pending prefix lives in
-//! [`crate::state::UiState::pending_prefix`].
 //! Scopes partition key ownership: [`KeyScope::Global`] bindings belong to
 //! the App shell, [`KeyScope::DirNormal`] and [`KeyScope::TextNormal`]
-//! bindings to the two session views, and [`KeyScope::Editing`] is the
-//! root-layer fallback while a text-entry mode is active.
+//! bindings to the two session views, [`KeyScope::Dialog`] to the open
+//! transfer dialog, and [`KeyScope::Editing`] is the root-layer fallback
+//! while a text-entry mode is active.
 //!
 //! [`handle_session_key`] is pure with respect to the global state: it
 //! mutates only the [`SessionView`] passed in and reports key ownership
@@ -25,7 +23,7 @@
 //! caller can return `EventResult::Ignored` instead of swallowing the key.
 //! Rendering is done by the ratatui-kit components in `ui/`.
 
-use cocomo_lib::{SyncOperation, TransferAction, TransferItem};
+use cocomo_lib::SyncOperation;
 use ratatui_kit::{
     crossterm::event::{KeyCode, KeyEvent, KeyModifiers},
     ratatui::{
@@ -36,7 +34,10 @@ use ratatui_kit::{
 
 use crate::{
     diff_model::diff_group_starts,
-    state::{SessionAction, SessionContent, SessionMode, SessionView},
+    state::{
+        SessionAction, SessionContent, SessionMode, SessionView,
+        TransferChoice, TransferOp,
+    },
 };
 
 /// Shorthand for an unmodified key binding.
@@ -57,6 +58,10 @@ pub enum KeyScope {
     /// capture keys in their own layers; this scope is only the root-layer
     /// fallback that cancels the mode.
     Editing,
+    /// The transfer dialog is open. Its accelerators live here so they stay
+    /// documented in the table; navigation and `Enter` are owned by the
+    /// dialog's `Select` component and deliberately not listed.
+    Dialog,
 }
 
 /// The command a [`KeyBinding`] performs.
@@ -114,14 +119,14 @@ pub enum Cmd {
     NextDiff,
     /// Jump to the previous difference group.
     PrevDiff,
-    /// Copy the selected entry left → right (`C-l`).
-    CopyRight,
-    /// Copy the selected entry right → left (`C-r`).
-    CopyLeft,
-    /// Delete the selected entry from the left side (`D l`).
-    DeleteLeft,
-    /// Delete the selected entry from the right side (`D r`).
-    DeleteRight,
+    /// Open the copy dialog for the selected entry (`c`).
+    CopyDialog,
+    /// Open the delete dialog for the selected entry (`d`).
+    DeleteDialog,
+    /// Confirm the given option of the open transfer dialog.
+    DialogPick(TransferChoice),
+    /// Close the transfer dialog without transferring.
+    DialogAbort,
     /// Enter search mode (`/`).
     StartSearch,
     /// Enter command mode (`:`).
@@ -144,12 +149,9 @@ pub(crate) struct KeyBinding {
     /// Command to run.
     cmd: Cmd,
     /// Help-bar entry `(keys, description)`; `None` hides the binding
-    /// (e.g. the `Down` alias of `j`).
+    /// (e.g. the `Down` alias of `j`, or the dialog accelerators, which the
+    /// dialog labels itself).
     help: Option<(&'static str, &'static str)>,
-    /// Prefix key that must be pressed immediately before `key` for a
-    /// two-key sequence binding (e.g. the `D` of `D l`). `None` marks a
-    /// single-key binding.
-    prefix: Option<KeyCode>,
 }
 
 /// The complete keymap. Array order determines help-bar order; bindings
@@ -162,7 +164,6 @@ const KEYMAP: &[KeyBinding] = &[
         scope: KeyScope::DirNormal,
         cmd: Cmd::NextRow,
         help: Some(("j/k", "navigate")),
-        prefix: None,
     },
     KeyBinding {
         key: KeyCode::Down,
@@ -170,7 +171,6 @@ const KEYMAP: &[KeyBinding] = &[
         scope: KeyScope::DirNormal,
         cmd: Cmd::NextRow,
         help: None,
-        prefix: None,
     },
     KeyBinding {
         key: KeyCode::Char('k'),
@@ -178,7 +178,6 @@ const KEYMAP: &[KeyBinding] = &[
         scope: KeyScope::DirNormal,
         cmd: Cmd::PrevRow,
         help: None,
-        prefix: None,
     },
     KeyBinding {
         key: KeyCode::Up,
@@ -186,7 +185,6 @@ const KEYMAP: &[KeyBinding] = &[
         scope: KeyScope::DirNormal,
         cmd: Cmd::PrevRow,
         help: None,
-        prefix: None,
     },
     KeyBinding {
         key: KeyCode::Char('g'),
@@ -194,7 +192,6 @@ const KEYMAP: &[KeyBinding] = &[
         scope: KeyScope::DirNormal,
         cmd: Cmd::FirstRow,
         help: Some(("g/G", "top/bottom")),
-        prefix: None,
     },
     KeyBinding {
         key: KeyCode::Char('G'),
@@ -202,7 +199,6 @@ const KEYMAP: &[KeyBinding] = &[
         scope: KeyScope::DirNormal,
         cmd: Cmd::LastRow,
         help: None,
-        prefix: None,
     },
     KeyBinding {
         key: KeyCode::Char('n'),
@@ -210,7 +206,6 @@ const KEYMAP: &[KeyBinding] = &[
         scope: KeyScope::DirNormal,
         cmd: Cmd::NextDiff,
         help: Some(("n/N", "next/prev diff")),
-        prefix: None,
     },
     KeyBinding {
         key: KeyCode::Char('N'),
@@ -218,7 +213,6 @@ const KEYMAP: &[KeyBinding] = &[
         scope: KeyScope::DirNormal,
         cmd: Cmd::PrevDiff,
         help: None,
-        prefix: None,
     },
     KeyBinding {
         key: KeyCode::Char('f'),
@@ -226,7 +220,6 @@ const KEYMAP: &[KeyBinding] = &[
         scope: KeyScope::DirNormal,
         cmd: Cmd::StartFilter,
         help: Some(("f", "filter")),
-        prefix: None,
     },
     KeyBinding {
         key: KeyCode::Char('F'),
@@ -234,7 +227,6 @@ const KEYMAP: &[KeyBinding] = &[
         scope: KeyScope::DirNormal,
         cmd: Cmd::ToggleHideSame,
         help: Some(("F", "hide same")),
-        prefix: None,
     },
     KeyBinding {
         key: KeyCode::Char('C'),
@@ -242,7 +234,6 @@ const KEYMAP: &[KeyBinding] = &[
         scope: KeyScope::DirNormal,
         cmd: Cmd::ToggleCompareContent,
         help: Some(("C", "cont. on/off")),
-        prefix: None,
     },
     KeyBinding {
         key: KeyCode::Char('m'),
@@ -250,7 +241,6 @@ const KEYMAP: &[KeyBinding] = &[
         scope: KeyScope::DirNormal,
         cmd: Cmd::CycleSyncOpForward,
         help: Some(("m/M", "sync op")),
-        prefix: None,
     },
     KeyBinding {
         key: KeyCode::Char('M'),
@@ -258,7 +248,6 @@ const KEYMAP: &[KeyBinding] = &[
         scope: KeyScope::DirNormal,
         cmd: Cmd::CycleSyncOpBackward,
         help: None,
-        prefix: None,
     },
     KeyBinding {
         // `S` runs the sync; until the confirmation modal lands (phase 3),
@@ -268,7 +257,6 @@ const KEYMAP: &[KeyBinding] = &[
         scope: KeyScope::DirNormal,
         cmd: Cmd::PlanSync,
         help: Some(("S", "sync")),
-        prefix: None,
     },
     KeyBinding {
         key: KeyCode::Char('P'),
@@ -276,7 +264,6 @@ const KEYMAP: &[KeyBinding] = &[
         scope: KeyScope::DirNormal,
         cmd: Cmd::PlanSync,
         help: Some(("P", "plan")),
-        prefix: None,
     },
     KeyBinding {
         key: KeyCode::Char('e'),
@@ -284,39 +271,20 @@ const KEYMAP: &[KeyBinding] = &[
         scope: KeyScope::DirNormal,
         cmd: Cmd::ExecuteSync,
         help: Some(("e", "execute")),
-        prefix: None,
     },
     KeyBinding {
-        key: KeyCode::Char('l'),
-        modifiers: CTRL,
-        scope: KeyScope::DirNormal,
-        cmd: Cmd::CopyRight,
-        help: Some(("C-l", "copy l\u{2192}r")),
-        prefix: None,
-    },
-    KeyBinding {
-        key: KeyCode::Char('r'),
-        modifiers: CTRL,
-        scope: KeyScope::DirNormal,
-        cmd: Cmd::CopyLeft,
-        help: Some(("C-r", "copy r\u{2192}l")),
-        prefix: None,
-    },
-    KeyBinding {
-        key: KeyCode::Char('l'),
+        key: KeyCode::Char('c'),
         modifiers: NONE,
         scope: KeyScope::DirNormal,
-        cmd: Cmd::DeleteLeft,
-        help: Some(("D l", "del left")),
-        prefix: Some(KeyCode::Char('D')),
+        cmd: Cmd::CopyDialog,
+        help: Some(("c", "copy")),
     },
     KeyBinding {
-        key: KeyCode::Char('r'),
+        key: KeyCode::Char('d'),
         modifiers: NONE,
         scope: KeyScope::DirNormal,
-        cmd: Cmd::DeleteRight,
-        help: Some(("D r", "del right")),
-        prefix: Some(KeyCode::Char('D')),
+        cmd: Cmd::DeleteDialog,
+        help: Some(("d", "delete")),
     },
     KeyBinding {
         key: KeyCode::Char('r'),
@@ -324,7 +292,6 @@ const KEYMAP: &[KeyBinding] = &[
         scope: KeyScope::DirNormal,
         cmd: Cmd::Reload,
         help: Some(("r", "reload")),
-        prefix: None,
     },
     KeyBinding {
         key: KeyCode::Char('s'),
@@ -332,7 +299,6 @@ const KEYMAP: &[KeyBinding] = &[
         scope: KeyScope::DirNormal,
         cmd: Cmd::StartSaveSession,
         help: Some(("s", "save")),
-        prefix: None,
     },
     KeyBinding {
         key: KeyCode::Char('O'),
@@ -340,7 +306,6 @@ const KEYMAP: &[KeyBinding] = &[
         scope: KeyScope::DirNormal,
         cmd: Cmd::StartLoadSession,
         help: Some(("O", "load")),
-        prefix: None,
     },
     KeyBinding {
         key: KeyCode::Char('/'),
@@ -348,7 +313,6 @@ const KEYMAP: &[KeyBinding] = &[
         scope: KeyScope::DirNormal,
         cmd: Cmd::StartSearch,
         help: Some(("/", "search")),
-        prefix: None,
     },
     KeyBinding {
         key: KeyCode::Char(':'),
@@ -356,7 +320,6 @@ const KEYMAP: &[KeyBinding] = &[
         scope: KeyScope::DirNormal,
         cmd: Cmd::StartCommand,
         help: Some((":", "command")),
-        prefix: None,
     },
     KeyBinding {
         key: KeyCode::Enter,
@@ -364,7 +327,6 @@ const KEYMAP: &[KeyBinding] = &[
         scope: KeyScope::DirNormal,
         cmd: Cmd::OpenEntry,
         help: Some(("\u{21A5}", "open dir")),
-        prefix: None,
     },
     KeyBinding {
         key: KeyCode::Backspace,
@@ -372,7 +334,6 @@ const KEYMAP: &[KeyBinding] = &[
         scope: KeyScope::DirNormal,
         cmd: Cmd::GoUp,
         help: Some(("\u{232B}", "up")),
-        prefix: None,
     },
     KeyBinding {
         key: KeyCode::Esc,
@@ -380,7 +341,6 @@ const KEYMAP: &[KeyBinding] = &[
         scope: KeyScope::DirNormal,
         cmd: Cmd::Cancel,
         help: Some(("Esc", "cancel")),
-        prefix: None,
     },
     // -- Text comparison, normal mode. --
     KeyBinding {
@@ -389,7 +349,6 @@ const KEYMAP: &[KeyBinding] = &[
         scope: KeyScope::TextNormal,
         cmd: Cmd::NextRow,
         help: Some(("j/k", "navigate")),
-        prefix: None,
     },
     KeyBinding {
         key: KeyCode::Down,
@@ -397,7 +356,6 @@ const KEYMAP: &[KeyBinding] = &[
         scope: KeyScope::TextNormal,
         cmd: Cmd::NextRow,
         help: None,
-        prefix: None,
     },
     KeyBinding {
         key: KeyCode::Char('k'),
@@ -405,7 +363,6 @@ const KEYMAP: &[KeyBinding] = &[
         scope: KeyScope::TextNormal,
         cmd: Cmd::PrevRow,
         help: None,
-        prefix: None,
     },
     KeyBinding {
         key: KeyCode::Up,
@@ -413,7 +370,6 @@ const KEYMAP: &[KeyBinding] = &[
         scope: KeyScope::TextNormal,
         cmd: Cmd::PrevRow,
         help: None,
-        prefix: None,
     },
     KeyBinding {
         key: KeyCode::Char('g'),
@@ -421,7 +377,6 @@ const KEYMAP: &[KeyBinding] = &[
         scope: KeyScope::TextNormal,
         cmd: Cmd::FirstRow,
         help: Some(("g/G", "top/bottom")),
-        prefix: None,
     },
     KeyBinding {
         key: KeyCode::Char('G'),
@@ -429,7 +384,6 @@ const KEYMAP: &[KeyBinding] = &[
         scope: KeyScope::TextNormal,
         cmd: Cmd::LastRow,
         help: None,
-        prefix: None,
     },
     KeyBinding {
         key: KeyCode::Char('n'),
@@ -437,7 +391,6 @@ const KEYMAP: &[KeyBinding] = &[
         scope: KeyScope::TextNormal,
         cmd: Cmd::NextDiff,
         help: Some(("n/N", "next/prev diff")),
-        prefix: None,
     },
     KeyBinding {
         key: KeyCode::Char('N'),
@@ -445,7 +398,20 @@ const KEYMAP: &[KeyBinding] = &[
         scope: KeyScope::TextNormal,
         cmd: Cmd::PrevDiff,
         help: None,
-        prefix: None,
+    },
+    KeyBinding {
+        key: KeyCode::Char('c'),
+        modifiers: NONE,
+        scope: KeyScope::TextNormal,
+        cmd: Cmd::CopyDialog,
+        help: Some(("c", "copy")),
+    },
+    KeyBinding {
+        key: KeyCode::Char('d'),
+        modifiers: NONE,
+        scope: KeyScope::TextNormal,
+        cmd: Cmd::DeleteDialog,
+        help: Some(("d", "delete")),
     },
     KeyBinding {
         key: KeyCode::Char('/'),
@@ -453,7 +419,6 @@ const KEYMAP: &[KeyBinding] = &[
         scope: KeyScope::TextNormal,
         cmd: Cmd::StartSearch,
         help: Some(("/", "search")),
-        prefix: None,
     },
     KeyBinding {
         key: KeyCode::Char(':'),
@@ -461,7 +426,43 @@ const KEYMAP: &[KeyBinding] = &[
         scope: KeyScope::TextNormal,
         cmd: Cmd::StartCommand,
         help: Some((":", "command")),
-        prefix: None,
+    },
+    // -- Transfer dialog (its own input layer; the `Select` inside owns
+    //    j/k/Enter, so only the accelerators are listed here). --
+    KeyBinding {
+        key: KeyCode::Esc,
+        modifiers: NONE,
+        scope: KeyScope::Dialog,
+        cmd: Cmd::DialogAbort,
+        help: None,
+    },
+    KeyBinding {
+        key: KeyCode::Char('a'),
+        modifiers: NONE,
+        scope: KeyScope::Dialog,
+        cmd: Cmd::DialogAbort,
+        help: None,
+    },
+    KeyBinding {
+        key: KeyCode::Char('l'),
+        modifiers: NONE,
+        scope: KeyScope::Dialog,
+        cmd: Cmd::DialogPick(TransferChoice::Left),
+        help: None,
+    },
+    KeyBinding {
+        key: KeyCode::Char('r'),
+        modifiers: NONE,
+        scope: KeyScope::Dialog,
+        cmd: Cmd::DialogPick(TransferChoice::Right),
+        help: None,
+    },
+    KeyBinding {
+        key: KeyCode::Char('b'),
+        modifiers: NONE,
+        scope: KeyScope::Dialog,
+        cmd: Cmd::DialogPick(TransferChoice::Both),
+        help: None,
     },
     // -- Text-entry modes (root-layer fallback; the input layers normally
     //    capture keys exclusively). --
@@ -471,7 +472,6 @@ const KEYMAP: &[KeyBinding] = &[
         scope: KeyScope::Editing,
         cmd: Cmd::CancelEdit,
         help: None,
-        prefix: None,
     },
     KeyBinding {
         key: KeyCode::Char('q'),
@@ -479,7 +479,6 @@ const KEYMAP: &[KeyBinding] = &[
         scope: KeyScope::Editing,
         cmd: Cmd::CancelEdit,
         help: None,
-        prefix: None,
     },
     // -- App shell. --
     KeyBinding {
@@ -488,7 +487,6 @@ const KEYMAP: &[KeyBinding] = &[
         scope: KeyScope::Global,
         cmd: Cmd::CloseTab,
         help: Some(("Ctrl+W", "close")),
-        prefix: None,
     },
     KeyBinding {
         key: KeyCode::Tab,
@@ -496,7 +494,6 @@ const KEYMAP: &[KeyBinding] = &[
         scope: KeyScope::Global,
         cmd: Cmd::SwitchTab,
         help: Some(("Tab", "tabs")),
-        prefix: None,
     },
     KeyBinding {
         key: KeyCode::Tab,
@@ -504,7 +501,6 @@ const KEYMAP: &[KeyBinding] = &[
         scope: KeyScope::Global,
         cmd: Cmd::SwitchTab,
         help: None,
-        prefix: None,
     },
     KeyBinding {
         key: KeyCode::Left,
@@ -512,7 +508,6 @@ const KEYMAP: &[KeyBinding] = &[
         scope: KeyScope::Global,
         cmd: Cmd::MenuPrev,
         help: Some(("\u{2190}/\u{2192}", "menu")),
-        prefix: None,
     },
     KeyBinding {
         key: KeyCode::Right,
@@ -520,7 +515,6 @@ const KEYMAP: &[KeyBinding] = &[
         scope: KeyScope::Global,
         cmd: Cmd::MenuNext,
         help: None,
-        prefix: None,
     },
     KeyBinding {
         key: KeyCode::Char('q'),
@@ -528,7 +522,6 @@ const KEYMAP: &[KeyBinding] = &[
         scope: KeyScope::Global,
         cmd: Cmd::Quit,
         help: Some(("q", "quit")),
-        prefix: None,
     },
     KeyBinding {
         key: KeyCode::Char('Q'),
@@ -536,7 +529,6 @@ const KEYMAP: &[KeyBinding] = &[
         scope: KeyScope::Global,
         cmd: Cmd::Quit,
         help: None,
-        prefix: None,
     },
     KeyBinding {
         key: KeyCode::Char('?'),
@@ -544,7 +536,6 @@ const KEYMAP: &[KeyBinding] = &[
         scope: KeyScope::Global,
         cmd: Cmd::ToggleHelp,
         help: Some(("?", "help")),
-        prefix: None,
     },
     KeyBinding {
         key: KeyCode::F(1),
@@ -552,7 +543,6 @@ const KEYMAP: &[KeyBinding] = &[
         scope: KeyScope::Global,
         cmd: Cmd::ToggleHelp,
         help: None,
-        prefix: None,
     },
 ];
 
@@ -560,51 +550,18 @@ const KEYMAP: &[KeyBinding] = &[
 ///
 /// A binding matches when the key code is equal, the required modifiers are
 /// present, and — for unmodified bindings — no Ctrl/Alt modifier is set, so
-/// `Ctrl+Tab` never fires the plain `Tab` binding. Two-key sequence
-/// bindings (those with a prefix) are excluded; use [`lookup_prefixed`] for
-/// their second key.
+/// `Ctrl+Tab` never fires the plain `Tab` binding.
 pub fn lookup(scope: KeyScope, key: KeyEvent) -> Option<Cmd> {
     KEYMAP
         .iter()
         .find(|b| {
-            b.prefix.is_none()
-                && b.scope == scope
+            b.scope == scope
                 && b.key == key.code
                 && key.modifiers.contains(b.modifiers)
                 && (b.modifiers != NONE
                     || !key.modifiers.intersects(CTRL | KeyModifiers::ALT))
         })
         .map(|b| b.cmd)
-}
-
-/// Return the command for the second key of a two-key sequence: the binding
-/// in `scope` whose prefix is `prefix` and whose key is `key`.
-pub fn lookup_prefixed(
-    scope: KeyScope,
-    prefix: KeyCode,
-    key: KeyEvent,
-) -> Option<Cmd> {
-    KEYMAP
-        .iter()
-        .find(|b| {
-            b.prefix == Some(prefix)
-                && b.scope == scope
-                && b.key == key.code
-                && key.modifiers.contains(b.modifiers)
-                && (b.modifiers != NONE
-                    || !key.modifiers.intersects(CTRL | KeyModifiers::ALT))
-        })
-        .map(|b| b.cmd)
-}
-
-/// Return whether `key` starts a two-key sequence in `scope` (i.e. some
-/// binding uses it as its prefix).
-pub fn starts_sequence(scope: KeyScope, key: KeyEvent) -> bool {
-    KEYMAP.iter().any(|b| {
-        b.prefix == Some(key.code)
-            && b.scope == scope
-            && !key.modifiers.intersects(CTRL | KeyModifiers::ALT)
-    })
 }
 
 /// Build the help bar lines for the given scopes from the keymap.
@@ -660,39 +617,24 @@ pub fn help_lines(scopes: &[KeyScope], width: u16) -> Vec<Line<'static>> {
 /// see the key. Otherwise returns the [`SessionAction`] the controller must
 /// dispatch.
 ///
-/// Two-key sequence bindings (e.g. `D l`) work through
-/// [`crate::state::UiState::pending_prefix`]: a prefix key arms the pending
-/// state and is consumed; the next key is first looked up as the sequence
-/// continuation, then as a normal binding, so a mistyped continuation never
-/// strands the handler in prefix mode.
+/// While the transfer dialog is open its scope owns the keys, which keeps
+/// the dialog accelerators in the same table as every other binding even
+/// though the dialog renders in its own input layer.
 pub fn handle_session_key(
     session: &mut SessionView,
     key: KeyEvent,
 ) -> Option<SessionAction> {
     let scope = if session.ui.mode.is_editing() {
         KeyScope::Editing
+    } else if matches!(session.ui.mode, SessionMode::Transfer { .. }) {
+        KeyScope::Dialog
     } else {
         match &session.content {
             SessionContent::Dir(_) => KeyScope::DirNormal,
             SessionContent::Text(_) => KeyScope::TextNormal,
         }
     };
-    let cmd = match session.ui.pending_prefix.take() {
-        Some(prefix) => {
-            lookup_prefixed(scope, prefix, key).or_else(|| lookup(scope, key))
-        }
-        None => match lookup(scope, key) {
-            Some(cmd) => Some(cmd),
-            None => {
-                if starts_sequence(scope, key) {
-                    session.ui.pending_prefix = Some(key.code);
-                    return Some(SessionAction::None);
-                }
-                None
-            }
-        },
-    }?;
-    Some(execute(cmd, session))
+    Some(execute(lookup(scope, key)?, session))
 }
 
 /// Run a session-scoped [`Cmd`], mutating the session and returning the
@@ -801,13 +743,12 @@ fn execute(cmd: Cmd, session: &mut SessionView) -> SessionAction {
             jump_diff(session, -1);
             SessionAction::None
         }
-        Cmd::CopyRight => transfer_action(session, TransferAction::CopyRight),
-        Cmd::CopyLeft => transfer_action(session, TransferAction::CopyLeft),
-        Cmd::DeleteLeft => {
-            transfer_action(session, TransferAction::DeleteLeft)
-        }
-        Cmd::DeleteRight => {
-            transfer_action(session, TransferAction::DeleteRight)
+        Cmd::CopyDialog => open_dialog(session, TransferOp::Copy),
+        Cmd::DeleteDialog => open_dialog(session, TransferOp::Delete),
+        Cmd::DialogPick(choice) => dialog_choice(session, choice),
+        Cmd::DialogAbort => {
+            session.ui.mode = SessionMode::Normal;
+            SessionAction::None
         }
         Cmd::StartSearch => {
             // Enter search mode; the query buffer lives in the mode itself.
@@ -945,52 +886,40 @@ fn cycle_sync_op(current: &SyncOperation, delta: isize) -> SyncOperation {
     ops[new_idx as usize]
 }
 
-/// Resolve the selected entry to a transfer action for `action`.
+/// Open the transfer dialog for the selected entry.
 ///
-/// An entry that does not exist on the side the action reads from or
-/// removes (e.g. copying left → right an entry that only exists on the
-/// right) is a no-op.
-fn transfer_action(
-    session: &SessionView,
-    action: TransferAction,
-) -> SessionAction {
-    match selected_transfer_item(session, action) {
-        Some(item) => SessionAction::Transfer { item },
-        None => SessionAction::None,
+/// A no-op when nothing is selected (or the selected entry exists on
+/// neither side), so `c`/`d` on an empty table simply do nothing.
+fn open_dialog(session: &mut SessionView, op: TransferOp) -> SessionAction {
+    if session.transfer_target().is_some() {
+        session.ui.mode = SessionMode::Transfer { op };
     }
+    SessionAction::None
 }
 
-/// Build the [`TransferItem`] for the selected entry and `action`.
+/// Resolve a transfer-dialog option into the action the controller must
+/// dispatch, closing the dialog.
 ///
-/// Copies take their content from the source side, deletes remove that
-/// side's own copy. The item carries the entry's path relative to the
-/// comparison root, exactly as the executor expects it.
-fn selected_transfer_item(
-    session: &SessionView,
-    action: TransferAction,
-) -> Option<TransferItem> {
-    let entries = session.filtered_entries();
-    let selected = session
-        .ui
-        .table_state
-        .selected()
-        .filter(|&i| i < entries.len())
-        .map(|i| entries[i])?;
-    let info = match action {
-        TransferAction::CopyRight | TransferAction::DeleteLeft => {
-            selected.left.as_ref()?
-        }
-        TransferAction::CopyLeft | TransferAction::DeleteRight => {
-            selected.right.as_ref()?
-        }
-        _ => return None,
+/// The target is resolved here rather than trusted from the dialog's render,
+/// so an accelerator for an option the dialog never offered transfers
+/// nothing.
+pub fn dialog_choice(
+    session: &mut SessionView,
+    choice: TransferChoice,
+) -> SessionAction {
+    let SessionMode::Transfer { op } = session.ui.mode else {
+        return SessionAction::None;
     };
-    Some(TransferItem::new(
-        action,
-        selected.name.clone(),
-        info.is_dir,
-        info.path.clone(),
-    ))
+    session.ui.mode = SessionMode::Normal;
+    let items = session
+        .transfer_target()
+        .map(|target| target.items(op, choice))
+        .unwrap_or_default();
+    if items.is_empty() {
+        SessionAction::None
+    } else {
+        SessionAction::Transfer { items }
+    }
 }
 
 #[cfg(test)]
@@ -999,7 +928,7 @@ mod tests {
 
     use cocomo_lib::{
         DirComparison, DirEntry, DirEntryStatus, Endpoint, EntryInfo, Grammar,
-        LineInfo, TextDiff, TextDifference,
+        LineInfo, TextDiff, TextDifference, TransferAction,
     };
     use ratatui_kit::crossterm::event::KeyEvent;
 
@@ -1069,13 +998,6 @@ mod tests {
         code: KeyCode,
     ) -> Option<SessionAction> {
         handle_session_key(session, key(code))
-    }
-
-    fn press_key(
-        session: &mut SessionView,
-        key: KeyEvent,
-    ) -> Option<SessionAction> {
-        handle_session_key(session, key)
     }
 
     /// Dir session with one left-only, one right-only, and one differing
@@ -1382,78 +1304,129 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_l_builds_copy_item_from_selected_entry() {
-        let mut session = dir_session_with_sides();
-        session.ui.table_state.select(Some(0));
-        let ctrl_l = KeyEvent::new(KeyCode::Char('l'), CTRL);
-        match press_key(&mut session, ctrl_l) {
-            Some(SessionAction::Transfer { item }) => {
-                assert_eq!(item.action, TransferAction::CopyRight);
-                assert_eq!(item.name, "left-only.txt");
-                assert_eq!(item.rel_path, "left-only.txt");
-                assert!(!item.is_dir);
-            }
-            other => panic!("expected Transfer, got {other:?}"),
+    fn c_and_d_open_the_transfer_dialog() {
+        for (key, op) in [('c', TransferOp::Copy), ('d', TransferOp::Delete)] {
+            let mut session = dir_session_with_sides();
+            session.ui.table_state.select(Some(0));
+            assert_eq!(
+                press(&mut session, KeyCode::Char(key)),
+                Some(SessionAction::None)
+            );
+            assert_eq!(session.ui.mode, SessionMode::Transfer { op });
         }
     }
 
     #[test]
-    fn copy_without_source_side_is_a_noop() {
-        // Copying left → right an entry that only exists on the right does
-        // nothing (the key is still owned, so it cannot leak to siblings).
-        let mut session = dir_session_with_sides();
-        session.ui.table_state.select(Some(1));
-        let ctrl_l = KeyEvent::new(KeyCode::Char('l'), CTRL);
-        assert_eq!(press_key(&mut session, ctrl_l), Some(SessionAction::None));
-    }
-
-    #[test]
-    fn d_prefix_sequence_deletes() {
-        let mut session = dir_session_with_sides();
-        session.ui.table_state.select(Some(0));
-
-        // The prefix alone arms the pending state and is consumed.
+    fn dialog_keys_work_in_a_text_session_too() {
+        let mut session = text_session();
         assert_eq!(
-            press(&mut session, KeyCode::Char('D')),
+            press(&mut session, KeyCode::Char('d')),
             Some(SessionAction::None)
         );
-        assert_eq!(session.ui.pending_prefix, Some(KeyCode::Char('D')));
+        assert_eq!(
+            session.ui.mode,
+            SessionMode::Transfer {
+                op: TransferOp::Delete
+            }
+        );
+    }
 
-        // The continuation resolves to the delete action and clears the
-        // pending state.
+    #[test]
+    fn dialog_needs_a_target_entry() {
+        // The entries of `dir_session()` exist on neither side, so there is
+        // nothing to copy or delete and the dialog stays closed.
+        let mut session = dir_session();
+        session.ui.table_state.select(Some(0));
+        press(&mut session, KeyCode::Char('c'));
+        assert_eq!(session.ui.mode, SessionMode::Normal);
+    }
+
+    #[test]
+    fn dialog_accelerator_builds_the_transfer_items() {
+        let mut session = dir_session_with_sides();
+        session.ui.table_state.select(Some(0));
+        press(&mut session, KeyCode::Char('c'));
+        // `l` is the left → right accelerator of the copy dialog.
         match press(&mut session, KeyCode::Char('l')) {
-            Some(SessionAction::Transfer { item }) => {
-                assert_eq!(item.action, TransferAction::DeleteLeft);
-                assert_eq!(item.name, "left-only.txt");
+            Some(SessionAction::Transfer { items }) => {
+                assert_eq!(items.len(), 1);
+                assert_eq!(items[0].action, TransferAction::CopyRight);
+                assert_eq!(items[0].name, "left-only.txt");
+                assert_eq!(items[0].rel_path, "left-only.txt");
+                assert!(!items[0].is_dir);
             }
             other => panic!("expected Transfer, got {other:?}"),
         }
-        assert_eq!(session.ui.pending_prefix, None);
+        // Confirming closes the dialog.
+        assert_eq!(session.ui.mode, SessionMode::Normal);
+    }
 
-        // `D r` deletes on the right side.
-        session.ui.table_state.select(Some(1));
-        press(&mut session, KeyCode::Char('D'));
-        match press(&mut session, KeyCode::Char('r')) {
-            Some(SessionAction::Transfer { item }) => {
-                assert_eq!(item.action, TransferAction::DeleteRight);
-                assert_eq!(item.name, "right-only.txt");
+    #[test]
+    fn delete_both_transfers_one_item_per_side() {
+        let mut session = dir_session_with_sides();
+        session.ui.table_state.select(Some(2));
+        press(&mut session, KeyCode::Char('d'));
+        match press(&mut session, KeyCode::Char('b')) {
+            Some(SessionAction::Transfer { items }) => {
+                assert_eq!(items.len(), 2);
+                assert_eq!(items[0].action, TransferAction::DeleteLeft);
+                assert_eq!(items[1].action, TransferAction::DeleteRight);
             }
             other => panic!("expected Transfer, got {other:?}"),
         }
     }
 
     #[test]
-    fn d_prefix_aborts_on_unbound_continuation() {
+    fn unoffered_accelerator_transfers_nothing() {
+        // A right-only entry has no `left → right` option, so `l` closes the
+        // dialog without a transfer instead of copying thin air.
         let mut session = dir_session_with_sides();
-        press(&mut session, KeyCode::Char('D'));
-        // An unbound continuation clears the pending prefix and stays
-        // unbound itself.
-        assert_eq!(press(&mut session, KeyCode::Char('x')), None);
-        assert_eq!(session.ui.pending_prefix, None);
-        // Bare `r` is Reload again, not a swallowed `D r`.
+        session.ui.table_state.select(Some(1));
+        press(&mut session, KeyCode::Char('c'));
         assert_eq!(
-            press(&mut session, KeyCode::Char('r')),
-            Some(SessionAction::Reload)
+            press(&mut session, KeyCode::Char('l')),
+            Some(SessionAction::None)
+        );
+        assert_eq!(session.ui.mode, SessionMode::Normal);
+    }
+
+    #[test]
+    fn dialog_abort_leaves_the_data_alone() {
+        let mut session = dir_session_with_sides();
+        session.ui.table_state.select(Some(0));
+        press(&mut session, KeyCode::Char('d'));
+        assert_eq!(
+            press(&mut session, KeyCode::Esc),
+            Some(SessionAction::None)
+        );
+        assert_eq!(session.ui.mode, SessionMode::Normal);
+
+        // `a` aborts just like Esc.
+        press(&mut session, KeyCode::Char('d'));
+        assert_eq!(
+            press(&mut session, KeyCode::Char('a')),
+            Some(SessionAction::None)
+        );
+        assert_eq!(session.ui.mode, SessionMode::Normal);
+    }
+
+    #[test]
+    fn dialog_scope_owns_keys_and_leaves_navigation_to_select() {
+        // While the dialog is open the table must not move: `j` is owned by
+        // the dialog's `Select`, so the session handler reports it unbound.
+        let mut session = dir_session_with_sides();
+        session.ui.table_state.select(Some(0));
+        press(&mut session, KeyCode::Char('d'));
+        assert_eq!(press(&mut session, KeyCode::Char('j')), None);
+        assert_eq!(session.ui.table_state.selected(), Some(0));
+        // Dir-scope commands are unreachable until the dialog closes; `n`
+        // is bound in the dir scope but not a dialog accelerator.
+        assert_eq!(press(&mut session, KeyCode::Char('n')), None);
+        assert_eq!(
+            session.ui.mode,
+            SessionMode::Transfer {
+                op: TransferOp::Delete
+            }
         );
     }
 

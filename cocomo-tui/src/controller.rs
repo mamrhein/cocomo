@@ -39,11 +39,11 @@ use ratatui_kit::crossterm::event::KeyEvent;
 
 use crate::{
     error::{Result, TuiError},
-    keys::handle_session_key,
+    keys::{dialog_choice, handle_session_key},
     session_store::session_to_config,
     state::{
-        APP_STATE, AppState, SessionAction, SessionMode, SessionView,
-        SyncStage,
+        APP_STATE, AppState, SessionAction, SessionContent, SessionMode,
+        SessionView, SyncStage, TransferChoice,
     },
 };
 
@@ -325,6 +325,15 @@ fn active_dir_session_id() -> Option<usize> {
         .map(|s| s.core.id)
 }
 
+/// Return the stable id of the active session, whatever it compares.
+///
+/// A transfer can also target the two files of a text-diff session, so it
+/// cannot go through [`active_dir_session_id`].
+fn active_session_id() -> Option<usize> {
+    let state = APP_STATE.state();
+    state.read().active().map(|s| s.core.id)
+}
+
 /// The session inputs an async task needs, captured under a single read
 /// lock so that no guard is ever held across an `await`.
 struct SessionSnapshot {
@@ -346,6 +355,51 @@ impl SessionSnapshot {
             sync_operation: dir.sync_operation,
         })
     }
+}
+
+/// The inputs of a single transfer, captured under one read lock.
+struct TransferSnapshot {
+    left: Endpoint,
+    right: Endpoint,
+    /// Roots the executor joins the entry name onto: the compared
+    /// directories for a dir session, the directories *containing* the
+    /// compared files for a text session.
+    left_root: PathBuf,
+    right_root: PathBuf,
+    is_dir: bool,
+    compare_content: bool,
+}
+
+impl TransferSnapshot {
+    fn from_session(session: &SessionView) -> Self {
+        // A text session's endpoints are the files themselves, while the
+        // executor addresses an entry as `root.join(name)`.
+        let root = |path: &Path, is_dir: bool| {
+            if is_dir {
+                path.to_path_buf()
+            } else {
+                path.parent().unwrap_or(path).to_path_buf()
+            }
+        };
+        let is_dir = session.content.is_dir();
+        Self {
+            left: session.core.left.clone(),
+            right: session.core.right.clone(),
+            left_root: root(session.core.left.path(), is_dir),
+            right_root: root(session.core.right.path(), is_dir),
+            is_dir,
+            compare_content: session
+                .dir()
+                .is_some_and(|dir| dir.compare_content),
+        }
+    }
+}
+
+/// What a transfer task must write back: a fresh comparison for a dir
+/// session, fresh diff content for a text session.
+enum PostTransfer {
+    Dir(DirComparison),
+    Text(SessionContent),
 }
 
 /// Apply a synchronous mutation to the session with the given id under a
@@ -614,14 +668,12 @@ pub(crate) fn process_session_action(action: SessionAction) {
                 "Session load failed",
             );
         }
-        SessionAction::Transfer { item } => {
-            let Some(id) = active_dir_session_id() else {
+        SessionAction::Transfer { items } => {
+            let Some(id) = active_session_id() else {
                 return;
             };
             spawn_task(
-                move |app| {
-                    app.session(id).and_then(SessionSnapshot::from_session)
-                },
+                move |app| app.session(id).map(TransferSnapshot::from_session),
                 move |snapshot| async move {
                     let pair = if snapshot.left.same_provider(&snapshot.right)
                     {
@@ -633,9 +685,9 @@ pub(crate) fn process_session_action(action: SessionAction) {
                         )
                     };
                     let result = execute_transfers(
-                        &[item],
-                        snapshot.left.path(),
-                        snapshot.right.path(),
+                        &items,
+                        &snapshot.left_root,
+                        &snapshot.right_root,
                         pair,
                     )
                     .await;
@@ -652,18 +704,48 @@ pub(crate) fn process_session_action(action: SessionAction) {
                             details.join("; ")
                         ));
                     }
-                    // Re-run the comparison so the table reflects the
+                    // Re-run the comparison so the view reflects the
                     // transfer.
-                    compare(
-                        &snapshot.left,
-                        &snapshot.right,
-                        snapshot.compare_content,
-                    )
-                    .await
+                    if snapshot.is_dir {
+                        let comparison = compare(
+                            &snapshot.left,
+                            &snapshot.right,
+                            snapshot.compare_content,
+                        )
+                        .await?;
+                        Ok(PostTransfer::Dir(comparison))
+                    } else {
+                        let session =
+                            run_text_comparison(snapshot.left, snapshot.right)
+                                .await?;
+                        Ok(PostTransfer::Text(session.content))
+                    }
                 },
-                move |app, comparison| {
-                    if let Some(s) = app.session_mut(id) {
-                        s.set_comparison(Some(comparison));
+                move |app, post| {
+                    let Some(session) = app.session_mut(id) else {
+                        return;
+                    };
+                    match post {
+                        PostTransfer::Dir(comparison) => {
+                            session.set_comparison(Some(comparison));
+                        }
+                        PostTransfer::Text(content) => {
+                            session.content = content;
+                            // The transferred file may have lost lines (or
+                            // vanished), so keep the selection in range.
+                            let rows = session.row_count();
+                            if session
+                                .ui
+                                .table_state
+                                .selected()
+                                .is_some_and(|s| s >= rows)
+                            {
+                                session
+                                    .ui
+                                    .table_state
+                                    .select(rows.checked_sub(1));
+                            }
+                        }
                     }
                 },
                 "Comparison after transfer failed",
@@ -694,6 +776,29 @@ pub(crate) fn dispatch_dir_key(key: KeyEvent) -> bool {
 /// Like [`dispatch_dir_key`], scoped to text-diff sessions.
 pub(crate) fn dispatch_text_key(key: KeyEvent) -> bool {
     dispatch_key(|s| s.content.is_text(), key)
+}
+
+/// Handle a key press for the open transfer dialog.
+///
+/// Like [`dispatch_dir_key`], but scoped to a session whose dialog is open.
+/// Navigation and `Enter` are consumed by the dialog's `Select` component,
+/// so only the accelerators and `Esc` reach this path.
+pub(crate) fn dispatch_dialog_key(key: KeyEvent) -> bool {
+    dispatch_key(|s| matches!(s.ui.mode, SessionMode::Transfer { .. }), key)
+}
+
+/// Confirm the option the dialog's `Select` highlighted (mouse click or
+/// `Enter`), which bypasses the keymap and so enters through here.
+pub(crate) fn confirm_transfer(choice: TransferChoice) {
+    let action = {
+        let state = APP_STATE.state();
+        let mut app = state.write();
+        match app.active_mut() {
+            Some(session) => dialog_choice(session, choice),
+            None => return,
+        }
+    };
+    process_session_action(action);
 }
 
 fn dispatch_key(
