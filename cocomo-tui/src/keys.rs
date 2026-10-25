@@ -898,11 +898,12 @@ fn open_dialog(session: &mut SessionView, op: TransferOp) -> SessionAction {
 }
 
 /// Resolve a transfer-dialog option into the action the controller must
-/// dispatch, closing the dialog.
+/// dispatch.
 ///
 /// The target is resolved here rather than trusted from the dialog's render,
-/// so an accelerator for an option the dialog never offered transfers
-/// nothing.
+/// so an accelerator for an option the entry does not activate is absorbed:
+/// the dialog stays open and nothing transfers. Only an active option (or
+/// `abort`) closes the dialog.
 pub fn dialog_choice(
     session: &mut SessionView,
     choice: TransferChoice,
@@ -910,11 +911,16 @@ pub fn dialog_choice(
     let SessionMode::Transfer { op } = session.ui.mode else {
         return SessionAction::None;
     };
+    let Some(target) = session.transfer_target() else {
+        // The dialog cannot render without a target; drop the stale mode.
+        session.ui.mode = SessionMode::Normal;
+        return SessionAction::None;
+    };
+    if !choice.is_enabled(op, target.has_left, target.has_right) {
+        return SessionAction::None;
+    }
     session.ui.mode = SessionMode::Normal;
-    let items = session
-        .transfer_target()
-        .map(|target| target.items(op, choice))
-        .unwrap_or_default();
+    let items = target.items(op, choice);
     if items.is_empty() {
         SessionAction::None
     } else {
@@ -1377,9 +1383,9 @@ mod tests {
     }
 
     #[test]
-    fn unoffered_accelerator_transfers_nothing() {
-        // A right-only entry has no `left → right` option, so `l` closes the
-        // dialog without a transfer instead of copying thin air.
+    fn dead_option_absorbs_its_accelerator() {
+        // A right-only entry does not activate `left → right`, so `l` is a
+        // no-op that leaves the dialog open; the active `r` still transfers.
         let mut session = dir_session_with_sides();
         session.ui.table_state.select(Some(1));
         press(&mut session, KeyCode::Char('c'));
@@ -1387,6 +1393,18 @@ mod tests {
             press(&mut session, KeyCode::Char('l')),
             Some(SessionAction::None)
         );
+        assert_eq!(
+            session.ui.mode,
+            SessionMode::Transfer {
+                op: TransferOp::Copy
+            }
+        );
+        match press(&mut session, KeyCode::Char('r')) {
+            Some(SessionAction::Transfer { items }) => {
+                assert_eq!(items[0].action, TransferAction::CopyLeft);
+            }
+            other => panic!("expected Transfer, got {other:?}"),
+        }
         assert_eq!(session.ui.mode, SessionMode::Normal);
     }
 
@@ -1411,16 +1429,18 @@ mod tests {
     }
 
     #[test]
-    fn dialog_scope_owns_keys_and_leaves_navigation_to_select() {
-        // While the dialog is open the table must not move: `j` is owned by
-        // the dialog's `Select`, so the session handler reports it unbound.
+    fn dialog_scope_owns_only_its_keys() {
+        // While the dialog is open the session handler claims nothing but
+        // `l`/`r`/`b`/`Esc`/`a`; `j` and the dir-scope commands stay
+        // unbound (the dialog's exclusive input layer swallows them, so the
+        // table behind cannot move).
         let mut session = dir_session_with_sides();
         session.ui.table_state.select(Some(0));
         press(&mut session, KeyCode::Char('d'));
         assert_eq!(press(&mut session, KeyCode::Char('j')), None);
         assert_eq!(session.ui.table_state.selected(), Some(0));
         // Dir-scope commands are unreachable until the dialog closes; `n`
-        // is bound in the dir scope but not a dialog accelerator.
+        // is bound in the dir scope but not a dialog key.
         assert_eq!(press(&mut session, KeyCode::Char('n')), None);
         assert_eq!(
             session.ui.mode,

@@ -39,11 +39,11 @@ use ratatui_kit::crossterm::event::KeyEvent;
 
 use crate::{
     error::{Result, TuiError},
-    keys::{dialog_choice, handle_session_key},
+    keys::handle_session_key,
     session_store::session_to_config,
     state::{
         APP_STATE, AppState, SessionAction, SessionContent, SessionMode,
-        SessionView, SyncStage, TransferChoice,
+        SessionView, SyncStage,
     },
 };
 
@@ -781,24 +781,10 @@ pub(crate) fn dispatch_text_key(key: KeyEvent) -> bool {
 /// Handle a key press for the open transfer dialog.
 ///
 /// Like [`dispatch_dir_key`], but scoped to a session whose dialog is open.
-/// Navigation and `Enter` are consumed by the dialog's `Select` component,
-/// so only the accelerators and `Esc` reach this path.
+/// The dialog is a pure key interface, so `l`/`r`/`b`/`Esc` are its only
+/// owned keys; every other key is swallowed by its exclusive input layer.
 pub(crate) fn dispatch_dialog_key(key: KeyEvent) -> bool {
     dispatch_key(|s| matches!(s.ui.mode, SessionMode::Transfer { .. }), key)
-}
-
-/// Confirm the option the dialog's `Select` highlighted (mouse click or
-/// `Enter`), which bypasses the keymap and so enters through here.
-pub(crate) fn confirm_transfer(choice: TransferChoice) {
-    let action = {
-        let state = APP_STATE.state();
-        let mut app = state.write();
-        match app.active_mut() {
-            Some(session) => dialog_choice(session, choice),
-            None => return,
-        }
-    };
-    process_session_action(action);
 }
 
 fn dispatch_key(

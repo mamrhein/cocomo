@@ -76,30 +76,19 @@ impl TransferOp {
         }
     }
 
-    /// Return the options this operation offers for an entry present on the
-    /// given sides, in display order and always ending with
-    /// [`TransferChoice::Abort`].
+    /// The dialog's fixed option list, in display order.
     ///
-    /// Options that cannot apply to the entry are omitted rather than shown
-    /// dead: copying left → right needs a left side, and `both` only makes
-    /// sense when both sides hold the entry.
-    pub fn choices(
-        self,
-        has_left: bool,
-        has_right: bool,
-    ) -> Vec<TransferChoice> {
-        let mut choices = Vec::new();
-        if has_left {
-            choices.push(TransferChoice::Left);
-        }
-        if has_right {
-            choices.push(TransferChoice::Right);
-        }
-        if self == Self::Delete && has_left && has_right {
-            choices.push(TransferChoice::Both);
-        }
-        choices.push(TransferChoice::Abort);
-        choices
+    /// All four options are always listed; [`TransferChoice::is_enabled`]
+    /// decides which ones the selected entry actually activates, so the
+    /// user sees the full key map instead of a list that shifts shape per
+    /// entry.
+    pub fn choices(self) -> [TransferChoice; 4] {
+        [
+            TransferChoice::Left,
+            TransferChoice::Right,
+            TransferChoice::Both,
+            TransferChoice::Abort,
+        ]
     }
 }
 
@@ -136,6 +125,27 @@ impl TransferChoice {
             Self::Right => "r",
             Self::Both => "b",
             Self::Abort => "Esc",
+        }
+    }
+
+    /// Return whether an entry present on the given sides activates this
+    /// option under `op`.
+    ///
+    /// `l` needs a left side, `r` a right side, and `b` both sides; `abort`
+    /// is always active. `both` stays a delete-only option: copying in both
+    /// directions is order-dependent and nets out to a no-op in a 2-way
+    /// compare.
+    pub fn is_enabled(
+        self,
+        op: TransferOp,
+        has_left: bool,
+        has_right: bool,
+    ) -> bool {
+        match self {
+            Self::Left => has_left,
+            Self::Right => has_right,
+            Self::Both => op == TransferOp::Delete && has_left && has_right,
+            Self::Abort => true,
         }
     }
 }
@@ -1105,47 +1115,36 @@ mod tests {
     }
 
     #[test]
-    fn choices_offer_only_the_options_the_sides_support() {
-        assert_eq!(
-            TransferOp::Copy.choices(true, true),
-            vec![
-                TransferChoice::Left,
-                TransferChoice::Right,
-                TransferChoice::Abort,
-            ]
-        );
-        assert_eq!(
-            TransferOp::Copy.choices(true, false),
-            vec![TransferChoice::Left, TransferChoice::Abort]
-        );
-        assert_eq!(
-            TransferOp::Copy.choices(false, true),
-            vec![TransferChoice::Right, TransferChoice::Abort]
-        );
-        // Without any side the dialog only offers the way out.
-        assert_eq!(
-            TransferOp::Copy.choices(false, false),
-            vec![TransferChoice::Abort]
-        );
+    fn choices_always_list_all_four_options() {
+        let expected = [
+            TransferChoice::Left,
+            TransferChoice::Right,
+            TransferChoice::Both,
+            TransferChoice::Abort,
+        ];
+        assert_eq!(TransferOp::Copy.choices(), expected);
+        assert_eq!(TransferOp::Delete.choices(), expected);
+    }
 
-        // `both` is a delete-only option and needs both sides.
-        assert_eq!(
-            TransferOp::Delete.choices(true, true),
-            vec![
-                TransferChoice::Left,
-                TransferChoice::Right,
-                TransferChoice::Both,
-                TransferChoice::Abort,
-            ]
-        );
-        assert_eq!(
-            TransferOp::Delete.choices(true, false),
-            vec![TransferChoice::Left, TransferChoice::Abort]
-        );
-        assert_eq!(
-            TransferOp::Delete.choices(false, true),
-            vec![TransferChoice::Right, TransferChoice::Abort]
-        );
+    #[test]
+    fn is_enabled_follows_the_sides_holding_the_entry() {
+        use TransferChoice as C;
+        use TransferOp::{Copy, Delete};
+
+        // `l` activates with a left side, `r` with a right side, `b` with
+        // both, and `abort` always.
+        assert!(C::Left.is_enabled(Copy, true, false));
+        assert!(!C::Left.is_enabled(Copy, false, true));
+        assert!(C::Right.is_enabled(Copy, false, true));
+        assert!(!C::Right.is_enabled(Copy, true, false));
+        assert!(C::Both.is_enabled(Delete, true, true));
+        assert!(!C::Both.is_enabled(Delete, true, false));
+        assert!(!C::Both.is_enabled(Delete, false, true));
+        assert!(C::Abort.is_enabled(Copy, false, false));
+
+        // Copying in both directions is a no-op, so `b` never activates
+        // for copy, even with both sides present.
+        assert!(!C::Both.is_enabled(Copy, true, true));
     }
 
     #[test]

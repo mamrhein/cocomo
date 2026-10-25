@@ -9,17 +9,23 @@
 
 //! Transfer dialog: the confirmation step of `c` (copy) and `d` (delete).
 //!
-//! The dialog shows the selected line, then the operations that apply to it
-//! — copy left → right / right → left, or delete left / right / both — plus
-//! `abort`. It is the confirmation for destructive work, so a single
-//! deliberate choice stands between the selection and the filesystem.
+//! The dialog is a pure key interface — no list, no cursor. It shows the
+//! selected line, and its bottom help line lists exactly the keys the entry
+//! activates: `l` left, `r` right, `b` both (delete only), `Esc` abort.
+//! Activation is decided by [`TransferChoice::is_enabled`]: `l` needs a
+//! left side, `r` a right side, `b` both sides; abort is always active.
+//! Keys that do not apply are not shown at all, and a press of one is
+//! absorbed (the dialog stays open).
+//!
+//! The dialog is the confirmation for destructive work, so a single
+//! deliberate key press stands between the selection and the filesystem.
 //!
 //! The component lives in the App shell (not in a session view) so one
 //! implementation serves both comparison views. Like `AlertModal` it owns an
-//! exclusive input layer while open, which is what keeps the table and the
-//! shell from reacting behind the dialog. Navigation and `Enter` inside the
-//! dialog belong to the framework's `Select`; only the accelerators and
-//! `Esc` go through the keymap (`KeyScope::Dialog`).
+//! exclusive input layer while open: the dialog's keys go through the keymap
+//! (`KeyScope::Dialog`), and every other key is swallowed by the layer,
+//! which is what keeps the table and the shell from reacting behind the
+//! dialog.
 
 use cocomo_lib::{DirEntry, EntryInfo, format_date, format_size};
 use ratatui_kit::{
@@ -29,35 +35,18 @@ use ratatui_kit::{
         layout::{Constraint, Direction},
         style::{Modifier, Style},
         text::{Line, Span, Text as RataText},
-        widgets::{ListItem, Padding},
+        widgets::Padding,
     },
 };
 
 use super::theme::CocomoTheme;
 use crate::{
-    controller::{confirm_transfer, dispatch_dialog_key},
+    controller::dispatch_dialog_key,
     state::{
-        APP_STATE, SessionContent, SessionMode, SessionView, TransferChoice,
-        TransferOp, TransferTarget,
+        APP_STATE, SessionContent, SessionMode, SessionView, TransferOp,
+        TransferTarget,
     },
 };
-
-/// One row of the dialog's option list.
-///
-/// Carries the choice alongside its label so `Select` can hand the choice
-/// back to the controller without an index lookup that could drift from the
-/// option list.
-#[derive(Clone)]
-struct DialogOption {
-    choice: TransferChoice,
-    label: String,
-}
-
-impl From<DialogOption> for ListItem<'static> {
-    fn from(option: DialogOption) -> Self {
-        ListItem::new(Line::from(option.label))
-    }
-}
 
 /// Everything the dialog renders, resolved from the active session.
 struct DialogData {
@@ -65,8 +54,8 @@ struct DialogData {
     op: TransferOp,
     /// The selected line, rendered so the user sees what they are acting on.
     summary: Vec<Line<'static>>,
-    /// The options that apply to the entry, in display order.
-    options: Vec<DialogOption>,
+    /// Bottom help line listing the keys the entry activates.
+    help: Line<'static>,
 }
 
 /// Transfer dialog rendered above the active session.
@@ -89,7 +78,7 @@ pub(super) fn TransferDialog(
             Some(DialogData {
                 op,
                 summary: summary_lines(s, &target, &theme),
-                options: options(op, &target),
+                help: help_line(op, &target).style(theme.dim).centered(),
             })
         });
     let open = dialog.is_some();
@@ -108,8 +97,9 @@ pub(super) fn TransferDialog(
                 return EventResult::Ignored;
             }
 
-            // `j`/`k`/`Enter` belong to the `Select` in this layer, so an
-            // unowned key must stay unclaimed or the list stops moving.
+            // The dialog owns `l`/`r`/`b`/`Esc` (via the keymap); an
+            // unowned key stays unclaimed here, and the layer's
+            // `blocks_lower` swallows it so it never reaches the table.
             if dispatch_dialog_key(key) {
                 EventResult::Consumed
             } else {
@@ -119,18 +109,18 @@ pub(super) fn TransferDialog(
     );
 
     // Flatten the dialog data into render values; closed means empty.
-    let (title, summary, options) = match &dialog {
+    let (title, summary, help) = match &dialog {
         Some(data) => (
             Line::from(format!(" {} ", data.op.title()))
                 .style(theme.title)
                 .centered(),
             data.summary.clone(),
-            data.options.clone(),
+            data.help.clone(),
         ),
-        None => (Line::from(""), Vec::new(), Vec::new()),
+        None => (Line::from(""), Vec::new(), Line::from("")),
     };
     // Two border rows plus the padding around the content.
-    let height = 4 + summary.len() as u16 + options.len().max(1) as u16;
+    let height = 4 + summary.len().max(1) as u16;
 
     element!(
         Modal(
@@ -145,43 +135,41 @@ pub(super) fn TransferDialog(
                 flex_direction: Direction::Vertical,
                 border_style: theme.border,
                 top_title: title,
-                bottom_title: Line::from(" j/k move  Enter run  Esc abort ")
-                    .style(theme.dim)
-                    .centered(),
+                bottom_title: help,
                 padding: Padding::uniform(1),
             ) {
                 Text(text: RataText::from(summary))
-                Select<DialogOption>(
-                    items: options,
-                    // Highlight the first option immediately, so `Enter`
-                    // needs no prior navigation.
-                    default_index: Some(0),
-                    on_select: Handler::from(move |option: DialogOption| {
-                        confirm_transfer(option.choice);
-                    }),
-                )
             }
         }
     )
 }
 
-/// Build the option list for `op` restricted to the sides that hold the
-/// entry, each labelled with its accelerator.
-fn options(op: TransferOp, target: &TransferTarget) -> Vec<DialogOption> {
-    op.choices(target.has_left, target.has_right)
-        .into_iter()
-        .map(|choice| DialogOption {
-            choice,
-            label: format!("[{}] {}", choice.key(), choice.label(op)),
-        })
-        .collect()
+/// Build the bottom help line: the keys the entry activates, in display
+/// order, as `key label` pairs. Keys that do not apply are omitted, so the
+/// copy line never carries `b`.
+fn help_line(op: TransferOp, target: &TransferTarget) -> Line<'static> {
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    for choice in op.choices() {
+        if !choice.is_enabled(op, target.has_left, target.has_right) {
+            continue;
+        }
+        if !spans.is_empty() {
+            spans.push(Span::raw("   "));
+        }
+        spans.push(Span::raw(format!(
+            "{} {}",
+            choice.key(),
+            choice.label(op)
+        )));
+    }
+    Line::from(spans)
 }
 
 /// Render the selected line: what the transfer would act on.
 ///
 /// A directory session shows the entry row (name, both sides' metadata, and
 /// the status symbol); a text session shows the two compared paths. When no
-/// option applies, the reason from [`TransferTarget::note`] is appended.
+/// key applies, the reason from [`TransferTarget::note`] is appended.
 fn summary_lines(
     session: &SessionView,
     target: &TransferTarget,
