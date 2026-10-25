@@ -1061,11 +1061,12 @@ Exit codes: `0` = no differences / success, `1` = differences found (compare mod
 └─────────────────────────────────────────────────────────┘
 ```
 
-The shell is a ratatui-kit app: `RouterProvider` + `routes!` (`router` feature) for
-the main views, tab bar, menu bar, and status bar as custom components. State
-shared across views (active session, open tabs, filters) lives in process-global
-`Atom`s (`atom` feature); ephemeral per-view state uses `use_state`. Enabled
-features: `router`, `atom`, `input`, `tree`, `table`, `virtual-list`.
+The shell is a ratatui-kit app: the main view is switched by a `match` on the
+active session's content (no router), with the tab bar, menu bar, and status bar
+as custom components. State shared across views (active session, open tabs,
+filters) lives in process-global `Atom`s (`atom` feature); ephemeral per-view
+state uses `use_state`. Required features: `atom`, `input`, `tree`, `table`,
+`virtual-list` (the crate currently enables `full`).
 
 ### 11.2 Dir Diff View
 
@@ -1080,9 +1081,20 @@ features: `router`, `atom`, `input`, `tree`, `table`, `virtual-list`.
 │     ...            │  ...           │ | ...             │
 ```
 
-Built on `TreeSelect` (`tree` feature) for the expandable directory tree and
-`Table` (`table` feature) for the size/date/status columns, using its row and
-column highlight for the selection.
+Built as an expandable directory tree: `[+]` / `[-]` indicators mark collapsible
+directories, and `+` / `-` expand or collapse the selected directory in place.
+Each row renders the comparison metadata (size, modified) and the center status
+column, with the selection highlighted. `Enter` opens a new tab rooted at the
+selected entry, so a subtree can be inspected in its own view while the tree
+stays in place.
+
+`TreeSelect` (`tree` feature) provides the expand/collapse state
+(`TreeState::toggle_selected`), the `[+]`/`[-]` symbols (configurable
+`node_*_symbol`s), and click hits (`click_at`), but its rows are single `Text`
+lines, not cell grids: the metadata columns must be fixed-width spans padded per
+tree depth, and the column header rendered as a separate line above. If that
+padding proves too brittle, the fallback is the existing `Table` with manual
+indent levels.
 
 ### 11.3 Text Diff View
 
@@ -1104,8 +1116,9 @@ for rendered markdown diffs.
 | Key           | Action                                  |
 | ------------- | --------------------------------------- |
 | `j` / `k`     | Navigate down / up                      |
-| `+`           | descend into directory                  |
-| `-`           | ascend out of directory                 |
+| `+`           | Expand the selected directory           |
+| `-`           | Collapse the selected directory         |
+| `Enter`       | Open a new tab from the selected entry  |
 | `n` / `N`     | Next / previous difference              |
 | `C-l` / `C-r` | Copy left → right / right → left        |
 | `D-l` / `D-r` | Delete from left / right                |
@@ -1121,8 +1134,10 @@ for rendered markdown diffs.
   which opens an exclusive input layer while editing, so the single-letter
   navigation keys stay live and no manual editing/navigating mode machine is
   needed.
-- `S` confirmation uses `ConfirmModal`; the Help menu uses `ShortcutInfoModal`.
-  Both manage their own input layer.
+- `S` confirmation uses `ConfirmModal`, which manages its own input layer.
+  Help is shown by the keymap-generated help bar (`?`/`F1`), keeping the hints
+  in sync with the actual dispatch; `ShortcutInfoModal` is the alternative once
+  the menu bar is wired to commands.
 - `Button` provides no keyboard focus or activation, so every menu-bar action
   also gets a registered keybinding (required for the keyboard-only operation in
   §15.5). User-overridable keybindings live in the `ratatui-kit-keymap`
