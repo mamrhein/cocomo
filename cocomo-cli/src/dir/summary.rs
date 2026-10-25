@@ -7,14 +7,12 @@
 // $Source$
 // $Revision$
 
-use std::collections::HashMap;
-use std::io::Write;
+use std::{collections::HashMap, io::Write};
 
 use cocomo_lib::compare::{DirEntry, DirEntryStatus};
 
-use crate::cli::{DirCompareArgs, SummaryMode};
-
 use super::filter::{should_show_entry, should_show_in_tree};
+use crate::cli::{DirCompareArgs, SummaryMode};
 
 // ---------------------------------------------------------------------------
 // Summary
@@ -107,7 +105,8 @@ pub(super) fn collect_and_count_into(
         // render_tree_entries). Flat mode: always descend, since children
         // are shown independently of parent visibility.
         if let Some(sub) = &entry.sub_entries
-            && (!use_tree_filter || (is_visible && super::filter::is_dir_entry(entry)))
+            && (!use_tree_filter
+                || (is_visible && super::filter::is_dir_entry(entry)))
         {
             collect_and_count_into(
                 &sub.entries,
@@ -167,7 +166,10 @@ pub(super) fn print_summary_to(
 }
 
 /// Print a per-status breakdown table with counts and percentages.
-pub(super) fn print_full_summary_to(summary: &Summary, output: &mut dyn Write) {
+pub(super) fn print_full_summary_to(
+    summary: &Summary,
+    output: &mut dyn Write,
+) {
     let total = summary.total();
     writeln!(output, "Summary breakdown:").unwrap();
     // The percentage column is right-aligned in a fixed 10-character field so
@@ -238,10 +240,12 @@ pub(super) fn print_summary_to_vec(
 
 #[cfg(test)]
 mod tests {
-    use super::{all_statuses, collect_and_count, print_summary_to_vec};
-    use super::super::test_helpers::{
-        make_nested_comparison, make_nested_comparison_with_hidden,
-        make_test_comparison,
+    use super::{
+        super::test_helpers::{
+            make_nested_comparison, make_nested_comparison_with_hidden,
+            make_test_comparison,
+        },
+        all_statuses, collect_and_count, print_summary_to_vec,
     };
     use crate::cli::{DirCompareArgs, SummaryMode};
 
@@ -305,7 +309,8 @@ mod tests {
         let comp = make_test_comparison();
         let mut args = test_args();
         args.show_different = true;
-        let (visible, summary) = collect_and_count(&comp.entries, &args, false);
+        let (visible, summary) =
+            collect_and_count(&comp.entries, &args, false);
         assert_eq!(visible.len(), 1); // only diff.txt (Different)
         assert_eq!(summary.total(), 1);
         assert_eq!(summary.same_count(), 0);
@@ -320,7 +325,8 @@ mod tests {
         let comp = make_test_comparison();
         let mut args = test_args();
         args.show_orphans = true;
-        let (visible, summary) = collect_and_count(&comp.entries, &args, false);
+        let (visible, summary) =
+            collect_and_count(&comp.entries, &args, false);
         assert_eq!(visible.len(), 2); // only_left.txt + only_right.txt
         assert_eq!(summary.total(), 2);
         assert_eq!(summary.same_count(), 0);
@@ -353,8 +359,8 @@ mod tests {
         let mut args = test_args();
         args.tree = true;
         let (visible, summary) = collect_and_count(&comp.entries, &args, true);
-        // Root level: 1 dir + 1 file = 2 entries (all visible with default args)
-        // Sub-level (sub/): 3 entries
+        // Root level: 1 dir + 1 file = 2 entries (all visible with default
+        // args) Sub-level (sub/): 3 entries
         // Total: 5
         assert_eq!(visible.len(), 5);
         assert_eq!(summary.total(), 5);
@@ -362,8 +368,8 @@ mod tests {
 
     #[test]
     fn summary_tree_mode_excludes_children_of_filtered_dirs() {
-        // With --excl-hidden, a hidden directory and its children should not be
-        // counted in tree mode.
+        // With --excl-hidden, a hidden directory and its children should not
+        // be counted in tree mode.
         let comp = make_nested_comparison_with_hidden();
         let mut args = test_args();
         args.excl_hidden = true;
@@ -381,7 +387,8 @@ mod tests {
         let comp = make_nested_comparison_with_hidden();
         let mut args = test_args();
         args.excl_hidden = true;
-        let (_visible, summary) = collect_and_count(&comp.entries, &args, false);
+        let (_visible, summary) =
+            collect_and_count(&comp.entries, &args, false);
         // Root: sub/ (Same) + visible.txt (Same) + .hidden_dir/ (filtered out)
         // .hidden_dir/child.txt (passes name filter, counted)
         assert_eq!(summary.total(), 3); // sub, visible.txt, child.txt
