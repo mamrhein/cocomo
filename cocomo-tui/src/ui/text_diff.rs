@@ -53,6 +53,33 @@ pub(super) fn TextCompareView(
     // resize. Must stay above the early returns below (stable hook order).
     let (term_width, _) = hooks.use_terminal_size();
 
+    // Event handler for session-level keys (j/k, g/G, n/N, l/Tab).
+    // The App component's global handler runs first and consumes global keys
+    // (Ctrl+W, Ctrl+Tab, Left/Right, q).  For remaining keys, the controller
+    // locks the state briefly, lets `handle_session_key` mutate the session,
+    // and dispatches the resulting intent. Like the hooks above it, this
+    // registration must stay above the early returns below (stable hook
+    // order); it captures nothing session-specific, so it can run before the
+    // session is resolved.
+    hooks.use_event_handler(
+        EventScope::Current,
+        EventPriority::Normal,
+        move |event| {
+            let Event::Key(key) = event else {
+                return EventResult::Ignored;
+            };
+            if key.kind != KeyEventKind::Press {
+                return EventResult::Ignored;
+            }
+
+            if dispatch_text_key(key) {
+                EventResult::Consumed
+            } else {
+                EventResult::Ignored
+            }
+        },
+    );
+
     // Read session data from the atom.
     let app = app_handle.read();
     let session = app.active().filter(|s| s.content.is_text());
@@ -157,30 +184,6 @@ pub(super) fn TextCompareView(
         .unwrap_or_default();
 
     drop(app);
-
-    // Event handler for session-level keys (j/k, g/G, n/N, l/Tab).
-    // The App component's global handler runs first and consumes global keys
-    // (Ctrl+W, Ctrl+Tab, Left/Right, q).  For remaining keys, the controller
-    // locks the state briefly, lets `handle_session_key` mutate the session,
-    // and dispatches the resulting intent.
-    hooks.use_event_handler(
-        EventScope::Current,
-        EventPriority::Normal,
-        move |event| {
-            let Event::Key(key) = event else {
-                return EventResult::Ignored;
-            };
-            if key.kind != KeyEventKind::Press {
-                return EventResult::Ignored;
-            }
-
-            if dispatch_text_key(key) {
-                EventResult::Consumed
-            } else {
-                EventResult::Ignored
-            }
-        },
-    );
 
     // -- Build the element tree ----------------------------------------------
 
