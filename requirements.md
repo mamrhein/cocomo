@@ -3,7 +3,7 @@
 A file/folder comparison and synchronization tool inspired by Beyond Compare, written in Rust with four components:
 
 - **`cocomo-lib`** — async filesystem abstraction library
-- **`cocomo-tui`** — terminal UI (`ratatui`)
+- **`cocomo-tui`** — terminal UI (`ratatui-kit`)
 - **`cocomo-gui`** — desktop GUI (`gpui`)
 - **`cocomo-cli`** — CLI / scripting front-end
 
@@ -17,7 +17,7 @@ A file/folder comparison and synchronization tool inspired by Beyond Compare, wr
 
 cocomo/
 ├── cocomo_lib/ # core library
-├── cocomo_tui/ # ratatui front-end
+├── cocomo_tui/ # ratatui-kit front-end
 ├── cocomo_gui/ # gpui front-end
 └── cocomo_cli/ # CLI / scripting front-end
 
@@ -37,7 +37,7 @@ cocomo/
 | Async runtime  | `tokio`                 | I/O event loop                                        |
 | Parallelism    | `rayon`                 | CPU-bound diffing                                     |
 | Filesystem I/O | `fs_err` + `walkdir`    | Rich error context; battle-tested directory traversal |
-| TUI            | `ratatui` + `crossterm` | Terminal rendering                                    |
+| TUI            | `ratatui-kit`           | Component framework over ratatui + crossterm          |
 | GUI            | `gpui`                  | Desktop windowing (via Zed's toolkit)                 |
 | CLI            | `clap`                  | Argument parsing                                      |
 | Compression    | `flate2`, `zip`, `tar`  | Archive support                                       |
@@ -1061,6 +1061,12 @@ Exit codes: `0` = no differences / success, `1` = differences found (compare mod
 └─────────────────────────────────────────────────────────┘
 ```
 
+The shell is a ratatui-kit app: `RouterProvider` + `routes!` (`router` feature) for
+the main views, tab bar, menu bar, and status bar as custom components. State
+shared across views (active session, open tabs, filters) lives in process-global
+`Atom`s (`atom` feature); ephemeral per-view state uses `use_state`. Enabled
+features: `router`, `atom`, `input`, `tree`, `table`, `virtual-list`.
+
 ### 11.2 Dir Diff View
 
 ```
@@ -1074,6 +1080,10 @@ Exit codes: `0` = no differences / success, `1` = differences found (compare mod
 │     ...            │  ...           │ | ...             │
 ```
 
+Built on `TreeSelect` (`tree` feature) for the expandable directory tree and
+`Table` (`table` feature) for the size/date/status columns, using its row and
+column highlight for the selection.
+
 ### 11.3 Text Diff View
 
 ```
@@ -1083,6 +1093,11 @@ Exit codes: `0` = no differences / success, `1` = differences found (compare mod
 │  9   return x;            │<│ 12   return y;            │
 │ 10 }                      │=| 13 }                      │
 ```
+
+ratatui-kit has no built-in diff component; the side-by-side view is a custom
+component (native ratatui widgets via the `widget(...)` escape hatch where
+helpful). The `ratatui-kit-markdown` companion crate provides a diff component
+for rendered markdown diffs.
 
 ### 11.4 Keybindings
 
@@ -1102,20 +1117,38 @@ Exit codes: `0` = no differences / success, `1` = differences found (compare mod
 | `ESC`         | Close modal / panel                     |
 | `Tab`         | Switch between tab panes                |
 
+- `:` and `/` activate a `SearchInput` (`input` feature) via its `activate_key`,
+  which opens an exclusive input layer while editing, so the single-letter
+  navigation keys stay live and no manual editing/navigating mode machine is
+  needed.
+- `S` confirmation uses `ConfirmModal`; the Help menu uses `ShortcutInfoModal`.
+  Both manage their own input layer.
+- `Button` provides no keyboard focus or activation, so every menu-bar action
+  also gets a registered keybinding (required for the keyboard-only operation in
+  §15.5). User-overridable keybindings live in the `ratatui-kit-keymap`
+  companion crate.
+
 ### 11.5 Modal Panels
 
-- **Filter panel**: regex input, name filter toggle, status filter checkboxes
+- **Filter panel**: regex input (`Input`), name filter toggle, status filter
+  checkboxes (`MultiSelect`)
 - **Settings modal**: per-session settings editor
 - **Sync preview**: list of pending operations with approve/reject per item
 - **Report modal**: choose format, destination, options
-- **Session browser**: list saved sessions, create new
+- **Session browser**: list saved sessions (`VirtualList`, `virtual-list`
+  feature), create new
+
+All modals follow the framework's `open` + callback model and close on `ESC`.
 
 ### 11.6 Terminal Features
 
-- Fullscreen mode (alt-screen)
-- Mouse support (click to select, drag to multi-select)
+- Fullscreen mode (alt-screen): `.fullscreen()`
+- Mouse support: `RunOptions { mouse: true }`; click-to-select via `use_hover_row`,
+  drag to multi-select via `use_drag`
 - Paste paths from clipboard (OSC 52 or `paste` crate)
-- Theme support (256 color / true color)
+- Theme support (256 color / true color) via the framework's `Palette` /
+  `PaletteProvider`; named color schemes from the official `ratatui-kit-themes`
+  companion crate
 
 ---
 
