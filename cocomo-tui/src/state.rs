@@ -232,6 +232,9 @@ impl SessionCore {
     }
 
     /// Generate a short tab title from the two endpoints' entry names.
+    ///
+    /// When both sides share the same name the pair carries no extra
+    /// information, so the title is shortened to the single name.
     fn tab_title_for(left: &Endpoint, right: &Endpoint) -> String {
         let left_name = left
             .path()
@@ -243,7 +246,11 @@ impl SessionCore {
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "…".to_string());
-        format!("{left_name} vs {right_name}")
+        if left_name == right_name {
+            left_name
+        } else {
+            format!("{left_name} vs {right_name}")
+        }
     }
 }
 
@@ -664,6 +671,16 @@ mod tests {
             false,
         );
         assert_eq!(session.tab_title(), "b vs y");
+    }
+
+    #[test]
+    fn tab_title_shortens_when_names_are_equal() {
+        let session = SessionView::new_dir_compare(
+            Endpoint::local("/a/b"),
+            Endpoint::local("/x/b"),
+            false,
+        );
+        assert_eq!(session.tab_title(), "b");
     }
 
     #[test]
