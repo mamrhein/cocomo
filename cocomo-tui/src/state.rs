@@ -57,6 +57,10 @@ pub enum SessionMode {
     /// entry. Not a text-entry mode: the dialog's own input layer keeps the
     /// shell and the table from seeing keys, so `is_editing` stays `false`.
     Transfer { op: TransferOp },
+    /// The sync confirmation modal is open for the planned sync (`S`). Like
+    /// [`SessionMode::Transfer`], the modal's exclusive input layer owns
+    /// every key while it is open, so this is not a text-entry mode either.
+    SyncConfirm,
 }
 
 /// Which transfer the [`SessionMode::Transfer`] dialog offers.
@@ -255,9 +259,11 @@ pub enum SessionAction {
     GoUp,
     /// Reload the current session's comparison.
     Reload,
-    /// Plan a sync (dry-run) and display the preview.
+    /// Plan a sync (dry-run), display the preview, then ask for approval
+    /// of the execution in the confirmation modal.
     PlanSync { operation: SyncOperation },
-    /// Execute the planned sync.
+    /// Execute the planned sync; dispatched when the confirmation modal is
+    /// approved.
     ExecuteSync,
     /// Save the current session config to a file.
     SaveSession { name: String },
@@ -1018,6 +1024,14 @@ mod tests {
         assert_eq!(planned.result().planned_count(), 0);
         let executed = SyncStage::Executed(SyncResult::default());
         assert!(executed.result().is_dry_run());
+    }
+
+    #[test]
+    fn sync_confirm_is_not_an_editing_mode() {
+        // The confirmation modal owns the keys through its own exclusive
+        // input layer, not through a text-entry mode guard, so `is_editing`
+        // must stay `false` (mirroring `Transfer`).
+        assert!(!SessionMode::SyncConfirm.is_editing());
     }
 
     #[test]

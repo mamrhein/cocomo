@@ -203,12 +203,8 @@ fn session_keys_report_their_controller_actions() {
     press(&mut session, KeyCode::Char('m'));
     let op = session.dir().unwrap().sync_operation;
     assert_eq!(
-        press(&mut session, KeyCode::Char('P')),
+        press(&mut session, KeyCode::Char('S')),
         Some(SessionAction::PlanSync { operation: op })
-    );
-    assert_eq!(
-        press(&mut session, KeyCode::Char('e')),
-        Some(SessionAction::ExecuteSync)
     );
     assert_eq!(
         press(&mut session, KeyCode::Char('r')),
@@ -218,6 +214,22 @@ fn session_keys_report_their_controller_actions() {
         press(&mut session, KeyCode::Backspace),
         Some(SessionAction::GoUp)
     );
+}
+
+#[test]
+fn sync_confirm_mode_defers_to_the_modal() {
+    let mut session = dir_session();
+    // The controller records the plan and enters the confirm mode once
+    // the dry-run arrives; from then on the session handler claims
+    // nothing, leaving every key — including `Esc` — to the modal's
+    // exclusive input layer, so the preview cannot be cancelled behind
+    // the modal.
+    session.set_sync(SyncStage::Planned(SyncResult::default()));
+    session.ui.mode = SessionMode::SyncConfirm;
+    assert_eq!(press(&mut session, KeyCode::Char('j')), None);
+    assert_eq!(press(&mut session, KeyCode::Esc), None);
+    assert!(session.dir().unwrap().sync.is_some());
+    assert_eq!(session.ui.mode, SessionMode::SyncConfirm);
 }
 
 #[test]

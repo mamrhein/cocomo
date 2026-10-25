@@ -21,6 +21,7 @@ use ratatui_kit::{
 use super::{
     dir_compare::DirCompareView,
     menu_bar::{MENU_TITLES, MenuBar},
+    sync_confirm::SyncConfirmModal,
     tab_bar::TabBar,
     text_diff::TextCompareView,
     transfer_dialog::TransferDialog,
@@ -168,6 +169,9 @@ pub(crate) fn App(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             // Copy/delete confirmation, driven by the active session's
             // transfer mode.
             TransferDialog()
+            // Sync execution approval, driven by the active session's
+            // sync-confirm mode.
+            SyncConfirmModal()
         }
     )
 }

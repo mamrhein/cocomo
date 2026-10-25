@@ -150,6 +150,7 @@ pub(super) fn DirCompareView(
             SyncStage::Executed(_) => "Executed".to_string(),
         });
     let sync_active = dir.sync.is_some();
+    let sync_planned = matches!(dir.sync, Some(SyncStage::Planned(_)));
     let mode = session.ui.mode.clone();
     let hide_same = dir.hide_same;
     let active_filter = session.ui.active_filter.clone();
@@ -230,12 +231,25 @@ pub(super) fn DirCompareView(
     } else if matches!(mode, SessionMode::Command { .. }) {
         vec![Line::from(":=activate  Enter=run  Esc=cancel")]
     } else if sync_active {
-        vec![Line::from(vec![
+        // In a planned preview, `S` re-plans and re-opens the
+        // confirmation modal; after execution it starts a fresh plan.
+        let mut spans = vec![
             Span::styled("j/k", Style::new().add_modifier(Modifier::BOLD)),
             Span::raw(" navigate  "),
-            Span::styled("Esc", Style::new().add_modifier(Modifier::BOLD)),
-            Span::raw(" cancel"),
-        ])]
+        ];
+        if sync_planned {
+            spans.push(Span::styled(
+                "S",
+                Style::new().add_modifier(Modifier::BOLD),
+            ));
+            spans.push(Span::raw(" confirm  "));
+        }
+        spans.push(Span::styled(
+            "Esc",
+            Style::new().add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::raw(" cancel"));
+        vec![Line::from(spans)]
     } else {
         keys::help_lines(&[KeyScope::DirNormal, KeyScope::Global], term_width)
     };

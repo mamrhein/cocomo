@@ -18,6 +18,7 @@ mod frame;
 mod menu_bar;
 mod rows;
 mod session_table;
+mod sync_confirm;
 mod tab_bar;
 mod text_diff;
 pub(crate) mod theme;

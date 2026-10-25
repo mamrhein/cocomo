@@ -95,14 +95,12 @@ pub enum Cmd {
     ToggleHideSame,
     /// Toggle content comparison.
     ToggleCompareContent,
-    /// Plan a sync (dry-run) with the current operation.
-    PlanSync,
+    /// Plan the sync (dry-run), then confirm its execution (`S`).
+    Sync,
     /// Cycle the sync operation forward.
     CycleSyncOpForward,
     /// Cycle the sync operation backward.
     CycleSyncOpBackward,
-    /// Execute the planned sync.
-    ExecuteSync,
     /// Enter save-session mode.
     StartSaveSession,
     /// Enter load-session mode and list saved sessions.
@@ -268,27 +266,13 @@ const KEYMAP: &[KeyBinding] = &[
         help: None,
     },
     KeyBinding {
-        // `S` runs the sync; until the confirmation modal lands (phase 3),
-        // it plans the sync exactly like `P`.
+        // `S` runs the whole sync flow: the controller plans the sync and
+        // opens the confirmation modal once the plan is ready.
         key: KeyCode::Char('S'),
         modifiers: NONE,
         scope: KeyScope::DirNormal,
-        cmd: Cmd::PlanSync,
+        cmd: Cmd::Sync,
         help: Some(("S", "sync")),
-    },
-    KeyBinding {
-        key: KeyCode::Char('P'),
-        modifiers: NONE,
-        scope: KeyScope::DirNormal,
-        cmd: Cmd::PlanSync,
-        help: Some(("P", "plan")),
-    },
-    KeyBinding {
-        key: KeyCode::Char('e'),
-        modifiers: NONE,
-        scope: KeyScope::DirNormal,
-        cmd: Cmd::ExecuteSync,
-        help: Some(("e", "execute")),
     },
     KeyBinding {
         key: KeyCode::Char('c'),
@@ -646,6 +630,11 @@ pub fn handle_session_key(
         KeyScope::Editing
     } else if matches!(session.ui.mode, SessionMode::Transfer { .. }) {
         KeyScope::Dialog
+    } else if matches!(session.ui.mode, SessionMode::SyncConfirm) {
+        // The sync confirmation modal owns every key while it is open;
+        // its exclusive input layer normally blocks this handler already,
+        // and claiming nothing here is the belt-and-braces counterpart.
+        return None;
     } else {
         match &session.content {
             SessionContent::Dir(_) => KeyScope::DirNormal,
@@ -696,9 +685,11 @@ fn execute(cmd: Cmd, session: &mut SessionView) -> SessionAction {
             }
             SessionAction::None
         }
-        Cmd::PlanSync => {
-            // Plan sync with the current operation (dry-run). Bound in the
-            // dir scope only, so the dir state is present.
+        Cmd::Sync => {
+            // Plan the sync with the current operation (dry-run); the
+            // controller opens the confirmation modal once the plan
+            // arrives. Bound in the dir scope only, so the dir state is
+            // present.
             SessionAction::PlanSync {
                 operation: session
                     .dir()
@@ -717,11 +708,6 @@ fn execute(cmd: Cmd, session: &mut SessionView) -> SessionAction {
                 dir.sync_operation = cycle_sync_op(&dir.sync_operation, -1);
             }
             SessionAction::None
-        }
-        Cmd::ExecuteSync => {
-            // Execute the planned sync (only meaningful when a preview is
-            // active, but we dispatch it and the controller handles it).
-            SessionAction::ExecuteSync
         }
         Cmd::StartSaveSession => {
             // Enter input mode; the name buffer lives in the mode itself.
@@ -1305,6 +1291,10 @@ mod tests {
         assert_eq!(press(&mut session, KeyCode::Char('x')), None);
         // `q` is owned by the App shell, not the session handler.
         assert_eq!(press(&mut session, KeyCode::Char('q')), None);
+        // The two-step sync keys `P`/`e` are gone; `S` is the only sync
+        // entry point.
+        assert_eq!(press(&mut session, KeyCode::Char('P')), None);
+        assert_eq!(press(&mut session, KeyCode::Char('e')), None);
         // Dir-only keys are unbound in a text session.
         let mut session = text_session();
         assert_eq!(press(&mut session, KeyCode::Char('f')), None);
@@ -1652,9 +1642,9 @@ mod tests {
     }
 
     #[test]
-    fn s_plans_sync_like_p() {
-        // Until the confirmation modal lands, `S` plans the sync with the
-        // currently configured operation.
+    fn s_plans_sync_for_confirmation() {
+        // `S` requests the dry-run plan; the controller opens the
+        // confirmation modal once the plan arrives.
         let mut session = dir_session();
         assert_eq!(
             press(&mut session, KeyCode::Char('S')),
@@ -1662,6 +1652,19 @@ mod tests {
                 operation: SyncOperation::default()
             })
         );
+    }
+
+    #[test]
+    fn sync_confirm_mode_claims_no_session_keys() {
+        // While the confirmation modal is open its exclusive input layer
+        // owns every key, so the session handler must claim nothing: even
+        // bound keys like `j` and `Esc` report as unbound (the layer
+        // swallows them) and the selection cannot move behind the modal.
+        let mut session = dir_session();
+        session.ui.mode = SessionMode::SyncConfirm;
+        assert_eq!(press(&mut session, KeyCode::Char('j')), None);
+        assert_eq!(session.ui.table_state.selected(), Some(0));
+        assert_eq!(press(&mut session, KeyCode::Esc), None);
     }
 
     #[test]

@@ -578,7 +578,18 @@ pub(crate) fn process_session_action(action: SessionAction) {
                 },
                 move |app, result| {
                     if let Some(s) = app.session_mut(id) {
+                        // A non-empty plan is executed only after the user
+                        // approves it in the confirmation modal; an empty
+                        // plan has nothing to approve, so the preview
+                        // alone is shown. The modal is not opened over
+                        // another mode the user may have entered while the
+                        // plan was running.
+                        let confirm = result.planned_count() > 0;
                         s.set_sync(SyncStage::Planned(result));
+                        if confirm && matches!(s.ui.mode, SessionMode::Normal)
+                        {
+                            s.ui.mode = SessionMode::SyncConfirm;
+                        }
                     }
                 },
                 "Sync planning failed",
@@ -788,6 +799,41 @@ pub(crate) fn dispatch_text_key(key: KeyEvent) -> bool {
 /// owned keys; every other key is swallowed by its exclusive input layer.
 pub(crate) fn dispatch_dialog_key(key: KeyEvent) -> bool {
     dispatch_key(|s| matches!(s.ui.mode, SessionMode::Transfer { .. }), key)
+}
+
+/// Approve the planned sync: close the confirmation modal and execute.
+///
+/// Bound to the modal's confirm action (`y`/`Enter`). Execution re-derives
+/// the transfers from the current filesystem state, so the approved plan
+/// is a preview rather than a fixed list.
+pub(crate) fn confirm_sync() {
+    let action = {
+        let state = APP_STATE.state();
+        let mut app = state.write();
+        let Some(session) = app.active_mut().filter(|s| {
+            s.content.is_dir() && matches!(s.ui.mode, SessionMode::SyncConfirm)
+        }) else {
+            return;
+        };
+        session.ui.mode = SessionMode::Normal;
+        SessionAction::ExecuteSync
+    };
+    process_session_action(action);
+}
+
+/// Reject the planned sync: close the confirmation modal, keeping the
+/// preview on screen for review.
+///
+/// Bound to the modal's cancel action (`n`/`N`/`Esc`). From the preview,
+/// `Esc` discards it and `S` re-plans and re-confirms.
+pub(crate) fn reject_sync() {
+    let state = APP_STATE.state();
+    let mut app = state.write();
+    if let Some(session) = app.active_mut()
+        && matches!(session.ui.mode, SessionMode::SyncConfirm)
+    {
+        session.ui.mode = SessionMode::Normal;
+    }
 }
 
 fn dispatch_key(
