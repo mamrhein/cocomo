@@ -12,7 +12,7 @@
 use std::sync::Arc;
 
 use ratatui_kit::{
-    crossterm::event::{Event, KeyEventKind},
+    crossterm::event::{Event, KeyCode, KeyEventKind},
     prelude::*,
     ratatui::{
         layout::{Constraint, Direction},
@@ -22,15 +22,18 @@ use ratatui_kit::{
 
 use super::{
     diff_list::SessionDiffList,
-    frame::{HelpBar, StatusBar},
+    frame::{COMMAND_PLACEHOLDER, HelpBar, StatusBar},
     rows::{TextDiffRow, text_diff_rows},
     theme::CocomoTheme,
 };
 use crate::{
-    controller::dispatch_text_key,
+    controller::{
+        dispatch_text_key, set_active_mode, set_mode_buffer, submit_command,
+        submit_search,
+    },
     diff_model::{current_diff_position, diff_line_numbers},
     keys::{self, KeyScope},
-    state::APP_STATE,
+    state::{APP_STATE, SessionMode},
 };
 
 /// Text comparison view using a windowed side-by-side diff list.
@@ -126,6 +129,7 @@ pub(super) fn TextCompareView(
     let left_line_count = text.left_lines.len();
     let right_line_count = text.right_lines.len();
     let show_help = app.show_help;
+    let mode = session.ui.mode.clone();
 
     // Compute the current diff-group position for the status bar. The row
     // styles already carry the per-line diff highlighting from the memo.
@@ -163,9 +167,19 @@ pub(super) fn TextCompareView(
 
     // Build help bar lines from the keymap, wrapped to the terminal width,
     // so the bar cannot drift from the actual bindings and never truncates
-    // an item.
+    // an item. While a text-entry mode is active, mode-specific hints take
+    // over (the same convention as the dir view).
     let help_bar_lines: Vec<Line<'static>> =
-        keys::help_lines(&[KeyScope::TextNormal, KeyScope::Global], term_width);
+        if matches!(mode, SessionMode::Search { .. }) {
+            vec![Line::from("/=activate  Enter=jump  Esc=cancel")]
+        } else if matches!(mode, SessionMode::Command { .. }) {
+            vec![Line::from(":=activate  Enter=run  Esc=cancel")]
+        } else {
+            keys::help_lines(
+                &[KeyScope::TextNormal, KeyScope::Global],
+                term_width,
+            )
+        };
 
     // File names for the diff column headers.
     let left_name = session
@@ -203,8 +217,46 @@ pub(super) fn TextCompareView(
                 left_name: left_name,
                 right_name: right_name,
             )
-            // Status bar.
-            StatusBar(line: status_bar_line)
+            // Status bar or input component depending on mode. Text entry
+            // uses SearchInput, which owns its exclusive input layer; the
+            // activate key matches the key that entered the mode.
+            if let SessionMode::Search { query } = &mode {
+                SearchInput(
+                    value: query.clone(),
+                    placeholder: "Search lines...".to_string(),
+                    is_editing: true,
+                    activate_key: KeyCode::Char('/'),
+                    on_change: Handler::from(move |val: String| {
+                        set_mode_buffer(val);
+                    }),
+                    on_submit: Handler::from(move |val: String| -> bool {
+                        submit_search(val)
+                    }),
+                    clear_on_escape: true,
+                    on_clear: Handler::from(move |_: ()| {
+                        set_active_mode(SessionMode::Normal);
+                    }),
+                )
+            } else if let SessionMode::Command { input } = &mode {
+                SearchInput(
+                    value: input.clone(),
+                    placeholder: COMMAND_PLACEHOLDER.to_string(),
+                    is_editing: true,
+                    activate_key: KeyCode::Char(':'),
+                    on_change: Handler::from(move |val: String| {
+                        set_mode_buffer(val);
+                    }),
+                    on_submit: Handler::from(move |val: String| -> bool {
+                        submit_command(val)
+                    }),
+                    clear_on_escape: true,
+                    on_clear: Handler::from(move |_: ()| {
+                        set_active_mode(SessionMode::Normal);
+                    }),
+                )
+            } else {
+                StatusBar(line: status_bar_line)
+            }
             // Help bar: only rendered when toggled on (`?`).
             if show_help {
                 HelpBar(lines: help_bar_lines)

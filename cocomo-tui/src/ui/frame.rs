@@ -23,6 +23,11 @@ use ratatui_kit::{
     },
 };
 
+/// Placeholder text of the command-mode (`:`) input, shared by both
+/// comparison views.
+pub(super) const COMMAND_PLACEHOLDER: &str =
+    "Command (reload, sync, filter <pattern>, help)...";
+
 /// Props for [`StatusBar`].
 #[derive(Default, Props)]
 pub(super) struct BarProps {

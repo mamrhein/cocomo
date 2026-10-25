@@ -30,9 +30,10 @@ use std::{
 
 use cocomo_lib::{
     CompareConfig, ContentCache, DirComparison, Endpoint, FileSystem, FsError,
-    Grammar, LineInfo, NullPrompter, Prompter, Provider, SessionConfig,
-    SyncOperation, SyncResult, SyncRules, TextCompareSettings, compare_texts,
-    default_session_dir, list_saved_sessions,
+    FsPair, Grammar, LineInfo, NullPrompter, Prompter, Provider,
+    SessionConfig, SyncOperation, SyncResult, SyncRules, TextCompareSettings,
+    compare_texts, default_session_dir, execute_transfers,
+    list_saved_sessions,
 };
 use ratatui_kit::crossterm::event::KeyEvent;
 
@@ -613,6 +614,61 @@ pub(crate) fn process_session_action(action: SessionAction) {
                 "Session load failed",
             );
         }
+        SessionAction::Transfer { item } => {
+            let Some(id) = active_dir_session_id() else {
+                return;
+            };
+            spawn_task(
+                move |app| {
+                    app.session(id).and_then(SessionSnapshot::from_session)
+                },
+                move |snapshot| async move {
+                    let pair = if snapshot.left.same_provider(&snapshot.right)
+                    {
+                        FsPair::Shared(snapshot.left.fs())
+                    } else {
+                        FsPair::Separate(
+                            snapshot.left.fs(),
+                            snapshot.right.fs(),
+                        )
+                    };
+                    let result = execute_transfers(
+                        &[item],
+                        snapshot.left.path(),
+                        snapshot.right.path(),
+                        pair,
+                    )
+                    .await;
+                    // Non-fatal per-item failures are collected by the
+                    // executor; surface them before re-comparing.
+                    if result.failed > 0 {
+                        let details: Vec<String> = result
+                            .errors
+                            .iter()
+                            .map(|e| e.to_string())
+                            .collect();
+                        report_error(format!(
+                            "Transfer failed: {}",
+                            details.join("; ")
+                        ));
+                    }
+                    // Re-run the comparison so the table reflects the
+                    // transfer.
+                    compare(
+                        &snapshot.left,
+                        &snapshot.right,
+                        snapshot.compare_content,
+                    )
+                    .await
+                },
+                move |app, comparison| {
+                    if let Some(s) = app.session_mut(id) {
+                        s.set_comparison(Some(comparison));
+                    }
+                },
+                "Comparison after transfer failed",
+            );
+        }
         SessionAction::None => {}
     }
 }
@@ -670,12 +726,14 @@ pub(crate) fn set_filter_input(value: String) {
     }
 }
 
-/// Update the name buffer of the active session's save/load mode.
-pub(crate) fn set_mode_name(name: String) {
+/// Update the input buffer of the active session's text-entry mode.
+pub(crate) fn set_mode_buffer(value: String) {
     if let Some(session) = APP_STATE.state().write().active_mut() {
         match &mut session.ui.mode {
             SessionMode::SaveSession { name: buf }
-            | SessionMode::LoadSession { name: buf, .. } => *buf = name,
+            | SessionMode::LoadSession { name: buf, .. }
+            | SessionMode::Search { query: buf }
+            | SessionMode::Command { input: buf } => *buf = value,
             _ => {}
         }
     }
@@ -739,6 +797,82 @@ pub(crate) fn submit_filter(value: String) {
         session.ui.active_filter = Some(value);
         session.ui.mode = SessionMode::Normal;
     }
+}
+
+/// Apply the submitted search query: jump to the next matching row (from
+/// just after the current selection, wrapping) and return to normal mode.
+///
+/// Returns `true` when the session was in search mode (so the input
+/// component may close its editing layer), `false` otherwise.
+pub(crate) fn submit_search(query: String) -> bool {
+    let state = APP_STATE.state();
+    let mut app = state.write();
+    let Some(session) = app.active_mut() else {
+        return false;
+    };
+    if !matches!(session.ui.mode, SessionMode::Search { .. }) {
+        return false;
+    }
+    let from = session.ui.table_state.selected().unwrap_or(0);
+    if let Some(row) = session.find_row_matching(&query, from) {
+        session.ui.table_state.select(Some(row));
+    }
+    session.ui.mode = SessionMode::Normal;
+    true
+}
+
+/// Run the submitted command-line command and return to normal mode.
+///
+/// The BCS script engine is deferred to v2 (requirements §16), so command
+/// mode executes a small set of built-in commands that map onto existing
+/// session actions. Unknown commands surface in the `AlertModal`.
+///
+/// Returns `true` when the session was in command mode, `false` otherwise.
+pub(crate) fn submit_command(input: String) -> bool {
+    let (line, sync_operation) = {
+        let state = APP_STATE.state();
+        let mut app = state.write();
+        let Some(session) = app.active_mut() else {
+            return false;
+        };
+        if !matches!(session.ui.mode, SessionMode::Command { .. }) {
+            return false;
+        }
+        let operation = session.dir().map(|d| d.sync_operation);
+        session.ui.mode = SessionMode::Normal;
+        (input.trim().to_string(), operation)
+    };
+    if line.is_empty() {
+        return true;
+    }
+    let (name, arg) = line
+        .split_once(char::is_whitespace)
+        .unwrap_or((line.as_str(), ""));
+    match name.to_lowercase().as_str() {
+        "reload" => process_session_action(SessionAction::Reload),
+        "sync" => {
+            if let Some(operation) = sync_operation {
+                process_session_action(SessionAction::PlanSync { operation });
+            }
+        }
+        "filter" => {
+            let filter = if arg.trim().is_empty() {
+                None
+            } else {
+                Some(arg.trim().to_string())
+            };
+            if let Some(session) = APP_STATE.state().write().active_mut() {
+                session.ui.active_filter = filter;
+                session.ui.table_state.select(Some(0));
+            }
+        }
+        "help" => toggle_help(),
+        _ => report_error(format!(
+            "Unknown command `{name}`. Available: reload, sync, filter \
+             <pattern>, help"
+        )),
+    }
+    true
 }
 
 /// Switch the active session into `mode`.

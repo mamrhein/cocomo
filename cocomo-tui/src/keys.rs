@@ -11,6 +11,9 @@
 //!
 //! The [`KEYMAP`] table maps (key, scope) pairs to [`Cmd`] values and to
 //! their help-bar labels, so dispatch and documentation cannot drift apart.
+//! Bindings may also declare a prefix key, forming two-key sequences such
+//! as `D l` (delete left); the pending prefix lives in
+//! [`crate::state::UiState::pending_prefix`].
 //! Scopes partition key ownership: [`KeyScope::Global`] bindings belong to
 //! the App shell, [`KeyScope::DirNormal`] and [`KeyScope::TextNormal`]
 //! bindings to the two session views, and [`KeyScope::Editing`] is the
@@ -22,7 +25,7 @@
 //! caller can return `EventResult::Ignored` instead of swallowing the key.
 //! Rendering is done by the ratatui-kit components in `ui/`.
 
-use cocomo_lib::SyncOperation;
+use cocomo_lib::{SyncOperation, TransferAction, TransferItem};
 use ratatui_kit::{
     crossterm::event::{KeyCode, KeyEvent, KeyModifiers},
     ratatui::{
@@ -111,6 +114,18 @@ pub enum Cmd {
     NextDiff,
     /// Jump to the previous difference group.
     PrevDiff,
+    /// Copy the selected entry left → right (`C-l`).
+    CopyRight,
+    /// Copy the selected entry right → left (`C-r`).
+    CopyLeft,
+    /// Delete the selected entry from the left side (`D l`).
+    DeleteLeft,
+    /// Delete the selected entry from the right side (`D r`).
+    DeleteRight,
+    /// Enter search mode (`/`).
+    StartSearch,
+    /// Enter command mode (`:`).
+    StartCommand,
     /// Leave a text-entry mode without applying it.
     CancelEdit,
 }
@@ -131,6 +146,10 @@ pub(crate) struct KeyBinding {
     /// Help-bar entry `(keys, description)`; `None` hides the binding
     /// (e.g. the `Down` alias of `j`).
     help: Option<(&'static str, &'static str)>,
+    /// Prefix key that must be pressed immediately before `key` for a
+    /// two-key sequence binding (e.g. the `D` of `D l`). `None` marks a
+    /// single-key binding.
+    prefix: Option<KeyCode>,
 }
 
 /// The complete keymap. Array order determines help-bar order; bindings
@@ -143,6 +162,7 @@ const KEYMAP: &[KeyBinding] = &[
         scope: KeyScope::DirNormal,
         cmd: Cmd::NextRow,
         help: Some(("j/k", "navigate")),
+        prefix: None,
     },
     KeyBinding {
         key: KeyCode::Down,
@@ -150,6 +170,7 @@ const KEYMAP: &[KeyBinding] = &[
         scope: KeyScope::DirNormal,
         cmd: Cmd::NextRow,
         help: None,
+        prefix: None,
     },
     KeyBinding {
         key: KeyCode::Char('k'),
@@ -157,6 +178,7 @@ const KEYMAP: &[KeyBinding] = &[
         scope: KeyScope::DirNormal,
         cmd: Cmd::PrevRow,
         help: None,
+        prefix: None,
     },
     KeyBinding {
         key: KeyCode::Up,
@@ -164,6 +186,7 @@ const KEYMAP: &[KeyBinding] = &[
         scope: KeyScope::DirNormal,
         cmd: Cmd::PrevRow,
         help: None,
+        prefix: None,
     },
     KeyBinding {
         key: KeyCode::Char('g'),
@@ -171,6 +194,7 @@ const KEYMAP: &[KeyBinding] = &[
         scope: KeyScope::DirNormal,
         cmd: Cmd::FirstRow,
         help: Some(("g/G", "top/bottom")),
+        prefix: None,
     },
     KeyBinding {
         key: KeyCode::Char('G'),
@@ -178,6 +202,23 @@ const KEYMAP: &[KeyBinding] = &[
         scope: KeyScope::DirNormal,
         cmd: Cmd::LastRow,
         help: None,
+        prefix: None,
+    },
+    KeyBinding {
+        key: KeyCode::Char('n'),
+        modifiers: NONE,
+        scope: KeyScope::DirNormal,
+        cmd: Cmd::NextDiff,
+        help: Some(("n/N", "next/prev diff")),
+        prefix: None,
+    },
+    KeyBinding {
+        key: KeyCode::Char('N'),
+        modifiers: NONE,
+        scope: KeyScope::DirNormal,
+        cmd: Cmd::PrevDiff,
+        help: None,
+        prefix: None,
     },
     KeyBinding {
         key: KeyCode::Char('f'),
@@ -185,6 +226,7 @@ const KEYMAP: &[KeyBinding] = &[
         scope: KeyScope::DirNormal,
         cmd: Cmd::StartFilter,
         help: Some(("f", "filter")),
+        prefix: None,
     },
     KeyBinding {
         key: KeyCode::Char('F'),
@@ -192,6 +234,7 @@ const KEYMAP: &[KeyBinding] = &[
         scope: KeyScope::DirNormal,
         cmd: Cmd::ToggleHideSame,
         help: Some(("F", "hide same")),
+        prefix: None,
     },
     KeyBinding {
         key: KeyCode::Char('C'),
@@ -199,6 +242,7 @@ const KEYMAP: &[KeyBinding] = &[
         scope: KeyScope::DirNormal,
         cmd: Cmd::ToggleCompareContent,
         help: Some(("C", "cont. on/off")),
+        prefix: None,
     },
     KeyBinding {
         key: KeyCode::Char('m'),
@@ -206,6 +250,7 @@ const KEYMAP: &[KeyBinding] = &[
         scope: KeyScope::DirNormal,
         cmd: Cmd::CycleSyncOpForward,
         help: Some(("m/M", "sync op")),
+        prefix: None,
     },
     KeyBinding {
         key: KeyCode::Char('M'),
@@ -213,6 +258,17 @@ const KEYMAP: &[KeyBinding] = &[
         scope: KeyScope::DirNormal,
         cmd: Cmd::CycleSyncOpBackward,
         help: None,
+        prefix: None,
+    },
+    KeyBinding {
+        // `S` runs the sync; until the confirmation modal lands (phase 3),
+        // it plans the sync exactly like `P`.
+        key: KeyCode::Char('S'),
+        modifiers: NONE,
+        scope: KeyScope::DirNormal,
+        cmd: Cmd::PlanSync,
+        help: Some(("S", "sync")),
+        prefix: None,
     },
     KeyBinding {
         key: KeyCode::Char('P'),
@@ -220,6 +276,7 @@ const KEYMAP: &[KeyBinding] = &[
         scope: KeyScope::DirNormal,
         cmd: Cmd::PlanSync,
         help: Some(("P", "plan")),
+        prefix: None,
     },
     KeyBinding {
         key: KeyCode::Char('e'),
@@ -227,6 +284,39 @@ const KEYMAP: &[KeyBinding] = &[
         scope: KeyScope::DirNormal,
         cmd: Cmd::ExecuteSync,
         help: Some(("e", "execute")),
+        prefix: None,
+    },
+    KeyBinding {
+        key: KeyCode::Char('l'),
+        modifiers: CTRL,
+        scope: KeyScope::DirNormal,
+        cmd: Cmd::CopyRight,
+        help: Some(("C-l", "copy l\u{2192}r")),
+        prefix: None,
+    },
+    KeyBinding {
+        key: KeyCode::Char('r'),
+        modifiers: CTRL,
+        scope: KeyScope::DirNormal,
+        cmd: Cmd::CopyLeft,
+        help: Some(("C-r", "copy r\u{2192}l")),
+        prefix: None,
+    },
+    KeyBinding {
+        key: KeyCode::Char('l'),
+        modifiers: NONE,
+        scope: KeyScope::DirNormal,
+        cmd: Cmd::DeleteLeft,
+        help: Some(("D l", "del left")),
+        prefix: Some(KeyCode::Char('D')),
+    },
+    KeyBinding {
+        key: KeyCode::Char('r'),
+        modifiers: NONE,
+        scope: KeyScope::DirNormal,
+        cmd: Cmd::DeleteRight,
+        help: Some(("D r", "del right")),
+        prefix: Some(KeyCode::Char('D')),
     },
     KeyBinding {
         key: KeyCode::Char('r'),
@@ -234,6 +324,7 @@ const KEYMAP: &[KeyBinding] = &[
         scope: KeyScope::DirNormal,
         cmd: Cmd::Reload,
         help: Some(("r", "reload")),
+        prefix: None,
     },
     KeyBinding {
         key: KeyCode::Char('s'),
@@ -241,6 +332,7 @@ const KEYMAP: &[KeyBinding] = &[
         scope: KeyScope::DirNormal,
         cmd: Cmd::StartSaveSession,
         help: Some(("s", "save")),
+        prefix: None,
     },
     KeyBinding {
         key: KeyCode::Char('O'),
@@ -248,6 +340,23 @@ const KEYMAP: &[KeyBinding] = &[
         scope: KeyScope::DirNormal,
         cmd: Cmd::StartLoadSession,
         help: Some(("O", "load")),
+        prefix: None,
+    },
+    KeyBinding {
+        key: KeyCode::Char('/'),
+        modifiers: NONE,
+        scope: KeyScope::DirNormal,
+        cmd: Cmd::StartSearch,
+        help: Some(("/", "search")),
+        prefix: None,
+    },
+    KeyBinding {
+        key: KeyCode::Char(':'),
+        modifiers: NONE,
+        scope: KeyScope::DirNormal,
+        cmd: Cmd::StartCommand,
+        help: Some((":", "command")),
+        prefix: None,
     },
     KeyBinding {
         key: KeyCode::Enter,
@@ -255,6 +364,7 @@ const KEYMAP: &[KeyBinding] = &[
         scope: KeyScope::DirNormal,
         cmd: Cmd::OpenEntry,
         help: Some(("\u{21A5}", "open dir")),
+        prefix: None,
     },
     KeyBinding {
         key: KeyCode::Backspace,
@@ -262,6 +372,7 @@ const KEYMAP: &[KeyBinding] = &[
         scope: KeyScope::DirNormal,
         cmd: Cmd::GoUp,
         help: Some(("\u{232B}", "up")),
+        prefix: None,
     },
     KeyBinding {
         key: KeyCode::Esc,
@@ -269,6 +380,7 @@ const KEYMAP: &[KeyBinding] = &[
         scope: KeyScope::DirNormal,
         cmd: Cmd::Cancel,
         help: Some(("Esc", "cancel")),
+        prefix: None,
     },
     // -- Text comparison, normal mode. --
     KeyBinding {
@@ -277,6 +389,7 @@ const KEYMAP: &[KeyBinding] = &[
         scope: KeyScope::TextNormal,
         cmd: Cmd::NextRow,
         help: Some(("j/k", "navigate")),
+        prefix: None,
     },
     KeyBinding {
         key: KeyCode::Down,
@@ -284,6 +397,7 @@ const KEYMAP: &[KeyBinding] = &[
         scope: KeyScope::TextNormal,
         cmd: Cmd::NextRow,
         help: None,
+        prefix: None,
     },
     KeyBinding {
         key: KeyCode::Char('k'),
@@ -291,6 +405,7 @@ const KEYMAP: &[KeyBinding] = &[
         scope: KeyScope::TextNormal,
         cmd: Cmd::PrevRow,
         help: None,
+        prefix: None,
     },
     KeyBinding {
         key: KeyCode::Up,
@@ -298,6 +413,7 @@ const KEYMAP: &[KeyBinding] = &[
         scope: KeyScope::TextNormal,
         cmd: Cmd::PrevRow,
         help: None,
+        prefix: None,
     },
     KeyBinding {
         key: KeyCode::Char('g'),
@@ -305,6 +421,7 @@ const KEYMAP: &[KeyBinding] = &[
         scope: KeyScope::TextNormal,
         cmd: Cmd::FirstRow,
         help: Some(("g/G", "top/bottom")),
+        prefix: None,
     },
     KeyBinding {
         key: KeyCode::Char('G'),
@@ -312,6 +429,7 @@ const KEYMAP: &[KeyBinding] = &[
         scope: KeyScope::TextNormal,
         cmd: Cmd::LastRow,
         help: None,
+        prefix: None,
     },
     KeyBinding {
         key: KeyCode::Char('n'),
@@ -319,6 +437,7 @@ const KEYMAP: &[KeyBinding] = &[
         scope: KeyScope::TextNormal,
         cmd: Cmd::NextDiff,
         help: Some(("n/N", "next/prev diff")),
+        prefix: None,
     },
     KeyBinding {
         key: KeyCode::Char('N'),
@@ -326,6 +445,23 @@ const KEYMAP: &[KeyBinding] = &[
         scope: KeyScope::TextNormal,
         cmd: Cmd::PrevDiff,
         help: None,
+        prefix: None,
+    },
+    KeyBinding {
+        key: KeyCode::Char('/'),
+        modifiers: NONE,
+        scope: KeyScope::TextNormal,
+        cmd: Cmd::StartSearch,
+        help: Some(("/", "search")),
+        prefix: None,
+    },
+    KeyBinding {
+        key: KeyCode::Char(':'),
+        modifiers: NONE,
+        scope: KeyScope::TextNormal,
+        cmd: Cmd::StartCommand,
+        help: Some((":", "command")),
+        prefix: None,
     },
     // -- Text-entry modes (root-layer fallback; the input layers normally
     //    capture keys exclusively). --
@@ -335,6 +471,7 @@ const KEYMAP: &[KeyBinding] = &[
         scope: KeyScope::Editing,
         cmd: Cmd::CancelEdit,
         help: None,
+        prefix: None,
     },
     KeyBinding {
         key: KeyCode::Char('q'),
@@ -342,6 +479,7 @@ const KEYMAP: &[KeyBinding] = &[
         scope: KeyScope::Editing,
         cmd: Cmd::CancelEdit,
         help: None,
+        prefix: None,
     },
     // -- App shell. --
     KeyBinding {
@@ -350,13 +488,23 @@ const KEYMAP: &[KeyBinding] = &[
         scope: KeyScope::Global,
         cmd: Cmd::CloseTab,
         help: Some(("Ctrl+W", "close")),
+        prefix: None,
+    },
+    KeyBinding {
+        key: KeyCode::Tab,
+        modifiers: NONE,
+        scope: KeyScope::Global,
+        cmd: Cmd::SwitchTab,
+        help: Some(("Tab", "tabs")),
+        prefix: None,
     },
     KeyBinding {
         key: KeyCode::Tab,
         modifiers: CTRL,
         scope: KeyScope::Global,
         cmd: Cmd::SwitchTab,
-        help: Some(("Ctrl+Tab", "tabs")),
+        help: None,
+        prefix: None,
     },
     KeyBinding {
         key: KeyCode::Left,
@@ -364,6 +512,7 @@ const KEYMAP: &[KeyBinding] = &[
         scope: KeyScope::Global,
         cmd: Cmd::MenuPrev,
         help: Some(("\u{2190}/\u{2192}", "menu")),
+        prefix: None,
     },
     KeyBinding {
         key: KeyCode::Right,
@@ -371,6 +520,7 @@ const KEYMAP: &[KeyBinding] = &[
         scope: KeyScope::Global,
         cmd: Cmd::MenuNext,
         help: None,
+        prefix: None,
     },
     KeyBinding {
         key: KeyCode::Char('q'),
@@ -378,6 +528,7 @@ const KEYMAP: &[KeyBinding] = &[
         scope: KeyScope::Global,
         cmd: Cmd::Quit,
         help: Some(("q", "quit")),
+        prefix: None,
     },
     KeyBinding {
         key: KeyCode::Char('Q'),
@@ -385,6 +536,7 @@ const KEYMAP: &[KeyBinding] = &[
         scope: KeyScope::Global,
         cmd: Cmd::Quit,
         help: None,
+        prefix: None,
     },
     KeyBinding {
         key: KeyCode::Char('?'),
@@ -392,6 +544,7 @@ const KEYMAP: &[KeyBinding] = &[
         scope: KeyScope::Global,
         cmd: Cmd::ToggleHelp,
         help: Some(("?", "help")),
+        prefix: None,
     },
     KeyBinding {
         key: KeyCode::F(1),
@@ -399,6 +552,7 @@ const KEYMAP: &[KeyBinding] = &[
         scope: KeyScope::Global,
         cmd: Cmd::ToggleHelp,
         help: None,
+        prefix: None,
     },
 ];
 
@@ -406,18 +560,51 @@ const KEYMAP: &[KeyBinding] = &[
 ///
 /// A binding matches when the key code is equal, the required modifiers are
 /// present, and — for unmodified bindings — no Ctrl/Alt modifier is set, so
-/// `Ctrl+Tab` never fires the plain `Tab` binding.
+/// `Ctrl+Tab` never fires the plain `Tab` binding. Two-key sequence
+/// bindings (those with a prefix) are excluded; use [`lookup_prefixed`] for
+/// their second key.
 pub fn lookup(scope: KeyScope, key: KeyEvent) -> Option<Cmd> {
     KEYMAP
         .iter()
         .find(|b| {
-            b.scope == scope
+            b.prefix.is_none()
+                && b.scope == scope
                 && b.key == key.code
                 && key.modifiers.contains(b.modifiers)
                 && (b.modifiers != NONE
                     || !key.modifiers.intersects(CTRL | KeyModifiers::ALT))
         })
         .map(|b| b.cmd)
+}
+
+/// Return the command for the second key of a two-key sequence: the binding
+/// in `scope` whose prefix is `prefix` and whose key is `key`.
+pub fn lookup_prefixed(
+    scope: KeyScope,
+    prefix: KeyCode,
+    key: KeyEvent,
+) -> Option<Cmd> {
+    KEYMAP
+        .iter()
+        .find(|b| {
+            b.prefix == Some(prefix)
+                && b.scope == scope
+                && b.key == key.code
+                && key.modifiers.contains(b.modifiers)
+                && (b.modifiers != NONE
+                    || !key.modifiers.intersects(CTRL | KeyModifiers::ALT))
+        })
+        .map(|b| b.cmd)
+}
+
+/// Return whether `key` starts a two-key sequence in `scope` (i.e. some
+/// binding uses it as its prefix).
+pub fn starts_sequence(scope: KeyScope, key: KeyEvent) -> bool {
+    KEYMAP.iter().any(|b| {
+        b.prefix == Some(key.code)
+            && b.scope == scope
+            && !key.modifiers.intersects(CTRL | KeyModifiers::ALT)
+    })
 }
 
 /// Build the help bar lines for the given scopes from the keymap.
@@ -472,6 +659,12 @@ pub fn help_lines(scopes: &[KeyScope], width: u16) -> Vec<Line<'static>> {
 /// so the caller can report `EventResult::Ignored` and let sibling handlers
 /// see the key. Otherwise returns the [`SessionAction`] the controller must
 /// dispatch.
+///
+/// Two-key sequence bindings (e.g. `D l`) work through
+/// [`crate::state::UiState::pending_prefix`]: a prefix key arms the pending
+/// state and is consumed; the next key is first looked up as the sequence
+/// continuation, then as a normal binding, so a mistyped continuation never
+/// strands the handler in prefix mode.
 pub fn handle_session_key(
     session: &mut SessionView,
     key: KeyEvent,
@@ -484,7 +677,21 @@ pub fn handle_session_key(
             SessionContent::Text(_) => KeyScope::TextNormal,
         }
     };
-    let cmd = lookup(scope, key)?;
+    let cmd = match session.ui.pending_prefix.take() {
+        Some(prefix) => {
+            lookup_prefixed(scope, prefix, key).or_else(|| lookup(scope, key))
+        }
+        None => match lookup(scope, key) {
+            Some(cmd) => Some(cmd),
+            None => {
+                if starts_sequence(scope, key) {
+                    session.ui.pending_prefix = Some(key.code);
+                    return Some(SessionAction::None);
+                }
+                None
+            }
+        },
+    }?;
     Some(execute(cmd, session))
 }
 
@@ -592,6 +799,28 @@ fn execute(cmd: Cmd, session: &mut SessionView) -> SessionAction {
         }
         Cmd::PrevDiff => {
             jump_diff(session, -1);
+            SessionAction::None
+        }
+        Cmd::CopyRight => transfer_action(session, TransferAction::CopyRight),
+        Cmd::CopyLeft => transfer_action(session, TransferAction::CopyLeft),
+        Cmd::DeleteLeft => {
+            transfer_action(session, TransferAction::DeleteLeft)
+        }
+        Cmd::DeleteRight => {
+            transfer_action(session, TransferAction::DeleteRight)
+        }
+        Cmd::StartSearch => {
+            // Enter search mode; the query buffer lives in the mode itself.
+            session.ui.mode = SessionMode::Search {
+                query: String::new(),
+            };
+            SessionAction::None
+        }
+        Cmd::StartCommand => {
+            // Enter command mode; the input buffer lives in the mode.
+            session.ui.mode = SessionMode::Command {
+                input: String::new(),
+            };
             SessionAction::None
         }
         Cmd::CancelEdit => {
@@ -716,6 +945,54 @@ fn cycle_sync_op(current: &SyncOperation, delta: isize) -> SyncOperation {
     ops[new_idx as usize]
 }
 
+/// Resolve the selected entry to a transfer action for `action`.
+///
+/// An entry that does not exist on the side the action reads from or
+/// removes (e.g. copying left → right an entry that only exists on the
+/// right) is a no-op.
+fn transfer_action(
+    session: &SessionView,
+    action: TransferAction,
+) -> SessionAction {
+    match selected_transfer_item(session, action) {
+        Some(item) => SessionAction::Transfer { item },
+        None => SessionAction::None,
+    }
+}
+
+/// Build the [`TransferItem`] for the selected entry and `action`.
+///
+/// Copies take their content from the source side, deletes remove that
+/// side's own copy. The item carries the entry's path relative to the
+/// comparison root, exactly as the executor expects it.
+fn selected_transfer_item(
+    session: &SessionView,
+    action: TransferAction,
+) -> Option<TransferItem> {
+    let entries = session.filtered_entries();
+    let selected = session
+        .ui
+        .table_state
+        .selected()
+        .filter(|&i| i < entries.len())
+        .map(|i| entries[i])?;
+    let info = match action {
+        TransferAction::CopyRight | TransferAction::DeleteLeft => {
+            selected.left.as_ref()?
+        }
+        TransferAction::CopyLeft | TransferAction::DeleteRight => {
+            selected.right.as_ref()?
+        }
+        _ => return None,
+    };
+    Some(TransferItem::new(
+        action,
+        selected.name.clone(),
+        info.is_dir,
+        info.path.clone(),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
@@ -792,6 +1069,51 @@ mod tests {
         code: KeyCode,
     ) -> Option<SessionAction> {
         handle_session_key(session, key(code))
+    }
+
+    fn press_key(
+        session: &mut SessionView,
+        key: KeyEvent,
+    ) -> Option<SessionAction> {
+        handle_session_key(session, key)
+    }
+
+    /// Dir session with one left-only, one right-only, and one differing
+    /// entry, each present on exactly the sides its status implies.
+    fn dir_session_with_sides() -> SessionView {
+        let info = |name: &str| EntryInfo {
+            name: name.into(),
+            path: name.into(),
+            is_dir: false,
+            ..Default::default()
+        };
+        let entry = |name: &str, status, left: bool, right: bool| DirEntry {
+            name: name.into(),
+            status,
+            left: left.then(|| info(name)),
+            right: right.then(|| info(name)),
+            center: None,
+            sub_entries: None,
+        };
+        let mut session = SessionView::new_dir_compare(
+            Endpoint::local(std::path::PathBuf::from("/left")),
+            Endpoint::local(std::path::PathBuf::from("/right")),
+            false,
+        );
+        session.set_comparison(Some(DirComparison {
+            entries: vec![
+                entry("left-only.txt", DirEntryStatus::LeftOnly, true, false),
+                entry(
+                    "right-only.txt",
+                    DirEntryStatus::RightOnly,
+                    false,
+                    true,
+                ),
+                entry("both.txt", DirEntryStatus::Different, true, true),
+            ],
+            ..Default::default()
+        }));
+        session
     }
 
     #[test]
@@ -990,15 +1312,189 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_tab_is_only_bound_in_the_shell() {
-        // Ctrl+Tab belongs to the shell; plain Tab is unbound in the
+    fn tab_switches_tabs_only_in_the_shell() {
+        // Bare Tab and Ctrl+Tab belong to the shell; neither fires in the
         // session scopes, and a NONE-modifier binding never fires for a
         // Ctrl combination.
+        assert_eq!(
+            lookup(KeyScope::Global, key(KeyCode::Tab)),
+            Some(Cmd::SwitchTab)
+        );
         let ctrl_tab = KeyEvent::new(KeyCode::Tab, CTRL | KeyModifiers::SHIFT);
         assert_eq!(lookup(KeyScope::Global, ctrl_tab), Some(Cmd::SwitchTab));
         assert_eq!(lookup(KeyScope::DirNormal, ctrl_tab), None);
         assert_eq!(lookup(KeyScope::DirNormal, key(KeyCode::Tab)), None);
         assert_eq!(lookup(KeyScope::TextNormal, key(KeyCode::Tab)), None);
+    }
+
+    #[test]
+    fn n_navigates_dir_differences() {
+        // In the dir view, every non-identical entry is a difference group;
+        // identical entries are skipped and the jump wraps.
+        let mut session = dir_session();
+        session.set_comparison(Some(DirComparison {
+            entries: vec![
+                DirEntry {
+                    name: "a".into(),
+                    status: DirEntryStatus::Same,
+                    left: None,
+                    right: None,
+                    center: None,
+                    sub_entries: None,
+                },
+                DirEntry {
+                    name: "b".into(),
+                    status: DirEntryStatus::Different,
+                    left: None,
+                    right: None,
+                    center: None,
+                    sub_entries: None,
+                },
+                DirEntry {
+                    name: "c".into(),
+                    status: DirEntryStatus::SameBinary,
+                    left: None,
+                    right: None,
+                    center: None,
+                    sub_entries: None,
+                },
+                DirEntry {
+                    name: "d".into(),
+                    status: DirEntryStatus::LeftOnly,
+                    left: None,
+                    right: None,
+                    center: None,
+                    sub_entries: None,
+                },
+            ],
+            ..Default::default()
+        }));
+        session.ui.table_state.select(Some(0));
+        press(&mut session, KeyCode::Char('n'));
+        assert_eq!(session.ui.table_state.selected(), Some(1));
+        press(&mut session, KeyCode::Char('n'));
+        assert_eq!(session.ui.table_state.selected(), Some(3));
+        // Wrap to the first difference.
+        press(&mut session, KeyCode::Char('n'));
+        assert_eq!(session.ui.table_state.selected(), Some(1));
+        press(&mut session, KeyCode::Char('N'));
+        assert_eq!(session.ui.table_state.selected(), Some(3));
+    }
+
+    #[test]
+    fn ctrl_l_builds_copy_item_from_selected_entry() {
+        let mut session = dir_session_with_sides();
+        session.ui.table_state.select(Some(0));
+        let ctrl_l = KeyEvent::new(KeyCode::Char('l'), CTRL);
+        match press_key(&mut session, ctrl_l) {
+            Some(SessionAction::Transfer { item }) => {
+                assert_eq!(item.action, TransferAction::CopyRight);
+                assert_eq!(item.name, "left-only.txt");
+                assert_eq!(item.rel_path, "left-only.txt");
+                assert!(!item.is_dir);
+            }
+            other => panic!("expected Transfer, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn copy_without_source_side_is_a_noop() {
+        // Copying left → right an entry that only exists on the right does
+        // nothing (the key is still owned, so it cannot leak to siblings).
+        let mut session = dir_session_with_sides();
+        session.ui.table_state.select(Some(1));
+        let ctrl_l = KeyEvent::new(KeyCode::Char('l'), CTRL);
+        assert_eq!(press_key(&mut session, ctrl_l), Some(SessionAction::None));
+    }
+
+    #[test]
+    fn d_prefix_sequence_deletes() {
+        let mut session = dir_session_with_sides();
+        session.ui.table_state.select(Some(0));
+
+        // The prefix alone arms the pending state and is consumed.
+        assert_eq!(
+            press(&mut session, KeyCode::Char('D')),
+            Some(SessionAction::None)
+        );
+        assert_eq!(session.ui.pending_prefix, Some(KeyCode::Char('D')));
+
+        // The continuation resolves to the delete action and clears the
+        // pending state.
+        match press(&mut session, KeyCode::Char('l')) {
+            Some(SessionAction::Transfer { item }) => {
+                assert_eq!(item.action, TransferAction::DeleteLeft);
+                assert_eq!(item.name, "left-only.txt");
+            }
+            other => panic!("expected Transfer, got {other:?}"),
+        }
+        assert_eq!(session.ui.pending_prefix, None);
+
+        // `D r` deletes on the right side.
+        session.ui.table_state.select(Some(1));
+        press(&mut session, KeyCode::Char('D'));
+        match press(&mut session, KeyCode::Char('r')) {
+            Some(SessionAction::Transfer { item }) => {
+                assert_eq!(item.action, TransferAction::DeleteRight);
+                assert_eq!(item.name, "right-only.txt");
+            }
+            other => panic!("expected Transfer, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn d_prefix_aborts_on_unbound_continuation() {
+        let mut session = dir_session_with_sides();
+        press(&mut session, KeyCode::Char('D'));
+        // An unbound continuation clears the pending prefix and stays
+        // unbound itself.
+        assert_eq!(press(&mut session, KeyCode::Char('x')), None);
+        assert_eq!(session.ui.pending_prefix, None);
+        // Bare `r` is Reload again, not a swallowed `D r`.
+        assert_eq!(
+            press(&mut session, KeyCode::Char('r')),
+            Some(SessionAction::Reload)
+        );
+    }
+
+    #[test]
+    fn s_plans_sync_like_p() {
+        // Until the confirmation modal lands, `S` plans the sync with the
+        // currently configured operation.
+        let mut session = dir_session();
+        assert_eq!(
+            press(&mut session, KeyCode::Char('S')),
+            Some(SessionAction::PlanSync {
+                operation: SyncOperation::default()
+            })
+        );
+    }
+
+    #[test]
+    fn slash_and_colon_open_editing_modes() {
+        let mut session = dir_session();
+        assert_eq!(
+            press(&mut session, KeyCode::Char('/')),
+            Some(SessionAction::None)
+        );
+        assert!(matches!(
+            &session.ui.mode,
+            SessionMode::Search { query } if query.is_empty()
+        ));
+        assert!(session.ui.mode.is_editing());
+        // Esc (Editing scope) cancels the mode.
+        press(&mut session, KeyCode::Esc);
+        assert_eq!(session.ui.mode, SessionMode::Normal);
+
+        assert_eq!(
+            press(&mut session, KeyCode::Char(':')),
+            Some(SessionAction::None)
+        );
+        assert!(matches!(
+            &session.ui.mode,
+            SessionMode::Command { input } if input.is_empty()
+        ));
+        assert!(session.ui.mode.is_editing());
     }
 
     #[test]
@@ -1009,7 +1505,7 @@ mod tests {
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
             .collect();
-        for label in ["j/k", "g/G", "n/N", "Ctrl+W", "Ctrl+Tab", "q"] {
+        for label in ["j/k", "g/G", "n/N", "Ctrl+W", "Tab", "q"] {
             assert!(text.contains(label), "missing `{label}` in `{text}`");
         }
         // Dir-only labels must not appear in the text help bar.

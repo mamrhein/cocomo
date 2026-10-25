@@ -20,15 +20,16 @@ use ratatui_kit::{
 };
 
 use super::{
-    frame::{HelpBar, StatusBar},
+    frame::{COMMAND_PLACEHOLDER, HelpBar, StatusBar},
     rows::{CellRow, cell_row_renderer, dir_rows, sync_rows},
     session_table::SessionTable,
     theme::CocomoTheme,
 };
 use crate::{
     controller::{
-        dispatch_dir_key, set_active_mode, set_filter_input, set_mode_name,
-        submit_filter, submit_load_name, submit_save_name,
+        dispatch_dir_key, set_active_mode, set_filter_input, set_mode_buffer,
+        submit_command, submit_filter, submit_load_name, submit_save_name,
+        submit_search,
     },
     keys::{self, KeyScope},
     state::{APP_STATE, SessionMode, SyncStage},
@@ -219,6 +220,10 @@ pub(super) fn DirCompareView(
         vec![Line::from("s=activate  Enter=save  Esc=cancel")]
     } else if matches!(mode, SessionMode::LoadSession { .. }) {
         vec![Line::from("O=activate  Enter=load  Esc=cancel")]
+    } else if matches!(mode, SessionMode::Search { .. }) {
+        vec![Line::from("/=activate  Enter=jump  Esc=cancel")]
+    } else if matches!(mode, SessionMode::Command { .. }) {
+        vec![Line::from(":=activate  Enter=run  Esc=cancel")]
     } else if sync_active {
         vec![Line::from(vec![
             Span::styled("j/k", Style::new().add_modifier(Modifier::BOLD)),
@@ -313,7 +318,7 @@ pub(super) fn DirCompareView(
                     is_editing: true,
                     activate_key: KeyCode::Char('s'),
                     on_change: Handler::from(move |val: String| {
-                        set_mode_name(val);
+                        set_mode_buffer(val);
                     }),
                     on_submit: Handler::from(move |val: String| -> bool {
                         submit_save_name(val)
@@ -337,10 +342,44 @@ pub(super) fn DirCompareView(
                     is_editing: true,
                     activate_key: KeyCode::Char('O'),
                     on_change: Handler::from(move |val: String| {
-                        set_mode_name(val);
+                        set_mode_buffer(val);
                     }),
                     on_submit: Handler::from(move |val: String| -> bool {
                         submit_load_name(val)
+                    }),
+                    clear_on_escape: true,
+                    on_clear: Handler::from(move |_: ()| {
+                        set_active_mode(SessionMode::Normal);
+                    }),
+                )
+            } else if let SessionMode::Search { query } = &mode {
+                SearchInput(
+                    value: query.clone(),
+                    placeholder: "Search entries...".to_string(),
+                    is_editing: true,
+                    activate_key: KeyCode::Char('/'),
+                    on_change: Handler::from(move |val: String| {
+                        set_mode_buffer(val);
+                    }),
+                    on_submit: Handler::from(move |val: String| -> bool {
+                        submit_search(val)
+                    }),
+                    clear_on_escape: true,
+                    on_clear: Handler::from(move |_: ()| {
+                        set_active_mode(SessionMode::Normal);
+                    }),
+                )
+            } else if let SessionMode::Command { input } = &mode {
+                SearchInput(
+                    value: input.clone(),
+                    placeholder: COMMAND_PLACEHOLDER.to_string(),
+                    is_editing: true,
+                    activate_key: KeyCode::Char(':'),
+                    on_change: Handler::from(move |val: String| {
+                        set_mode_buffer(val);
+                    }),
+                    on_submit: Handler::from(move |val: String| -> bool {
+                        submit_command(val)
                     }),
                     clear_on_escape: true,
                     on_clear: Handler::from(move |_: ()| {

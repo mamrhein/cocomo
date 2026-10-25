@@ -24,9 +24,11 @@ use std::{
 
 use cocomo_lib::{
     DirComparison, DirEntry, DirEntryStatus, Endpoint, Grammar, LineInfo,
-    SyncOperation, SyncResult, TextDiff,
+    SyncOperation, SyncResult, TextDiff, TransferItem,
 };
-use ratatui_kit::{Atom, components::table::TableState};
+use ratatui_kit::{
+    Atom, components::table::TableState, crossterm::event::KeyCode,
+};
 
 /// The current input mode of a session.
 ///
@@ -47,6 +49,11 @@ pub enum SessionMode {
         name: String,
         saved_sessions: Vec<String>,
     },
+    /// The user is typing a search pattern (`/`); submitting jumps to the
+    /// next matching row.
+    Search { query: String },
+    /// The user is typing a command-line command (`:`).
+    Command { input: String },
 }
 
 impl SessionMode {
@@ -58,7 +65,11 @@ impl SessionMode {
     pub fn is_editing(&self) -> bool {
         matches!(
             self,
-            Self::Filter | Self::SaveSession { .. } | Self::LoadSession { .. }
+            Self::Filter
+                | Self::SaveSession { .. }
+                | Self::LoadSession { .. }
+                | Self::Search { .. }
+                | Self::Command { .. }
         )
     }
 }
@@ -84,6 +95,9 @@ pub enum SessionAction {
     ListSessions,
     /// Load a session config from a file.
     LoadSession { path: PathBuf },
+    /// Execute a single transfer (copy or delete) on the selected entry,
+    /// then re-run the comparison so the table reflects the change.
+    Transfer { item: TransferItem },
     /// No action required.
     None,
 }
@@ -213,6 +227,10 @@ pub struct UiState {
     pub filter_input: String,
     /// Active filter pattern. `None` means no filter.
     pub active_filter: Option<String>,
+    /// Prefix key of a two-key sequence awaiting its second key (e.g. the
+    /// `D` of `D l`). Set by the key handler when a prefix-only binding
+    /// fires, cleared on the next key press whatever it does.
+    pub pending_prefix: Option<KeyCode>,
 }
 
 /// Monotonic counter assigning stable ids to sessions.
@@ -416,6 +434,47 @@ impl SessionView {
                 true
             })
             .collect()
+    }
+
+    /// Return the first row at or after `after + 1` whose displayed text
+    /// contains `query` (case-insensitive), wrapping around at the end.
+    ///
+    /// Directory rows match on the entry name, text rows on either side's
+    /// line content. This is the search model behind `/`; `None` when no
+    /// row matches or the query is empty.
+    pub fn find_row_matching(
+        &self,
+        query: &str,
+        after: usize,
+    ) -> Option<usize> {
+        if query.is_empty() {
+            return None;
+        }
+        let query = query.to_lowercase();
+        let rows = self.row_count();
+        if rows == 0 {
+            return None;
+        }
+        let start = after.saturating_add(1);
+        (0..rows)
+            .map(|k| (start + k) % rows)
+            .find(|&i| self.row_matches(i, &query))
+    }
+
+    /// Return whether the row at index `i` contains the lowercased `query`.
+    fn row_matches(&self, i: usize, query: &str) -> bool {
+        match &self.content {
+            SessionContent::Dir(_) => self
+                .filtered_entries()
+                .get(i)
+                .is_some_and(|e| e.name.to_lowercase().contains(query)),
+            SessionContent::Text(text) => {
+                [text.left_lines.get(i), text.right_lines.get(i)]
+                    .into_iter()
+                    .flatten()
+                    .any(|line| line.content.to_lowercase().contains(query))
+            }
+        }
     }
 }
 
@@ -741,5 +800,52 @@ mod tests {
         assert!(app.session(id).is_some());
         assert!(app.session_mut(id).is_some());
         assert!(app.session(id + 1000).is_none());
+    }
+
+    #[test]
+    fn find_row_matching_wraps_and_ignores_case() {
+        let mut session = dir_session();
+        session.set_comparison(Some(comparison(&[
+            ("Alpha", DirEntryStatus::Same),
+            ("beta.txt", DirEntryStatus::Different),
+            ("gamma", DirEntryStatus::Same),
+        ])));
+
+        // Case-insensitive substring match, starting strictly after the
+        // given row.
+        assert_eq!(session.find_row_matching("BETA", 0), Some(1));
+        // Wraps around at the end back to the first match.
+        assert_eq!(session.find_row_matching("alpha", 1), Some(0));
+        // No match and the empty query yield `None`.
+        assert_eq!(session.find_row_matching("delta", 0), None);
+        assert_eq!(session.find_row_matching("", 0), None);
+    }
+
+    #[test]
+    fn find_row_matching_searches_both_sides_of_a_text_diff() {
+        let left = vec![
+            LineInfo::new(1, "fn one()".into()),
+            LineInfo::new(2, "fn two()".into()),
+        ];
+        let right = vec![
+            LineInfo::new(1, "fn one()".into()),
+            LineInfo::new(2, "let THREE = 3;".into()),
+        ];
+        let session = SessionView::new_text_compare(
+            Endpoint::local("/left"),
+            Endpoint::local("/right"),
+            left,
+            right,
+            TextDiff::default(),
+            Grammar::plain_text(),
+        );
+
+        // A match only on the right side is found, and only on the left.
+        assert_eq!(session.find_row_matching("three", 0), Some(1));
+        assert_eq!(session.find_row_matching("two", 0), Some(1));
+        // From the matching row itself, the wrap-around still finds it (it
+        // is the last candidate of the search).
+        assert_eq!(session.find_row_matching("two", 1), Some(1));
+        assert_eq!(session.find_row_matching("nine", 0), None);
     }
 }

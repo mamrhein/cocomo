@@ -89,7 +89,7 @@ impl TransferAction {
 // ---------------------------------------------------------------------------
 
 /// A single transfer operation to be executed.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct TransferItem {
     /// The action to perform.
     pub action: TransferAction,

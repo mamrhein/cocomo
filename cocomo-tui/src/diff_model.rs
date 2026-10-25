@@ -18,9 +18,9 @@
 
 use std::collections::HashSet;
 
-use cocomo_lib::TextDiff;
+use cocomo_lib::{DirEntryStatus, TextDiff};
 
-use crate::state::SessionView;
+use crate::state::{SessionContent, SessionView};
 
 /// Build the set of line numbers that are part of a difference.
 pub fn diff_line_numbers(session: &SessionView) -> HashSet<usize> {
@@ -34,11 +34,30 @@ pub fn diff_line_numbers(session: &SessionView) -> HashSet<usize> {
 ///
 /// Each element is the row index (0-based into the merged view) where a
 /// difference group starts. These are the targets for n/N navigation.
+///
+/// Text sessions group their differing lines into blocks; directory
+/// sessions treat every entry that is not identical (`Same` /
+/// `SameBinary`) as its own group, so n/N step through the differing
+/// entries one by one.
 pub fn diff_group_starts(session: &SessionView) -> Vec<usize> {
-    session
-        .text()
-        .and_then(|text| text.text_diff.as_ref())
-        .map_or_else(Vec::new, TextDiff::group_starts)
+    match &session.content {
+        SessionContent::Dir(_) => session
+            .filtered_entries()
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| {
+                !matches!(
+                    entry.status,
+                    DirEntryStatus::Same | DirEntryStatus::SameBinary
+                )
+            })
+            .map(|(i, _)| i)
+            .collect(),
+        SessionContent::Text(_) => session
+            .text()
+            .and_then(|text| text.text_diff.as_ref())
+            .map_or_else(Vec::new, TextDiff::group_starts),
+    }
 }
 
 /// Return the current diff group index (1-based) and total count.
