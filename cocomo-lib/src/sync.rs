@@ -340,6 +340,19 @@ enum MirrorDir {
     Left,
 }
 
+/// Return `true` when the entry is an orphan directory.
+///
+/// An orphan directory is planned as a single recursive operation on the
+/// directory itself; its compared sub-entries carry the full subtree and
+/// must not be expanded into duplicate per-child operations.
+fn is_orphan_dir(entry: &DirEntry) -> bool {
+    matches!(
+        entry.status,
+        DirEntryStatus::LeftOnly | DirEntryStatus::RightOnly
+    ) && (entry.left.as_ref().is_some_and(|l| l.is_dir)
+        || entry.right.as_ref().is_some_and(|r| r.is_dir))
+}
+
 /// Collect transfer items for a mirror operation.
 fn collect_mirror_items(
     comparison: &DirComparison,
@@ -432,8 +445,12 @@ fn collect_mirror_items(
             _ => {}
         }
 
-        // Recurse into sub-directories.
-        if let Some(ref sub) = entry.sub_entries {
+        // Recurse into sub-directories. An orphan directory is already
+        // planned as one recursive operation, so its subtree must not add
+        // duplicate child items.
+        if !is_orphan_dir(entry)
+            && let Some(ref sub) = entry.sub_entries
+        {
             collect_mirror_items(sub, items, direction);
         }
     }
@@ -510,7 +527,9 @@ fn collect_copy_items(
             _ => {}
         }
 
-        if let Some(ref sub) = entry.sub_entries {
+        if !is_orphan_dir(entry)
+            && let Some(ref sub) = entry.sub_entries
+        {
             collect_copy_items(sub, items, direction);
         }
     }
@@ -594,7 +613,11 @@ fn collect_orphan_delete_items(
             _ => {}
         }
 
-        if let Some(ref sub) = entry.sub_entries {
+        // An orphan directory is deleted as one recursive operation; do not
+        // expand its subtree into duplicate child deletions.
+        if !is_orphan_dir(entry)
+            && let Some(ref sub) = entry.sub_entries
+        {
             collect_orphan_delete_items(sub, items);
         }
     }
@@ -856,6 +879,40 @@ mod tests {
         assert!(result.planned_count() >= 1);
 
         fs_err::remove_dir_all(left.parent().unwrap()).ok();
+    }
+
+    #[tokio::test]
+    async fn plan_sync_orphan_dir_is_single_item() {
+        // An orphan directory whose subtree is compared must still be
+        // planned as one recursive operation, not expanded into duplicate
+        // per-child items.
+        let base = env::temp_dir()
+            .join(format!("cocomo_sync_orphan_{}", process::id()));
+        let _ = fs_err::remove_dir_all(&base);
+        let (left, right) = make_sync_dirs_at(&base);
+        fs_err::create_dir_all(left.join("orphan_dir/inner")).unwrap();
+        fs_err::write(left.join("orphan_dir/inner/n.txt"), "n").unwrap();
+
+        let fs = LocalFs::new("test");
+        let rules = SyncRules {
+            operation: SyncOperation::MirrorLeft,
+            dry_run: true,
+            ..Default::default()
+        };
+
+        let result = plan_sync(&fs, &left, &right, &rules).await.unwrap();
+        // Base fixture plans two items (copy left_only, delete right_only);
+        // the orphan dir adds exactly one more: the directory itself.
+        assert_eq!(result.planned_count(), 3, "planned: {:?}", result.planned);
+        let dir_item = result
+            .planned
+            .iter()
+            .find(|i| i.name == "orphan_dir")
+            .expect("orphan dir should be planned");
+        assert!(dir_item.is_dir);
+        assert!(!result.planned.iter().any(|i| i.name == "n.txt"));
+
+        fs_err::remove_dir_all(&base).ok();
     }
 
     #[tokio::test]

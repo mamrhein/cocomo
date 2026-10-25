@@ -262,8 +262,11 @@ pub async fn compare_directories(
 /// For a pair of files the status is determined by [`compare_file_status`].
 /// For a pair of directories the children already attached to the scan
 /// entries are merged recursively, so every nesting level is compared
-/// exactly once. Directory entries whose subtree contains differences get
-/// their placeholder `Same` status refined to `Different`.
+/// exactly once. A directory that exists on only one side is descended into
+/// as well, merging its children against an empty list so that the entire
+/// orphan subtree appears in the comparison. Directory entries whose subtree
+/// contains differences get their placeholder `Same` status refined to
+/// `Different`.
 fn compare_children<'a>(
     fs: &'a dyn FileSystem,
     left: &'a [ScanEntry],
@@ -312,12 +315,20 @@ fn compare_children<'a>(
                 }
             };
 
-            // For a directory pair, recurse one level into the children
-            // that the scan already attached to the entries.
-            let both_dirs = left_entry.is_some_and(|e| e.is_dir())
-                && right_entry.is_some_and(|e| e.is_dir());
+            // Recurse one level into the children that the scan already
+            // attached to the entries. This covers a directory pair and an
+            // orphan directory alike: for an orphan directory the absent
+            // side contributes an empty child list, so the whole subtree is
+            // compared and its entries stay left/right-only. A directory
+            // colliding with a file (`IdenticalNameDifferentType`) is not
+            // descended into.
+            let left_is_dir = left_entry.is_some_and(|e| e.is_dir());
+            let right_is_dir = right_entry.is_some_and(|e| e.is_dir());
+            let descend = (left_is_dir || right_is_dir)
+                && left_entry.is_none_or(|e| e.is_dir())
+                && right_entry.is_none_or(|e| e.is_dir());
 
-            if both_dirs {
+            if descend {
                 let lc = left_entry.and_then(|e| e.children()).unwrap_or(&[]);
                 let rc = right_entry.and_then(|e| e.children()).unwrap_or(&[]);
 
@@ -328,7 +339,10 @@ fn compare_children<'a>(
 
                 let has_diff = sub.different_count() > 0;
                 entry.sub_entries = Some(Arc::new(sub));
-                if has_diff {
+                // Only refine the `Same` placeholder of a shared directory;
+                // an orphan directory keeps its left/right-only status
+                // regardless of its subtree contents.
+                if has_diff && entry.status == DirEntryStatus::Same {
                     entry.status = DirEntryStatus::Different;
                 }
             }
@@ -486,12 +500,20 @@ where
                 }
             };
 
-            // For a directory pair, recurse one level into the children
-            // that the scan already attached to the entries.
-            let both_dirs = left_entry.is_some_and(|e| e.is_dir())
-                && right_entry.is_some_and(|e| e.is_dir());
+            // Recurse one level into the children that the scan already
+            // attached to the entries. This covers a directory pair and an
+            // orphan directory alike: for an orphan directory the absent
+            // side contributes an empty child list, so the whole subtree is
+            // compared and its entries stay left/right-only. A directory
+            // colliding with a file (`IdenticalNameDifferentType`) is not
+            // descended into.
+            let left_is_dir = left_entry.is_some_and(|e| e.is_dir());
+            let right_is_dir = right_entry.is_some_and(|e| e.is_dir());
+            let descend = (left_is_dir || right_is_dir)
+                && left_entry.is_none_or(|e| e.is_dir())
+                && right_entry.is_none_or(|e| e.is_dir());
 
-            if both_dirs {
+            if descend {
                 let lc = left_entry.and_then(|e| e.children()).unwrap_or(&[]);
                 let rc = right_entry.and_then(|e| e.children()).unwrap_or(&[]);
 
@@ -503,7 +525,10 @@ where
 
                 let has_diff = sub.different_count() > 0;
                 entry.sub_entries = Some(Arc::new(sub));
-                if has_diff {
+                // Only refine the `Same` placeholder of a shared directory;
+                // an orphan directory keeps its left/right-only status
+                // regardless of its subtree contents.
+                if has_diff && entry.status == DirEntryStatus::Same {
                     entry.status = DirEntryStatus::Different;
                 }
             }
@@ -1050,6 +1075,114 @@ mod tests {
         .unwrap();
 
         check_nested_differences(&result);
+
+        fs_err::remove_dir_all(left.parent().unwrap()).ok();
+    }
+
+    // -----------------------------------------------------------------------
+    // Orphan subtree tests
+    // -----------------------------------------------------------------------
+
+    /// Create a fixture where orphan directories nest further entries:
+    /// a shared dir containing a left-only subdir, a multi-level left-only
+    /// dir, a right-only dir, and a dir-vs-file name clash.
+    fn make_orphan_dirs() -> (std::path::PathBuf, std::path::PathBuf) {
+        let base = env::temp_dir()
+            .join(format!("cocomo_orphan_{}", std::process::id()));
+        let _ = fs_err::remove_dir_all(&base);
+
+        let left = base.join("left");
+        let right = base.join("right");
+
+        // Shared dir containing a left-only sub-dir with a nested file.
+        fs_err::create_dir_all(left.join("shared/lo-sub/deeper")).unwrap();
+        fs_err::create_dir_all(right.join("shared")).unwrap();
+        fs_err::write(left.join("shared/lo-sub/deeper/f.txt"), "f").unwrap();
+
+        // Multi-level orphan dir at the root.
+        fs_err::create_dir_all(left.join("lo-dir/inner")).unwrap();
+        fs_err::write(left.join("lo-dir/inner/g.txt"), "g").unwrap();
+
+        // Right-only dir with a nested file.
+        fs_err::create_dir_all(right.join("ro-dir")).unwrap();
+        fs_err::write(right.join("ro-dir/h.txt"), "h").unwrap();
+
+        (left, right)
+    }
+
+    /// Verify that the whole subtree of an orphan directory is compared and
+    /// classified as orphan on the owning side.
+    fn check_orphan_subtrees(comp: &DirComparison) {
+        let mut flat = Vec::new();
+        flat_statuses(comp, "", &mut flat);
+
+        for path in [
+            "lo-dir",
+            "lo-dir/inner",
+            "lo-dir/inner/g.txt",
+            "shared/lo-sub",
+            "shared/lo-sub/deeper",
+            "shared/lo-sub/deeper/f.txt",
+        ] {
+            assert_eq!(
+                status_of(comp, path),
+                Some(DirEntryStatus::LeftOnly),
+                "`{path}` should be left-only"
+            );
+        }
+        for path in ["ro-dir", "ro-dir/h.txt"] {
+            assert_eq!(
+                status_of(comp, path),
+                Some(DirEntryStatus::RightOnly),
+                "`{path}` should be right-only"
+            );
+        }
+
+        // The orphan directory itself keeps its orphan status even though
+        // its subtree is now compared.
+        let lo = find_entry(comp, "lo-dir").expect("`lo-dir` missing");
+        assert_eq!(lo.status, DirEntryStatus::LeftOnly);
+        assert!(
+            lo.sub_entries.is_some(),
+            "orphan subtree should be attached"
+        );
+    }
+
+    #[tokio::test]
+    async fn compare_walks_into_orphan_dirs() {
+        let (left, right) = make_orphan_dirs();
+        let fs: Arc<dyn FileSystem> = Arc::new(LocalFs::new("test"));
+        let cache = ContentCache::default_config();
+        let config = CompareConfig::full();
+
+        let result =
+            compare_directories(&fs, &left, &right, &config, Some(&cache))
+                .await
+                .unwrap();
+
+        check_orphan_subtrees(&result);
+
+        fs_err::remove_dir_all(left.parent().unwrap()).ok();
+    }
+
+    #[tokio::test]
+    async fn node_compare_walks_into_orphan_dirs() {
+        let (left, right) = make_orphan_dirs();
+        let fs = LocalFs::new("test");
+        let cache = ContentCache::default_config();
+        let config = CompareConfig::full();
+
+        let result = compare_directories_node(
+            &fs,
+            &left,
+            &right,
+            &config,
+            Some(&cache),
+        )
+        .await
+        .unwrap();
+
+        check_orphan_subtrees(&result);
 
         fs_err::remove_dir_all(left.parent().unwrap()).ok();
     }

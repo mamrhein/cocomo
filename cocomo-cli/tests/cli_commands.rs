@@ -77,6 +77,22 @@ fn create_nested_test_dirs() -> TempDir {
     dir
 }
 
+/// Create a temp dir where an orphan directory inside a shared nested dir
+/// carries its own nested children, and a top-level orphan dir exists.
+fn create_dirs_with_nested_orphans() -> TempDir {
+    let dir = TempDir::with_prefix("cocomo_nest_orphan").unwrap();
+
+    let left = dir.path().join("left");
+    let right = dir.path().join("right");
+    fs::create_dir_all(left.join("sub/orphan_sub/deeper")).unwrap();
+    fs::create_dir_all(right.join("sub")).unwrap();
+    fs::write(left.join("sub/orphan_sub/deeper/deep.txt"), "deep\n").unwrap();
+    fs::create_dir_all(left.join("top_orphan/inner")).unwrap();
+    fs::write(left.join("top_orphan/inner/g.txt"), "g\n").unwrap();
+
+    dir
+}
+
 /// Create a temp directory with hidden files and nested directories for
 /// testing --excl-hidden and --dirs-only filters.
 fn create_test_dirs_with_hidden() -> TempDir {
@@ -294,6 +310,46 @@ mod dir_compare {
             .code(1)
             .stdout(predicate::str::contains("<"))
             .stdout(predicate::str::contains(">"));
+    }
+
+    #[test]
+    fn nested_orphan_dirs_are_listed() {
+        // Contents of orphan directories must appear in the comparison,
+        // both in flat and in tree mode.
+        let dir = create_dirs_with_nested_orphans();
+        cmd()
+            .args(["dir", "compare"])
+            .args([
+                dir.path().join("left").to_str().unwrap(),
+                dir.path().join("right").to_str().unwrap(),
+            ])
+            .assert()
+            .code(1)
+            .stdout(predicate::str::contains("orphan_sub"))
+            .stdout(predicate::str::contains("deeper"))
+            .stdout(predicate::str::contains("deep.txt"))
+            .stdout(predicate::str::contains("top_orphan"))
+            .stdout(predicate::str::contains("inner"))
+            .stdout(predicate::str::contains("g.txt"))
+            .stdout(predicate::str::contains("6 orphans"));
+    }
+
+    #[test]
+    fn nested_orphan_dirs_are_listed_in_tree_mode() {
+        let dir = create_dirs_with_nested_orphans();
+        cmd()
+            .args(["dir", "compare", "--tree"])
+            .args([
+                dir.path().join("left").to_str().unwrap(),
+                dir.path().join("right").to_str().unwrap(),
+            ])
+            .assert()
+            .code(1)
+            .stdout(predicate::str::contains("orphan_sub"))
+            .stdout(predicate::str::contains("deep.txt"))
+            .stdout(predicate::str::contains("inner"))
+            .stdout(predicate::str::contains("g.txt"))
+            .stdout(predicate::str::contains("6 orphans"));
     }
 
     #[test]
