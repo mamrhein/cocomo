@@ -47,13 +47,12 @@ pub(super) fn WelcomeScreen(hooks: Hooks) -> impl Into<AnyElement<'static>> {
             Border(
                 flex_direction: Direction::Vertical,
                 justify_content: Flex::Center,
+                gap: 1,
                 border_style: theme.border,
                 top_title: welcome_title,
             ) {
                 Text(text: title_line)
-                Text(text: Line::from(""))
                 Text(text: hint_line_1)
-                Text(text: Line::from(""))
                 Text(text: hint_line_2)
             }
         }

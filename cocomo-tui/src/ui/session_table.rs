@@ -87,6 +87,27 @@ fn window_offset(
     offset.min(total - body_height)
 }
 
+/// Measured height of the table's body area, in rows.
+///
+/// The window math needs the body height *before* the `Table` renders, and
+/// the previous frame's draw area is the only measurement that accounts for
+/// the surrounding layout (menu bar, tab bar, status bar, help bar).
+/// `use_previous_size` lags one frame behind a resize, so an effect bumps a
+/// tick whenever the terminal size changes; the extra update converges the
+/// window to the new area without waiting for the next key press.
+fn use_body_height(hooks: &mut Hooks<'_, '_>, chrome_rows: u16) -> usize {
+    let area = hooks.use_previous_size();
+    let (term_width, term_height) = hooks.use_terminal_size();
+    let mut resize_tick = hooks.use_state(|| 0u32);
+    hooks.use_effect(
+        move || {
+            resize_tick.set(resize_tick.get() + 1);
+        },
+        (term_width, term_height),
+    );
+    usize::from(area.height.saturating_sub(chrome_rows))
+}
+
 /// Props for [`SessionTable`].
 #[derive(Default, Props)]
 pub(super) struct SessionTableProps {
@@ -120,29 +141,13 @@ pub(super) fn SessionTable(
 ) -> impl Into<AnyElement<'static>> {
     let theme = hooks.use_component_theme::<CocomoTheme>();
 
-    // The window math needs the body height *before* the `Table` renders,
-    // and the previous frame's draw area is the only measurement that
-    // accounts for the surrounding layout (menu bar, tab bar, status bar,
-    // help bar).
-    let area = hooks.use_previous_size();
     let mut scroll_offset = hooks.use_state(|| 0usize);
-    // `use_previous_size` lags one frame behind a resize; this tick re-runs
-    // the update once after the terminal size changes so the window
-    // converges to the new area without waiting for the next key press.
-    let (term_width, term_height) = hooks.use_terminal_size();
-    let mut resize_tick = hooks.use_state(|| 0u32);
-    hooks.use_effect(
-        move || {
-            resize_tick.set(resize_tick.get() + 1);
-        },
-        (term_width, term_height),
-    );
+    let body_height = use_body_height(&mut hooks, CHROME_ROWS);
 
     // Slice the rows to the viewport and make the selection relative to
     // the slice; `TableWrapMode::Truncate` below guarantees one row is
     // exactly one line, which keeps this math exact.
     let total = props.rows.len();
-    let body_height = usize::from(area.height.saturating_sub(CHROME_ROWS));
     let offset =
         window_offset(total, body_height, scroll_offset.get(), props.selected);
     if scroll_offset.get() != offset {

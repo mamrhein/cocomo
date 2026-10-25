@@ -73,6 +73,55 @@ pub(super) struct CocomoTheme {
     pub transfer_delete: Color,
     /// Color of move transfer actions.
     pub transfer_move: Color,
+    /// Status colors for directory entries.
+    pub status: StatusColors,
+}
+
+/// Status colors for directory entries.
+///
+/// The semantically classifiable statuses derive from the [`Palette`], so a
+/// palette swap recolors them; the comparison endpoints and the structural
+/// conflicts have no palette counterpart and stay fixed across themes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct StatusColors {
+    /// Gray for identical entries.
+    pub same: Color,
+    /// Yellow for similar (not identical) entries.
+    pub similar: Color,
+    /// Red for entries with differing content.
+    pub different: Color,
+    /// Cyan for entries only on the left side.
+    pub left_only: Color,
+    /// Magenta for entries only on the right side.
+    pub right_only: Color,
+    /// White for entries that exist only in the center.
+    pub center_only: Color,
+    /// Green for entries that can be merged cleanly.
+    pub mergeable: Color,
+    /// Magenta-violet for entries with a merge conflict.
+    pub conflict: Color,
+    /// Yellow for same-named entries of different types.
+    pub type_conflict: Color,
+}
+
+impl StatusColors {
+    fn from_palette(palette: &Palette) -> Self {
+        Self {
+            same: Color::Gray,
+            similar: palette.warning,
+            different: palette.error,
+            mergeable: palette.success,
+            // The endpoints are symmetric, so they keep the fixed
+            // cyan/magenta pair instead of half-deriving from the palette
+            // (the app palette sets `accent` to the same yellow as
+            // `warning`, which would collide with `similar`).
+            left_only: Color::Cyan,
+            right_only: Color::Magenta,
+            center_only: Color::White,
+            conflict: Color::Rgb(255, 0, 255),
+            type_conflict: Color::Rgb(255, 255, 0),
+        }
+    }
 }
 
 impl ComponentTheme for CocomoTheme {
@@ -107,6 +156,7 @@ impl ComponentTheme for CocomoTheme {
             transfer_copy_center: palette.warning,
             transfer_delete: palette.error,
             transfer_move: Color::Magenta,
+            status: StatusColors::from_palette(palette),
         }
     }
 }
@@ -124,16 +174,18 @@ impl CocomoTheme {
     /// which intentionally share a color.
     pub fn status_style(&self, status: DirEntryStatus) -> Style {
         let color = match status {
-            DirEntryStatus::Same | DirEntryStatus::SameBinary => Color::Gray,
-            DirEntryStatus::Similar => Color::Yellow,
-            DirEntryStatus::Different => Color::Red,
-            DirEntryStatus::LeftOnly => Color::Cyan,
-            DirEntryStatus::RightOnly => Color::Magenta,
-            DirEntryStatus::CenterOnly => Color::White,
-            DirEntryStatus::Mergeable => Color::Green,
-            DirEntryStatus::Conflict => Color::Rgb(255, 0, 255),
+            DirEntryStatus::Same | DirEntryStatus::SameBinary => {
+                self.status.same
+            }
+            DirEntryStatus::Similar => self.status.similar,
+            DirEntryStatus::Different => self.status.different,
+            DirEntryStatus::LeftOnly => self.status.left_only,
+            DirEntryStatus::RightOnly => self.status.right_only,
+            DirEntryStatus::CenterOnly => self.status.center_only,
+            DirEntryStatus::Mergeable => self.status.mergeable,
+            DirEntryStatus::Conflict => self.status.conflict,
             DirEntryStatus::IdenticalNameDifferentType => {
-                Color::Rgb(255, 255, 0)
+                self.status.type_conflict
             }
         };
         Style::new().fg(color).add_modifier(Modifier::BOLD)
@@ -181,9 +233,23 @@ mod tests {
 
     #[test]
     fn theme_derives_from_the_app_palette() {
-        let theme = CocomoTheme::from_palette(&cocomo_palette());
+        let palette = cocomo_palette();
+        let theme = CocomoTheme::from_palette(&palette);
         assert_eq!(theme.title.fg, Some(Color::Yellow));
         assert_eq!(theme.border.fg, Some(Color::Gray));
         assert_eq!(theme.highlight.bg, Some(Color::DarkGray));
+        // The semantically classifiable statuses follow the palette.
+        assert_eq!(
+            theme.status_style(DirEntryStatus::Similar).fg,
+            Some(palette.warning)
+        );
+        assert_eq!(
+            theme.status_style(DirEntryStatus::Different).fg,
+            Some(palette.error)
+        );
+        assert_eq!(
+            theme.status_style(DirEntryStatus::Mergeable).fg,
+            Some(palette.success)
+        );
     }
 }
