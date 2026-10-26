@@ -64,7 +64,7 @@ pub(super) fn matches_status_filter(
     }
 }
 
-/// Check whether an entry should be shown in flat text, CSV, or JSON output.
+/// Check whether an entry should be shown in CSV or JSON output.
 /// Applies both name/type and status filters.
 pub(super) fn should_show_entry(
     entry: &DirEntry,

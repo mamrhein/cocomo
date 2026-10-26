@@ -7,6 +7,8 @@
 // $Source$
 // $Revision$
 
+use std::cmp::Ordering;
+
 use cocomo_lib::compare::DirEntry;
 
 use crate::cli::SortField;
@@ -15,22 +17,26 @@ use crate::cli::SortField;
 // Entry sorting
 // ---------------------------------------------------------------------------
 
+/// Compare two entries by the given sort field. Ordering is descending for
+/// size and modified time (largest/newest first), ascending otherwise.
+fn compare_entries(a: &DirEntry, b: &DirEntry, sort: SortField) -> Ordering {
+    match sort {
+        SortField::Name => a.name.cmp(&b.name),
+        SortField::Size => entry_size(b).cmp(&entry_size(a)),
+        SortField::Modified => entry_modified(b).cmp(&entry_modified(a)),
+        SortField::Status => a.status.to_string().cmp(&b.status.to_string()),
+    }
+}
+
 /// Sort a flattened entry list in place by the given field.
 pub(super) fn sort_entries(entries: &mut [DirEntry], sort: SortField) {
-    match sort {
-        SortField::Name => entries.sort_by(|a, b| a.name.cmp(&b.name)),
-        SortField::Size => entries.sort_by(|a, b| {
-            let size_a = entry_size(a);
-            let size_b = entry_size(b);
-            size_b.cmp(&size_a)
-        }),
-        SortField::Modified => entries.sort_by(|a, b| {
-            let mod_a = entry_modified(a);
-            let mod_b = entry_modified(b);
-            mod_b.cmp(&mod_a)
-        }),
-        SortField::Status => entries.sort_by_key(|a| a.status.to_string()),
-    }
+    entries.sort_by(|a, b| compare_entries(a, b, sort));
+}
+
+/// Sort a borrowed entry list in place by the given field (used to order
+/// entries within each level of the tree output).
+pub(super) fn sort_entry_refs(entries: &mut [&DirEntry], sort: SortField) {
+    entries.sort_by(|a, b| compare_entries(a, b, sort));
 }
 
 /// Return the file size for an entry, preferring the left side then right.

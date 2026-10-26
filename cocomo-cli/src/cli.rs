@@ -104,8 +104,9 @@ pub struct DirCompareArgs {
     /// Compare file contents (activate content hashing).
     #[arg(short = 'c', long)]
     pub(crate) content: bool,
-    /// Maximum scan depth. Without this flag the scan is unlimited.
-    #[arg(short = 'm', long)]
+    /// Maximum scan depth (default: 1). Pass without a value to scan
+    /// without depth limit.
+    #[arg(short = 'm', long, num_args = 0..=1, default_value = "1")]
     pub(crate) max_depth: Option<usize>,
     /// Output format for console display.
     #[arg(short = 'f', long, default_value = "text")]
@@ -122,9 +123,6 @@ pub struct DirCompareArgs {
     /// Format for the report file (used with --report).
     #[arg(long, default_value = "text")]
     pub(crate) report_format: ReportFormatArg,
-    /// Render output as a hierarchical tree (text format only).
-    #[arg(short = 't', long)]
-    pub(crate) tree: bool,
     /// Control ANSI color output.
     #[arg(long, default_value = "auto")]
     pub(crate) color: ColorMode,
@@ -388,13 +386,12 @@ impl DirCompareArgs {
             left: "./left".to_string(),
             right: "./right".to_string(),
             content: false,
-            max_depth: None,
+            max_depth: Some(1),
             format: OutputFormat::Text,
             show_different: false,
             show_orphans: false,
             report: None,
             report_format: ReportFormatArg::Text,
-            tree: true,
             color: ColorMode::Never,
             no_mtime: false,
             no_summary: false,
