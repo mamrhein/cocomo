@@ -113,7 +113,11 @@ pub(super) fn FilterPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     );
 
     let Some(draft) = draft else {
-        return element!(Fragment).into_any();
+        // A childless `Fragment` has a transparent layout and falls back to
+        // the default `Fill(1)` height, which would steal the main view's
+        // rows in the App shell's vertical flex. A closed `Modal` is
+        // zero-sized instead (as in `TransferDialog`).
+        return element!(Modal(open: false)).into_any();
     };
 
     // Flatten the draft into render values.

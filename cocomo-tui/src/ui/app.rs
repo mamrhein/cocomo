@@ -186,3 +186,75 @@ pub(crate) fn App(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         }
     )
 }
+
+#[cfg(test)]
+mod render_tests {
+    use cocomo_lib::Endpoint;
+    use ratatui_kit::{ratatui::buffer::Buffer, test_util::render_frames};
+
+    use super::*;
+    use crate::{
+        state::{AppState, SessionView},
+        ui::theme::cocomo_palette,
+    };
+
+    /// Render the full `App` offscreen and flatten the buffer to text.
+    ///
+    /// Three frames: the session table windows its rows against the draw
+    /// area measured in the previous frame, so a single frame would render
+    /// the first-frame placeholder instead of the settled layout.
+    fn render(app: AppState) -> String {
+        APP_STATE.set(app);
+        let buf: Buffer = render_frames(
+            element!(PaletteProvider(palette: cocomo_palette()) {
+                App()
+            }),
+            100,
+            30,
+            3,
+        );
+        let mut out = String::new();
+        for y in 0..buf.area().height {
+            for x in 0..buf.area().width {
+                out.push_str(buf[(x, y)].symbol());
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    fn dir_session_state() -> AppState {
+        let mut app = AppState::new();
+        app.add_session(SessionView::new_dir_compare(
+            Endpoint::local("/left"),
+            Endpoint::local("/right"),
+            false,
+        ));
+        app
+    }
+
+    #[test]
+    fn dir_session_renders_the_table_panel() {
+        // Regression: the closed filter panel and report modal used to
+        // return a childless `Fragment`, whose default `Fill(1)` height
+        // stole the main view's rows and left the content area blank.
+        let text = render(dir_session_state());
+        assert!(
+            text.contains("Loading comparison"),
+            "table panel missing from the main view:\n{text}"
+        );
+        assert!(
+            text.contains('┌'),
+            "table border missing from the main view:\n{text}"
+        );
+    }
+
+    #[test]
+    fn welcome_screen_renders_the_full_panel() {
+        let text = render(AppState::new());
+        assert!(
+            text.contains("Welcome") && text.contains("└"),
+            "welcome panel not rendered at full height:\n{text}"
+        );
+    }
+}
