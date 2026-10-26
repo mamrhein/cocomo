@@ -22,12 +22,21 @@ use cocomo_lib::{DirEntryStatus, TextDiff};
 
 use crate::state::{SessionContent, SessionView};
 
-/// Build the set of line numbers that are part of a difference.
-pub fn diff_line_numbers(session: &SessionView) -> HashSet<usize> {
+/// Build the per-side sets of line numbers that are part of a difference.
+///
+/// The first set holds the left file's differing line numbers, the second
+/// the right file's. The text view's center gutter needs them split by side
+/// to tell `<` (the right side is newer) from `>` (the left side is).
+pub fn diff_line_numbers_by_side(
+    session: &SessionView,
+) -> (HashSet<usize>, HashSet<usize>) {
     session
         .text()
         .and_then(|text| text.text_diff.as_ref())
-        .map_or_else(HashSet::new, TextDiff::difference_line_numbers)
+        .map_or_else(
+            || (HashSet::new(), HashSet::new()),
+            TextDiff::difference_line_numbers_by_side,
+        )
 }
 
 /// Return the first row index of each contiguous difference group.
@@ -123,12 +132,12 @@ mod tests {
     }
 
     #[test]
-    fn diff_line_numbers_delegates_to_lib() {
-        let numbers = diff_line_numbers(&session());
-        for n in [3, 4, 5, 7] {
-            assert!(numbers.contains(&n), "missing line {n}");
-        }
-        assert!(!numbers.contains(&1));
+    fn diff_line_numbers_by_side_delegates_to_lib() {
+        let (left, right) = diff_line_numbers_by_side(&session());
+        // Lines 3 and 7 differ on both sides, lines 4 and 5 were added on
+        // the right only.
+        assert_eq!(left, HashSet::from([3, 7]));
+        assert_eq!(right, HashSet::from([3, 4, 5, 7]));
     }
 
     #[test]
@@ -152,7 +161,9 @@ mod tests {
     fn session_without_a_text_diff_is_empty() {
         let mut session = session();
         session.text_mut().unwrap().text_diff = None;
-        assert!(diff_line_numbers(&session).is_empty());
+        let (left, right) = diff_line_numbers_by_side(&session);
+        assert!(left.is_empty());
+        assert!(right.is_empty());
         assert!(diff_group_starts(&session).is_empty());
         assert_eq!(current_diff_position(&session), (0, 0));
     }

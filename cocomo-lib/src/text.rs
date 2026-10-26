@@ -255,25 +255,44 @@ impl TextDiff {
     /// Return the set of 1-based line numbers that participate in a
     /// difference, from either side.
     pub fn difference_line_numbers(&self) -> HashSet<usize> {
-        let mut numbers = HashSet::new();
+        let (mut numbers, right_numbers) =
+            self.difference_line_numbers_by_side();
+        numbers.extend(right_numbers);
+        numbers
+    }
+
+    /// Return the 1-based line numbers that participate in a difference,
+    /// split by side: the left (old) text's numbers first, the right (new)
+    /// text's numbers second.
+    ///
+    /// Unlike [`Self::difference_line_numbers`], this keeps track of *which*
+    /// text a differing line belongs to, which is what a side-by-side view
+    /// needs to tell a left-only line from a right-only or changed one.
+    pub fn difference_line_numbers_by_side(
+        &self,
+    ) -> (HashSet<usize>, HashSet<usize>) {
+        let mut left_numbers = HashSet::new();
+        let mut right_numbers = HashSet::new();
         for diff in &self.differences {
             match diff {
                 TextDifference::LineDifferent(left, right) => {
-                    numbers.insert(left.number);
-                    numbers.insert(right.number);
+                    left_numbers.insert(left.number);
+                    right_numbers.insert(right.number);
                 }
-                TextDifference::LinesAdded(_, lines)
-                | TextDifference::LinesRemoved(_, lines) => {
-                    numbers.extend(lines.iter().map(|l| l.number));
+                TextDifference::LinesAdded(_, lines) => {
+                    right_numbers.extend(lines.iter().map(|l| l.number));
+                }
+                TextDifference::LinesRemoved(_, lines) => {
+                    left_numbers.extend(lines.iter().map(|l| l.number));
                 }
                 TextDifference::LinesChanged(_, removed, added) => {
-                    numbers.extend(removed.iter().map(|l| l.number));
-                    numbers.extend(added.iter().map(|l| l.number));
+                    left_numbers.extend(removed.iter().map(|l| l.number));
+                    right_numbers.extend(added.iter().map(|l| l.number));
                 }
                 TextDifference::BlankLine => {}
             }
         }
-        numbers
+        (left_numbers, right_numbers)
     }
 
     /// Return the first row index (0-based) of each contiguous difference
@@ -725,6 +744,15 @@ mod tests {
         }
         assert!(!numbers.contains(&1));
         assert!(!numbers.contains(&10));
+    }
+
+    #[test]
+    fn difference_line_numbers_by_side_splits_sides() {
+        let (left, right) = grouped_diff().difference_line_numbers_by_side();
+        // Lines 3 and 7 differ on both sides, lines 4 and 5 were added on
+        // the right only.
+        assert_eq!(left, HashSet::from([3, 7]));
+        assert_eq!(right, HashSet::from([3, 4, 5, 7]));
     }
 
     #[test]

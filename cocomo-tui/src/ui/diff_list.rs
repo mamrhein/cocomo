@@ -13,7 +13,12 @@
 //! a `Table` would rebuild every row's cells on every frame.  Instead the
 //! rows are memoized view models ([`TextDiffRow`]) shared via `Arc`, and
 //! only the visible window is rendered, through `VirtualList` and the small
-//! native [`DiffLine`] widget that draws one row's two halves.
+//! native [`DiffLine`] widget that draws one row's two halves separated by
+//! a one-character status gutter (`<`, `=`, `>`) at the split.
+//!
+//! The gutter arrow points at the side that is behind: `<` when the right
+//! side has new or changed content, `>` when the left side has content the
+//! right side lacks, and `=` for identical lines (requirements §11.3).
 
 use std::sync::Arc;
 
@@ -28,16 +33,25 @@ use ratatui_kit::{
     },
 };
 
-use super::{rows::TextDiffRow, theme::CocomoTheme};
+use super::{
+    rows::{DiffGutter, TextDiffRow},
+    theme::CocomoTheme,
+};
 
-/// One rendered diff row: two styled half-lines sharing a row style.
+/// One rendered diff row: two styled half-lines and a one-character status
+/// gutter at the split, sharing a row style.
 ///
 /// Implemented as a native Ratatui widget (the `VirtualList` item type):
-/// the area is split at the midpoint and each half renders one line.
+/// the area is split at the midpoint, one column at the split carries the
+/// gutter symbol, and each remaining half renders one line.
 #[derive(Clone)]
 struct DiffLine {
     left: Line<'static>,
     right: Line<'static>,
+    /// Gutter symbol rendered in the column at the split.
+    gutter: &'static str,
+    /// Style for the gutter symbol.
+    gutter_style: Style,
     style: Style,
 }
 
@@ -49,20 +63,48 @@ impl Widget for DiffLine {
 
 impl Widget for &DiffLine {
     fn render(self, area: Rect, buf: &mut Buffer) {
+        buf.set_style(area, self.style);
+        if area.width == 0 {
+            return;
+        }
         let half = area.width / 2;
         let left_area = Rect {
             width: half,
             ..area
         };
-        let right_area = Rect {
-            x: area.x + half,
-            width: area.width - half,
-            ..area
-        };
-        buf.set_style(left_area, self.style);
-        buf.set_style(right_area, self.style);
         self.left.clone().render(left_area, buf);
-        self.right.clone().render(right_area, buf);
+        // One column at the split carries the status gutter; the right
+        // half starts after it.
+        let gutter_x = area.x + half;
+        Span::styled(self.gutter, self.gutter_style).render(
+            Rect {
+                x: gutter_x,
+                width: 1,
+                ..area
+            },
+            buf,
+        );
+        let right_x = gutter_x + 1;
+        let right_width = (area.x + area.width).saturating_sub(right_x);
+        if right_width > 0 {
+            let right_area = Rect {
+                x: right_x,
+                width: right_width,
+                ..area
+            };
+            self.right.clone().render(right_area, buf);
+        }
+    }
+}
+
+/// Style for a row's gutter symbol: dim for identical lines, and the
+/// color of the newer side's diff content otherwise (green `diff_added`
+/// for `<`, red `diff_removed` for `>`).
+fn gutter_style(theme: &CocomoTheme, gutter: DiffGutter) -> Style {
+    match gutter {
+        DiffGutter::Equal => theme.dim,
+        DiffGutter::RightNewer => theme.diff_added,
+        DiffGutter::LeftNewer => theme.diff_removed,
     }
 }
 
@@ -119,6 +161,8 @@ pub(super) fn SessionDiffList(
 
     let rows = props.rows.clone();
     let highlight = theme.highlight;
+    // The header row has no status of its own; a dim bar keeps the gutter
+    // column visually continuous with the rows below.
     let header = DiffLine {
         left: Line::from(Span::styled(
             props.left_name.clone(),
@@ -128,6 +172,8 @@ pub(super) fn SessionDiffList(
             props.right_name.clone(),
             theme.right_name,
         )),
+        gutter: "\u{2502}",
+        gutter_style: theme.dim,
         style: Style::default(),
     };
 
@@ -153,6 +199,8 @@ pub(super) fn SessionDiffList(
                         let line = DiffLine {
                             left: row.left.clone(),
                             right: row.right.clone(),
+                            gutter: row.gutter.symbol(),
+                            gutter_style: gutter_style(&theme, row.gutter),
                             style: if ctx.is_selected {
                                 highlight
                             } else {
@@ -165,4 +213,54 @@ pub(super) fn SessionDiffList(
             )
         }
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_line(gutter: &'static str) -> DiffLine {
+        DiffLine {
+            left: Line::from("L"),
+            right: Line::from("R"),
+            gutter,
+            gutter_style: Style::new(),
+            style: Style::new(),
+        }
+    }
+
+    #[test]
+    fn diff_line_renders_the_gutter_at_the_split() {
+        let mut buf = Buffer::empty(Rect::new(0, 0, 10, 1));
+        test_line("<").render(buf.area, &mut buf);
+        // Width 10 splits at column 5: the gutter occupies it, the right
+        // half starts one column later.
+        assert_eq!(buf[(0, 0)].symbol(), "L");
+        assert_eq!(buf[(5, 0)].symbol(), "<");
+        assert_eq!(buf[(6, 0)].symbol(), "R");
+    }
+
+    #[test]
+    fn diff_line_survives_a_too_narrow_area() {
+        // Width 2 fits the left half and the gutter but not the right
+        // half; rendering must not panic.
+        let mut buf = Buffer::empty(Rect::new(0, 0, 2, 1));
+        test_line("=").render(buf.area, &mut buf);
+        assert_eq!(buf[(0, 0)].symbol(), "L");
+        assert_eq!(buf[(1, 0)].symbol(), "=");
+    }
+
+    #[test]
+    fn gutter_style_distinguishes_the_statuses() {
+        let theme = CocomoTheme::default();
+        assert_eq!(gutter_style(&theme, DiffGutter::Equal), theme.dim);
+        assert_eq!(
+            gutter_style(&theme, DiffGutter::RightNewer),
+            theme.diff_added
+        );
+        assert_eq!(
+            gutter_style(&theme, DiffGutter::LeftNewer),
+            theme.diff_removed
+        );
+    }
 }

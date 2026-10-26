@@ -31,7 +31,7 @@ use crate::{
         dispatch_text_key, set_active_mode, set_mode_buffer, submit_command,
         submit_search,
     },
-    diff_model::{current_diff_position, diff_line_numbers},
+    diff_model::{current_diff_position, diff_line_numbers_by_side},
     keys::{self, KeyScope},
     state::{APP_STATE, SessionMode},
 };
@@ -98,12 +98,17 @@ pub(super) fn TextCompareView(
     let rows: Arc<Vec<TextDiffRow>> = hooks.use_memo(
         || match session {
             Some(s) => match s.text() {
-                Some(text) => text_diff_rows(
-                    &text.left_lines,
-                    &text.right_lines,
-                    &diff_line_numbers(s),
-                    &theme,
-                ),
+                Some(text) => {
+                    let (left_diffs, right_diffs) =
+                        diff_line_numbers_by_side(s);
+                    text_diff_rows(
+                        &text.left_lines,
+                        &text.right_lines,
+                        &left_diffs,
+                        &right_diffs,
+                        &theme,
+                    )
+                }
                 None => Arc::new(Vec::new()),
             },
             None => Arc::new(Vec::new()),

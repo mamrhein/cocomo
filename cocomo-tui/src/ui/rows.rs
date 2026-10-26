@@ -13,7 +13,7 @@
 //! `cocomo-lib` data only when that data changes (keyed by the session's
 //! revision counters), and cloned cheaply per frame afterwards — the cell
 //! rows share an `Arc<[TableCell]>`, and a diff row is a single pair of
-//! pre-styled lines.
+//! pre-styled lines plus a gutter status.
 
 use std::{collections::HashSet, sync::Arc};
 
@@ -134,17 +134,51 @@ pub(super) fn sync_rows(
         .collect()
 }
 
+/// Per-row status rendered as the one-character gutter between the two
+/// diff panes (requirements §11.3).
+///
+/// The arrow points at the side that is behind: `<` when the right side
+/// has new or changed content, `>` when the left side has content the
+/// right side lacks. This mirrors the dir view's status symbols.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum DiffGutter {
+    /// Both sides show the same line.
+    Equal,
+    /// The right side has new or changed content (`<`).
+    RightNewer,
+    /// The left side has content the right side lacks (`>`).
+    LeftNewer,
+}
+
+impl DiffGutter {
+    /// The single-character gutter symbol.
+    pub fn symbol(self) -> &'static str {
+        match self {
+            DiffGutter::Equal => "=",
+            DiffGutter::RightNewer => "<",
+            DiffGutter::LeftNewer => ">",
+        }
+    }
+}
+
 /// One row of the side-by-side text diff: the two fully styled half-lines
-/// (line number, diff marker, content).
+/// (line number, diff marker, content) and the center gutter status.
 #[derive(Clone)]
 pub(super) struct TextDiffRow {
     /// Left half-line.
     pub left: Line<'static>,
     /// Right half-line.
     pub right: Line<'static>,
+    /// Status shown in the gutter between the panes.
+    pub gutter: DiffGutter,
 }
 
 /// Build the memoized text-diff rows from the two files' lines.
+///
+/// `left_diff_numbers` and `right_diff_numbers` are the per-side sets of
+/// differing line numbers; a row's gutter is `<` when its right line is
+/// part of a difference (changed or added), `>` when only its left line
+/// is (removed), and `=` otherwise.
 ///
 /// The result is `Arc`-wrapped so the component clones it in O(1) per
 /// frame; the rows themselves are only rebuilt when the underlying diff
@@ -152,25 +186,43 @@ pub(super) struct TextDiffRow {
 pub(super) fn text_diff_rows(
     left_lines: &[LineInfo],
     right_lines: &[LineInfo],
-    diff_numbers: &HashSet<usize>,
+    left_diff_numbers: &HashSet<usize>,
+    right_diff_numbers: &HashSet<usize>,
     theme: &CocomoTheme,
 ) -> Arc<Vec<TextDiffRow>> {
     let max_lines = std::cmp::max(left_lines.len(), right_lines.len());
     Arc::new(
         (0..max_lines)
-            .map(|i| TextDiffRow {
-                left: diff_side_line(
-                    left_lines.get(i),
-                    diff_numbers,
-                    theme,
-                    theme.diff_removed,
-                ),
-                right: diff_side_line(
-                    right_lines.get(i),
-                    diff_numbers,
-                    theme,
-                    theme.diff_added,
-                ),
+            .map(|i| {
+                let left = left_lines.get(i);
+                let right = right_lines.get(i);
+                let left_diff = left
+                    .is_some_and(|l| left_diff_numbers.contains(&l.number));
+                let right_diff = right
+                    .is_some_and(|l| right_diff_numbers.contains(&l.number));
+                let gutter = if right_diff {
+                    // A changed or added right line is the newer content.
+                    DiffGutter::RightNewer
+                } else if left_diff {
+                    DiffGutter::LeftNewer
+                } else {
+                    DiffGutter::Equal
+                };
+                TextDiffRow {
+                    left: diff_side_line(
+                        left,
+                        left_diff_numbers,
+                        theme,
+                        theme.diff_removed,
+                    ),
+                    right: diff_side_line(
+                        right,
+                        right_diff_numbers,
+                        theme,
+                        theme.diff_added,
+                    ),
+                    gutter,
+                }
             })
             .collect(),
     )
@@ -179,9 +231,11 @@ pub(super) fn text_diff_rows(
 /// Render one side of a diff row: line number, diff marker, and content,
 /// or a blank placeholder when the file has no line at this index.
 ///
-/// Diff lines are highlighted with `diff_style` (red for the left, green
-/// for the right side); otherwise the grammar classification of the line
-/// decides the style.
+/// `diff_numbers` is the *side's own* set of differing line numbers, so a
+/// line is only marked when it participates in a difference on its own
+/// side. Diff lines are highlighted with `diff_style` (red for the left,
+/// green for the right side); otherwise the grammar classification of the
+/// line decides the style.
 fn diff_side_line(
     line: Option<&LineInfo>,
     diff_numbers: &HashSet<usize>,
@@ -215,4 +269,57 @@ fn importance_for_line(line: &LineInfo) -> Importance {
         }
     }
     max_imp
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lines(contents: &[&str]) -> Vec<LineInfo> {
+        contents
+            .iter()
+            .enumerate()
+            .map(|(i, c)| LineInfo::new(i + 1, (*c).to_string()))
+            .collect()
+    }
+
+    fn numbers(nums: &[usize]) -> HashSet<usize> {
+        nums.iter().copied().collect()
+    }
+
+    #[test]
+    fn text_diff_rows_gutter_points_at_the_behind_side() {
+        // Line 2 changed on both sides, line 4 exists only on the left.
+        let left = lines(&["a", "b", "c", "d"]);
+        let right = lines(&["a", "x", "c"]);
+        let rows = text_diff_rows(
+            &left,
+            &right,
+            &numbers(&[2, 4]),
+            &numbers(&[2]),
+            &CocomoTheme::default(),
+        );
+        let gutters: Vec<&str> =
+            rows.iter().map(|r| r.gutter.symbol()).collect();
+        assert_eq!(gutters, vec!["=", "<", "=", ">"]);
+    }
+
+    #[test]
+    fn text_diff_rows_mark_only_their_own_side() {
+        let left = lines(&["a"]);
+        let right = lines(&["b"]);
+        // Only the right line participates in a difference: the left line
+        // must not carry a diff marker even though line 1 differs on the
+        // other side.
+        let rows = text_diff_rows(
+            &left,
+            &right,
+            &numbers(&[]),
+            &numbers(&[1]),
+            &CocomoTheme::default(),
+        );
+        assert_eq!(rows[0].left.spans[1].content.as_ref(), "  ");
+        assert_eq!(rows[0].right.spans[1].content.as_ref(), "\u{25B6} ");
+        assert_eq!(rows[0].gutter, DiffGutter::RightNewer);
+    }
 }
