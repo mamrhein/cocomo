@@ -457,8 +457,8 @@ mod tests {
             self.0.id()
         }
 
-        fn label_node(&self) -> &str {
-            self.0.label_node()
+        fn label(&self) -> &str {
+            self.0.label()
         }
 
         async fn resolve_path(

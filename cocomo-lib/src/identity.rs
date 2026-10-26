@@ -11,8 +11,9 @@
 //!
 //! Every filesystem backend assigns its own [`NodeId`] values internally. The
 //! IDs are opaque to callers — they are not paths, not inodes, not memory
-//! addresses. Callers receive them from the [`FileSystem`] trait and pass them
-//! back for subsequent operations. This eliminates TOCTOU races and path
+//! addresses. Callers receive them from the
+//! [`NodeFileSystem`](crate::fs::NodeFileSystem) trait and pass
+//! them back for subsequent operations. This eliminates TOCTOU races and path
 //! construction bugs.
 //!
 //! Type-safe wrappers [`DirId`] and [`FileId`] encode the node kind at

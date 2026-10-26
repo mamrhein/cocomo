@@ -7,8 +7,7 @@
 // $Source$
 // $Revision$
 
-//! In-memory `FileSystem`, `NodeFileSystem`, and `WritableFileSystem` double
-//! for tests.
+//! In-memory [`NodeFileSystem`] and [`WritableFileSystem`] double for tests.
 //!
 //! [`MockFs`] is backed by a `BTreeMap` of tree entries (directory, file, or
 //! symlink) plus two error-injection maps. It lets provider-agnostic logic
@@ -60,8 +59,7 @@ use crate::{
     error::{FsError, FsOperation, Result},
     file::FsFile,
     fs::{
-        DirEntryMeta, DirStream, FileSystem, NodeFileSystem, OpenMode,
-        WritableFileSystem,
+        DirEntryMeta, DirStream, NodeFileSystem, OpenMode, WritableFileSystem,
     },
     identity::{DirId, FileId, FileSystemId, NodeId},
     meta::Metadata,
@@ -135,13 +133,14 @@ impl MockTree {
 /// instance, so that two mocks are never treated as the same filesystem.
 static NEXT_FS_ID: AtomicU64 = AtomicU64::new(1);
 
-/// A writable, in-memory `FileSystem` for tests.
+/// A writable, in-memory [`NodeFileSystem`] and [`WritableFileSystem`]
+/// double for tests.
 ///
 /// Build the tree with the `with_*` builder methods, then pass the instance
-/// to anything that takes a `&Arc<dyn FileSystem>`:
+/// to anything that takes a node-based filesystem:
 ///
 /// ```text
-/// let fs: Arc<dyn FileSystem> = Arc::new(
+/// let fs = Arc::new(
 ///     MockFs::new("mock")
 ///         .with_dir("/root")
 ///         .with_file("/root/a.txt", "alpha")
@@ -287,6 +286,8 @@ impl MockFs {
     }
 
     /// Metadata of the direct children of `dir`, in path order.
+    // Only used by `read_dir`; the node API lists children itself.
+    #[allow(dead_code)]
     fn child_meta(&self, dir: &Path) -> Vec<DirEntryMeta> {
         self.children_of(dir)
             .into_iter()
@@ -630,9 +631,18 @@ impl Clone for MockFs {
     }
 }
 
-#[async_trait]
-impl FileSystem for MockFs {
-    async fn metadata(&self, path: &Path) -> Result<Metadata> {
+// ---------------------------------------------------------------------------
+// Path-based operation helpers
+//
+// These methods back the former `FileSystem` trait. The node impls delegate
+// to the ones they need (so injected errors shadow node operations, too);
+// the remaining `#[allow(dead_code)]` methods are only exercised by this
+// module's unit tests.
+// ---------------------------------------------------------------------------
+
+impl MockFs {
+    #[allow(dead_code)]
+    pub(crate) async fn metadata(&self, path: &Path) -> Result<Metadata> {
         if let Some(err) = self.error_at(path) {
             return Err(err);
         }
@@ -652,7 +662,8 @@ impl FileSystem for MockFs {
         }
     }
 
-    async fn read_dir(&self, path: &Path) -> Result<DirStream<'_>> {
+    #[allow(dead_code)]
+    pub(crate) async fn read_dir(&self, path: &Path) -> Result<DirStream<'_>> {
         if let Some(err) = self.error_at(path) {
             return Err(err);
         }
@@ -678,7 +689,7 @@ impl FileSystem for MockFs {
         }
     }
 
-    async fn open(
+    pub(crate) async fn open(
         &self,
         path: &Path,
         mode: OpenMode,
@@ -709,7 +720,7 @@ impl FileSystem for MockFs {
         }
     }
 
-    async fn read(
+    pub(crate) async fn read(
         &self,
         path: &Path,
         range: Option<Range<u64>>,
@@ -745,7 +756,7 @@ impl FileSystem for MockFs {
         Ok(data.slice(r.start as usize..end))
     }
 
-    async fn read_stream(
+    pub(crate) async fn read_stream(
         &self,
         path: &Path,
         _range: Option<Range<u64>>,
@@ -776,41 +787,15 @@ impl FileSystem for MockFs {
         Ok(stream)
     }
 
-    async fn write(&self, path: &Path, data: Bytes) -> Result<()> {
+    #[allow(dead_code)]
+    pub(crate) async fn write(&self, path: &Path, data: Bytes) -> Result<()> {
         if let Some(err) = self.error_at(path) {
             return Err(err);
         }
         self.set_content(path, &data)
     }
 
-    async fn create_dir(&self, path: &Path) -> Result<()> {
-        if let Some(err) = self.error_at(path) {
-            return Err(err);
-        }
-        {
-            let mut tree = self.tree.write();
-            if tree.nodes.contains_key(path) {
-                return Err(FsError::InvalidArgument {
-                    operation: FsOperation::CreateDir,
-                    path: path.to_path_buf(),
-                    message: "entry already exists".to_string(),
-                });
-            }
-            tree.nodes.insert(path.to_path_buf(), MockNode::Dir);
-        }
-        let name: OsString =
-            path.file_name().map(OsStr::to_owned).unwrap_or_default();
-        let node = Node::directory(
-            name,
-            path.to_path_buf(),
-            Metadata::dir(Utc::now()),
-        )
-        .with_parent(self.resolve_parent_id(path));
-        self.upsert_node(node);
-        Ok(())
-    }
-
-    async fn remove(&self, path: &Path) -> Result<()> {
+    pub(crate) async fn remove(&self, path: &Path) -> Result<()> {
         if let Some(err) = self.error_at(path) {
             return Err(err);
         }
@@ -831,14 +816,15 @@ impl FileSystem for MockFs {
         Ok(())
     }
 
-    async fn remove_all(&self, path: &Path) -> Result<()> {
+    #[allow(dead_code)]
+    pub(crate) async fn remove_all(&self, path: &Path) -> Result<()> {
         if let Some(err) = self.error_at(path) {
             return Err(err);
         }
         self.remove_subtree(path)
     }
 
-    async fn rename(&self, src: &Path, dst: &Path) -> Result<()> {
+    pub(crate) async fn rename(&self, src: &Path, dst: &Path) -> Result<()> {
         if let Some(err) = self.error_at(src) {
             return Err(err);
         }
@@ -848,7 +834,8 @@ impl FileSystem for MockFs {
         self.move_subtree(src, dst)
     }
 
-    async fn copy(&self, src: &Path, dst: &Path) -> Result<()> {
+    #[allow(dead_code)]
+    pub(crate) async fn copy(&self, src: &Path, dst: &Path) -> Result<()> {
         if let Some(err) = self.error_at(src) {
             return Err(err);
         }
@@ -856,38 +843,6 @@ impl FileSystem for MockFs {
             return Err(err);
         }
         self.copy_subtree(src, dst).map(|_| ())
-    }
-
-    async fn read_link(&self, path: &Path) -> Result<PathBuf> {
-        if let Some(err) = self.error_at(path) {
-            return Err(err);
-        }
-        match self.node_at(path) {
-            Some(MockNode::Symlink(target)) => Ok(target),
-            Some(_) => Err(FsError::InvalidArgument {
-                operation: FsOperation::ReadLink,
-                path: path.to_path_buf(),
-                message: "entry is not a symlink".to_string(),
-            }),
-            None => Err(FsError::NotFound {
-                path: path.to_path_buf(),
-            }),
-        }
-    }
-
-    async fn symlink(&self, target: &Path, link: &Path) -> Result<()> {
-        if let Some(err) = self.error_at(link) {
-            return Err(err);
-        }
-        self.tree.write().nodes.insert(
-            link.to_path_buf(),
-            MockNode::Symlink(target.to_path_buf()),
-        );
-        Ok(())
-    }
-
-    fn label(&self) -> &str {
-        &self.label
     }
 }
 
@@ -905,7 +860,7 @@ impl NodeFileSystem for MockFs {
         self.fs_id
     }
 
-    fn label_node(&self) -> &str {
+    fn label(&self) -> &str {
         &self.label
     }
 

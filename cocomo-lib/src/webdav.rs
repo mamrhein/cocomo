@@ -9,9 +9,9 @@
 
 //! WebDAV filesystem provider.
 //!
-//! Provides access to WebDAV servers through the [`FileSystem`],
-//! [`NodeFileSystem`], and [`WritableFileSystem`] traits. Uses the `webdav`
-//! crate for the underlying client.
+//! Provides access to WebDAV servers through the [`NodeFileSystem`] and
+//! [`WritableFileSystem`] traits. Uses the `webdav` crate for the underlying
+//! client.
 //!
 //! # Configuration
 //!
@@ -40,9 +40,7 @@ use futures::Stream;
 use crate::{
     error::{FsError, Result},
     file::FsFile,
-    fs::{
-        DirStream, FileSystem, NodeFileSystem, OpenMode, WritableFileSystem,
-    },
+    fs::{NodeFileSystem, OpenMode, WritableFileSystem},
     identity::{DirId, FileId, FileSystemId, NodeId},
     meta::Metadata,
     node::Node,
@@ -144,96 +142,6 @@ impl WebDavFs {
 }
 
 #[async_trait]
-impl FileSystem for WebDavFs {
-    async fn metadata(&self, _path: &Path) -> Result<Metadata> {
-        unimplemented!(
-            "WebDavFs::metadata — implement with webdav PROPFIND (depth 0)"
-        )
-    }
-
-    async fn read_dir(&self, _path: &Path) -> Result<DirStream<'_>> {
-        unimplemented!(
-            "WebDavFs::read_dir — implement with webdav PROPFIND (depth 1)"
-        )
-    }
-
-    async fn open(
-        &self,
-        _path: &Path,
-        _mode: OpenMode,
-    ) -> Result<Box<dyn FsFile>> {
-        unimplemented!("WebDavFs::open — implement with webdav GET/PUT")
-    }
-
-    async fn read(
-        &self,
-        _path: &Path,
-        _range: Option<Range<u64>>,
-    ) -> Result<Bytes> {
-        unimplemented!(
-            "WebDavFs::read — implement with webdav GET (Range header)"
-        )
-    }
-
-    async fn read_stream(
-        &self,
-        _path: &Path,
-        _range: Option<Range<u64>>,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<Bytes>> + Send>>> {
-        unimplemented!(
-            "WebDavFs::read_stream — implement with webdav streaming GET"
-        )
-    }
-
-    async fn write(&self, _path: &Path, _data: Bytes) -> Result<()> {
-        unimplemented!("WebDavFs::write — implement with webdav PUT")
-    }
-
-    async fn create_dir(&self, _path: &Path) -> Result<()> {
-        unimplemented!("WebDavFs::create_dir — implement with webdav MKCOL")
-    }
-
-    async fn remove(&self, _path: &Path) -> Result<()> {
-        unimplemented!("WebDavFs::remove — implement with webdav DELETE")
-    }
-
-    async fn remove_all(&self, _path: &Path) -> Result<()> {
-        unimplemented!(
-            "WebDavFs::remove_all — implement with recursive PROPFIND + \
-             DELETE"
-        )
-    }
-
-    async fn rename(&self, _src: &Path, _dst: &Path) -> Result<()> {
-        unimplemented!("WebDavFs::rename — implement with webdav MOVE")
-    }
-
-    async fn copy(&self, _src: &Path, _dst: &Path) -> Result<()> {
-        unimplemented!("WebDavFs::copy — implement with webdav COPY")
-    }
-
-    async fn read_link(&self, _path: &Path) -> Result<PathBuf> {
-        Err(FsError::Io {
-            operation: crate::error::FsOperation::ReadLink,
-            path: PathBuf::new(),
-            message: "WebDAV does not support symbolic links".into(),
-        })
-    }
-
-    async fn symlink(&self, _target: &Path, _link: &Path) -> Result<()> {
-        Err(FsError::Io {
-            operation: crate::error::FsOperation::Symlink,
-            path: PathBuf::new(),
-            message: "WebDAV does not support symbolic links".into(),
-        })
-    }
-
-    fn label(&self) -> &str {
-        &self.label
-    }
-}
-
-#[async_trait]
 impl NodeFileSystem for WebDavFs {
     type FsId = u64;
     type Nid = u64;
@@ -243,7 +151,7 @@ impl NodeFileSystem for WebDavFs {
         self.fs_id
     }
 
-    fn label_node(&self) -> &str {
+    fn label(&self) -> &str {
         &self.label
     }
 
@@ -448,8 +356,11 @@ mod tests {
         };
         let fs = WebDavFs::new("test-dav", config);
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let result =
-            rt.block_on(fs.symlink(Path::new("/target"), Path::new("/link")));
+        let result = rt.block_on(fs.create_symlink(
+            DirId::new(0),
+            OsStr::new("link"),
+            Path::new("/target"),
+        ));
         assert!(result.is_err());
     }
 

@@ -424,18 +424,18 @@ impl Session {
             name: self.name.clone(),
             session_type: self.session_type,
             left: ProviderRef {
-                provider: self.left_provider.label_node().to_string(),
+                provider: self.left_provider.label().to_string(),
                 path: self.left_path.clone(),
             },
             right: ProviderRef {
-                provider: self.right_provider.label_node().to_string(),
+                provider: self.right_provider.label().to_string(),
                 path: self.right_path.clone(),
             },
             center: self.center_path.clone().map(|path| ProviderRef {
                 provider: self
                     .center_provider
                     .as_ref()
-                    .map(|p| p.label_node().to_string())
+                    .map(|p| p.label().to_string())
                     .unwrap_or_default(),
                 path,
             }),
@@ -506,11 +506,11 @@ impl fmt::Debug for Session {
             .field("id", &self.id)
             .field("name", &self.name)
             .field("session_type", &self.session_type)
-            .field("left_label", &self.left_provider.label_node())
-            .field("right_label", &self.right_provider.label_node())
+            .field("left_label", &self.left_provider.label())
+            .field("right_label", &self.right_provider.label())
             .field(
                 "center_label",
-                &self.center_provider.as_ref().map(|p| p.label_node()),
+                &self.center_provider.as_ref().map(|p| p.label()),
             )
             .field("left_path", &self.left_path)
             .field("right_path", &self.right_path)

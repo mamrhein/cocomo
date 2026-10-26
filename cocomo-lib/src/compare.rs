@@ -511,8 +511,8 @@ where
     // its own provider.
     let left_path = left_root.join(&left.path);
     let right_path = right_root.join(&right.path);
-    let left_label = left_fs.label_node();
-    let right_label = right_fs.label_node();
+    let left_label = left_fs.label();
+    let right_label = right_fs.label();
 
     let left_id = left_fs.resolve_path(&left_path).await.ok();
     let right_id = right_fs.resolve_path(&right_path).await.ok();

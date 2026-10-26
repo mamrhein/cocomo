@@ -9,20 +9,13 @@
 
 //! Core filesystem traits that every backend implements.
 //!
-//! # Path-based API (current)
-//!
-//! The [`FileSystem`] trait uses path-based operations. This is the current
-//! API used by all downstream modules (scanning, comparison, etc.).
-//!
-//! # Node-based API (new)
+//! # Node-based API
 //!
 //! The [`NodeFileSystem`] trait operates on opaque [`NodeId`] identifiers.
-//! Paths are resolved exactly once at entry time via `resolve_path()`, and all
-//! subsequent I/O uses node identifiers to avoid TOCTOU races.
-//!
-//! Both traits are implemented by [`LocalFs`](crate::local::LocalFs). The
-//! node-based trait is the target for future migration; the path-based trait
-//! remains for backward compatibility.
+//! Paths are resolved exactly once at entry time via
+//! [`NodeFileSystem::resolve_path`], and all subsequent I/O uses node
+//! identifiers to avoid TOCTOU races. Backends may keep path-based helpers as
+//! private inherent methods; they are no longer part of the public API.
 //!
 //! # Read / write split
 //!
@@ -31,12 +24,7 @@
 //! S3 in read-only mode) implement only the base trait.
 
 use std::{
-    ffi::OsStr,
-    fmt::Debug,
-    hash::Hash,
-    ops::Range,
-    path::{Path, PathBuf},
-    pin::Pin,
+    ffi::OsStr, fmt::Debug, hash::Hash, ops::Range, path::Path, pin::Pin,
     sync::Arc,
 };
 
@@ -67,90 +55,27 @@ pub enum OpenMode {
     Append,
 }
 
-/// A single directory entry returned by `read_dir`.
+/// A single directory entry returned by a backend's path-based `read_dir`
+/// helper.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct DirEntryMeta {
+// Only constructed by backend `read_dir` helpers, which the node API does
+// not delegate to; exercised by backend unit tests.
+#[allow(dead_code)]
+pub(crate) struct DirEntryMeta {
     /// File or directory name (not the full path).
     pub name: String,
     /// Metadata for this entry.
     pub meta: Metadata,
 }
 
-/// A stream of directory entries. Used by `read_dir` to handle large
-/// directories without loading all entries into memory at once.
-pub type DirStream<'a> =
+/// A stream of directory entries. Used by path-based `read_dir` helpers to
+/// handle large directories without loading all entries into memory at once.
+#[allow(dead_code)]
+pub(crate) type DirStream<'a> =
     Pin<Box<dyn Stream<Item = Result<DirEntryMeta>> + Send + 'a>>;
 
 // ---------------------------------------------------------------------------
-// Path-based FileSystem trait (current API)
-// ---------------------------------------------------------------------------
-
-/// The unified filesystem abstraction. Every backend (local, FTP, S3, etc.)
-/// implements this trait so that higher-level logic is provider-agnostic.
-///
-/// This trait uses path-based operations and is the current stable API.
-#[async_trait]
-pub trait FileSystem: Send + Sync {
-    /// Resolve a path to metadata. Does not open the file.
-    async fn metadata(&self, path: &Path) -> Result<Metadata>;
-
-    /// List directory entries. Returns a stream for large directories.
-    async fn read_dir(&self, path: &Path) -> Result<DirStream<'_>>;
-
-    /// Open a file for I/O. The returned handle owns the open descriptor;
-    /// the caller should discard `path` after this call.
-    async fn open(
-        &self,
-        path: &Path,
-        mode: OpenMode,
-    ) -> Result<Box<dyn FsFile>>;
-
-    /// Read file content in a single call. `range` is optional for sparse
-    /// reads. For large files prefer `read_stream()` instead.
-    async fn read(
-        &self,
-        path: &Path,
-        range: Option<Range<u64>>,
-    ) -> Result<Bytes>;
-
-    /// Read file content as a stream. Suitable for large files and
-    /// streaming comparison or hashing.
-    async fn read_stream(
-        &self,
-        path: &Path,
-        range: Option<Range<u64>>,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<Bytes>> + Send>>>;
-
-    /// Write file content.
-    async fn write(&self, path: &Path, data: Bytes) -> Result<()>;
-
-    /// Create directory (parents as needed).
-    async fn create_dir(&self, path: &Path) -> Result<()>;
-
-    /// Delete a file or empty directory.
-    async fn remove(&self, path: &Path) -> Result<()>;
-
-    /// Delete recursively.
-    async fn remove_all(&self, path: &Path) -> Result<()>;
-
-    /// Rename / move within the same provider.
-    async fn rename(&self, src: &Path, dst: &Path) -> Result<()>;
-
-    /// Copy within the same provider.
-    async fn copy(&self, src: &Path, dst: &Path) -> Result<()>;
-
-    /// Symlink metadata (target path, if applicable).
-    async fn read_link(&self, path: &Path) -> Result<PathBuf>;
-
-    /// Create a symlink.
-    async fn symlink(&self, target: &Path, link: &Path) -> Result<()>;
-
-    /// Human-readable label for this provider instance.
-    fn label(&self) -> &str;
-}
-
-// ---------------------------------------------------------------------------
-// Node-based FileSystem trait (new API)
+// NodeFileSystem trait
 // ---------------------------------------------------------------------------
 
 /// A node-oriented filesystem abstraction.
@@ -158,8 +83,6 @@ pub trait FileSystem: Send + Sync {
 /// All operations use opaque [`NodeId`] identifiers. Paths are resolved at
 /// entry time via [`NodeFileSystem::resolve_path`], and all subsequent I/O
 /// uses node identifiers to avoid TOCTOU races.
-///
-/// This trait is the target for future migration of downstream modules.
 #[async_trait]
 pub trait NodeFileSystem: Send + Sync {
     /// Concrete type used to identify this filesystem instance.
@@ -179,7 +102,7 @@ pub trait NodeFileSystem: Send + Sync {
     fn id(&self) -> FileSystemId<Self::FsId>;
 
     /// Return a human-readable label for this provider instance.
-    fn label_node(&self) -> &str;
+    fn label(&self) -> &str;
 
     // ── Resolution (path -> node, the entry point) ──
 

@@ -12,7 +12,8 @@
 //! Every entry in a filesystem is represented as a [`Node`], which carries
 //! metadata, a kind classification, and optional structural links (parent,
 //! children). Content is never stored in the node itself — file data is
-//! always read on demand through the [`FileSystem`] trait.
+//! always read on demand through the
+//! [`NodeFileSystem`](crate::fs::NodeFileSystem) trait.
 //!
 //! # Lazy loading
 //!
@@ -103,8 +104,9 @@ impl SymlinkTarget {
 
 /// Classification of a filesystem node.
 ///
-/// Directory children names are populated lazily. File content is never stored
-/// in the node — it is always read via the [`FileSystem`] trait.
+/// Directory children names are populated lazily. File content is never
+/// stored in the node — it is always read via the
+/// [`NodeFileSystem`](crate::fs::NodeFileSystem) trait.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum NodeKind {
     /// A directory. Child names are resolved on demand.

@@ -799,7 +799,7 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
-    use crate::fs::FileSystem;
+    use crate::fs::NodeFileSystem;
 
     fn make_test_store() -> (ProfileStore, PathBuf) {
         let dir = std::env::temp_dir()

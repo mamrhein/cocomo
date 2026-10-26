@@ -36,8 +36,7 @@ use crate::{
     error::{FsError, FsOperation, Result, wrap},
     file::FsFile,
     fs::{
-        DirEntryMeta, DirStream, FileSystem, NodeFileSystem, OpenMode,
-        WritableFileSystem,
+        DirEntryMeta, DirStream, NodeFileSystem, OpenMode, WritableFileSystem,
     },
     identity::{DirId, FileId, FileSystemId, NodeId},
     meta::Metadata,
@@ -290,6 +289,8 @@ impl LocalFs {
     }
 
     /// Build metadata from a `fs_err::DirEntry`.
+    // Only used by `read_dir`, which the node API does not delegate to.
+    #[allow(dead_code)]
     fn entry_meta(entry: &fs_err::DirEntry) -> Metadata {
         let path = entry.path();
 
@@ -387,12 +388,16 @@ fn detect_device_id() -> u64 {
 }
 
 // ---------------------------------------------------------------------------
-// FileSystem implementation
+// Path-based operation helpers
+//
+// These methods back the former `FileSystem` trait. The node impls delegate
+// to the ones they need; the rest are only exercised by this module's unit
+// tests, hence their `#[allow(dead_code)]` attributes.
 // ---------------------------------------------------------------------------
 
-#[async_trait]
-impl FileSystem for LocalFs {
-    async fn metadata(&self, path: &Path) -> Result<Metadata> {
+impl LocalFs {
+    #[allow(dead_code)]
+    pub(crate) async fn metadata(&self, path: &Path) -> Result<Metadata> {
         let meta =
             fs_err::tokio::symlink_metadata(path).await.map_err(|e| {
                 wrap(e, crate::error::FsOperation::Open, path.to_path_buf())
@@ -412,7 +417,8 @@ impl FileSystem for LocalFs {
         })
     }
 
-    async fn read_dir(&self, path: &Path) -> Result<DirStream<'_>> {
+    #[allow(dead_code)]
+    pub(crate) async fn read_dir(&self, path: &Path) -> Result<DirStream<'_>> {
         let entries = fs_err::read_dir(path).map_err(|e| {
             wrap(e, crate::error::FsOperation::ReadDir, path.to_path_buf())
         })?;
@@ -432,7 +438,7 @@ impl FileSystem for LocalFs {
         Ok(s)
     }
 
-    async fn open(
+    pub(crate) async fn open(
         &self,
         path: &Path,
         mode: OpenMode,
@@ -497,7 +503,7 @@ impl FileSystem for LocalFs {
         }))
     }
 
-    async fn read(
+    pub(crate) async fn read(
         &self,
         path: &Path,
         range: Option<Range<u64>>,
@@ -558,7 +564,7 @@ impl FileSystem for LocalFs {
         Ok(data)
     }
 
-    async fn read_stream(
+    pub(crate) async fn read_stream(
         &self,
         path: &Path,
         _range: Option<Range<u64>>,
@@ -584,7 +590,7 @@ impl FileSystem for LocalFs {
         Ok(Box::pin(adapted))
     }
 
-    async fn write(&self, path: &Path, data: Bytes) -> Result<()> {
+    pub(crate) async fn write(&self, path: &Path, data: Bytes) -> Result<()> {
         // Write to a temp file first, then atomically rename to the target.
         let (temp_path, _file) = Self::create_temp_file(path).await?;
         fs_err::tokio::write(&temp_path, &data).await.map_err(|e| {
@@ -598,14 +604,16 @@ impl FileSystem for LocalFs {
         Ok(())
     }
 
-    async fn create_dir(&self, path: &Path) -> Result<()> {
+    #[allow(dead_code)]
+    pub(crate) async fn create_dir(&self, path: &Path) -> Result<()> {
         fs_err::tokio::create_dir_all(path).await.map_err(|e| {
             wrap(e, crate::error::FsOperation::CreateDir, path.to_path_buf())
         })?;
         Ok(())
     }
 
-    async fn remove(&self, path: &Path) -> Result<()> {
+    #[allow(dead_code)]
+    pub(crate) async fn remove(&self, path: &Path) -> Result<()> {
         // Try removing as a file first, then as a directory.
         match fs_err::tokio::remove_file(path).await {
             Ok(()) => Ok(()),
@@ -630,7 +638,8 @@ impl FileSystem for LocalFs {
         }
     }
 
-    async fn remove_all(&self, path: &Path) -> Result<()> {
+    #[allow(dead_code)]
+    pub(crate) async fn remove_all(&self, path: &Path) -> Result<()> {
         let meta = fs_err::symlink_metadata(path).map_err(|e| {
             wrap(e, crate::error::FsOperation::Remove, path.to_path_buf())
         })?;
@@ -646,58 +655,20 @@ impl FileSystem for LocalFs {
         Ok(())
     }
 
-    async fn rename(&self, src: &Path, dst: &Path) -> Result<()> {
+    #[allow(dead_code)]
+    pub(crate) async fn rename(&self, src: &Path, dst: &Path) -> Result<()> {
         fs_err::tokio::rename(src, dst).await.map_err(|e| {
             wrap(e, crate::error::FsOperation::Rename, src.to_path_buf())
         })?;
         Ok(())
     }
 
-    async fn copy(&self, src: &Path, dst: &Path) -> Result<()> {
+    #[allow(dead_code)]
+    pub(crate) async fn copy(&self, src: &Path, dst: &Path) -> Result<()> {
         fs_err::tokio::copy(src, dst).await.map_err(|e| {
             wrap(e, crate::error::FsOperation::Copy, src.to_path_buf())
         })?;
         Ok(())
-    }
-
-    async fn read_link(&self, path: &Path) -> Result<PathBuf> {
-        tokio::fs::read_link(path).await.map_err(|e| {
-            wrap(e, crate::error::FsOperation::ReadLink, path.to_path_buf())
-        })
-    }
-
-    async fn symlink(&self, target: &Path, link: &Path) -> Result<()> {
-        #[cfg(unix)]
-        {
-            tokio::fs::symlink(target, link).await.map_err(|e| {
-                wrap(e, crate::error::FsOperation::Symlink, link.to_path_buf())
-            })?;
-        }
-        #[cfg(windows)]
-        {
-            if target.is_dir() {
-                tokio::fs::symlink_dir(target, link).await.map_err(|e| {
-                    wrap(
-                        e,
-                        crate::error::FsOperation::Symlink,
-                        link.to_path_buf(),
-                    )
-                })?;
-            } else {
-                tokio::fs::symlink_file(target, link).await.map_err(|e| {
-                    wrap(
-                        e,
-                        crate::error::FsOperation::Symlink,
-                        link.to_path_buf(),
-                    )
-                })?;
-            }
-        }
-        Ok(())
-    }
-
-    fn label(&self) -> &str {
-        &self.label
     }
 }
 
@@ -715,7 +686,7 @@ impl NodeFileSystem for LocalFs {
         self.fs_id
     }
 
-    fn label_node(&self) -> &str {
+    fn label(&self) -> &str {
         &self.label
     }
 

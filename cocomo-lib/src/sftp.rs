@@ -10,7 +10,7 @@
 //! SFTP filesystem provider.
 //!
 //! Provides access to remote SFTP (SSH file transfer) servers through the
-//! [`FileSystem`], [`NodeFileSystem`], and [`WritableFileSystem`] traits.
+//! [`NodeFileSystem`] and [`WritableFileSystem`] traits.
 //! Uses `russh` for the SSH transport and `russh-sftp` for the SFTP
 //! protocol.
 //!
@@ -73,10 +73,7 @@ use tokio::io::{
 use crate::{
     error::{FsError, FsOperation, Result},
     file::FsFile,
-    fs::{
-        DirEntryMeta, DirStream, FileSystem, NodeFileSystem, OpenMode,
-        WritableFileSystem,
-    },
+    fs::{NodeFileSystem, OpenMode, WritableFileSystem},
     identity::{DirId, FileId, FileSystemId, NodeId},
     meta::Metadata,
     node::{Node, NodeKind, SymlinkTarget},
@@ -779,29 +776,15 @@ fn attrs_to_metadata(attrs: &FileAttributes) -> Metadata {
 }
 
 // ---------------------------------------------------------------------------
-// FileSystem trait
+// Path-based operation helpers
 // ---------------------------------------------------------------------------
 
-#[async_trait]
-impl FileSystem for SftpFs {
-    async fn metadata(&self, path: &Path) -> Result<Metadata> {
+impl SftpFs {
+    pub(crate) async fn metadata(&self, path: &Path) -> Result<Metadata> {
         self.lstat_path(path).await
     }
 
-    async fn read_dir(&self, path: &Path) -> Result<DirStream<'_>> {
-        let entries = self.list_entries(path).await?;
-
-        let metas: Vec<DirEntryMeta> = entries
-            .into_iter()
-            .map(|(name, meta)| DirEntryMeta { name, meta })
-            .collect();
-
-        let s: DirStream<'_> =
-            Box::pin(futures::stream::iter(metas.into_iter().map(Ok)));
-        Ok(s)
-    }
-
-    async fn open(
+    pub(crate) async fn open(
         &self,
         path: &Path,
         mode: OpenMode,
@@ -847,7 +830,7 @@ impl FileSystem for SftpFs {
         }))
     }
 
-    async fn read(
+    pub(crate) async fn read(
         &self,
         path: &Path,
         range: Option<Range<u64>>,
@@ -907,7 +890,7 @@ impl FileSystem for SftpFs {
         Ok(Bytes::from(buf))
     }
 
-    async fn read_stream(
+    pub(crate) async fn read_stream(
         &self,
         path: &Path,
         range: Option<Range<u64>>,
@@ -926,7 +909,7 @@ impl FileSystem for SftpFs {
         Ok(Box::pin(futures::stream::iter(chunks.into_iter().map(Ok))))
     }
 
-    async fn write(&self, path: &Path, data: Bytes) -> Result<()> {
+    pub(crate) async fn write(&self, path: &Path, data: Bytes) -> Result<()> {
         let sftp_path = self.to_sftp_path(path);
         let conn = self.connect().await?;
         let session = Self::session(&conn)?;
@@ -942,7 +925,7 @@ impl FileSystem for SftpFs {
         Ok(())
     }
 
-    async fn create_dir(&self, path: &Path) -> Result<()> {
+    pub(crate) async fn create_dir(&self, path: &Path) -> Result<()> {
         let sftp_path = self.to_sftp_path(path);
         let conn = self.connect().await?;
         let session = Self::session(&conn)?;
@@ -952,7 +935,7 @@ impl FileSystem for SftpFs {
         Ok(())
     }
 
-    async fn remove(&self, path: &Path) -> Result<()> {
+    pub(crate) async fn remove(&self, path: &Path) -> Result<()> {
         let sftp_path = self.to_sftp_path(path);
         let conn = self.connect().await?;
         let session = Self::session(&conn)?;
@@ -966,12 +949,7 @@ impl FileSystem for SftpFs {
         }
     }
 
-    async fn remove_all(&self, path: &Path) -> Result<()> {
-        // Recursive removal via lstat + readdir + remove.
-        self.remove_all_impl(path).await
-    }
-
-    async fn rename(&self, src: &Path, dst: &Path) -> Result<()> {
+    pub(crate) async fn rename(&self, src: &Path, dst: &Path) -> Result<()> {
         let src_sftp = self.to_sftp_path(src);
         let dst_sftp = self.to_sftp_path(dst);
         let conn = self.connect().await?;
@@ -982,13 +960,13 @@ impl FileSystem for SftpFs {
         Ok(())
     }
 
-    async fn copy(&self, src: &Path, dst: &Path) -> Result<()> {
+    pub(crate) async fn copy(&self, src: &Path, dst: &Path) -> Result<()> {
         // SFTP has no native copy; read source then write to destination.
         let data = self.read(src, None).await?;
         self.write(dst, data).await
     }
 
-    async fn read_link(&self, path: &Path) -> Result<PathBuf> {
+    pub(crate) async fn read_link(&self, path: &Path) -> Result<PathBuf> {
         let sftp_path = self.to_sftp_path(path);
         let conn = self.connect().await?;
         let session = Self::session(&conn)?;
@@ -998,7 +976,11 @@ impl FileSystem for SftpFs {
         Ok(PathBuf::from(target))
     }
 
-    async fn symlink(&self, target: &Path, link: &Path) -> Result<()> {
+    pub(crate) async fn symlink(
+        &self,
+        target: &Path,
+        link: &Path,
+    ) -> Result<()> {
         let link_sftp = self.to_sftp_path(link);
         let conn = self.connect().await?;
         let session = Self::session(&conn)?;
@@ -1009,10 +991,6 @@ impl FileSystem for SftpFs {
                 sftp_error_to_fs(e, FsOperation::Symlink, link.to_path_buf())
             })?;
         Ok(())
-    }
-
-    fn label(&self) -> &str {
-        &self.label
     }
 }
 
@@ -1088,7 +1066,7 @@ impl NodeFileSystem for SftpFs {
         self.fs_id
     }
 
-    fn label_node(&self) -> &str {
+    fn label(&self) -> &str {
         &self.label
     }
 

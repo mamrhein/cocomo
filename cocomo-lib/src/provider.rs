@@ -42,9 +42,7 @@ use thiserror::Error;
 use crate::{
     error::{FsError, Result},
     file::FsFile,
-    fs::{
-        DirStream, FileSystem, NodeFileSystem, OpenMode, WritableFileSystem,
-    },
+    fs::{NodeFileSystem, OpenMode, WritableFileSystem},
     ftp::{FtpConfig, FtpFs},
     identity::{DirId, FileId, FileSystemId, NodeId},
     local::LocalFs,
@@ -66,8 +64,8 @@ use crate::{
 /// Unified wrapper around all filesystem providers.
 ///
 /// Every built-in provider is a variant of this enum. The enum implements
-/// [`NodeFileSystem`], [`WritableFileSystem`], and [`FileSystem`] by
-/// delegating to the inner provider.
+/// [`NodeFileSystem`] and [`WritableFileSystem`] by delegating to the inner
+/// provider.
 pub enum Provider {
     /// Local filesystem.
     Local(LocalFs),
@@ -187,7 +185,7 @@ impl Provider {
     pub fn provider_id(&self) -> ProviderId {
         let provider_type = self.provider_type();
         let scheme = provider_type.scheme();
-        let label = self.label_node();
+        let label = self.label();
         let profile =
             if label.is_empty() || label == scheme || label.contains(':') {
                 None
@@ -707,165 +705,6 @@ fn profile_matches_endpoint(profile: &Profile, url: &Url) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// FileSystem implementation (path-based)
-// ---------------------------------------------------------------------------
-
-#[async_trait]
-impl FileSystem for Provider {
-    async fn metadata(&self, path: &Path) -> Result<Metadata> {
-        match self {
-            Self::Local(p) => p.metadata(path).await,
-            Self::Ftp(p) => p.metadata(path).await,
-            Self::Sftp(p) => p.metadata(path).await,
-            Self::S3(p) => p.metadata(path).await,
-            Self::WebDav(p) => p.metadata(path).await,
-        }
-    }
-
-    async fn read_dir(&self, path: &Path) -> Result<DirStream<'_>> {
-        match self {
-            Self::Local(p) => p.read_dir(path).await,
-            Self::Ftp(p) => p.read_dir(path).await,
-            Self::Sftp(p) => p.read_dir(path).await,
-            Self::S3(p) => p.read_dir(path).await,
-            Self::WebDav(p) => p.read_dir(path).await,
-        }
-    }
-
-    async fn open(
-        &self,
-        path: &Path,
-        mode: OpenMode,
-    ) -> Result<Box<dyn FsFile>> {
-        match self {
-            Self::Local(p) => p.open(path, mode).await,
-            Self::Ftp(p) => p.open(path, mode).await,
-            Self::Sftp(p) => p.open(path, mode).await,
-            Self::S3(p) => p.open(path, mode).await,
-            Self::WebDav(p) => p.open(path, mode).await,
-        }
-    }
-
-    async fn read(
-        &self,
-        path: &Path,
-        range: Option<Range<u64>>,
-    ) -> Result<Bytes> {
-        match self {
-            Self::Local(p) => p.read(path, range).await,
-            Self::Ftp(p) => p.read(path, range).await,
-            Self::Sftp(p) => p.read(path, range).await,
-            Self::S3(p) => p.read(path, range).await,
-            Self::WebDav(p) => p.read(path, range).await,
-        }
-    }
-
-    async fn read_stream(
-        &self,
-        path: &Path,
-        range: Option<Range<u64>>,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<Bytes>> + Send>>> {
-        match self {
-            Self::Local(p) => p.read_stream(path, range).await,
-            Self::Ftp(p) => p.read_stream(path, range).await,
-            Self::Sftp(p) => p.read_stream(path, range).await,
-            Self::S3(p) => p.read_stream(path, range).await,
-            Self::WebDav(p) => p.read_stream(path, range).await,
-        }
-    }
-
-    async fn write(&self, path: &Path, data: Bytes) -> Result<()> {
-        match self {
-            Self::Local(p) => p.write(path, data).await,
-            Self::Ftp(p) => p.write(path, data).await,
-            Self::Sftp(p) => p.write(path, data).await,
-            Self::S3(p) => p.write(path, data).await,
-            Self::WebDav(p) => p.write(path, data).await,
-        }
-    }
-
-    async fn create_dir(&self, path: &Path) -> Result<()> {
-        match self {
-            Self::Local(p) => p.create_dir(path).await,
-            Self::Ftp(p) => p.create_dir(path).await,
-            Self::Sftp(p) => p.create_dir(path).await,
-            Self::S3(p) => p.create_dir(path).await,
-            Self::WebDav(p) => p.create_dir(path).await,
-        }
-    }
-
-    async fn remove(&self, path: &Path) -> Result<()> {
-        match self {
-            Self::Local(p) => p.remove(path).await,
-            Self::Ftp(p) => p.remove(path).await,
-            Self::Sftp(p) => p.remove(path).await,
-            Self::S3(p) => p.remove(path).await,
-            Self::WebDav(p) => p.remove(path).await,
-        }
-    }
-
-    async fn remove_all(&self, path: &Path) -> Result<()> {
-        match self {
-            Self::Local(p) => p.remove_all(path).await,
-            Self::Ftp(p) => p.remove_all(path).await,
-            Self::Sftp(p) => p.remove_all(path).await,
-            Self::S3(p) => p.remove_all(path).await,
-            Self::WebDav(p) => p.remove_all(path).await,
-        }
-    }
-
-    async fn rename(&self, src: &Path, dst: &Path) -> Result<()> {
-        match self {
-            Self::Local(p) => p.rename(src, dst).await,
-            Self::Ftp(p) => p.rename(src, dst).await,
-            Self::Sftp(p) => p.rename(src, dst).await,
-            Self::S3(p) => p.rename(src, dst).await,
-            Self::WebDav(p) => p.rename(src, dst).await,
-        }
-    }
-
-    async fn copy(&self, src: &Path, dst: &Path) -> Result<()> {
-        match self {
-            Self::Local(p) => p.copy(src, dst).await,
-            Self::Ftp(p) => p.copy(src, dst).await,
-            Self::Sftp(p) => p.copy(src, dst).await,
-            Self::S3(p) => p.copy(src, dst).await,
-            Self::WebDav(p) => p.copy(src, dst).await,
-        }
-    }
-
-    async fn read_link(&self, path: &Path) -> Result<PathBuf> {
-        match self {
-            Self::Local(p) => p.read_link(path).await,
-            Self::Ftp(p) => p.read_link(path).await,
-            Self::Sftp(p) => p.read_link(path).await,
-            Self::S3(p) => p.read_link(path).await,
-            Self::WebDav(p) => p.read_link(path).await,
-        }
-    }
-
-    async fn symlink(&self, target: &Path, link: &Path) -> Result<()> {
-        match self {
-            Self::Local(p) => p.symlink(target, link).await,
-            Self::Ftp(p) => p.symlink(target, link).await,
-            Self::Sftp(p) => p.symlink(target, link).await,
-            Self::S3(p) => p.symlink(target, link).await,
-            Self::WebDav(p) => p.symlink(target, link).await,
-        }
-    }
-
-    fn label(&self) -> &str {
-        match self {
-            Self::Local(p) => p.label(),
-            Self::Ftp(p) => p.label(),
-            Self::Sftp(p) => p.label(),
-            Self::S3(p) => p.label(),
-            Self::WebDav(p) => p.label(),
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
 // NodeFileSystem implementation
 // ---------------------------------------------------------------------------
 
@@ -885,13 +724,13 @@ impl NodeFileSystem for Provider {
         }
     }
 
-    fn label_node(&self) -> &str {
+    fn label(&self) -> &str {
         match self {
-            Self::Local(p) => p.label_node(),
-            Self::Ftp(p) => p.label_node(),
-            Self::Sftp(p) => p.label_node(),
-            Self::S3(p) => p.label_node(),
-            Self::WebDav(p) => p.label_node(),
+            Self::Local(p) => p.label(),
+            Self::Ftp(p) => p.label(),
+            Self::Sftp(p) => p.label(),
+            Self::S3(p) => p.label(),
+            Self::WebDav(p) => p.label(),
         }
     }
 

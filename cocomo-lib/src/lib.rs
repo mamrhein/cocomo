@@ -12,7 +12,8 @@
 //!
 //! # Architecture
 //!
-//! All filesystem I/O is async behind the [`FileSystem`] trait. Built-in
+//! All filesystem I/O is async behind the [`NodeFileSystem`] and
+//! [`WritableFileSystem`] traits. Built-in
 //! providers include [`LocalFs`] for the local filesystem, [`S3Fs`] for
 //! Amazon S3, [`FtpFs`] for FTP/FTPS, [`SftpFs`] for SFTP, and [`WebDavFs`]
 //! for WebDAV. Front-ends
@@ -21,7 +22,7 @@
 //!
 //! # Key modules
 //!
-//! - [`fs`] — Core [`FileSystem`] trait and related types.
+//! - [`fs`] — Core node-based filesystem traits and related types.
 //! - [`identity`] — Opaque identifiers for filesystems and nodes.
 //! - [`node`] — Filesystem node model, classification, and symlink targets.
 //! - [`local`] — [`LocalFs`], the local filesystem provider.
@@ -39,7 +40,8 @@
 //! - [`compare`] — Directory comparison engine that merges two scanned trees.
 //! - [`filter`] — Name, display, and content filters for comparison results.
 //! - [`text`] — Line-based text comparison engine.
-//! - [`testutil`] — [`MockFs`], an in-memory `FileSystem` double for tests.
+//! - [`mockfs`] — [`MockFs`], an in-memory node-based filesystem double for
+//!   tests.
 //! - [`patch`] — Unified diff generation and patch application.
 //! - [`grammar`] — Syntax-aware grammar rules for smart diffing.
 //! - [`format`] — File format registry and format-specific settings.
@@ -99,9 +101,7 @@ pub use format::{
     FileFormat, FormatRegistry, FormatSettings, FormatType, LineEnding,
     TableParser, TextEncoding,
 };
-pub use fs::{
-    DirEntryMeta, FileSystem, NodeFileSystem, OpenMode, WritableFileSystem,
-};
+pub use fs::{NodeFileSystem, OpenMode, WritableFileSystem};
 pub use ftp::{FtpConfig, FtpDirId, FtpFileId, FtpFs, FtpNodeId};
 pub use grammar::{Grammar, GrammarRule, Importance};
 pub use hash::{
