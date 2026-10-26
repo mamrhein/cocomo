@@ -24,10 +24,13 @@ use std::{
 };
 
 use cocomo_lib::{
-    DirComparison, DirEntry, DirEntryStatus, Endpoint, Grammar, LineInfo,
-    SyncOperation, SyncResult, TextDiff, TransferAction, TransferItem,
+    DirComparison, DirEntry, Endpoint, Grammar, LineInfo, SyncOperation,
+    SyncResult, TextDiff, TransferAction, TransferItem,
+    filter::DisplayFilters,
+    report::{ReportConfig, ReportFormat},
 };
 use ratatui_kit::{Atom, components::table::TableState};
+use regex::RegexBuilder;
 
 /// The current input mode of a session.
 ///
@@ -37,17 +40,18 @@ use ratatui_kit::{Atom, components::table::TableState};
 pub enum SessionMode {
     #[default]
     Normal,
-    /// The user is typing a filter pattern (buffer:
-    /// [`UiState::filter_input`]).
-    Filter,
+    /// The filter panel modal (`f`) is open, holding its draft in a box
+    /// so the enum stays small.
+    FilterPanel { draft: Box<FilterDraft> },
     /// The user is typing a session name to save.
     SaveSession { name: String },
-    /// The user is picking a saved session to load. `saved_sessions` is
+    /// The session browser modal (`O`) is open. `saved_sessions` is
     /// filled asynchronously by the `ListSessions` action.
-    LoadSession {
-        name: String,
-        saved_sessions: Vec<String>,
-    },
+    SessionBrowser { saved_sessions: Vec<String> },
+    /// The settings modal (`,`) is open.
+    Settings,
+    /// The report modal (`R`) is open, holding its draft in a box.
+    Report { draft: Box<ReportDraft> },
     /// The user is typing a search pattern (`/`); submitting jumps to the
     /// next matching row.
     Search { query: String },
@@ -235,16 +239,206 @@ impl SessionMode {
     ///
     /// While editing, printable keys belong to the input component's layer;
     /// the shell and session handlers must not claim them (e.g. `q` must
-    /// not quit).
+    /// not quit). The modal panels (`FilterPanel`, `SessionBrowser`,
+    /// `Settings`, `Report`) are not text-entry modes: like
+    /// [`SessionMode::Transfer`] they own an exclusive input layer that
+    /// keeps the shell and the table from seeing keys.
     pub fn is_editing(&self) -> bool {
         matches!(
             self,
-            Self::Filter
-                | Self::SaveSession { .. }
-                | Self::LoadSession { .. }
+            Self::SaveSession { .. }
                 | Self::Search { .. }
                 | Self::Command { .. }
         )
+    }
+}
+
+/// A compiled, case-insensitive regex used as the directory view's name
+/// filter.
+///
+/// The pattern text is kept alongside the compiled form so the filter can
+/// be displayed, edited, persisted, and compared cheaply (`PartialEq`
+/// compares the text only, since `Regex` is not comparable).
+#[derive(Clone, Debug)]
+pub struct NamePattern {
+    /// The pattern text as the user entered it.
+    pub pattern: String,
+    /// The case-insensitive compiled form.
+    regex: regex::Regex,
+}
+
+impl NamePattern {
+    /// Compile `pattern` into a case-insensitive name filter.
+    pub fn new(pattern: impl Into<String>) -> Result<Self, regex::Error> {
+        let pattern = pattern.into();
+        let regex =
+            RegexBuilder::new(&pattern).case_insensitive(true).build()?;
+        Ok(Self { pattern, regex })
+    }
+
+    /// Returns `true` when `name` matches the pattern.
+    pub fn is_match(&self, name: &str) -> bool {
+        self.regex.is_match(name)
+    }
+}
+
+impl PartialEq for NamePattern {
+    fn eq(&self, other: &Self) -> bool {
+        self.pattern == other.pattern
+    }
+}
+
+/// Which section of the filter panel owns the keys.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FilterFocus {
+    /// The regex pattern field.
+    #[default]
+    Pattern,
+    /// The name-filter enable toggle.
+    NameToggle,
+    /// The status checkboxes.
+    Statuses,
+}
+
+/// Draft state of the filter panel modal (`f`).
+///
+/// All fields are primitives so the draft can be `PartialEq` (neither a
+/// compiled `Regex` nor [`DisplayFilters`] is comparable). The panel
+/// applies the draft to the session on `Enter`; an invalid regex keeps the
+/// panel open with [`Self::error`] set.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FilterDraft {
+    /// Name pattern text.
+    pub pattern: String,
+    /// Cursor position within [`Self::pattern`] (character index).
+    pub cursor: usize,
+    /// Whether the name pattern filters entries at all.
+    pub name_filter_on: bool,
+    /// Show identical entries.
+    pub show_same: bool,
+    /// Show differing entries.
+    pub show_different: bool,
+    /// Show orphan entries.
+    pub show_orphans: bool,
+    /// Which section owns the keys.
+    pub focus: FilterFocus,
+    /// Validation message shown in the panel (e.g. an invalid regex).
+    pub error: Option<String>,
+}
+
+impl Default for FilterDraft {
+    fn default() -> Self {
+        Self {
+            pattern: String::new(),
+            cursor: 0,
+            name_filter_on: true,
+            show_same: true,
+            show_different: true,
+            show_orphans: true,
+            focus: FilterFocus::default(),
+            error: None,
+        }
+    }
+}
+
+/// Which section of the report modal owns the keys.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ReportFocus {
+    /// The format list.
+    #[default]
+    Format,
+    /// The destination path field.
+    Destination,
+    /// The inclusion checkboxes.
+    Options,
+}
+
+/// Draft state of the report modal (`R`).
+///
+/// Like [`FilterDraft`] the fields are primitives so the draft stays
+/// `PartialEq`; the [`ReportConfig`] is built from it only when the report
+/// is generated.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReportDraft {
+    /// Output format.
+    pub format: ReportFormat,
+    /// Output file path text.
+    pub destination: String,
+    /// Cursor position within [`Self::destination`] (character index).
+    pub cursor: usize,
+    /// Include identical entries.
+    pub include_same: bool,
+    /// Include differing entries.
+    pub include_different: bool,
+    /// Include orphan entries.
+    pub include_orphans: bool,
+    /// Recurse into subdirectory entries.
+    pub include_subdirectories: bool,
+    /// Include detailed file metadata.
+    pub include_file_details: bool,
+    /// Which section owns the keys.
+    pub focus: ReportFocus,
+    /// Validation message shown in the modal (e.g. a missing path).
+    pub error: Option<String>,
+}
+
+impl Default for ReportDraft {
+    fn default() -> Self {
+        Self {
+            format: ReportFormat::default(),
+            destination: String::new(),
+            cursor: 0,
+            include_same: false,
+            include_different: true,
+            include_orphans: true,
+            include_subdirectories: true,
+            include_file_details: true,
+            focus: ReportFocus::default(),
+            error: None,
+        }
+    }
+}
+
+impl ReportDraft {
+    /// Build the [`ReportConfig`] the draft's checkboxes describe.
+    pub fn config(&self) -> ReportConfig {
+        ReportConfig {
+            include_same: self.include_same,
+            include_different: self.include_different,
+            include_orphans: self.include_orphans,
+            include_subdirectories: self.include_subdirectories,
+            include_file_details: self.include_file_details,
+        }
+    }
+}
+
+/// A toggleable entry of the settings modal (`,`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SettingItem {
+    /// Toggle content comparison (mirrors `C`).
+    CompareContent,
+    /// Toggle hiding identical entries (mirrors `F`).
+    HideSame,
+    /// Cycle the sync operation forward (mirrors `m`).
+    SyncOperation,
+}
+
+/// A [`ReportConfig`] with field-wise equality.
+///
+/// `ReportConfig` itself does not implement `PartialEq`, but
+/// [`SessionAction`] needs one so tests can assert on dispatched actions;
+/// the newtype compares the inclusion flags directly.
+#[derive(Clone, Debug)]
+pub struct ReportSelection(pub ReportConfig);
+
+impl PartialEq for ReportSelection {
+    fn eq(&self, other: &Self) -> bool {
+        let (a, b) = (&self.0, &other.0);
+        a.include_same == b.include_same
+            && a.include_different == b.include_different
+            && a.include_orphans == b.include_orphans
+            && a.include_subdirectories == b.include_subdirectories
+            && a.include_file_details == b.include_file_details
     }
 }
 
@@ -274,6 +468,13 @@ pub enum SessionAction {
     /// Execute the transfers the dialog confirmed on the selected entry,
     /// then re-run the comparison so the view reflects the change.
     Transfer { items: Vec<TransferItem> },
+    /// Generate a comparison report and write it to `destination`; the
+    /// report modal dispatches this on `Enter`.
+    GenerateReport {
+        format: ReportFormat,
+        config: ReportSelection,
+        destination: PathBuf,
+    },
     /// No action required.
     None,
 }
@@ -359,8 +560,9 @@ pub struct DirView {
     pub tree_revision: u64,
     /// Compare file contents (vs. meta data only).
     pub compare_content: bool,
-    /// Hide identical entries.
-    pub hide_same: bool,
+    /// Which entry statuses the tree displays (the `F` toggle flips
+    /// `show_same`).
+    pub display: DisplayFilters,
     /// Sync workflow stage, or `None` when no sync is planned or executed.
     pub sync: Option<SyncStage>,
     /// Sync operation currently configured.
@@ -425,13 +627,10 @@ pub struct TextDiffView {
 pub struct UiState {
     /// Selected row in the entry table.
     pub table_state: TableState,
-    /// Current input mode (owns the save/load name buffers).
+    /// Current input mode (owns the save-name buffer and the panel drafts).
     pub mode: SessionMode,
-    /// Filter text input buffer, used only while [`SessionMode::Filter`]
-    /// is active.
-    pub filter_input: String,
-    /// Active filter pattern. `None` means no filter.
-    pub active_filter: Option<String>,
+    /// Active name filter. `None` means no filter.
+    pub name_filter: Option<NamePattern>,
 }
 
 /// Monotonic counter assigning stable ids to sessions.
@@ -489,7 +688,7 @@ impl SessionView {
                 expanded: HashSet::new(),
                 tree_revision: 0,
                 compare_content,
-                hide_same: false,
+                display: DisplayFilters::all(),
                 sync: None,
                 sync_operation: SyncOperation::default(),
             }),
@@ -658,22 +857,20 @@ impl SessionView {
         }
     }
 
-    /// Whether an entry passes the hide-identical and name filters.
+    /// Whether an entry passes the display and name filters.
     fn entry_visible(&self, dir: &DirView, entry: &DirEntry) -> bool {
-        // Hide same entries if toggled.
-        if dir.hide_same {
-            match entry.status {
-                DirEntryStatus::Same | DirEntryStatus::SameBinary => {
-                    return false;
-                }
-                _ => {}
-            }
+        // Hide entries whose status is switched off in the display filters.
+        if !dir.display.should_show(&entry.status) {
+            return false;
         }
 
-        // Apply name filter.
-        if self.ui.active_filter.as_ref().is_some_and(|filter| {
-            !entry.name.to_lowercase().contains(&filter.to_lowercase())
-        }) {
+        // Apply the name filter (a case-insensitive regex).
+        if self
+            .ui
+            .name_filter
+            .as_ref()
+            .is_some_and(|f| !f.is_match(&entry.name))
+        {
             return false;
         }
 
@@ -1035,7 +1232,7 @@ mod tests {
     }
 
     #[test]
-    fn visible_rows_applies_hide_same_and_name_filter() {
+    fn visible_rows_applies_display_and_name_filters() {
         let mut session = dir_session();
         session.set_comparison(Some(comparison(&[
             ("alpha", DirEntryStatus::Same),
@@ -1044,11 +1241,12 @@ mod tests {
         ])));
         assert_eq!(session.visible_rows().len(), 3);
 
-        session.dir_mut().unwrap().hide_same = true;
+        session.dir_mut().unwrap().display.show_same = false;
         assert_eq!(session.visible_rows().len(), 2);
 
-        // The name filter is case-insensitive and combines with hide_same.
-        session.ui.active_filter = Some("b".into());
+        // The name filter is a case-insensitive regex and combines with
+        // the display filters.
+        session.ui.name_filter = Some(NamePattern::new("^b").unwrap());
         let names: Vec<&str> = session
             .visible_rows()
             .iter()
@@ -1104,7 +1302,7 @@ mod tests {
             ..Default::default()
         }));
         session.dir_mut().unwrap().expanded.insert("sub".into());
-        session.dir_mut().unwrap().hide_same = true;
+        session.dir_mut().unwrap().display.show_same = false;
 
         let names: Vec<&str> = session
             .visible_rows()
@@ -1114,7 +1312,7 @@ mod tests {
         assert_eq!(names, ["sub", "keep.txt"]);
 
         // A directory hidden by the name filter hides its whole subtree.
-        session.ui.active_filter = Some("keep".into());
+        session.ui.name_filter = Some(NamePattern::new("keep").unwrap());
         assert!(session.visible_rows().is_empty());
     }
 
@@ -1147,7 +1345,7 @@ mod tests {
             ("b", DirEntryStatus::Different),
         ])));
         assert_eq!(session.row_count(), 2);
-        session.dir_mut().unwrap().hide_same = true;
+        session.dir_mut().unwrap().display.show_same = false;
         assert_eq!(session.row_count(), 1);
     }
 

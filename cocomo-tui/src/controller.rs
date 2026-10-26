@@ -33,17 +33,17 @@ use cocomo_lib::{
     FsPair, Grammar, LineInfo, NullPrompter, Prompter, Provider,
     SessionConfig, SyncOperation, SyncResult, SyncRules, TextCompareSettings,
     compare_texts, default_session_dir, execute_transfers,
-    list_saved_sessions,
+    list_saved_sessions, report::generate_report,
 };
 use ratatui_kit::crossterm::event::KeyEvent;
 
 use crate::{
     error::{Result, TuiError},
-    keys::handle_session_key,
+    keys::{cycle_sync_op, handle_session_key},
     session_store::session_to_config,
     state::{
-        APP_STATE, AppState, SessionAction, SessionContent, SessionMode,
-        SessionView, SyncStage,
+        APP_STATE, AppState, NamePattern, SessionAction, SessionContent,
+        SessionMode, SessionView, SettingItem, SyncStage,
     },
 };
 
@@ -297,13 +297,23 @@ async fn create_session_from_config(
     let mut session = SessionView::new_dir_compare(left, right, compare_files);
     session.set_comparison(Some(comparison));
 
-    // Restore filter settings.
-    if !config.settings.name_filter.is_empty() {
-        session.ui.active_filter =
-            Some(config.settings.name_filter[0].clone());
-    }
+    // Restore the display filters.
     if let Some(dir) = session.dir_mut() {
-        dir.hide_same = !config.settings.show_same;
+        dir.display.show_same = config.settings.show_same;
+        dir.display.show_different = config.settings.show_different;
+        dir.display.show_orphans = config.settings.show_orphans;
+    }
+    // Restore the name filter; a saved pattern that no longer compiles is
+    // skipped with a warning instead of failing the whole load.
+    if let Some(raw) = config.settings.name_filter.first() {
+        match NamePattern::new(raw) {
+            Ok(pattern) => session.ui.name_filter = Some(pattern),
+            Err(e) => {
+                report_error(format!(
+                    "Ignoring invalid saved filter `{raw}`: {e}"
+                ));
+            }
+        }
     }
 
     Ok(session)
@@ -659,11 +669,10 @@ pub(crate) fn process_session_action(action: SessionAction) {
                 },
                 move |app, names| {
                     // Only apply the listing while the session is still
-                    // in load mode; the buffer lives in the mode.
+                    // browsing; the list lives in the mode.
                     if let Some(s) = app.session_mut(id)
-                        && let SessionMode::LoadSession {
-                            saved_sessions, ..
-                        } = &mut s.ui.mode
+                        && let SessionMode::SessionBrowser { saved_sessions } =
+                            &mut s.ui.mode
                     {
                         *saved_sessions = names;
                     }
@@ -765,6 +774,37 @@ pub(crate) fn process_session_action(action: SessionAction) {
                 "Comparison after transfer failed",
             );
         }
+        SessionAction::GenerateReport {
+            format,
+            config,
+            destination,
+        } => {
+            let Some(id) = active_dir_session_id() else {
+                return;
+            };
+            spawn_task(
+                move |app| app.session(id)?.dir()?.comparison.clone(),
+                move |comparison| async move {
+                    let report =
+                        generate_report(&comparison, format, &config.0);
+                    fs_err::tokio::write(&destination, report)
+                        .await
+                        .map_err(|e| TuiError::io(&destination, e))?;
+                    Ok(())
+                },
+                move |app, ()| {
+                    // Close the modal only if it is still open; a failure
+                    // never reaches here (it goes to the `AlertModal`
+                    // instead, leaving the draft editable).
+                    if let Some(s) = app.session_mut(id)
+                        && matches!(s.ui.mode, SessionMode::Report { .. })
+                    {
+                        s.ui.mode = SessionMode::Normal;
+                    }
+                },
+                "Report generation failed",
+            );
+        }
         SessionAction::None => {}
     }
 }
@@ -799,6 +839,36 @@ pub(crate) fn dispatch_text_key(key: KeyEvent) -> bool {
 /// owned keys; every other key is swallowed by its exclusive input layer.
 pub(crate) fn dispatch_dialog_key(key: KeyEvent) -> bool {
     dispatch_key(|s| matches!(s.ui.mode, SessionMode::Transfer { .. }), key)
+}
+
+/// Handle a key press for the open filter panel modal.
+///
+/// Like [`dispatch_dir_key`], scoped to a session whose filter panel is
+/// open; the panel's exclusive input layer keeps lower handlers from
+/// seeing keys.
+pub(crate) fn dispatch_filter_panel_key(key: KeyEvent) -> bool {
+    dispatch_key(
+        |s| matches!(s.ui.mode, SessionMode::FilterPanel { .. }),
+        key,
+    )
+}
+
+/// Handle a key press for the open session browser modal.
+pub(crate) fn dispatch_browser_key(key: KeyEvent) -> bool {
+    dispatch_key(
+        |s| matches!(s.ui.mode, SessionMode::SessionBrowser { .. }),
+        key,
+    )
+}
+
+/// Handle a key press for the open settings modal.
+pub(crate) fn dispatch_settings_key(key: KeyEvent) -> bool {
+    dispatch_key(|s| matches!(s.ui.mode, SessionMode::Settings), key)
+}
+
+/// Handle a key press for the open report modal.
+pub(crate) fn dispatch_report_key(key: KeyEvent) -> bool {
+    dispatch_key(|s| matches!(s.ui.mode, SessionMode::Report { .. }), key)
 }
 
 /// Approve the planned sync: close the confirmation modal and execute.
@@ -859,19 +929,11 @@ fn dispatch_key(
     }
 }
 
-/// Set the filter input buffer of the active session.
-pub(crate) fn set_filter_input(value: String) {
-    if let Some(session) = APP_STATE.state().write().active_mut() {
-        session.ui.filter_input = value;
-    }
-}
-
 /// Update the input buffer of the active session's text-entry mode.
 pub(crate) fn set_mode_buffer(value: String) {
     if let Some(session) = APP_STATE.state().write().active_mut() {
         match &mut session.ui.mode {
             SessionMode::SaveSession { name: buf }
-            | SessionMode::LoadSession { name: buf, .. }
             | SessionMode::Search { query: buf }
             | SessionMode::Command { input: buf } => *buf = value,
             _ => {}
@@ -906,36 +968,94 @@ pub(crate) fn submit_save_name(name: String) -> bool {
     true
 }
 
-/// Submit the typed name for loading a saved session.
+/// Load the saved session `name` from the session directory and close the
+/// browser modal.
 ///
-/// Returns `true` when the load was dispatched, `false` when the session
-/// was not in load mode or the name is still empty (keeping the input
-/// open for the user to type one).
-pub(crate) fn submit_load_name(name: String) -> bool {
-    if name.is_empty() {
-        return false;
-    }
+/// Dispatched by the browser's `Select` on `Enter`.
+pub(crate) fn load_saved_session(name: String) {
     let path = {
         let state = APP_STATE.state();
         let mut app = state.write();
         let Some(session) = app.active_mut() else {
-            return false;
+            return;
         };
-        if !matches!(session.ui.mode, SessionMode::LoadSession { .. }) {
-            return false;
+        if !matches!(session.ui.mode, SessionMode::SessionBrowser { .. }) {
+            return;
         }
         session.ui.mode = SessionMode::Normal;
         default_session_dir().join(format!("{name}.toml"))
     };
     process_session_action(SessionAction::LoadSession { path });
-    true
 }
 
-/// Apply `value` as the active session's filter and return to normal mode.
-pub(crate) fn submit_filter(value: String) {
-    if let Some(session) = APP_STATE.state().write().active_mut() {
-        session.ui.active_filter = Some(value);
-        session.ui.mode = SessionMode::Normal;
+/// Toggle or cycle the settings modal entry `item`.
+///
+/// Dispatched by the settings modal's `Select` on `Enter`; the modal stays
+/// open so several settings can be changed in a row.
+pub(crate) fn toggle_setting(item: SettingItem) {
+    if let Some(session) = APP_STATE.state().write().active_mut()
+        && matches!(session.ui.mode, SessionMode::Settings)
+        && let Some(dir) = session.dir_mut()
+    {
+        match item {
+            SettingItem::CompareContent => {
+                dir.compare_content = !dir.compare_content;
+            }
+            SettingItem::HideSame => {
+                dir.display.show_same = !dir.display.show_same;
+                session.ui.table_state.select(Some(0));
+            }
+            SettingItem::SyncOperation => {
+                dir.sync_operation = cycle_sync_op(&dir.sync_operation, 1);
+            }
+        }
+    }
+}
+
+/// Record the status checkboxes of the open filter panel draft.
+///
+/// Called by the panel's `MultiSelect` whenever a checkbox is toggled; the
+/// draft (not the session) changes, so the table behind the modal keeps
+/// its current appearance until the draft is applied.
+pub(crate) fn set_filter_panel_statuses(
+    show_same: bool,
+    show_different: bool,
+    show_orphans: bool,
+) {
+    if let Some(session) = APP_STATE.state().write().active_mut()
+        && let SessionMode::FilterPanel { draft } = &mut session.ui.mode
+    {
+        draft.show_same = show_same;
+        draft.show_different = show_different;
+        draft.show_orphans = show_orphans;
+    }
+}
+
+/// Record the format chosen in the open report modal draft.
+pub(crate) fn set_report_format(format: cocomo_lib::report::ReportFormat) {
+    if let Some(session) = APP_STATE.state().write().active_mut()
+        && let SessionMode::Report { draft } = &mut session.ui.mode
+    {
+        draft.format = format;
+    }
+}
+
+/// Record the inclusion checkboxes of the open report modal draft.
+pub(crate) fn set_report_options(
+    include_same: bool,
+    include_different: bool,
+    include_orphans: bool,
+    include_subdirectories: bool,
+    include_file_details: bool,
+) {
+    if let Some(session) = APP_STATE.state().write().active_mut()
+        && let SessionMode::Report { draft } = &mut session.ui.mode
+    {
+        draft.include_same = include_same;
+        draft.include_different = include_different;
+        draft.include_orphans = include_orphans;
+        draft.include_subdirectories = include_subdirectories;
+        draft.include_file_details = include_file_details;
     }
 }
 
@@ -996,13 +1116,22 @@ pub(crate) fn submit_command(input: String) -> bool {
             }
         }
         "filter" => {
-            let filter = if arg.trim().is_empty() {
+            let pattern = arg.trim();
+            let compiled = if pattern.is_empty() {
                 None
             } else {
-                Some(arg.trim().to_string())
+                match NamePattern::new(pattern) {
+                    Ok(p) => Some(p),
+                    Err(e) => {
+                        report_error(format!(
+                            "Invalid filter pattern `{pattern}`: {e}"
+                        ));
+                        return true;
+                    }
+                }
             };
             if let Some(session) = APP_STATE.state().write().active_mut() {
-                session.ui.active_filter = filter;
+                session.ui.name_filter = compiled;
                 session.ui.table_state.select(Some(0));
             }
         }

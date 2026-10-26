@@ -27,9 +27,8 @@ use super::{
 };
 use crate::{
     controller::{
-        dispatch_dir_key, set_active_mode, set_filter_input, set_mode_buffer,
-        submit_command, submit_filter, submit_load_name, submit_save_name,
-        submit_search,
+        dispatch_dir_key, set_active_mode, set_mode_buffer, submit_command,
+        submit_save_name, submit_search,
     },
     keys::{self, KeyScope},
     state::{APP_STATE, SessionMode, SyncStage},
@@ -45,9 +44,10 @@ use crate::{
 /// the selected directory in place, and `Enter` opens a new tab rooted at
 /// the selection. The table rows are memoized view models ([`CellRow`])
 /// that are rebuilt only when the comparison revision, the tree revision,
-/// the hide-identical toggle, or the active filter changes. All text entry
-/// (filter, save and load names) uses `SearchInput`, which owns its
-/// exclusive input layer.
+/// the display filters, or the name filter changes. All text entry (save
+/// name and search) uses `SearchInput`, which owns its exclusive input
+/// layer; the filter panel, session browser, settings, and report live in
+/// modal components in the App shell.
 #[component]
 pub(super) fn DirCompareView(
     mut hooks: Hooks,
@@ -103,8 +103,10 @@ pub(super) fn DirCompareView(
                     s.core.id,
                     d.comparison_revision,
                     d.tree_revision,
-                    d.hide_same,
-                    s.ui.active_filter.clone(),
+                    d.display.show_same,
+                    d.display.show_different,
+                    d.display.show_orphans,
+                    s.ui.name_filter.as_ref().map(|f| f.pattern.clone()),
                 )),
                 d.sync.as_ref().map(|_| (s.core.id, d.sync_revision)),
             ),
@@ -152,8 +154,9 @@ pub(super) fn DirCompareView(
     let sync_active = dir.sync.is_some();
     let sync_planned = matches!(dir.sync, Some(SyncStage::Planned(_)));
     let mode = session.ui.mode.clone();
-    let hide_same = dir.hide_same;
-    let active_filter = session.ui.active_filter.clone();
+    let show_same = dir.display.show_same;
+    let name_filter =
+        session.ui.name_filter.as_ref().map(|f| f.pattern.clone());
     let left_path_str = session.core.left.display().to_string();
     let right_path_str = session.core.right.display().to_string();
     let sync_operation = dir.sync_operation;
@@ -161,7 +164,6 @@ pub(super) fn DirCompareView(
 
     // Extract data needed after dropping the app handle (for status bar and
     // element! rendering). All session references below use these locals.
-    let filter_input = session.ui.filter_input.clone();
     let comparison_stats = dir.comparison.as_ref().map(|c| {
         format!(
             "Total: {}  Same: {}  Diff: {}  Orphans: {}",
@@ -176,8 +178,8 @@ pub(super) fn DirCompareView(
     drop(app);
 
     // -- Build status bar line -----------------------------------------------
-    // When in Filter, SaveSession, or LoadSession mode, the status bar is
-    // replaced by a SearchInput rendered in the element! tree.
+    // When in SaveSession or Search mode, the status bar is replaced by a
+    // SearchInput rendered in the element! tree.
 
     let mut status_bar_line: Line<'static> =
         if let Some(status_text) = &sync_status {
@@ -188,14 +190,14 @@ pub(super) fn DirCompareView(
             ))
         } else {
             let stats = comparison_stats;
-            let filter_info = active_filter
+            let filter_info = name_filter
                 .as_ref()
                 .map(|f| format!("*{f}*"))
                 .unwrap_or_else(|| "No filter".to_string());
-            let display = if hide_same {
-                "Hiding identical"
-            } else {
+            let display = if show_same {
                 "Showing all"
+            } else {
+                "Hiding identical"
             };
             Line::from(vec![
                 Span::raw(stats.unwrap_or_else(|| "No data".to_string())),
@@ -220,39 +222,39 @@ pub(super) fn DirCompareView(
     // width so the bar cannot drift from the actual dispatch and never
     // truncates an item.
 
-    let help_bar_lines: Vec<Line<'static>> = if mode == SessionMode::Filter {
-        vec![Line::from("f=activate  Enter=apply  Esc=cancel")]
-    } else if matches!(mode, SessionMode::SaveSession { .. }) {
-        vec![Line::from("s=activate  Enter=save  Esc=cancel")]
-    } else if matches!(mode, SessionMode::LoadSession { .. }) {
-        vec![Line::from("O=activate  Enter=load  Esc=cancel")]
-    } else if matches!(mode, SessionMode::Search { .. }) {
-        vec![Line::from("/=activate  Enter=jump  Esc=cancel")]
-    } else if matches!(mode, SessionMode::Command { .. }) {
-        vec![Line::from(":=activate  Enter=run  Esc=cancel")]
-    } else if sync_active {
-        // In a planned preview, `S` re-plans and re-opens the
-        // confirmation modal; after execution it starts a fresh plan.
-        let mut spans = vec![
-            Span::styled("j/k", Style::new().add_modifier(Modifier::BOLD)),
-            Span::raw(" navigate  "),
-        ];
-        if sync_planned {
+    let help_bar_lines: Vec<Line<'static>> =
+        if matches!(mode, SessionMode::SaveSession { .. }) {
+            vec![Line::from("s=activate  Enter=save  Esc=cancel")]
+        } else if matches!(mode, SessionMode::Search { .. }) {
+            vec![Line::from("/=activate  Enter=jump  Esc=cancel")]
+        } else if matches!(mode, SessionMode::Command { .. }) {
+            vec![Line::from(":=activate  Enter=run  Esc=cancel")]
+        } else if sync_active {
+            // In a planned preview, `S` re-plans and re-opens the
+            // confirmation modal; after execution it starts a fresh plan.
+            let mut spans = vec![
+                Span::styled("j/k", Style::new().add_modifier(Modifier::BOLD)),
+                Span::raw(" navigate  "),
+            ];
+            if sync_planned {
+                spans.push(Span::styled(
+                    "S",
+                    Style::new().add_modifier(Modifier::BOLD),
+                ));
+                spans.push(Span::raw(" confirm  "));
+            }
             spans.push(Span::styled(
-                "S",
+                "Esc",
                 Style::new().add_modifier(Modifier::BOLD),
             ));
-            spans.push(Span::raw(" confirm  "));
-        }
-        spans.push(Span::styled(
-            "Esc",
-            Style::new().add_modifier(Modifier::BOLD),
-        ));
-        spans.push(Span::raw(" cancel"));
-        vec![Line::from(spans)]
-    } else {
-        keys::help_lines(&[KeyScope::DirNormal, KeyScope::Global], term_width)
-    };
+            spans.push(Span::raw(" cancel"));
+            vec![Line::from(spans)]
+        } else {
+            keys::help_lines(
+                &[KeyScope::DirNormal, KeyScope::Global],
+                term_width,
+            )
+        };
 
     // -- Build the element tree ----------------------------------------------
 
@@ -260,9 +262,9 @@ pub(super) fn DirCompareView(
     // allowed inside element! children blocks).
     let empty_msg = if comparison_is_none {
         "Loading comparison\u{2026}"
-    } else if hide_same {
+    } else if !show_same {
         "No differing entries."
-    } else if active_filter.is_some() {
+    } else if name_filter.is_some() {
         "No entries match the current filter."
     } else {
         "Directories are identical."
@@ -312,25 +314,7 @@ pub(super) fn DirCompareView(
             // Status bar or input component depending on mode. All text
             // entry uses SearchInput, which owns its exclusive input layer;
             // the activate key matches the key that entered the mode.
-            if mode == SessionMode::Filter {
-                SearchInput(
-                    value: filter_input,
-                    placeholder: "Filter entries...".to_string(),
-                    is_editing: true,
-                    activate_key: KeyCode::Char('f'),
-                    on_change: Handler::from(move |val: String| {
-                        set_filter_input(val);
-                    }),
-                    on_submit: Handler::from(move |val: String| -> bool {
-                        submit_filter(val);
-                        true
-                    }),
-                    clear_on_escape: true,
-                    on_clear: Handler::from(move |_: ()| {
-                        set_active_mode(SessionMode::Normal);
-                    }),
-                )
-            } else if let SessionMode::SaveSession { name } = &mode {
+            if let SessionMode::SaveSession { name } = &mode {
                 SearchInput(
                     value: name.clone(),
                     placeholder: "Session name...".to_string(),
@@ -341,30 +325,6 @@ pub(super) fn DirCompareView(
                     }),
                     on_submit: Handler::from(move |val: String| -> bool {
                         submit_save_name(val)
-                    }),
-                    clear_on_escape: true,
-                    on_clear: Handler::from(move |_: ()| {
-                        set_active_mode(SessionMode::Normal);
-                    }),
-                )
-            } else if let SessionMode::LoadSession {
-                name,
-                saved_sessions,
-            } = &mode
-            {
-                if !saved_sessions.is_empty() {
-                    Text(text: Line::from(format!("Saved: {}", saved_sessions.join(", "))))
-                }
-                SearchInput(
-                    value: name.clone(),
-                    placeholder: "Session name to load...".to_string(),
-                    is_editing: true,
-                    activate_key: KeyCode::Char('O'),
-                    on_change: Handler::from(move |val: String| {
-                        set_mode_buffer(val);
-                    }),
-                    on_submit: Handler::from(move |val: String| -> bool {
-                        submit_load_name(val)
                     }),
                     clear_on_escape: true,
                     on_clear: Handler::from(move |_: ()| {

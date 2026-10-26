@@ -45,16 +45,16 @@ pub(crate) fn session_to_config(
             compare_structure: true,
             name_filter: session
                 .ui
-                .active_filter
+                .name_filter
                 .as_ref()
-                .map(|f| vec![f.clone()])
+                .map(|f| vec![f.pattern.clone()])
                 .unwrap_or_default(),
             ignore_whitespace: false,
             skip_blank_lines: false,
             skip_comments: false,
-            show_same: !dir.hide_same,
-            show_different: true,
-            show_orphans: true,
+            show_same: dir.display.show_same,
+            show_different: dir.display.show_different,
+            show_orphans: dir.display.show_orphans,
         },
     })
 }

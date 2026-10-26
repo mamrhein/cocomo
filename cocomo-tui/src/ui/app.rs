@@ -20,7 +20,11 @@ use ratatui_kit::{
 
 use super::{
     dir_compare::DirCompareView,
+    filter_panel::FilterPanel,
     menu_bar::{MENU_TITLES, MenuBar},
+    report_modal::ReportModal,
+    session_browser::SessionBrowser,
+    settings_modal::SettingsModal,
     sync_confirm::SyncConfirmModal,
     tab_bar::TabBar,
     text_diff::TextCompareView,
@@ -172,6 +176,13 @@ pub(crate) fn App(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             // Sync execution approval, driven by the active session's
             // sync-confirm mode.
             SyncConfirmModal()
+            // Filter panel, session browser, settings, and report modal,
+            // each driven by the active session's mode (at most one is
+            // open at a time).
+            FilterPanel()
+            SessionBrowser()
+            SettingsModal()
+            ReportModal()
         }
     )
 }

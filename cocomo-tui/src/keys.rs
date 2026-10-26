@@ -14,8 +14,10 @@
 //! Scopes partition key ownership: [`KeyScope::Global`] bindings belong to
 //! the App shell, [`KeyScope::DirNormal`] and [`KeyScope::TextNormal`]
 //! bindings to the two session views, [`KeyScope::Dialog`] to the open
-//! transfer dialog, and [`KeyScope::Editing`] is the root-layer fallback
-//! while a text-entry mode is active.
+//! transfer dialog, [`KeyScope::FilterPanel`], [`KeyScope::SessionBrowser`],
+//! [`KeyScope::Settings`] and [`KeyScope::Report`] to the modal panels,
+//! and [`KeyScope::Editing`] is the root-layer fallback while a text-entry
+//! mode is active.
 //!
 //! [`handle_session_key`] is pure with respect to the global state: it
 //! mutates only the [`SessionView`] passed in and reports key ownership
@@ -23,8 +25,11 @@
 //! caller can return `EventResult::Ignored` instead of swallowing the key.
 //! Rendering is done by the ratatui-kit components in `ui/`.
 
+use std::path::PathBuf;
+
 use cocomo_lib::SyncOperation;
 use ratatui_kit::{
+    components::tui_input::{Input, InputRequest},
     crossterm::event::{KeyCode, KeyEvent, KeyModifiers},
     ratatui::{
         style::{Modifier, Style},
@@ -35,8 +40,9 @@ use ratatui_kit::{
 use crate::{
     diff_model::diff_group_starts,
     state::{
-        SessionAction, SessionContent, SessionMode, SessionView,
-        TransferChoice, TransferOp,
+        FilterDraft, FilterFocus, NamePattern, ReportDraft, ReportFocus,
+        ReportSelection, SessionAction, SessionContent, SessionMode,
+        SessionView, TransferChoice, TransferOp,
     },
 };
 
@@ -62,6 +68,20 @@ pub enum KeyScope {
     /// documented in the table; navigation and `Enter` are owned by the
     /// dialog's `Select` component and deliberately not listed.
     Dialog,
+    /// The filter panel modal is open. `Enter` applies, `Tab` moves the
+    /// focus; keys the focused child widget owns (text editing, `Space` on
+    /// the status list) are deliberately not listed.
+    FilterPanel,
+    /// The session browser modal is open. `j`/`k`/`Enter` are owned by its
+    /// `Select` child and deliberately not listed.
+    SessionBrowser,
+    /// The settings modal is open. `Enter` toggles the highlighted entry
+    /// through its `Select` child and is deliberately not listed.
+    Settings,
+    /// The report modal is open. `Enter` generates from every section but
+    /// the format list (where the `Select` child owns it) and is handled
+    /// dynamically, so it is deliberately not listed.
+    Report,
 }
 
 /// The command a [`KeyBinding`] performs.
@@ -89,8 +109,8 @@ pub enum Cmd {
     FirstRow,
     /// Select the last row.
     LastRow,
-    /// Enter filter mode.
-    StartFilter,
+    /// Open the filter panel modal (`f`).
+    OpenFilterPanel,
     /// Toggle hiding identical entries.
     ToggleHideSame,
     /// Toggle content comparison.
@@ -103,8 +123,12 @@ pub enum Cmd {
     CycleSyncOpBackward,
     /// Enter save-session mode.
     StartSaveSession,
-    /// Enter load-session mode and list saved sessions.
-    StartLoadSession,
+    /// Open the session browser modal and list saved sessions (`O`).
+    OpenSessionBrowser,
+    /// Open the settings modal (`,`).
+    OpenSettings,
+    /// Open the report modal (`R`).
+    OpenReport,
     /// Re-run the current comparison.
     Reload,
     /// Open the selected entry in a new session.
@@ -135,6 +159,18 @@ pub enum Cmd {
     StartCommand,
     /// Leave a text-entry mode without applying it.
     CancelEdit,
+    // -- Modal panel scopes: executed by the panel handlers. --
+    /// Close an open modal panel without applying it.
+    PanelClose,
+    /// Move a modal panel's focus to the next section (`Tab`).
+    PanelFocusNext,
+    /// Apply the filter panel draft (`Enter`).
+    PanelApply,
+    /// Toggle the filter panel's name-filter enable flag (`Space`).
+    PanelToggle,
+    /// Close the session browser and enter save mode to create a new
+    /// session (`n`).
+    SessionNew,
 }
 
 /// A single key binding: which key in which scope runs which command, and
@@ -234,7 +270,7 @@ const KEYMAP: &[KeyBinding] = &[
         key: KeyCode::Char('f'),
         modifiers: NONE,
         scope: KeyScope::DirNormal,
-        cmd: Cmd::StartFilter,
+        cmd: Cmd::OpenFilterPanel,
         help: Some(("f", "filter")),
     },
     KeyBinding {
@@ -306,8 +342,22 @@ const KEYMAP: &[KeyBinding] = &[
         key: KeyCode::Char('O'),
         modifiers: NONE,
         scope: KeyScope::DirNormal,
-        cmd: Cmd::StartLoadSession,
-        help: Some(("O", "load")),
+        cmd: Cmd::OpenSessionBrowser,
+        help: Some(("O", "sessions")),
+    },
+    KeyBinding {
+        key: KeyCode::Char(','),
+        modifiers: NONE,
+        scope: KeyScope::DirNormal,
+        cmd: Cmd::OpenSettings,
+        help: Some((",", "settings")),
+    },
+    KeyBinding {
+        key: KeyCode::Char('R'),
+        modifiers: NONE,
+        scope: KeyScope::DirNormal,
+        cmd: Cmd::OpenReport,
+        help: Some(("R", "report")),
     },
     KeyBinding {
         key: KeyCode::Char('/'),
@@ -466,6 +516,74 @@ const KEYMAP: &[KeyBinding] = &[
         cmd: Cmd::DialogPick(TransferChoice::Both),
         help: None,
     },
+    // -- Filter panel modal (its own input layer; the focused child widget
+    //    owns the keys it needs, so only the panel-level keys are listed). --
+    KeyBinding {
+        key: KeyCode::Esc,
+        modifiers: NONE,
+        scope: KeyScope::FilterPanel,
+        cmd: Cmd::PanelClose,
+        help: None,
+    },
+    KeyBinding {
+        key: KeyCode::Tab,
+        modifiers: NONE,
+        scope: KeyScope::FilterPanel,
+        cmd: Cmd::PanelFocusNext,
+        help: None,
+    },
+    KeyBinding {
+        key: KeyCode::Enter,
+        modifiers: NONE,
+        scope: KeyScope::FilterPanel,
+        cmd: Cmd::PanelApply,
+        help: None,
+    },
+    KeyBinding {
+        key: KeyCode::Char(' '),
+        modifiers: NONE,
+        scope: KeyScope::FilterPanel,
+        cmd: Cmd::PanelToggle,
+        help: None,
+    },
+    // -- Session browser modal. --
+    KeyBinding {
+        key: KeyCode::Esc,
+        modifiers: NONE,
+        scope: KeyScope::SessionBrowser,
+        cmd: Cmd::PanelClose,
+        help: None,
+    },
+    KeyBinding {
+        key: KeyCode::Char('n'),
+        modifiers: NONE,
+        scope: KeyScope::SessionBrowser,
+        cmd: Cmd::SessionNew,
+        help: None,
+    },
+    // -- Settings modal. --
+    KeyBinding {
+        key: KeyCode::Esc,
+        modifiers: NONE,
+        scope: KeyScope::Settings,
+        cmd: Cmd::PanelClose,
+        help: None,
+    },
+    // -- Report modal. --
+    KeyBinding {
+        key: KeyCode::Esc,
+        modifiers: NONE,
+        scope: KeyScope::Report,
+        cmd: Cmd::PanelClose,
+        help: None,
+    },
+    KeyBinding {
+        key: KeyCode::Tab,
+        modifiers: NONE,
+        scope: KeyScope::Report,
+        cmd: Cmd::PanelFocusNext,
+        help: None,
+    },
     // -- Text-entry modes (root-layer fallback; the input layers normally
     //    capture keys exclusively). --
     KeyBinding {
@@ -621,20 +739,36 @@ pub fn help_lines(scopes: &[KeyScope], width: u16) -> Vec<Line<'static>> {
 ///
 /// While the transfer dialog is open its scope owns the keys, which keeps
 /// the dialog accelerators in the same table as every other binding even
-/// though the dialog renders in its own input layer.
+/// though the dialog renders in its own input layer. The modal panels
+/// (`FilterPanel`, `SessionBrowser`, `Settings`, `Report`) route to
+/// dedicated handlers because their key ownership depends on which panel
+/// section currently has focus.
 pub fn handle_session_key(
     session: &mut SessionView,
     key: KeyEvent,
 ) -> Option<SessionAction> {
+    match session.ui.mode {
+        SessionMode::FilterPanel { .. } => {
+            return handle_filter_panel_key(session, key);
+        }
+        SessionMode::SessionBrowser { .. } => {
+            return handle_browser_key(session, key);
+        }
+        SessionMode::Settings => return handle_settings_key(session, key),
+        SessionMode::Report { .. } => return handle_report_key(session, key),
+        SessionMode::SyncConfirm => {
+            // The sync confirmation modal owns every key while it is open;
+            // its exclusive input layer normally blocks this handler
+            // already, and claiming nothing here is the belt-and-braces
+            // counterpart.
+            return None;
+        }
+        _ => {}
+    }
     let scope = if session.ui.mode.is_editing() {
         KeyScope::Editing
     } else if matches!(session.ui.mode, SessionMode::Transfer { .. }) {
         KeyScope::Dialog
-    } else if matches!(session.ui.mode, SessionMode::SyncConfirm) {
-        // The sync confirmation modal owns every key while it is open;
-        // its exclusive input layer normally blocks this handler already,
-        // and claiming nothing here is the belt-and-braces counterpart.
-        return None;
     } else {
         match &session.content {
             SessionContent::Dir(_) => KeyScope::DirNormal,
@@ -667,14 +801,28 @@ fn execute(cmd: Cmd, session: &mut SessionView) -> SessionAction {
             }
             SessionAction::None
         }
-        Cmd::StartFilter => {
-            session.ui.mode = SessionMode::Filter;
-            session.ui.filter_input.clear();
+        Cmd::OpenFilterPanel => {
+            // Seed the draft from the session's current filters so the
+            // panel always shows the effective state.
+            let mut draft = FilterDraft::default();
+            if let Some(dir) = session.dir() {
+                draft.show_same = dir.display.show_same;
+                draft.show_different = dir.display.show_different;
+                draft.show_orphans = dir.display.show_orphans;
+            }
+            draft.name_filter_on = session.ui.name_filter.is_some();
+            if let Some(filter) = &session.ui.name_filter {
+                draft.pattern = filter.pattern.clone();
+                draft.cursor = filter.pattern.chars().count();
+            }
+            session.ui.mode = SessionMode::FilterPanel {
+                draft: Box::new(draft),
+            };
             SessionAction::None
         }
         Cmd::ToggleHideSame => {
             if let Some(dir) = session.dir_mut() {
-                dir.hide_same = !dir.hide_same;
+                dir.display.show_same = !dir.display.show_same;
             }
             session.ui.table_state.select(Some(0));
             SessionAction::None
@@ -716,13 +864,22 @@ fn execute(cmd: Cmd, session: &mut SessionView) -> SessionAction {
             };
             SessionAction::None
         }
-        Cmd::StartLoadSession => {
-            // Enter load mode and list saved sessions for it.
-            session.ui.mode = SessionMode::LoadSession {
-                name: String::new(),
+        Cmd::OpenSessionBrowser => {
+            // Open the browser and list saved sessions for it.
+            session.ui.mode = SessionMode::SessionBrowser {
                 saved_sessions: Vec::new(),
             };
             SessionAction::ListSessions
+        }
+        Cmd::OpenSettings => {
+            session.ui.mode = SessionMode::Settings;
+            SessionAction::None
+        }
+        Cmd::OpenReport => {
+            session.ui.mode = SessionMode::Report {
+                draft: Box::new(ReportDraft::default()),
+            };
+            SessionAction::None
         }
         Cmd::Reload => SessionAction::Reload,
         Cmd::OpenEntry => handle_enter(session),
@@ -745,12 +902,12 @@ fn execute(cmd: Cmd, session: &mut SessionView) -> SessionAction {
         }
         Cmd::Cancel => {
             // If a sync preview is active, cancel it. Otherwise, clear the
-            // filter.
+            // name filter.
             let cancelled_sync = session
                 .dir_mut()
                 .is_some_and(|dir| dir.sync.take().is_some());
             if !cancelled_sync {
-                session.ui.active_filter = None;
+                session.ui.name_filter = None;
             }
             session.ui.table_state.select(Some(0));
             SessionAction::None
@@ -794,7 +951,22 @@ fn execute(cmd: Cmd, session: &mut SessionView) -> SessionAction {
         }
         Cmd::CancelEdit => {
             session.ui.mode = SessionMode::Normal;
-            session.ui.filter_input.clear();
+            SessionAction::None
+        }
+        Cmd::PanelClose => {
+            session.ui.mode = SessionMode::Normal;
+            SessionAction::None
+        }
+        Cmd::SessionNew => {
+            // The browser hands over to the save-name prompt.
+            session.ui.mode = SessionMode::SaveSession {
+                name: String::new(),
+            };
+            SessionAction::None
+        }
+        // These depend on which panel draft is open and are executed by
+        // the panel handlers, never through this match.
+        Cmd::PanelFocusNext | Cmd::PanelApply | Cmd::PanelToggle => {
             SessionAction::None
         }
         // Global commands are dispatched by the App shell, never here.
@@ -940,7 +1112,10 @@ fn collapse_dir(session: &mut SessionView, path: &str) {
 }
 
 /// Cycle through sync operations.
-fn cycle_sync_op(current: &SyncOperation, delta: isize) -> SyncOperation {
+pub(crate) fn cycle_sync_op(
+    current: &SyncOperation,
+    delta: isize,
+) -> SyncOperation {
     let ops = SyncOperation::ALL;
     let len = ops.len() as isize;
     let idx = ops.iter().position(|x| x == current).unwrap_or(0) as isize;
@@ -988,6 +1163,260 @@ pub fn dialog_choice(
     } else {
         SessionAction::Transfer { items }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Modal panel handlers
+// ---------------------------------------------------------------------------
+
+/// Handle a key for the open filter panel modal.
+///
+/// The panel owns `Esc` (close), `Tab` (focus), `Enter` (apply) and
+/// `Space` (name-filter toggle) through the [`KeyScope::FilterPanel`]
+/// bindings; everything else reaches the focused section: printable keys
+/// edit the pattern buffer while it has focus, and `Space`/`j`/`k` pass
+/// through to the status `MultiSelect` while it has focus (returning
+/// `None` lets the child in the same input layer see the key).
+fn handle_filter_panel_key(
+    session: &mut SessionView,
+    key: KeyEvent,
+) -> Option<SessionAction> {
+    let focus = match &session.ui.mode {
+        SessionMode::FilterPanel { draft } => draft.focus,
+        _ => return None,
+    };
+    if let Some(cmd) = lookup(KeyScope::FilterPanel, key) {
+        // While the status list has focus, `Space` toggles its rows; the
+        // `MultiSelect` child must see the key, so the panel does not
+        // claim the toggle.
+        if cmd == Cmd::PanelToggle && focus == FilterFocus::Statuses {
+            return None;
+        }
+        return Some(match cmd {
+            Cmd::PanelClose => {
+                session.ui.mode = SessionMode::Normal;
+                SessionAction::None
+            }
+            Cmd::PanelFocusNext => {
+                if let SessionMode::FilterPanel { draft } =
+                    &mut session.ui.mode
+                {
+                    draft.focus = next_filter_focus(draft.focus);
+                }
+                SessionAction::None
+            }
+            Cmd::PanelToggle => {
+                if let SessionMode::FilterPanel { draft } =
+                    &mut session.ui.mode
+                {
+                    draft.name_filter_on = !draft.name_filter_on;
+                }
+                SessionAction::None
+            }
+            Cmd::PanelApply => apply_filter_draft(session),
+            _ => SessionAction::None,
+        });
+    }
+    // While the pattern field has focus, editing keys mutate the buffer.
+    if focus == FilterFocus::Pattern
+        && let SessionMode::FilterPanel { draft } = &mut session.ui.mode
+        && edit_text(&mut draft.pattern, &mut draft.cursor, key)
+    {
+        draft.error = None;
+        return Some(SessionAction::None);
+    }
+    None
+}
+
+/// Handle a key for the open session browser modal.
+///
+/// The browser owns `Esc` (close) and `n` (create new); `j`/`k`/`Enter`
+/// pass through to its `Select` child, which loads the highlighted
+/// session.
+fn handle_browser_key(
+    session: &mut SessionView,
+    key: KeyEvent,
+) -> Option<SessionAction> {
+    if !matches!(session.ui.mode, SessionMode::SessionBrowser { .. }) {
+        return None;
+    }
+    let cmd = lookup(KeyScope::SessionBrowser, key)?;
+    Some(execute(cmd, session))
+}
+
+/// Handle a key for the open settings modal.
+///
+/// The modal owns only `Esc`; `Enter` toggles the highlighted entry
+/// through its `Select` child.
+fn handle_settings_key(
+    session: &mut SessionView,
+    key: KeyEvent,
+) -> Option<SessionAction> {
+    if !matches!(session.ui.mode, SessionMode::Settings) {
+        return None;
+    }
+    let cmd = lookup(KeyScope::Settings, key)?;
+    Some(execute(cmd, session))
+}
+
+/// Handle a key for the open report modal.
+///
+/// `Enter` generates the report from every section except the format list
+/// (where the `Select` child owns it to confirm the highlighted format);
+/// `Esc` closes and `Tab` moves the focus; printable keys edit the
+/// destination path while it has focus.
+fn handle_report_key(
+    session: &mut SessionView,
+    key: KeyEvent,
+) -> Option<SessionAction> {
+    let focus = match &session.ui.mode {
+        SessionMode::Report { draft } => draft.focus,
+        _ => return None,
+    };
+    if key.code == KeyCode::Enter && focus != ReportFocus::Format {
+        return Some(generate_report_action(session));
+    }
+    if let Some(cmd) = lookup(KeyScope::Report, key) {
+        return Some(match cmd {
+            Cmd::PanelClose => {
+                session.ui.mode = SessionMode::Normal;
+                SessionAction::None
+            }
+            Cmd::PanelFocusNext => {
+                if let SessionMode::Report { draft } = &mut session.ui.mode {
+                    draft.focus = next_report_focus(draft.focus);
+                }
+                SessionAction::None
+            }
+            _ => SessionAction::None,
+        });
+    }
+    if focus == ReportFocus::Destination
+        && let SessionMode::Report { draft } = &mut session.ui.mode
+        && edit_text(&mut draft.destination, &mut draft.cursor, key)
+    {
+        draft.error = None;
+        return Some(SessionAction::None);
+    }
+    None
+}
+
+/// Apply the filter panel draft to the session and close the panel.
+///
+/// An invalid regex keeps the panel open and surfaces the compiler
+/// message in the draft instead of silently dropping the filter.
+fn apply_filter_draft(session: &mut SessionView) -> SessionAction {
+    let (compiled, statuses) = match &session.ui.mode {
+        SessionMode::FilterPanel { draft } => {
+            let compiled = if draft.name_filter_on && !draft.pattern.is_empty()
+            {
+                Some(NamePattern::new(&draft.pattern))
+            } else {
+                None
+            };
+            (
+                compiled,
+                (draft.show_same, draft.show_different, draft.show_orphans),
+            )
+        }
+        _ => return SessionAction::None,
+    };
+    let name_filter = match compiled {
+        Some(Ok(pattern)) => Some(pattern),
+        Some(Err(e)) => {
+            if let SessionMode::FilterPanel { draft } = &mut session.ui.mode {
+                draft.error = Some(format!("Invalid pattern: {e}"));
+            }
+            return SessionAction::None;
+        }
+        None => None,
+    };
+    session.ui.name_filter = name_filter;
+    let (show_same, show_different, show_orphans) = statuses;
+    if let Some(dir) = session.dir_mut() {
+        dir.display.show_same = show_same;
+        dir.display.show_different = show_different;
+        dir.display.show_orphans = show_orphans;
+    }
+    session.ui.mode = SessionMode::Normal;
+    session.ui.table_state.select(Some(0));
+    SessionAction::None
+}
+
+/// Build the report action from the modal draft.
+///
+/// An empty destination keeps the modal open with a validation message;
+/// otherwise the draft converts to a `ReportConfig` and the controller
+/// runs the generation.
+fn generate_report_action(session: &mut SessionView) -> SessionAction {
+    let (format, config, destination) = match &session.ui.mode {
+        SessionMode::Report { draft } => (
+            draft.format,
+            draft.config(),
+            draft.destination.trim().to_string(),
+        ),
+        _ => return SessionAction::None,
+    };
+    if destination.is_empty() {
+        if let SessionMode::Report { draft } = &mut session.ui.mode {
+            draft.error = Some("Enter an output path.".to_string());
+        }
+        return SessionAction::None;
+    }
+    SessionAction::GenerateReport {
+        format,
+        config: ReportSelection(config),
+        destination: PathBuf::from(destination),
+    }
+}
+
+/// Move the filter panel focus to the next section.
+fn next_filter_focus(focus: FilterFocus) -> FilterFocus {
+    match focus {
+        FilterFocus::Pattern => FilterFocus::NameToggle,
+        FilterFocus::NameToggle => FilterFocus::Statuses,
+        FilterFocus::Statuses => FilterFocus::Pattern,
+    }
+}
+
+/// Move the report modal focus to the next section.
+fn next_report_focus(focus: ReportFocus) -> ReportFocus {
+    match focus {
+        ReportFocus::Format => ReportFocus::Destination,
+        ReportFocus::Destination => ReportFocus::Options,
+        ReportFocus::Options => ReportFocus::Format,
+    }
+}
+
+/// Forward `key` to a `tui_input`-style editor over `value`/`cursor`.
+///
+/// Returns `true` when the key is an editing key (so the caller reports it
+/// as consumed); anything else leaves the buffer untouched and reports
+/// `false` so the key can reach a child component in the same layer.
+fn edit_text(value: &mut String, cursor: &mut usize, key: KeyEvent) -> bool {
+    let mut input = Input::new(std::mem::take(value)).with_cursor(*cursor);
+    let request = match key.code {
+        KeyCode::Char(c)
+            if key.modifiers.is_empty()
+                || key.modifiers == KeyModifiers::SHIFT =>
+        {
+            InputRequest::InsertChar(c)
+        }
+        KeyCode::Backspace => InputRequest::DeletePrevChar,
+        KeyCode::Delete => InputRequest::DeleteNextChar,
+        KeyCode::Left => InputRequest::GoToPrevChar,
+        KeyCode::Right => InputRequest::GoToNextChar,
+        KeyCode::Home => InputRequest::GoToStart,
+        KeyCode::End => InputRequest::GoToEnd,
+        _ => {
+            *value = input.value().to_string();
+            return false;
+        }
+    };
+    input.handle(request);
+    *value = input.value().to_string();
+    *cursor = input.cursor();
+    true
 }
 
 #[cfg(test)]
@@ -1303,15 +1732,17 @@ mod tests {
     #[test]
     fn editing_mode_esc_cancels_and_other_keys_pass_through() {
         let mut session = dir_session();
-        session.ui.mode = SessionMode::Filter;
-        session.ui.filter_input = "partial".into();
+        session.ui.mode = SessionMode::Search {
+            query: "partial".into(),
+        };
         let action = press(&mut session, KeyCode::Esc);
         assert_eq!(action, Some(SessionAction::None));
         assert_eq!(session.ui.mode, SessionMode::Normal);
-        assert!(session.ui.filter_input.is_empty());
 
         // While editing, printable keys are not owned by this handler.
-        session.ui.mode = SessionMode::Filter;
+        session.ui.mode = SessionMode::Search {
+            query: String::new(),
+        };
         assert_eq!(press(&mut session, KeyCode::Char('x')), None);
         // `q` cancels the mode instead of quitting.
         assert!(press(&mut session, KeyCode::Char('q')).is_some());
@@ -1319,11 +1750,11 @@ mod tests {
     }
 
     #[test]
-    fn save_and_load_modes_carry_their_own_buffers() {
+    fn save_mode_and_browser_carry_their_own_state() {
         let mut session = dir_session();
-        session.ui.filter_input = "keep me".into();
+        session.ui.name_filter = Some(NamePattern::new("keep me").unwrap());
 
-        // Save mode owns its name buffer; the filter buffer is untouched.
+        // Save mode owns its name buffer; the name filter is untouched.
         assert_eq!(
             press(&mut session, KeyCode::Char('s')),
             Some(SessionAction::None)
@@ -1332,22 +1763,34 @@ mod tests {
             &session.ui.mode,
             SessionMode::SaveSession { name } if name.is_empty()
         ));
-        assert_eq!(session.ui.filter_input, "keep me");
+        assert_eq!(
+            session.ui.name_filter.as_ref().unwrap().pattern,
+            "keep me"
+        );
 
-        // Cancelling drops the mode and its buffer with it.
+        // Cancelling drops the mode with it.
         assert!(press(&mut session, KeyCode::Char('q')).is_some());
         assert_eq!(session.ui.mode, SessionMode::Normal);
 
-        // Load mode carries its own name buffer and saved-session list,
-        // and asks the controller to fill the list.
+        // The browser opens empty and asks the controller to fill the
+        // saved-session list.
         assert_eq!(
             press(&mut session, KeyCode::Char('O')),
             Some(SessionAction::ListSessions)
         );
         assert!(matches!(
             &session.ui.mode,
-            SessionMode::LoadSession { name, saved_sessions }
-                if name.is_empty() && saved_sessions.is_empty()
+            SessionMode::SessionBrowser { saved_sessions }
+                if saved_sessions.is_empty()
+        ));
+        // `n` hands over to the save-name prompt.
+        assert_eq!(
+            press(&mut session, KeyCode::Char('n')),
+            Some(SessionAction::None)
+        );
+        assert!(matches!(
+            &session.ui.mode,
+            SessionMode::SaveSession { name } if name.is_empty()
         ));
     }
 
@@ -1749,5 +2192,155 @@ mod tests {
             Some(Cmd::ToggleHelp)
         );
         assert_eq!(lookup(KeyScope::DirNormal, key(KeyCode::F(1))), None);
+    }
+
+    #[test]
+    fn filter_panel_opens_seeded_and_applies_its_draft() {
+        let mut session = dir_session();
+        assert_eq!(
+            press(&mut session, KeyCode::Char('f')),
+            Some(SessionAction::None)
+        );
+        let SessionMode::FilterPanel { draft } = &session.ui.mode else {
+            panic!("expected FilterPanel mode");
+        };
+        // The draft mirrors the session's current display filters.
+        assert!(draft.show_same);
+        assert!(!draft.name_filter_on);
+
+        // Typing edits the pattern buffer while it has focus.
+        for c in "\\.txt".chars() {
+            press(&mut session, KeyCode::Char(c));
+        }
+        // `Tab` moves the focus to the name-filter toggle, where typing no
+        // longer edits the buffer.
+        assert_eq!(
+            press(&mut session, KeyCode::Tab),
+            Some(SessionAction::None)
+        );
+        press(&mut session, KeyCode::Char('z'));
+        // `Space` toggles the name filter on.
+        assert_eq!(
+            press(&mut session, KeyCode::Char(' ')),
+            Some(SessionAction::None)
+        );
+        // `Enter` applies the draft and closes the panel.
+        assert_eq!(
+            press(&mut session, KeyCode::Enter),
+            Some(SessionAction::None)
+        );
+        assert_eq!(session.ui.mode, SessionMode::Normal);
+        assert_eq!(session.ui.name_filter.as_ref().unwrap().pattern, "\\.txt");
+        assert!(
+            session
+                .ui
+                .name_filter
+                .as_ref()
+                .unwrap()
+                .is_match("file.txt")
+        );
+        assert!(!session.ui.name_filter.as_ref().unwrap().is_match("sub"));
+    }
+
+    #[test]
+    fn filter_panel_invalid_regex_stays_open_with_error() {
+        let mut session = dir_session();
+        press(&mut session, KeyCode::Char('f'));
+        press(&mut session, KeyCode::Char('('));
+        // The pattern is only compiled once the name filter is enabled.
+        press(&mut session, KeyCode::Tab);
+        press(&mut session, KeyCode::Char(' '));
+        assert_eq!(
+            press(&mut session, KeyCode::Enter),
+            Some(SessionAction::None)
+        );
+        let SessionMode::FilterPanel { draft } = &session.ui.mode else {
+            panic!("panel must stay open on an invalid pattern");
+        };
+        assert!(draft.error.is_some());
+        assert!(session.ui.name_filter.is_none());
+    }
+
+    #[test]
+    fn filter_panel_passes_list_keys_to_the_status_multiselect() {
+        let mut session = dir_session();
+        press(&mut session, KeyCode::Char('f'));
+        // Focus: Pattern -> NameToggle -> Statuses.
+        press(&mut session, KeyCode::Tab);
+        press(&mut session, KeyCode::Tab);
+        // While the status list has focus, `Space` and `j` belong to the
+        // child component, so the handler reports them unbound.
+        assert_eq!(press(&mut session, KeyCode::Char(' ')), None);
+        assert_eq!(press(&mut session, KeyCode::Char('j')), None);
+        // `Enter` still applies from the list section.
+        assert_eq!(
+            press(&mut session, KeyCode::Enter),
+            Some(SessionAction::None)
+        );
+        assert_eq!(session.ui.mode, SessionMode::Normal);
+    }
+
+    #[test]
+    fn settings_modal_opens_and_closes() {
+        let mut session = dir_session();
+        assert_eq!(
+            press(&mut session, KeyCode::Char(',')),
+            Some(SessionAction::None)
+        );
+        assert_eq!(session.ui.mode, SessionMode::Settings);
+        // `j` belongs to the `Select` child; the handler does not claim it.
+        assert_eq!(press(&mut session, KeyCode::Char('j')), None);
+        assert_eq!(
+            press(&mut session, KeyCode::Esc),
+            Some(SessionAction::None)
+        );
+        assert_eq!(session.ui.mode, SessionMode::Normal);
+    }
+
+    #[test]
+    fn report_modal_generates_on_enter_with_a_destination() {
+        let mut session = dir_session();
+        assert_eq!(
+            press(&mut session, KeyCode::Char('R')),
+            Some(SessionAction::None)
+        );
+        // Focus starts on the format list, where `Enter` is owned by the
+        // `Select` child.
+        assert_eq!(press(&mut session, KeyCode::Enter), None);
+        // `Tab` moves to the destination field; typing edits the path.
+        press(&mut session, KeyCode::Tab);
+        for c in "out.csv".chars() {
+            press(&mut session, KeyCode::Char(c));
+        }
+        // `Enter` from the path field dispatches the generation.
+        match press(&mut session, KeyCode::Enter) {
+            Some(SessionAction::GenerateReport {
+                format,
+                config,
+                destination,
+            }) => {
+                assert_eq!(format, cocomo_lib::report::ReportFormat::Text);
+                assert!(config.0.include_different);
+                assert!(!config.0.include_same);
+                assert_eq!(destination, PathBuf::from("out.csv"));
+            }
+            other => panic!("expected GenerateReport, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn report_modal_requires_a_destination() {
+        let mut session = dir_session();
+        press(&mut session, KeyCode::Char('R'));
+        press(&mut session, KeyCode::Tab);
+        // An empty destination keeps the modal open with a message.
+        assert_eq!(
+            press(&mut session, KeyCode::Enter),
+            Some(SessionAction::None)
+        );
+        let SessionMode::Report { draft } = &session.ui.mode else {
+            panic!("modal must stay open without a destination");
+        };
+        assert!(draft.error.is_some());
     }
 }

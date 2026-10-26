@@ -23,7 +23,10 @@ use cocomo_lib::{
 };
 use cocomo_tui::{
     keys::{Cmd, KeyScope, handle_session_key, lookup},
-    state::{AppState, SessionAction, SessionMode, SessionView, SyncStage},
+    state::{
+        AppState, NamePattern, SessionAction, SessionMode, SessionView,
+        SyncStage,
+    },
 };
 use ratatui_kit::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -235,11 +238,11 @@ fn sync_confirm_mode_defers_to_the_modal() {
 #[test]
 fn cancel_clears_sync_preview_before_filter() {
     let mut session = dir_session();
-    session.ui.active_filter = Some("txt".into());
+    session.ui.name_filter = Some(NamePattern::new("txt").unwrap());
 
     // Without a preview, Esc clears the filter.
     assert_eq!(press(&mut session, KeyCode::Esc), Some(SessionAction::None));
-    assert_eq!(session.ui.active_filter, None);
+    assert_eq!(session.ui.name_filter, None);
 
     // With a preview, Esc drops the preview and keeps the filter; the stage
     // variant (planned vs. executed) makes no difference to the cancel.
@@ -247,14 +250,14 @@ fn cancel_clears_sync_preview_before_filter() {
         SyncStage::Planned(SyncResult::default()),
         SyncStage::Executed(SyncResult::default()),
     ] {
-        session.ui.active_filter = Some("txt".into());
+        session.ui.name_filter = Some(NamePattern::new("txt").unwrap());
         session.dir_mut().unwrap().sync = Some(stage);
         assert_eq!(
             press(&mut session, KeyCode::Esc),
             Some(SessionAction::None)
         );
         assert!(session.dir().unwrap().sync.is_none());
-        assert_eq!(session.ui.active_filter.as_deref(), Some("txt"));
+        assert_eq!(session.ui.name_filter.as_ref().unwrap().pattern, "txt");
     }
 }
 
@@ -276,7 +279,9 @@ fn editing_scope_preempts_session_commands() {
 
     // ...but while a text-entry mode is active it belongs to the input
     // component, so the session handler must not claim it.
-    session.ui.mode = SessionMode::Filter;
+    session.ui.mode = SessionMode::Search {
+        query: String::new(),
+    };
     assert_eq!(press(&mut session, KeyCode::Char('j')), None);
     // Esc (Editing scope) cancels the mode.
     assert_eq!(press(&mut session, KeyCode::Esc), Some(SessionAction::None));
@@ -337,4 +342,66 @@ fn tab_lifecycle_through_app_state() {
     app.close_active();
     assert!(app.sessions.is_empty());
     assert!(app.active().is_none());
+}
+
+#[test]
+fn filter_panel_flow_from_open_to_applied_filter() {
+    let mut session = dir_session();
+
+    // `f` opens the panel seeded from the session's current filters.
+    assert_eq!(
+        press(&mut session, KeyCode::Char('f')),
+        Some(SessionAction::None)
+    );
+    assert!(
+        matches!(&session.ui.mode, SessionMode::FilterPanel { draft } if draft.show_same)
+    );
+
+    // Type a regex, enable the name filter, and apply.
+    for c in "file".chars() {
+        press(&mut session, KeyCode::Char(c));
+    }
+    press(&mut session, KeyCode::Tab); // focus the name-filter toggle
+    press(&mut session, KeyCode::Char(' ')); // enable it
+    assert_eq!(
+        press(&mut session, KeyCode::Enter),
+        Some(SessionAction::None)
+    );
+    assert_eq!(session.ui.mode, SessionMode::Normal);
+    assert_eq!(session.ui.name_filter.as_ref().unwrap().pattern, "file");
+
+    // The filter is effective: only `file.txt` remains visible.
+    let names: Vec<&str> = session
+        .visible_rows()
+        .iter()
+        .map(|r| r.entry.name.as_str())
+        .collect();
+    assert_eq!(names, ["file.txt"]);
+}
+
+#[test]
+fn report_flow_from_open_to_generate_action() {
+    let mut session = dir_session();
+
+    // `R` opens the modal; `Tab` reaches the destination field, where a
+    // path can be typed; `Enter` dispatches the generation.
+    assert_eq!(
+        press(&mut session, KeyCode::Char('R')),
+        Some(SessionAction::None)
+    );
+    press(&mut session, KeyCode::Tab);
+    for c in "report.json".chars() {
+        press(&mut session, KeyCode::Char(c));
+    }
+    let action = press(&mut session, KeyCode::Enter);
+    let Some(SessionAction::GenerateReport {
+        format: _,
+        config,
+        destination,
+    }) = action
+    else {
+        panic!("expected GenerateReport, got {action:?}");
+    };
+    assert!(config.0.include_orphans);
+    assert_eq!(destination, std::path::PathBuf::from("report.json"));
 }

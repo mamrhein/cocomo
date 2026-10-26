@@ -14,10 +14,14 @@
 pub(crate) mod app;
 mod diff_list;
 mod dir_compare;
+mod filter_panel;
 mod frame;
 mod menu_bar;
+mod report_modal;
 mod rows;
+mod session_browser;
 mod session_table;
+mod settings_modal;
 mod sync_confirm;
 mod tab_bar;
 mod text_diff;
