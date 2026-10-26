@@ -34,13 +34,21 @@ use crate::state::DirRow;
 
 /// A pre-rendered table row: the cells are computed once when the
 /// underlying data changes and shared through an `Arc` across frames.
+///
+/// The `index` is the row's absolute position in the table, so the themed
+/// wrapper in [`super::session_table`] can highlight drag-range and hover
+/// rows without re-deriving the window offset in its renderer.
 #[derive(Clone)]
-pub(super) struct CellRow(Arc<[TableCell]>);
+pub(super) struct CellRow {
+    /// Absolute row index in the table (independent of the visible window).
+    pub index: usize,
+    cells: Arc<[TableCell]>,
+}
 
 impl CellRow {
     /// Return the row's cells for the `Table` renderer.
     pub fn cells(&self) -> Vec<TableCell> {
-        self.0.to_vec()
+        self.cells.to_vec()
     }
 }
 
@@ -58,7 +66,8 @@ pub(super) fn cell_row_renderer() -> RenderTableRow<CellRow> {
 /// within a level.
 pub(super) fn dir_rows(rows: &[DirRow], theme: &CocomoTheme) -> Vec<CellRow> {
     rows.iter()
-        .map(|row| {
+        .enumerate()
+        .map(|(index, row)| {
             let entry = row.entry;
             let status_style = theme.status_style(entry.status);
 
@@ -93,12 +102,15 @@ pub(super) fn dir_rows(rows: &[DirRow], theme: &CocomoTheme) -> Vec<CellRow> {
             };
             let indent = "  ".repeat(row.depth);
 
-            CellRow(Arc::from(vec![
-                TableCell::new(format!("{indent}{toggle} {}", entry.name)),
-                TableCell::new(left_meta),
-                TableCell::new(entry.status.symbol()).style(status_style),
-                TableCell::new(right_meta),
-            ]))
+            CellRow {
+                index,
+                cells: Arc::from(vec![
+                    TableCell::new(format!("{indent}{toggle} {}", entry.name)),
+                    TableCell::new(left_meta),
+                    TableCell::new(entry.status.symbol()).style(status_style),
+                    TableCell::new(right_meta),
+                ]),
+            }
         })
         .collect()
 }
@@ -110,7 +122,8 @@ pub(super) fn sync_rows(
 ) -> Vec<CellRow> {
     items
         .iter()
-        .map(|item| {
+        .enumerate()
+        .map(|(index, item)| {
             let action_color = match item.action {
                 TransferAction::CopyLeft | TransferAction::CopyRight => {
                     theme.transfer_copy
@@ -124,12 +137,20 @@ pub(super) fn sync_rows(
                 }
             };
             let dir_indicator = if item.is_dir { "\u{1F4C4} " } else { "  " };
-            CellRow(Arc::from(vec![
-                TableCell::new(item.action.label().to_string()).style(
-                    Style::new().fg(action_color).add_modifier(Modifier::BOLD),
-                ),
-                TableCell::new(format!("{}{}", dir_indicator, item.rel_path)),
-            ]))
+            CellRow {
+                index,
+                cells: Arc::from(vec![
+                    TableCell::new(item.action.label().to_string()).style(
+                        Style::new()
+                            .fg(action_color)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    TableCell::new(format!(
+                        "{}{}",
+                        dir_indicator, item.rel_path
+                    )),
+                ]),
+            }
         })
         .collect()
 }

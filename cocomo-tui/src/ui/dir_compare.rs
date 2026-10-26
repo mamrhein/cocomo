@@ -27,8 +27,8 @@ use super::{
 };
 use crate::{
     controller::{
-        dispatch_dir_key, set_active_mode, set_mode_buffer, submit_command,
-        submit_save_name, submit_search,
+        dispatch_dir_key, extend_selection, select_row, set_active_mode,
+        set_mode_buffer, submit_command, submit_save_name, submit_search,
     },
     keys::{self, KeyScope},
     state::{APP_STATE, SessionMode, SyncStage},
@@ -161,6 +161,7 @@ pub(super) fn DirCompareView(
     let right_path_str = session.core.right.display().to_string();
     let sync_operation = dir.sync_operation;
     let show_help = app.show_help;
+    let selection_range = session.selection_range();
 
     // Extract data needed after dropping the app handle (for status bar and
     // element! rendering). All session references below use these locals.
@@ -280,6 +281,7 @@ pub(super) fn DirCompareView(
             if sync_active {
                 SessionTable(
                     selected: session_selected,
+                    selection_range: selection_range,
                     title: "Sync Preview (dry-run)".to_string(),
                     columns: vec![
                         TableColumn::new("Action", Constraint::Length(30)),
@@ -289,10 +291,17 @@ pub(super) fn DirCompareView(
                     rows: preview_rows,
                     render_row: Some(cell_row_renderer()),
                     empty_message: Line::from("No transfers planned."),
+                    on_select: Handler::from(move |index| {
+                        select_row(index);
+                    }),
+                    on_extend: Handler::from(move |index| {
+                        extend_selection(index);
+                    }),
                 )
             } else {
                 SessionTable(
                     selected: session_selected,
+                    selection_range: selection_range,
                     title: compare_title,
                     columns: vec![
                         TableColumn::new("T Name", Constraint::Fill(1)),
@@ -309,6 +318,12 @@ pub(super) fn DirCompareView(
                     rows: entry_rows,
                     render_row: Some(cell_row_renderer()),
                     empty_message: Line::from(empty_msg),
+                    on_select: Handler::from(move |index| {
+                        select_row(index);
+                    }),
+                    on_extend: Handler::from(move |index| {
+                        extend_selection(index);
+                    }),
                 )
             }
             // Status bar or input component depending on mode. All text

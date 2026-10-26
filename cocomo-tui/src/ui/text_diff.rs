@@ -28,8 +28,8 @@ use super::{
 };
 use crate::{
     controller::{
-        dispatch_text_key, set_active_mode, set_mode_buffer, submit_command,
-        submit_search,
+        dispatch_text_key, select_row, set_active_mode, set_mode_buffer,
+        submit_command, submit_search,
     },
     diff_model::{current_diff_position, diff_line_numbers_by_side},
     keys::{self, KeyScope},
@@ -221,6 +221,9 @@ pub(super) fn TextCompareView(
                 rows: rows,
                 left_name: left_name,
                 right_name: right_name,
+                on_select: Handler::from(move |index| {
+                    select_row(index);
+                }),
             )
             // Status bar or input component depending on mode. Text entry
             // uses SearchInput, which owns its exclusive input layer; the

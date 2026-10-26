@@ -123,6 +123,27 @@ pub(crate) fn App(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         },
     );
 
+    // Register the global paste handler. `Global` scope runs before the
+    // input-layer cutoff, so pastes reach it even while a `SearchInput`
+    // owns an exclusive layer (the framework's text fields do not consume
+    // `Event::Paste` themselves). With bracketed paste mode enabled at the
+    // entry point, a clipboard paste arrives as one event instead of a
+    // burst of key presses.
+    hooks.use_event_handler(
+        EventScope::Global,
+        EventPriority::Normal,
+        move |event| {
+            let Event::Paste(text) = event else {
+                return EventResult::Ignored;
+            };
+            if controller::paste_into_mode(text.as_str()) {
+                EventResult::Consumed
+            } else {
+                EventResult::Ignored
+            }
+        },
+    );
+
     // Read current state for rendering the menu and tab bars.
     let app = app_state.read();
     let menu_selection = app.menu_selection;
@@ -152,8 +173,20 @@ pub(crate) fn App(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     element!(
         View(flex_direction: Direction::Vertical) {
-            MenuBar(menu_titles: menu_titles, selected: menu_selection)
-            TabBar(tab_titles: tab_titles, active_index: active_index)
+            MenuBar(
+                menu_titles: menu_titles,
+                selected: menu_selection,
+                on_select: Handler::from(move |index| {
+                    controller::activate_menu(index);
+                }),
+            )
+            TabBar(
+                tab_titles: tab_titles,
+                active_index: active_index,
+                on_select: Handler::from(move |index| {
+                    controller::set_active_tab(index);
+                }),
+            )
             View(height: Constraint::Min(1)) {
                 match active_view {
                     ActiveView::Dir => { DirCompareView() }

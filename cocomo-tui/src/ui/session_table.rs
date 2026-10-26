@@ -14,11 +14,20 @@
 //! offset (it renders from the top of its area and clips at the bottom),
 //! so the component slices out the viewport itself and keeps the selection
 //! inside it.
+//!
+//! Mouse support lives here too: clicking a row selects it, dragging
+//! extends the selection to a contiguous range, and the row under the
+//! pointer is highlighted. The session owns the selection; the component
+//! only maps pointer positions to row indices and calls the `on_select`
+//! / `on_extend` handlers.
+
+use std::sync::Arc;
 
 use ratatui_kit::{
+    crossterm::event::MouseButton,
     prelude::*,
     ratatui::{
-        layout::{Alignment, Constraint},
+        layout::{Alignment, Constraint, Position},
         style::Styled,
         symbols,
         text::{Line, Span},
@@ -26,7 +35,7 @@ use ratatui_kit::{
     },
 };
 
-use super::{rows::CellRow, theme::CocomoTheme};
+use super::{mouse_enabled, rows::CellRow, theme::CocomoTheme};
 
 /// Mirror the session-owned table selection into a component-local
 /// `State<TableState>` for the `Table` component.
@@ -58,6 +67,31 @@ fn use_session_table_state(
 /// The header separator renders zero rows under [`TableBorderMode::None`],
 /// so it costs nothing here.
 const CHROME_ROWS: u16 = 3;
+
+/// Rows between the top of the component's draw area and the first body
+/// row (block border, header row).
+const BODY_TOP: u16 = CHROME_ROWS - 1;
+
+/// The table's current row window, as needed to map pointer positions to
+/// absolute row indices.
+#[derive(Clone, Copy, Default)]
+struct Window {
+    /// Index of the first visible row.
+    offset: usize,
+    /// Number of visible rows.
+    visible: usize,
+    /// Total number of rows.
+    total: usize,
+}
+
+/// Map a y coordinate local to the table's draw area to the absolute row
+/// index it hits, `None` on the chrome or the empty area below the rows.
+fn row_at_local_y(local_y: u16, window: &Window) -> Option<usize> {
+    let row = local_y.checked_sub(BODY_TOP)?;
+    let index = window.offset + usize::from(row);
+    (usize::from(row) < window.visible && index < window.total)
+        .then_some(index)
+}
 
 /// Compute the first visible row of the table window.
 ///
@@ -113,6 +147,8 @@ fn use_body_height(hooks: &mut Hooks<'_, '_>, chrome_rows: u16) -> usize {
 pub(super) struct SessionTableProps {
     /// Session-owned selection mirrored into the table handle.
     pub(super) selected: Option<usize>,
+    /// Inclusive row range of a mouse drag selection, if any.
+    pub(super) selection_range: Option<(usize, usize)>,
     /// Panel title rendered in the table block's top border.
     pub(super) title: String,
     /// Column definitions.
@@ -123,26 +159,36 @@ pub(super) struct SessionTableProps {
     pub(super) render_row: Option<RenderTableRow<CellRow>>,
     /// Message rendered instead of the table when there are no rows.
     pub(super) empty_message: Line<'static>,
+    /// Called with the absolute row index when a row is clicked.
+    pub(super) on_select: Handler<'static, usize>,
+    /// Called with the absolute row index while a drag extends the
+    /// selection.
+    pub(super) on_extend: Handler<'static, usize>,
 }
 
 /// Themed table shared by the comparison views (F16).
 ///
 /// Owns the selection mirroring ([`use_session_table_state`]), the row
 /// windowing ([`window_offset`]), the bordered block with themed title,
-/// and the default table styling, so the views only supply columns, rows,
-/// and the renderer.  The session owns the *absolute* selection; the
-/// `Table` receives only the visible slice with a selection relative to
-/// that slice.  When there are no rows, the `empty_message` is rendered
+/// the mouse selection (click, drag-to-extend, hover highlight), and the
+/// default table styling, so the views only supply columns, rows, and the
+/// renderer.  The session owns the *absolute* selection; the `Table`
+/// receives only the visible slice with a selection relative to that
+/// slice.  When there are no rows, the `empty_message` is rendered
 /// centered in the framed panel instead of an empty table.
 #[component]
 pub(super) fn SessionTable(
-    props: &SessionTableProps,
+    props: &mut SessionTableProps,
     mut hooks: Hooks,
 ) -> impl Into<AnyElement<'static>> {
     let theme = hooks.use_component_theme::<CocomoTheme>();
 
     let mut scroll_offset = hooks.use_state(|| 0usize);
     let body_height = use_body_height(&mut hooks, CHROME_ROWS);
+    // The pointer hit closures need the draw area to turn absolute pointer
+    // coordinates into table-local rows; `use_previous_size` reports the
+    // same previous-frame area the pointer stamps are computed from.
+    let area = hooks.use_previous_size();
 
     // Slice the rows to the viewport and make the selection relative to
     // the slice; `TableWrapMode::Truncate` below guarantees one row is
@@ -158,9 +204,59 @@ pub(super) fn SessionTable(
     } else {
         body_height.min(total)
     };
+    let window = Window {
+        offset,
+        visible,
+        total,
+    };
     let rows = props.rows[offset..offset + visible].to_vec();
     let selected = props.selected.map(|index| index.saturating_sub(offset));
     let table_state = use_session_table_state(&mut hooks, selected);
+
+    // Hover tracking for the row under the pointer. The hook self-gates on
+    // the framework's mouse capture, so it is inert in offscreen tests.
+    let hover = hooks.use_hover_row(move |position: Position| {
+        position
+            .y
+            .checked_sub(area.y)
+            .and_then(|local_y| row_at_local_y(local_y, &window))
+    });
+
+    // Click selects a single row (and anchors a potential drag); dragging
+    // extends the selection to the row under the pointer. Consuming `Down`
+    // establishes the implicit pointer capture, so `Drag` events keep
+    // arriving even while the pointer leaves the table. Registration is
+    // gated on the app's mouse-capture flag (stable for the process, so
+    // the hook order stays consistent); the framework's own `Table`
+    // handlers stay inert because the table is rendered `active: false`.
+    if mouse_enabled() {
+        let mut on_select = props.on_select.take();
+        let mut on_extend = props.on_extend.take();
+        hooks.use_pointer(PointerOptions::default(), move |ev| {
+            let row = ev
+                .position
+                .y
+                .checked_sub(ev.area.y)
+                .and_then(|local_y| row_at_local_y(local_y, &window));
+            match ev.kind {
+                PointerKind::Down(MouseButton::Left) => match row {
+                    Some(index) => {
+                        on_select(index);
+                        EventResult::Consumed
+                    }
+                    None => EventResult::Ignored,
+                },
+                PointerKind::Drag(MouseButton::Left) => match row {
+                    Some(index) => {
+                        on_extend(index);
+                        EventResult::Consumed
+                    }
+                    None => EventResult::Ignored,
+                },
+                _ => EventResult::Ignored,
+            }
+        });
+    }
 
     let title = Line::from(format!(" {} ", props.title));
     if props.rows.is_empty() {
@@ -179,6 +275,33 @@ pub(super) fn SessionTable(
         .into_any();
     }
 
+    // Wrap the view's renderer to paint the drag-range and hover rows:
+    // the `Table` widget only marks the selected row itself, so the extra
+    // rows of a range and the hovered row get their cell styles patched
+    // here (the rows carry their absolute index for exactly this).
+    let base_renderer = props.render_row.clone();
+    let range = props.selection_range;
+    let range_style = theme.range;
+    let hover_style = theme.hover;
+    let render_row: RenderTableRow<CellRow> =
+        Arc::new(move |row: &CellRow, is_selected: bool| {
+            let mut cells = match &base_renderer {
+                Some(render) => render(row, is_selected),
+                None => row.cells(),
+            };
+            let in_range = range.is_some_and(|(lo, hi)| {
+                lo != hi && row.index >= lo && row.index <= hi
+            });
+            let hovered = !is_selected && hover.get() == Some(row.index);
+            if in_range || hovered {
+                let patch = if hovered { hover_style } else { range_style };
+                for cell in &mut cells {
+                    cell.style = cell.style.patch(patch);
+                }
+            }
+            cells
+        });
+
     let block = Block::default()
         .borders(Borders::ALL)
         .title(Span::styled(format!(" {} ", props.title), theme.title))
@@ -192,7 +315,7 @@ pub(super) fn SessionTable(
             default_index: Some(0),
             columns: props.columns.clone(),
             rows,
-            render_row: props.render_row.clone(),
+            render_row: Some(render_row),
             block: Some(block),
             // The block already draws the outer border; the table must not
             // draw its own. With `Outer`, ratatui-kit 0.12 reserves (n-1)
@@ -271,5 +394,46 @@ mod tests {
     #[test]
     fn no_selection_keeps_the_offset() {
         assert_eq!(window_offset(100, 10, 7, None), 7);
+    }
+
+    #[test]
+    fn pointer_rows_map_past_the_chrome() {
+        let window = Window {
+            offset: 0,
+            visible: 10,
+            total: 100,
+        };
+        // The two chrome rows above the body hit no row.
+        assert_eq!(row_at_local_y(0, &window), None);
+        assert_eq!(row_at_local_y(1, &window), None);
+        // The first body row is the window's first visible row.
+        assert_eq!(row_at_local_y(2, &window), Some(0));
+        assert_eq!(row_at_local_y(11, &window), Some(9));
+        // Below the visible window there is no row.
+        assert_eq!(row_at_local_y(12, &window), None);
+    }
+
+    #[test]
+    fn pointer_rows_follow_the_window() {
+        let window = Window {
+            offset: 40,
+            visible: 10,
+            total: 45,
+        };
+        assert_eq!(row_at_local_y(2, &window), Some(40));
+        // The last three rows of the list fit the window; past the total
+        // there is nothing to hit.
+        assert_eq!(row_at_local_y(6, &window), Some(44));
+        assert_eq!(row_at_local_y(7, &window), None);
+    }
+
+    #[test]
+    fn pointer_hits_nothing_without_rows() {
+        let window = Window {
+            offset: 0,
+            visible: 0,
+            total: 0,
+        };
+        assert_eq!(row_at_local_y(2, &window), None);
     }
 }

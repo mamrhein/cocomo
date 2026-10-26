@@ -19,10 +19,16 @@
 //! The gutter arrow points at the side that is behind: `<` when the right
 //! side has new or changed content, `>` when the left side has content the
 //! right side lacks, and `=` for identical lines (requirements §11.3).
+//!
+//! Clicking a row selects it: the row→index mapping reuses the
+//! `tui-widget-list` hit test cached in the shared list state, so variable
+//! heights and the scroll offset are already accounted for.
 
 use std::sync::Arc;
 
 use ratatui_kit::{
+    components::tui_widget_list::hit_test::Hit,
+    crossterm::event::MouseButton,
     prelude::*,
     ratatui::{
         buffer::Buffer,
@@ -34,6 +40,7 @@ use ratatui_kit::{
 };
 
 use super::{
+    mouse_enabled,
     rows::{DiffGutter, TextDiffRow},
     theme::CocomoTheme,
 };
@@ -123,6 +130,8 @@ pub(super) struct SessionDiffListProps {
     pub(super) left_name: String,
     /// Right file's name, shown above the right half.
     pub(super) right_name: String,
+    /// Called with the row index when a diff row is clicked.
+    pub(super) on_select: Handler<'static, usize>,
 }
 
 /// Side-by-side diff list with a themed border, file-name header, and a
@@ -134,13 +143,49 @@ pub(super) struct SessionDiffListProps {
 /// keeps the selection in view and renders only the visible window.
 #[component]
 pub(super) fn SessionDiffList(
-    props: &SessionDiffListProps,
+    props: &mut SessionDiffListProps,
     mut hooks: Hooks,
 ) -> impl Into<AnyElement<'static>> {
     let theme = hooks.use_component_theme::<CocomoTheme>();
     let list_state = hooks.use_state(tui_widget_list::ListState::default);
     if list_state.read().selected != props.selected {
         list_state.write_no_update().select(props.selected);
+    }
+
+    // Click-to-select: the `VirtualList` below is rendered `active: false`
+    // (the session keymap owns navigation), so its own click handling stays
+    // inert and the click bubbles here. The hit test runs in screen
+    // coordinates against the viewport cached by the last render, which is
+    // what `PointerEvent::position` carries for a non-scrolled component.
+    // Registration is gated on the app's mouse-capture flag and must stay
+    // above the early return below (stable hook order).
+    if mouse_enabled() {
+        let mut on_select = props.on_select.take();
+        let list = list_state;
+        let total = props.rows.len();
+        hooks.use_pointer(PointerOptions::default(), move |ev| {
+            let PointerKind::Click {
+                button: MouseButton::Left,
+                ..
+            } = ev.kind
+            else {
+                return EventResult::Ignored;
+            };
+            // Collect the hit before calling the handler so no read guard
+            // is held across the state mutation.
+            let hit = match list.read().hit_test(ev.position.x, ev.position.y)
+            {
+                Some(Hit::Item(index)) if index < total => Some(index),
+                _ => None,
+            };
+            match hit {
+                Some(index) => {
+                    on_select(index);
+                    EventResult::Consumed
+                }
+                None => EventResult::Ignored,
+            }
+        });
     }
 
     let title = Line::from(format!(" {} ", props.title));

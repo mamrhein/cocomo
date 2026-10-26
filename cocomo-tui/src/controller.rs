@@ -39,7 +39,7 @@ use ratatui_kit::crossterm::event::KeyEvent;
 
 use crate::{
     error::{Result, TuiError},
-    keys::{cycle_sync_op, handle_session_key},
+    keys::{self, Cmd, cycle_sync_op, handle_session_key},
     session_store::session_to_config,
     state::{
         APP_STATE, AppState, NamePattern, SessionAction, SessionContent,
@@ -755,7 +755,9 @@ pub(crate) fn process_session_action(action: SessionAction) {
                         PostTransfer::Text(content) => {
                             session.content = content;
                             // The transferred file may have lost lines (or
-                            // vanished), so keep the selection in range.
+                            // vanished), so drop the drag anchor and keep
+                            // the selection in range.
+                            session.ui.selection_anchor = None;
                             let rows = session.row_count();
                             if session
                                 .ui
@@ -1075,7 +1077,7 @@ pub(crate) fn submit_search(query: String) -> bool {
     }
     let from = session.ui.table_state.selected().unwrap_or(0);
     if let Some(row) = session.find_row_matching(&query, from) {
-        session.ui.table_state.select(Some(row));
+        session.set_cursor(Some(row));
     }
     session.ui.mode = SessionMode::Normal;
     true
@@ -1132,7 +1134,7 @@ pub(crate) fn submit_command(input: String) -> bool {
             };
             if let Some(session) = APP_STATE.state().write().active_mut() {
                 session.ui.name_filter = compiled;
-                session.ui.table_state.select(Some(0));
+                session.set_cursor(Some(0));
             }
         }
         "help" => toggle_help(),
@@ -1151,6 +1153,30 @@ pub(crate) fn set_active_mode(mode: SessionMode) {
     }
 }
 
+/// Select the table row under the mouse as a single-row selection.
+///
+/// The clicked row becomes both the cursor and the drag anchor, so a
+/// subsequent drag extends from it (see [`extend_selection`]).
+pub(crate) fn select_row(index: usize) {
+    if let Some(session) = APP_STATE.state().write().active_mut() {
+        session.ui.table_state.select(Some(index));
+        session.ui.selection_anchor = Some(index);
+    }
+}
+
+/// Extend a drag selection to `index`, keeping the anchor in place.
+///
+/// When no anchor exists yet (the drag started on a keyboard-selected row),
+/// the current cursor becomes the anchor.
+pub(crate) fn extend_selection(index: usize) {
+    if let Some(session) = APP_STATE.state().write().active_mut() {
+        if session.ui.selection_anchor.is_none() {
+            session.ui.selection_anchor = session.ui.table_state.selected();
+        }
+        session.ui.table_state.select(Some(index));
+    }
+}
+
 /// Close the active tab.
 ///
 /// Returns `true` when no sessions remain, meaning the caller should exit.
@@ -1166,9 +1192,92 @@ pub(crate) fn switch_tab(delta: isize) {
     APP_STATE.state().write().switch_tab(delta);
 }
 
+/// Activate the session tab at `index` (tab bar click).
+pub(crate) fn set_active_tab(index: usize) {
+    APP_STATE.state().write().set_active_tab(index);
+}
+
 /// Select the menu item at `index`.
 pub(crate) fn set_menu_selection(index: usize) {
     APP_STATE.state().write().menu_selection = index;
+}
+
+/// Activate the menu bar item at `index` (menu bar click).
+///
+/// Each item maps onto the command of its keyboard counterpart (see
+/// [`crate::keys`]); the ones without a text-session equivalent are
+/// ignored when no directory session is active. `Help` toggles the global
+/// help bar and needs no session.
+pub(crate) fn activate_menu(index: usize) {
+    let cmd = match index {
+        0 => Cmd::OpenSessionBrowser,
+        1 => Cmd::Reload,
+        2 => Cmd::Sync,
+        3 => Cmd::ToggleHideSame,
+        4 => Cmd::OpenFilterPanel,
+        5 => {
+            toggle_help();
+            return;
+        }
+        _ => return,
+    };
+    let action = {
+        let state = APP_STATE.state();
+        let mut app = state.write();
+        app.menu_selection = index;
+        let Some(session) = app.active_mut().filter(|s| s.content.is_dir())
+        else {
+            return;
+        };
+        keys::run_menu_command(session, cmd)
+    };
+    process_session_action(action);
+}
+
+/// Insert pasted clipboard text into the active session's text-entry mode.
+///
+/// The `SearchInput` fields are controlled components without an exposed
+/// cursor position, so a paste replaces the current buffer (the common
+/// flow is entering the mode, then pasting a path). Returns `true` when a
+/// mode buffer received the text.
+pub(crate) fn paste_into_mode(text: &str) -> bool {
+    let Some(value) = sanitize_paste(text) else {
+        return false;
+    };
+    let state = APP_STATE.state();
+    let mut app = state.write();
+    let Some(session) = app.active_mut() else {
+        return false;
+    };
+    match &mut session.ui.mode {
+        SessionMode::SaveSession { name }
+        | SessionMode::Search { query: name }
+        | SessionMode::Command { input: name } => {
+            *name = value;
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Reduce pasted clipboard text to a single usable line.
+///
+/// Session names, search patterns, and commands are single-line values,
+/// so only the first non-empty line survives; control characters (a
+/// stray BEL, carriage returns, ANSI remnants from OSC 52) are dropped.
+/// `None` when nothing usable remains.
+fn sanitize_paste(text: &str) -> Option<String> {
+    text.lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(|line| {
+            line.chars()
+                .filter(|c| !c.is_control())
+                .collect::<String>()
+                .trim()
+                .to_string()
+        })
+        .filter(|line| !line.is_empty())
 }
 
 /// Toggle the bottom help bar.
@@ -1246,5 +1355,136 @@ mod tests {
         assert_eq!(text.right_lines.len(), 1);
         assert_eq!(text.right_lines[0].content, "fn a() {}");
         assert!(text.text_diff.is_some());
+    }
+
+    /// App state with a single dir session, for the mouse/paste/menu tests.
+    fn dir_app_state() -> AppState {
+        let mut app = AppState::new();
+        app.add_session(SessionView::new_dir_compare(
+            Endpoint::local("/left"),
+            Endpoint::local("/right"),
+            false,
+        ));
+        app
+    }
+
+    #[test]
+    fn select_row_sets_cursor_and_anchor() {
+        APP_STATE.set(dir_app_state());
+        select_row(3);
+        let state = APP_STATE.state();
+        let app = state.read();
+        let session = app.active().unwrap();
+        assert_eq!(session.ui.table_state.selected(), Some(3));
+        assert_eq!(session.ui.selection_anchor, Some(3));
+    }
+
+    #[test]
+    fn extend_selection_keeps_the_anchor() {
+        APP_STATE.set(dir_app_state());
+        select_row(1);
+        extend_selection(4);
+        let state = APP_STATE.state();
+        let app = state.read();
+        let session = app.active().unwrap();
+        assert_eq!(session.ui.table_state.selected(), Some(4));
+        assert_eq!(session.selection_range(), Some((1, 4)));
+    }
+
+    #[test]
+    fn extend_selection_anchors_a_keyboard_selection() {
+        // A drag that starts on a keyboard-selected row (no anchor yet)
+        // anchors at that row.
+        APP_STATE.set(dir_app_state());
+        {
+            let state = APP_STATE.state();
+            let mut app = state.write();
+            app.active_mut().unwrap().set_cursor(Some(2));
+        }
+        extend_selection(5);
+        let state = APP_STATE.state();
+        let app = state.read();
+        let session = app.active().unwrap();
+        assert_eq!(session.ui.selection_anchor, Some(2));
+        assert_eq!(session.ui.table_state.selected(), Some(5));
+    }
+
+    #[test]
+    fn paste_into_mode_replaces_the_editing_buffer() {
+        let mut app = dir_app_state();
+        app.active_mut().unwrap().ui.mode = SessionMode::Search {
+            query: "old".into(),
+        };
+        APP_STATE.set(app);
+        assert!(paste_into_mode("/some/path\r\njunk"));
+        let state = APP_STATE.state();
+        let app = state.read();
+        assert_eq!(
+            app.active().unwrap().ui.mode,
+            SessionMode::Search {
+                query: "/some/path".into()
+            }
+        );
+    }
+
+    #[test]
+    fn paste_outside_editing_modes_is_ignored() {
+        APP_STATE.set(dir_app_state());
+        // Normal mode owns no buffer, and whitespace-only clipboard text
+        // is no value to any mode either.
+        assert!(!paste_into_mode("  \n\t\n"));
+        let state = APP_STATE.state();
+        let app = state.read();
+        assert_eq!(app.active().unwrap().ui.mode, SessionMode::Normal);
+    }
+
+    #[test]
+    fn sanitize_paste_keeps_the_first_usable_line() {
+        assert_eq!(sanitize_paste("a\r\nb").as_deref(), Some("a"));
+        assert_eq!(
+            sanitize_paste("\n\n spaced \n").as_deref(),
+            Some("spaced")
+        );
+        // Control characters (BEL, ESC remnants) are dropped.
+        assert_eq!(sanitize_paste("a\u{7}b\u{1b}"), Some("ab".into()));
+        assert_eq!(sanitize_paste("   "), None);
+        assert_eq!(sanitize_paste("\u{7}\u{1b}"), None);
+    }
+
+    #[test]
+    fn activate_menu_toggles_help_without_a_session() {
+        APP_STATE.set(AppState::new());
+        activate_menu(5);
+        assert!(APP_STATE.state().read().show_help);
+    }
+
+    #[test]
+    fn activate_menu_runs_the_dir_command_and_selects_the_item() {
+        APP_STATE.set(dir_app_state());
+        activate_menu(3); // View → ToggleHideSame
+        let state = APP_STATE.state();
+        let app = state.read();
+        assert_eq!(app.menu_selection, 3);
+        assert!(!app.active().unwrap().dir().unwrap().display.show_same);
+    }
+
+    #[test]
+    fn activate_menu_dir_items_are_noops_on_a_text_session() {
+        let mut app = AppState::new();
+        app.add_session(SessionView::new_text_compare(
+            Endpoint::local("/left/a.txt"),
+            Endpoint::local("/right/b.txt"),
+            Vec::new(),
+            Vec::new(),
+            cocomo_lib::TextDiff::default(),
+            Grammar::plain_text(),
+        ));
+        APP_STATE.set(app);
+        activate_menu(3);
+        // The item highlights, but no command runs on a text session.
+        let state = APP_STATE.state();
+        let app = state.read();
+        assert_eq!(app.menu_selection, 3);
+        assert!(app.active().unwrap().ui.mode == SessionMode::Normal);
     }
 }

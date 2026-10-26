@@ -48,6 +48,12 @@ pub(super) struct CocomoTheme {
     pub title: Style,
     /// Reverse-video style for the selected table row.
     pub highlight: Style,
+    /// Plain selection-background style for the rows a drag selection
+    /// spans between its anchor and the cursor (the cursor row itself keeps
+    /// the stronger `highlight`).
+    pub range: Style,
+    /// Bold style for the row under the mouse pointer.
+    pub hover: Style,
     /// Cyan bold style for the application name.
     pub brand: Style,
     /// Dark-gray style for hints, line numbers, and other secondary text.
@@ -134,6 +140,8 @@ impl ComponentTheme for CocomoTheme {
             highlight: Style::new()
                 .bg(palette.selection)
                 .add_modifier(Modifier::REVERSED),
+            range: Style::new().bg(palette.selection),
+            hover: Style::new().add_modifier(Modifier::BOLD),
             brand: Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
             dim: Style::new().fg(palette.fg_dim),
             data: Style::new().fg(palette.warning),

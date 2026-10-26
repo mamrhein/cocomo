@@ -10,12 +10,15 @@
 //! Transfer dialog: the confirmation step of `c` (copy) and `d` (delete).
 //!
 //! The dialog is a pure key interface — no list, no cursor. It shows the
-//! selected line, and its bottom help line lists exactly the keys the entry
+//! selected line (or, for a drag-selected range, the list of affected
+//! entries), and its bottom help line lists exactly the keys the selection
 //! activates: `l` left, `r` right, `b` both (delete only), `Esc` abort.
-//! Activation is decided by [`TransferChoice::is_enabled`]: `l` needs a
-//! left side, `r` a right side, `b` both sides; abort is always active.
-//! Keys that do not apply are not shown at all, and a press of one is
-//! absorbed (the dialog stays open).
+//! Activation is decided by [`TransferChoice::is_enabled`] over the whole
+//! selection: `l` needs at least one entry with a left side, `r` one with a
+//! right side, `b` one with both; abort is always active. Keys that do not
+//! apply are not shown at all, and a press of one is absorbed (the dialog
+//! stays open). The confirmed choice then applies to every entry in the
+//! selection that supports it.
 //!
 //! The dialog is the confirmation for destructive work, so a single
 //! deliberate key press stands between the selection and the filesystem.
@@ -52,11 +55,15 @@ use crate::{
 struct DialogData {
     /// Which operation the dialog offers.
     op: TransferOp,
-    /// The selected line, rendered so the user sees what they are acting on.
+    /// What the transfer would act on, rendered for the user.
     summary: Vec<Line<'static>>,
-    /// Bottom help line listing the keys the entry activates.
+    /// Bottom help line listing the keys the selection activates.
     help: Line<'static>,
 }
+
+/// Maximum number of entries a multi-target summary lists before it
+/// collapses the rest into a `+N more` line.
+const MAX_SUMMARY_TARGETS: usize = 5;
 
 /// Transfer dialog rendered above the active session.
 #[component]
@@ -74,11 +81,21 @@ pub(super) fn TransferDialog(
             let SessionMode::Transfer { op } = s.ui.mode else {
                 return None;
             };
-            let target = s.transfer_target()?;
+            let targets = s.transfer_targets();
+            if targets.is_empty() {
+                return None;
+            }
+            // An option activates when any target in the range supports
+            // it; the items are then built per target, skipping the ones
+            // that do not.
+            let has_left = targets.iter().any(|t| t.has_left);
+            let has_right = targets.iter().any(|t| t.has_right);
             Some(DialogData {
                 op,
-                summary: summary_lines(s, &target, &theme),
-                help: help_line(op, &target).style(theme.dim).centered(),
+                summary: summary_lines(s, &targets, &theme),
+                help: help_line(op, has_left, has_right)
+                    .style(theme.dim)
+                    .centered(),
             })
         });
     let open = dialog.is_some();
@@ -144,13 +161,17 @@ pub(super) fn TransferDialog(
     )
 }
 
-/// Build the bottom help line: the keys the entry activates, in display
-/// order, as `key label` pairs. Keys that do not apply are omitted, so the
-/// copy line never carries `b`.
-fn help_line(op: TransferOp, target: &TransferTarget) -> Line<'static> {
+/// Build the bottom help line: the keys the selection activates, in
+/// display order, as `key label` pairs. Keys that do not apply are omitted,
+/// so the copy line never carries `b`.
+fn help_line(
+    op: TransferOp,
+    has_left: bool,
+    has_right: bool,
+) -> Line<'static> {
     let mut spans: Vec<Span<'static>> = Vec::new();
     for choice in op.choices() {
-        if !choice.is_enabled(op, target.has_left, target.has_right) {
+        if !choice.is_enabled(op, has_left, has_right) {
             continue;
         }
         if !spans.is_empty() {
@@ -165,16 +186,34 @@ fn help_line(op: TransferOp, target: &TransferTarget) -> Line<'static> {
     Line::from(spans)
 }
 
-/// Render the selected line: what the transfer would act on.
+/// Render what the transfer would act on.
 ///
-/// A directory session shows the entry row (name, both sides' metadata, and
-/// the status symbol); a text session shows the two compared paths. When no
-/// key applies, the reason from [`TransferTarget::note`] is appended.
+/// A single target keeps the detailed rendering: a directory session shows
+/// the entry row (name, both sides' metadata, and the status symbol), a
+/// text session shows the two compared paths, and the reason from
+/// [`TransferTarget::note`] is appended when no key applies. A drag range
+/// lists the affected entries by root-relative path, collapsing the tail
+/// beyond [`MAX_SUMMARY_TARGETS`] into a `+N more` line.
 fn summary_lines(
     session: &SessionView,
-    target: &TransferTarget,
+    targets: &[TransferTarget],
     theme: &CocomoTheme,
 ) -> Vec<Line<'static>> {
+    if targets.len() > 1 {
+        let mut lines: Vec<Line<'static>> = targets
+            .iter()
+            .take(MAX_SUMMARY_TARGETS)
+            .map(|target| Line::from(target.rel_path.clone()))
+            .collect();
+        if let Some(more) = targets.len().checked_sub(MAX_SUMMARY_TARGETS) {
+            lines.push(Line::from(Span::styled(
+                format!("+{more} more"),
+                theme.dim,
+            )));
+        }
+        return lines;
+    }
+
     let mut lines = match &session.content {
         SessionContent::Dir(_) => {
             let rows = session.visible_rows();
@@ -194,7 +233,7 @@ fn summary_lines(
             )),
         ],
     };
-    if let Some(note) = target.note {
+    if let Some(note) = targets.first().and_then(|t| t.note) {
         lines.push(Line::from(Span::styled(format!("({note})"), theme.dim)));
     }
     lines

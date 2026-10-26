@@ -40,13 +40,31 @@ pub(crate) mod ui;
 
 use anyhow::Result;
 use clap::Parser;
-use ratatui_kit::prelude::*;
+use ratatui_kit::{
+    crossterm::{
+        event::{DisableBracketedPaste, EnableBracketedPaste},
+        execute,
+    },
+    prelude::*,
+};
 
 use crate::{
     cli::{Cli, Startup},
     state::{APP_STATE, AppState},
-    ui::{app::App, theme::cocomo_palette},
+    ui::{app::App, set_mouse_enabled, theme::cocomo_palette},
 };
+
+/// Disables bracketed paste mode again when it goes out of scope.
+///
+/// Disabling is best-effort: the mode was only ever enabled by [`run`],
+/// and terminals that never entered it ignore the reset sequence.
+struct BracketedPasteGuard;
+
+impl Drop for BracketedPasteGuard {
+    fn drop(&mut self) {
+        let _ = execute!(std::io::stdout(), DisableBracketedPaste);
+    }
+}
 
 /// Parse the CLI arguments, seed the global [`APP_STATE`], and run the root
 /// [`App`] component on the full screen.
@@ -67,13 +85,22 @@ pub async fn run() -> Result<()> {
     }
     APP_STATE.set(app);
 
+    // Enable mouse capture (click/drag selection, menu activation) and
+    // bracketed paste (pastes arrive as a single `Event::Paste` instead of
+    // a burst of key presses that would trigger commands). Bracketed paste
+    // is best-effort: terminals without support keep delivering pastes as
+    // keys, which the paste handler simply does not see.
+    set_mouse_enabled();
+    let _paste_guard = BracketedPasteGuard;
+    let _ = execute!(std::io::stdout(), EnableBracketedPaste);
+
     // Inject the app palette at the root so every component (framework
     // built-ins and `CocomoTheme` readers alike) resolves its styles from
     // the central scheme.
     element!(PaletteProvider(palette: cocomo_palette()) {
         App()
     })
-    .fullscreen()
+    .fullscreen_with(RunOptions { mouse: true })
     .await?;
 
     Ok(())

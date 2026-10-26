@@ -627,6 +627,12 @@ pub struct TextDiffView {
 pub struct UiState {
     /// Selected row in the entry table.
     pub table_state: TableState,
+    /// Anchor row of a mouse drag selection.
+    ///
+    /// While set, the selection covers the inclusive range between the
+    /// anchor and the table cursor. Keyboard navigation always produces a
+    /// single-row selection and clears it (see [`SessionView::set_cursor`]).
+    pub selection_anchor: Option<usize>,
     /// Current input mode (owns the save-name buffer and the panel drafts).
     pub mode: SessionMode,
     /// Active name filter. `None` means no filter.
@@ -763,7 +769,7 @@ impl SessionView {
         if let Some(dir) = self.dir_mut() {
             dir.comparison = comparison;
             dir.comparison_revision += 1;
-            self.ui.table_state.select(Some(0));
+            self.set_cursor(Some(0));
         }
     }
 
@@ -777,8 +783,29 @@ impl SessionView {
         if let Some(dir) = self.dir_mut() {
             dir.sync = Some(stage);
             dir.sync_revision += 1;
-            self.ui.table_state.select(Some(0));
+            self.set_cursor(Some(0));
         }
+    }
+
+    /// Move the table cursor to `index` and drop the drag-selection anchor.
+    ///
+    /// Keyboard navigation and programmatic jumps always produce a
+    /// single-row selection, so they must not leave a stale range behind.
+    /// Mouse click/drag selection goes through the controller
+    /// (`select_row`/`extend_selection`) instead, which manages the anchor.
+    pub fn set_cursor(&mut self, index: Option<usize>) {
+        self.ui.selection_anchor = None;
+        self.ui.table_state.select(index);
+    }
+
+    /// The inclusive row range covered by a drag selection.
+    ///
+    /// `None` while there is no drag anchor — then only the selected row
+    /// is highlighted (the table widget already marks it).
+    pub fn selection_range(&self) -> Option<(usize, usize)> {
+        let selected = self.ui.table_state.selected()?;
+        let anchor = self.ui.selection_anchor?;
+        Some((anchor.min(selected), anchor.max(selected)))
     }
 
     /// Return the tab title for this session.
@@ -900,21 +927,11 @@ impl SessionView {
     /// explaining why. `None` when nothing is selected or the selected entry
     /// exists on neither side.
     pub fn transfer_target(&self) -> Option<TransferTarget> {
-        let same_side = self.core.left.same_provider(&self.core.right)
-            && self.core.left.path() == self.core.right.path();
+        let same_side = self.same_side();
         match &self.content {
             SessionContent::Dir(_) => {
-                let entry = self.selected_row()?.entry;
-                let info = entry.left.as_ref().or(entry.right.as_ref())?;
-                Some(TransferTarget {
-                    name: entry.name.clone(),
-                    rel_path: info.path.clone(),
-                    is_dir: info.is_dir,
-                    has_left: entry.left.is_some(),
-                    has_right: entry.right.is_some(),
-                    same_side,
-                    note: None,
-                })
+                let row = self.selected_row()?;
+                Self::dir_target(&row, same_side)
             }
             SessionContent::Text(_) => {
                 let left_name = self
@@ -944,6 +961,65 @@ impl SessionView {
                 })
             }
         }
+    }
+
+    /// Resolve the transfer targets for the current selection.
+    ///
+    /// A drag-selected range transfers every row in it that exists on at
+    /// least one side; without a drag anchor this is just the selected row
+    /// (matching [`SessionView::transfer_target`]). Text sessions always
+    /// target the compared files.
+    pub fn transfer_targets(&self) -> Vec<TransferTarget> {
+        let same_side = self.same_side();
+        match &self.content {
+            SessionContent::Dir(_) => {
+                let selected = self.ui.table_state.selected();
+                let Some((lo, hi)) = self
+                    .selection_range()
+                    .or_else(|| selected.map(|i| (i, i)))
+                else {
+                    return Vec::new();
+                };
+                let rows = self.visible_rows();
+                if rows.is_empty() || lo >= rows.len() {
+                    return Vec::new();
+                }
+                let hi = hi.min(rows.len() - 1);
+                rows[lo..=hi]
+                    .iter()
+                    .filter_map(|row| Self::dir_target(row, same_side))
+                    .collect()
+            }
+            SessionContent::Text(_) => {
+                self.transfer_target().into_iter().collect()
+            }
+        }
+    }
+
+    /// Whether both endpoints address the same root, so one delete removes
+    /// an entry for both sides.
+    fn same_side(&self) -> bool {
+        self.core.left.same_provider(&self.core.right)
+            && self.core.left.path() == self.core.right.path()
+    }
+
+    /// Build the transfer target for one visible directory row, `None`
+    /// when the entry exists on neither side.
+    fn dir_target(
+        row: &DirRow<'_>,
+        same_side: bool,
+    ) -> Option<TransferTarget> {
+        let entry = row.entry;
+        let info = entry.left.as_ref().or(entry.right.as_ref())?;
+        Some(TransferTarget {
+            name: entry.name.clone(),
+            rel_path: info.path.clone(),
+            is_dir: info.is_dir,
+            has_left: entry.left.is_some(),
+            has_right: entry.right.is_some(),
+            same_side,
+            note: None,
+        })
     }
 
     /// Return the first row at or after `after + 1` whose displayed text
@@ -1105,6 +1181,16 @@ impl AppState {
     /// Return the index of the active tab.
     pub fn active_index(&self) -> usize {
         self.active_tab
+    }
+
+    /// Activate the tab at `index`, ignoring out-of-range indices.
+    ///
+    /// The tab bar's click handler addresses tabs by absolute position,
+    /// unlike [`AppState::switch_tab`]'s relative delta.
+    pub fn set_active_tab(&mut self, index: usize) {
+        if index < self.sessions.len() {
+            self.active_tab = index;
+        }
     }
 }
 
@@ -1714,6 +1800,134 @@ mod tests {
         }));
         session.ui.table_state.select(Some(0));
         assert!(session.transfer_target().unwrap().same_side);
+    }
+
+    #[test]
+    fn set_cursor_clears_the_selection_anchor() {
+        let mut session = dir_session();
+        session.ui.table_state.select(Some(2));
+        session.ui.selection_anchor = Some(0);
+        assert_eq!(session.selection_range(), Some((0, 2)));
+
+        session.set_cursor(Some(5));
+        assert_eq!(session.ui.table_state.selected(), Some(5));
+        assert_eq!(session.ui.selection_anchor, None);
+        assert_eq!(session.selection_range(), None);
+    }
+
+    #[test]
+    fn selection_range_spans_anchor_and_cursor() {
+        let mut session = dir_session();
+        // Without an anchor the range is `None`, even with a selection.
+        session.ui.table_state.select(Some(3));
+        assert_eq!(session.selection_range(), None);
+
+        // The range is inclusive and order-independent.
+        session.ui.selection_anchor = Some(5);
+        assert_eq!(session.selection_range(), Some((3, 5)));
+        session.ui.table_state.select(Some(1));
+        assert_eq!(session.selection_range(), Some((1, 5)));
+    }
+
+    #[test]
+    fn resets_clear_the_selection_anchor() {
+        let mut session = dir_session();
+        session.ui.table_state.select(Some(2));
+        session.ui.selection_anchor = Some(0);
+        session.set_comparison(Some(comparison(&[(
+            "a",
+            DirEntryStatus::Different,
+        )])));
+        assert_eq!(session.ui.selection_anchor, None);
+
+        session.ui.selection_anchor = Some(1);
+        session.set_sync(SyncStage::Planned(SyncResult::default()));
+        assert_eq!(session.ui.selection_anchor, None);
+    }
+
+    #[test]
+    fn transfer_targets_cover_the_drag_range() {
+        let mut session = dir_session();
+        session.set_comparison(Some(DirComparison {
+            entries: vec![
+                entry_with_sides("a", DirEntryStatus::LeftOnly, true, false),
+                // An entry on neither side (the `comparison()` shape) is
+                // skipped by the range expansion.
+                DirEntry {
+                    name: "ghost".into(),
+                    status: DirEntryStatus::Different,
+                    left: None,
+                    right: None,
+                    center: None,
+                    sub_entries: None,
+                },
+                entry_with_sides("c", DirEntryStatus::Different, true, true),
+            ],
+            ..Default::default()
+        }));
+
+        // Without an anchor the range is just the selected row.
+        session.ui.table_state.select(Some(0));
+        let names: Vec<String> = session
+            .transfer_targets()
+            .into_iter()
+            .map(|t| t.name)
+            .collect();
+        assert_eq!(names, vec!["a"]);
+
+        // With an anchor, every row in the range that exists on a side
+        // becomes a target; the side-less row is skipped.
+        session.ui.selection_anchor = Some(0);
+        session.ui.table_state.select(Some(2));
+        let names: Vec<String> = session
+            .transfer_targets()
+            .into_iter()
+            .map(|t| t.name)
+            .collect();
+        assert_eq!(names, vec!["a", "c"]);
+    }
+
+    #[test]
+    fn transfer_targets_clamp_to_the_visible_rows() {
+        let mut session = dir_session();
+        session.set_comparison(Some(DirComparison {
+            entries: vec![entry_with_sides(
+                "a",
+                DirEntryStatus::Different,
+                true,
+                true,
+            )],
+            ..Default::default()
+        }));
+        // A stale anchor/cursor beyond the last row (e.g. after filtering)
+        // must not panic and still yields the reachable rows.
+        session.ui.selection_anchor = Some(0);
+        session.ui.table_state.select(Some(9));
+        let names: Vec<String> = session
+            .transfer_targets()
+            .into_iter()
+            .map(|t| t.name)
+            .collect();
+        assert_eq!(names, vec!["a"]);
+
+        // A selection entirely past the end yields no targets.
+        session.ui.selection_anchor = None;
+        session.ui.table_state.select(Some(9));
+        assert!(session.transfer_targets().is_empty());
+    }
+
+    #[test]
+    fn set_active_tab_ignores_out_of_range_indices() {
+        let mut app = AppState::new();
+        app.add_session(dir_session());
+        app.add_session(dir_session());
+        assert_eq!(app.active_index(), 1);
+
+        app.set_active_tab(0);
+        assert_eq!(app.active_index(), 0);
+
+        app.set_active_tab(2);
+        assert_eq!(app.active_index(), 0);
     }
 
     #[test]

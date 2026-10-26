@@ -27,7 +27,7 @@
 
 use std::path::PathBuf;
 
-use cocomo_lib::SyncOperation;
+use cocomo_lib::{SyncOperation, TransferItem};
 use ratatui_kit::{
     components::tui_input::{Input, InputRequest},
     crossterm::event::{KeyCode, KeyEvent, KeyModifiers},
@@ -791,13 +791,13 @@ fn execute(cmd: Cmd, session: &mut SessionView) -> SessionAction {
             SessionAction::None
         }
         Cmd::FirstRow => {
-            session.ui.table_state.select(Some(0));
+            session.set_cursor(Some(0));
             SessionAction::None
         }
         Cmd::LastRow => {
             let count = session.row_count();
             if count > 0 {
-                session.ui.table_state.select(Some(count - 1));
+                session.set_cursor(Some(count - 1));
             }
             SessionAction::None
         }
@@ -824,7 +824,7 @@ fn execute(cmd: Cmd, session: &mut SessionView) -> SessionAction {
             if let Some(dir) = session.dir_mut() {
                 dir.display.show_same = !dir.display.show_same;
             }
-            session.ui.table_state.select(Some(0));
+            session.set_cursor(Some(0));
             SessionAction::None
         }
         Cmd::ToggleCompareContent => {
@@ -909,7 +909,7 @@ fn execute(cmd: Cmd, session: &mut SessionView) -> SessionAction {
             if !cancelled_sync {
                 session.ui.name_filter = None;
             }
-            session.ui.table_state.select(Some(0));
+            session.set_cursor(Some(0));
             SessionAction::None
         }
         Cmd::NextDiff => {
@@ -985,15 +985,15 @@ fn navigate(session: &mut SessionView, delta: isize) {
     if delta > 0 {
         if let Some(selected) = session.ui.table_state.selected() {
             if selected + 1 < rows {
-                session.ui.table_state.select(Some(selected + 1));
+                session.set_cursor(Some(selected + 1));
             }
         } else if rows > 0 {
-            session.ui.table_state.select(Some(0));
+            session.set_cursor(Some(0));
         }
     } else if let Some(selected) =
         session.ui.table_state.selected().filter(|s| *s > 0)
     {
-        session.ui.table_state.select(Some(selected - 1));
+        session.set_cursor(Some(selected - 1));
     }
 }
 
@@ -1023,10 +1023,7 @@ fn jump_diff(session: &mut SessionView, delta: isize) {
     } else {
         *groups.last().expect("groups was checked to be non-empty")
     };
-    session
-        .ui
-        .table_state
-        .select(Some(target.unwrap_or(fallback)));
+    session.set_cursor(Some(target.unwrap_or(fallback)));
 }
 
 /// Handle Enter key — open the selected entry in a new session, leaving
@@ -1107,7 +1104,7 @@ fn collapse_dir(session: &mut SessionView, path: &str) {
         dir.tree_revision += 1;
     }
     if let Some(index) = session.row_index_of(path) {
-        session.ui.table_state.select(Some(index));
+        session.set_cursor(Some(index));
     }
 }
 
@@ -1123,12 +1120,12 @@ pub(crate) fn cycle_sync_op(
     ops[new_idx as usize]
 }
 
-/// Open the transfer dialog for the selected entry.
+/// Open the transfer dialog for the current selection.
 ///
-/// A no-op when nothing is selected (or the selected entry exists on
-/// neither side), so `c`/`d` on an empty table simply do nothing.
+/// A no-op when nothing is selected (or no selected entry exists on
+/// either side), so `c`/`d` on an empty table simply do nothing.
 fn open_dialog(session: &mut SessionView, op: TransferOp) -> SessionAction {
-    if session.transfer_target().is_some() {
+    if !session.transfer_targets().is_empty() {
         session.ui.mode = SessionMode::Transfer { op };
     }
     SessionAction::None
@@ -1137,10 +1134,11 @@ fn open_dialog(session: &mut SessionView, op: TransferOp) -> SessionAction {
 /// Resolve a transfer-dialog option into the action the controller must
 /// dispatch.
 ///
-/// The target is resolved here rather than trusted from the dialog's render,
-/// so an accelerator for an option the entry does not activate is absorbed:
-/// the dialog stays open and nothing transfers. Only an active option (or
-/// `abort`) closes the dialog.
+/// The targets are resolved here rather than trusted from the dialog's
+/// render, so an accelerator for an option no target in the selection
+/// activates is absorbed: the dialog stays open and nothing transfers.
+/// An active option transfers it on every target that supports it. Only an
+/// active option (or `abort`) closes the dialog.
 pub fn dialog_choice(
     session: &mut SessionView,
     choice: TransferChoice,
@@ -1148,16 +1146,24 @@ pub fn dialog_choice(
     let SessionMode::Transfer { op } = session.ui.mode else {
         return SessionAction::None;
     };
-    let Some(target) = session.transfer_target() else {
+    let targets = session.transfer_targets();
+    if targets.is_empty() {
         // The dialog cannot render without a target; drop the stale mode.
         session.ui.mode = SessionMode::Normal;
         return SessionAction::None;
-    };
-    if !choice.is_enabled(op, target.has_left, target.has_right) {
+    }
+    // The option activates when any target supports it; `items` then
+    // contributes nothing for the targets that do not.
+    let has_left = targets.iter().any(|t| t.has_left);
+    let has_right = targets.iter().any(|t| t.has_right);
+    if !choice.is_enabled(op, has_left, has_right) {
         return SessionAction::None;
     }
     session.ui.mode = SessionMode::Normal;
-    let items = target.items(op, choice);
+    let items: Vec<TransferItem> = targets
+        .iter()
+        .flat_map(|target| target.items(op, choice))
+        .collect();
     if items.is_empty() {
         SessionAction::None
     } else {
@@ -1339,8 +1345,17 @@ fn apply_filter_draft(session: &mut SessionView) -> SessionAction {
         dir.display.show_orphans = show_orphans;
     }
     session.ui.mode = SessionMode::Normal;
-    session.ui.table_state.select(Some(0));
+    session.set_cursor(Some(0));
     SessionAction::None
+}
+
+/// Run a session-scoped [`Cmd`] activated from the menu bar.
+///
+/// The menu items map onto the same commands the keybindings execute, so a
+/// click and its keyboard shortcut cannot drift apart. The controller
+/// dispatches the returned action like any key-derived one.
+pub fn run_menu_command(session: &mut SessionView, cmd: Cmd) -> SessionAction {
+    execute(cmd, session)
 }
 
 /// Build the report action from the modal draft.
@@ -1699,6 +1714,43 @@ mod tests {
     }
 
     #[test]
+    fn keyboard_navigation_clears_the_drag_anchor() {
+        let mut session = dir_session();
+        session.ui.table_state.select(Some(1));
+        session.ui.selection_anchor = Some(0);
+
+        press(&mut session, KeyCode::Char('j'));
+        assert_eq!(session.ui.selection_anchor, None);
+
+        session.ui.selection_anchor = Some(0);
+        press(&mut session, KeyCode::Char('G'));
+        assert_eq!(session.ui.selection_anchor, None);
+
+        session.ui.selection_anchor = Some(0);
+        press(&mut session, KeyCode::Esc);
+        assert_eq!(session.ui.selection_anchor, None);
+    }
+
+    #[test]
+    fn run_menu_command_executes_session_commands() {
+        let mut session = dir_session();
+        // `View` toggles hiding identical entries and resets the cursor.
+        session.ui.table_state.select(Some(2));
+        let action = run_menu_command(&mut session, Cmd::ToggleHideSame);
+        assert!(matches!(action, SessionAction::None));
+        assert!(!session.dir().unwrap().display.show_same);
+        assert_eq!(session.ui.table_state.selected(), Some(0));
+
+        // `Sessions` opens the browser and asks for the saved list.
+        let action = run_menu_command(&mut session, Cmd::OpenSessionBrowser);
+        assert!(matches!(action, SessionAction::ListSessions));
+        assert!(matches!(
+            session.ui.mode,
+            SessionMode::SessionBrowser { .. }
+        ));
+    }
+
+    #[test]
     fn shift_n_jumps_to_prev_diff_and_wraps() {
         // Regression: N used to search for groups *after* the cursor, so it
         // jumped forward instead of backward.
@@ -2014,6 +2066,38 @@ mod tests {
             }
             other => panic!("expected Transfer, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn dialog_choice_transfers_every_target_in_the_drag_range() {
+        // Range 0..=2 over left-only, right-only, and both: `l` (copy left
+        // → right) applies to the two entries that have a left side, and
+        // the right-only entry contributes nothing.
+        let mut session = dir_session_with_sides();
+        session.ui.table_state.select(Some(2));
+        session.ui.selection_anchor = Some(0);
+        press(&mut session, KeyCode::Char('c'));
+        assert!(matches!(
+            session.ui.mode,
+            SessionMode::Transfer {
+                op: TransferOp::Copy
+            }
+        ));
+        match press(&mut session, KeyCode::Char('l')) {
+            Some(SessionAction::Transfer { items }) => {
+                assert_eq!(items.len(), 2);
+                let names: Vec<&str> =
+                    items.iter().map(|i| i.name.as_str()).collect();
+                assert_eq!(names, vec!["left-only.txt", "both.txt"]);
+                assert!(
+                    items
+                        .iter()
+                        .all(|i| i.action == TransferAction::CopyRight)
+                );
+            }
+            other => panic!("expected Transfer, got {other:?}"),
+        }
+        assert_eq!(session.ui.mode, SessionMode::Normal);
     }
 
     #[test]
