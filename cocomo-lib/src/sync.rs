@@ -644,11 +644,11 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-    use crate::{FsError, FsOperation, LocalFs, MockFs, fs::FileSystem};
+    use crate::{FsError, FsOperation, LocalFs, MockFs, fs::NodeFileSystem};
 
     /// Read a file's content from a `MockFs` tree.
     async fn mock_content(fs: &MockFs, path: &str) -> Vec<u8> {
-        fs.read(Path::new(path), None).await.unwrap().to_vec()
+        fs.read_path(Path::new(path), None).await.unwrap().to_vec()
     }
 
     fn make_sync_dirs() -> (PathBuf, PathBuf) {
@@ -1268,7 +1268,7 @@ mod tests {
         );
         assert!(
             right_fs
-                .read(Path::new("/right/right_only.txt"), None)
+                .read_path(Path::new("/right/right_only.txt"), None)
                 .await
                 .is_err()
         );
@@ -1319,7 +1319,7 @@ mod tests {
         // Nothing was transferred: the destination tree is untouched.
         assert!(
             right_fs
-                .read(Path::new("/right/left_only.txt"), None)
+                .read_path(Path::new("/right/left_only.txt"), None)
                 .await
                 .is_err()
         );

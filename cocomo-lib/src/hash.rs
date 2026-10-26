@@ -30,10 +30,7 @@ use chrono::{DateTime, Utc};
 use parking_lot::Mutex;
 
 use crate::{
-    error::FsOperation,
-    fs::{FileSystem, NodeFileSystem},
-    identity::FileId,
-    meta::Metadata,
+    error::FsOperation, fs::NodeFileSystem, identity::FileId, meta::Metadata,
     node::Node,
 };
 
@@ -77,30 +74,10 @@ impl Hash for ContentId {
 }
 
 /// Compute the blake3 hash of file content by reading it through a
-/// `FileSystem` provider in a streaming fashion.
-pub async fn hash_file(
-    fs: &dyn FileSystem,
-    path: &Path,
-) -> crate::error::Result<Blake3Hash> {
-    let mut hasher = blake3::Hasher::new();
-    let mut stream = fs.read_stream(path, None).await?;
-    use futures::StreamExt;
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| crate::error::FsError::Io {
-            operation: crate::error::FsOperation::Read,
-            path: path.to_path_buf(),
-            message: format!("stream error: {e}"),
-        })?;
-        hasher.update(&chunk);
-    }
-    Ok(hasher.finalize())
-}
-
-/// Compute the blake3 hash of file content by reading it through a
 /// node-based `NodeFileSystem` provider in a streaming fashion.
 ///
-/// Unlike [`hash_file`], this uses a [`FileId`] instead of a path, avoiding
-/// TOCTOU races. The caller is responsible for caching the result if needed.
+/// This uses a [`FileId`] instead of a path, avoiding TOCTOU races. The
+/// caller is responsible for caching the result if needed.
 pub async fn hash_file_node<N>(
     fs: &N,
     file_id: FileId<N::Nid>,

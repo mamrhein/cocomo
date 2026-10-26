@@ -21,10 +21,10 @@ use std::{
 use futures::future::BoxFuture;
 
 use crate::{
-    FileSystem, NodeFileSystem, Result,
-    hash::{ContentCache, ContentId, hash_and_cache_node, hash_file},
+    NodeFileSystem, Result,
+    hash::{ContentCache, ContentId, hash_and_cache_node},
     identity::{FileId, NodeId},
-    scan::{ScanConfig, ScanEntry, scan_directory, scan_directory_node},
+    scan::{ScanConfig, ScanEntry, scan_directory_node},
 };
 
 /// The comparison status of a directory entry.
@@ -216,147 +216,8 @@ impl CompareConfig {
     }
 }
 
-/// Compare two directory trees and produce a unified `DirComparison`.
-///
-/// Both paths are scanned once with the given filesystem provider and
-/// config, then the two scanned trees are merged in a single recursive
-/// walk over the `children` of each `ScanEntry`; no subdirectory is ever
-/// re-scanned. When `compare_files` is enabled, content hashes are used
-/// to determine equality. The cache is optional and used as an optimization
-/// to avoid re-hashing files that were already processed.
-pub async fn compare_directories(
-    fs: &Arc<dyn FileSystem>,
-    left_path: &Path,
-    right_path: &Path,
-    config: &CompareConfig,
-    cache: Option<&ContentCache>,
-) -> Result<DirComparison> {
-    let scan_config = ScanConfig {
-        follow_symlinks: config.follow_symlinks,
-        max_depth: config.max_depth,
-    };
-
-    let left_result = scan_directory(fs, left_path, &scan_config).await?;
-    let right_result = scan_directory(fs, right_path, &scan_config).await?;
-
-    let mut comparison = compare_children(
-        &**fs,
-        &left_result.entries,
-        &right_result.entries,
-        left_path,
-        right_path,
-        config,
-        cache,
-    )
-    .await;
-
-    // Surface non-fatal scan errors instead of dropping them.
-    comparison.errors.extend(left_result.errors);
-    comparison.errors.extend(right_result.errors);
-
-    Ok(comparison)
-}
-
-/// Merge two lists of scanned sibling entries into a `DirComparison`.
-///
-/// For a pair of files the status is determined by [`compare_file_status`].
-/// For a pair of directories the children already attached to the scan
-/// entries are merged recursively, so every nesting level is compared
-/// exactly once. A directory that exists on only one side is descended into
-/// as well, merging its children against an empty list so that the entire
-/// orphan subtree appears in the comparison. Directory entries whose subtree
-/// contains differences get their placeholder `Same` status refined to
-/// `Different`.
-fn compare_children<'a>(
-    fs: &'a dyn FileSystem,
-    left: &'a [ScanEntry],
-    right: &'a [ScanEntry],
-    left_root: &'a Path,
-    right_root: &'a Path,
-    config: &'a CompareConfig,
-    cache: Option<&'a ContentCache>,
-) -> BoxFuture<'a, DirComparison> {
-    Box::pin(async move {
-        let mut comparison = DirComparison::default();
-
-        let left_map: HashMap<&str, &ScanEntry> =
-            left.iter().map(|e| (e.name.as_str(), e)).collect();
-        let right_map: HashMap<&str, &ScanEntry> =
-            right.iter().map(|e| (e.name.as_str(), e)).collect();
-
-        let mut names: Vec<&str> = Vec::new();
-        let mut seen = HashSet::new();
-        for name in left_map.keys().chain(right_map.keys()) {
-            if seen.insert(name) {
-                names.push(name);
-            }
-        }
-        names.sort();
-
-        for &name in &names {
-            let left_entry = left_map.get(name).copied();
-            let right_entry = right_map.get(name).copied();
-
-            let mut entry = match merge_entry_sync(
-                fs,
-                left_root,
-                left_entry,
-                right_root,
-                right_entry,
-                config,
-                cache,
-            )
-            .await
-            {
-                Ok(e) => e,
-                Err(e) => {
-                    comparison.errors.push(e);
-                    continue;
-                }
-            };
-
-            // Recurse one level into the children that the scan already
-            // attached to the entries. This covers a directory pair and an
-            // orphan directory alike: for an orphan directory the absent
-            // side contributes an empty child list, so the whole subtree is
-            // compared and its entries stay left/right-only. A directory
-            // colliding with a file (`IdenticalNameDifferentType`) is not
-            // descended into.
-            let left_is_dir = left_entry.is_some_and(|e| e.is_dir());
-            let right_is_dir = right_entry.is_some_and(|e| e.is_dir());
-            let descend = (left_is_dir || right_is_dir)
-                && left_entry.is_none_or(|e| e.is_dir())
-                && right_entry.is_none_or(|e| e.is_dir());
-
-            if descend {
-                let lc = left_entry.and_then(|e| e.children()).unwrap_or(&[]);
-                let rc = right_entry.and_then(|e| e.children()).unwrap_or(&[]);
-
-                let sub = compare_children(
-                    fs, lc, rc, left_root, right_root, config, cache,
-                )
-                .await;
-
-                let has_diff = sub.different_count() > 0;
-                entry.sub_entries = Some(Arc::new(sub));
-                // Only refine the `Same` placeholder of a shared directory;
-                // an orphan directory keeps its left/right-only status
-                // regardless of its subtree contents.
-                if has_diff && entry.status == DirEntryStatus::Same {
-                    entry.status = DirEntryStatus::Different;
-                }
-            }
-
-            *comparison.counts.entry(entry.status).or_insert(0) += 1;
-            comparison.entries.push(entry);
-        }
-
-        comparison
-    })
-}
-
 // ---------------------------------------------------------------------------
-// Node-based comparison
+// Directory comparison
 // ---------------------------------------------------------------------------
 
 /// Compare two directory trees that live on the same filesystem provider.
@@ -438,8 +299,16 @@ where
     Ok(comparison)
 }
 
-/// Node-aware version of [`compare_children`], mirroring the recursive
-/// tree walk of the path-based pipeline.
+/// Merge two lists of scanned sibling entries into a `DirComparison`.
+///
+/// For a pair of files the status is determined by
+/// [`compare_file_status_node`]. For a pair of directories the children
+/// already attached to the scan entries are merged recursively, so every
+/// nesting level is compared exactly once. A directory that exists on only
+/// one side is descended into as well, merging its children against an
+/// empty list so that the entire orphan subtree appears in the comparison.
+/// Directory entries whose subtree contains differences get their
+/// placeholder `Same` status refined to `Different`.
 ///
 /// `left_fs` and `right_fs` address the left and right side of the
 /// comparison; a file pair is hashed on the provider that owns it.
@@ -541,8 +410,8 @@ where
     })
 }
 
-/// Node-aware version of `merge_entry_sync`. The side parameters decide
-/// which provider a file pair is hashed on.
+/// Merge a single pair of entries into a `DirEntry`. The side parameters
+/// decide which provider a file pair is hashed on.
 #[allow(clippy::too_many_arguments)]
 async fn merge_entry_sync_node<L, R>(
     left_fs: &L,
@@ -720,127 +589,6 @@ where
     Ok(DirEntryStatus::Different)
 }
 
-/// Merge a single pair of entries into a `DirEntry`.
-async fn merge_entry_sync(
-    fs: &dyn FileSystem,
-    left_root: &Path,
-    left: Option<&ScanEntry>,
-    right_root: &Path,
-    right: Option<&ScanEntry>,
-    config: &CompareConfig,
-    cache: Option<&ContentCache>,
-) -> Result<DirEntry> {
-    let name = left
-        .map(|e| e.name.as_str())
-        .or(right.map(|e| e.name.as_str()))
-        .unwrap_or("")
-        .to_string();
-
-    let left_info = left.map(scan_entry_to_info);
-    let right_info = right.map(scan_entry_to_info);
-
-    let status = if let (Some(le), Some(re)) = (left, right) {
-        if le.meta.is_dir != re.meta.is_dir {
-            DirEntryStatus::IdenticalNameDifferentType
-        } else if le.meta.is_dir {
-            DirEntryStatus::Same // placeholder; refined by caller
-        } else {
-            compare_file_status(
-                fs, left_root, le, right_root, re, config, cache,
-            )
-            .await?
-        }
-    } else if left.is_some() {
-        DirEntryStatus::LeftOnly
-    } else {
-        DirEntryStatus::RightOnly
-    };
-
-    Ok(DirEntry {
-        name,
-        status,
-        left: left_info,
-        right: right_info,
-        center: None,
-        sub_entries: None,
-    })
-}
-
-/// Compare two file entries and determine their status.
-async fn compare_file_status(
-    fs: &dyn FileSystem,
-    left_root: &Path,
-    left: &ScanEntry,
-    right_root: &Path,
-    right: &ScanEntry,
-    config: &CompareConfig,
-    cache: Option<&ContentCache>,
-) -> Result<DirEntryStatus> {
-    if !config.compare_content {
-        return if left.meta.size == right.meta.size {
-            Ok(DirEntryStatus::Same)
-        } else {
-            Ok(DirEntryStatus::Different)
-        };
-    }
-
-    // Empty files are always the same.
-    if left.meta.size == right.meta.size && left.meta.size == 0 {
-        return Ok(DirEntryStatus::Same);
-    }
-
-    // Different sizes — check tolerance for "similar".
-    if left.meta.size != right.meta.size {
-        let size_diff = left.meta.size.abs_diff(right.meta.size);
-        let larger = std::cmp::max(left.meta.size, right.meta.size);
-        if larger > 0
-            && (size_diff as f64 / larger as f64) <= config.size_tolerance
-        {
-            return Ok(DirEntryStatus::Similar);
-        }
-        return Ok(DirEntryStatus::Different);
-    }
-
-    // Same size — check cache first, then hash.
-    let left_path = left_root.join(&left.path);
-    let right_path = right_root.join(&right.path);
-    let label = fs.label();
-
-    // Check the optional global cache.
-    if let Some(c) = cache {
-        let left_cid = c.get(label, &left_path);
-        let right_cid = c.get(label, &right_path);
-        if matches!((&left_cid, &right_cid), (Some(lc), Some(rc)) if lc.hash == rc.hash)
-        {
-            return Ok(DirEntryStatus::Same);
-        }
-    }
-
-    // Hash both files.
-    let left_hash = match hash_file(fs, &left_path).await {
-        Ok(h) => h,
-        Err(_) => return Ok(DirEntryStatus::Different),
-    };
-    let right_hash = match hash_file(fs, &right_path).await {
-        Ok(h) => h,
-        Err(_) => return Ok(DirEntryStatus::Different),
-    };
-
-    // Store in the optional global cache.
-    if let Some(c) = cache {
-        let left_cid_new = ContentId::from_blake3(&left.meta, &left_hash);
-        let right_cid_new = ContentId::from_blake3(&right.meta, &right_hash);
-        c.insert(label, &left_path, left_cid_new);
-        c.insert(label, &right_path, right_cid_new);
-    }
-
-    if left_hash == right_hash {
-        return Ok(DirEntryStatus::Same);
-    }
-
-    Ok(DirEntryStatus::Different)
-}
-
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -892,42 +640,6 @@ mod tests {
         fs_err::write(right.join("common/inner.txt"), "inner").unwrap();
 
         (left, right)
-    }
-
-    #[tokio::test]
-    async fn compare_detects_same_and_different() {
-        let (left, right) = make_test_dirs();
-        let fs: Arc<dyn FileSystem> = Arc::new(LocalFs::new("test"));
-        let cache = ContentCache::default_config();
-        let config = CompareConfig::full();
-
-        let result =
-            compare_directories(&fs, &left, &right, &config, Some(&cache))
-                .await
-                .unwrap();
-
-        assert!(result.same_count() > 0);
-        assert!(result.different_count() > 0);
-        assert!(result.orphan_count() > 0);
-
-        fs_err::remove_dir_all(left.parent().unwrap()).ok();
-    }
-
-    #[tokio::test]
-    async fn compare_meta_data_only() {
-        let (left, right) = make_test_dirs();
-        let fs: Arc<dyn FileSystem> = Arc::new(LocalFs::new("test"));
-        let cache = ContentCache::default_config();
-        let config = CompareConfig::meta_data_only();
-
-        let result =
-            compare_directories(&fs, &left, &right, &config, Some(&cache))
-                .await
-                .unwrap();
-
-        assert!(result.total() > 0);
-
-        fs_err::remove_dir_all(left.parent().unwrap()).ok();
     }
 
     #[test]
@@ -1041,23 +753,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn compare_detects_nested_differences() {
-        let (left, right) = make_nested_dirs();
-        let fs: Arc<dyn FileSystem> = Arc::new(LocalFs::new("test"));
-        let cache = ContentCache::default_config();
-        let config = CompareConfig::full();
-
-        let result =
-            compare_directories(&fs, &left, &right, &config, Some(&cache))
-                .await
-                .unwrap();
-
-        check_nested_differences(&result);
-
-        fs_err::remove_dir_all(left.parent().unwrap()).ok();
-    }
-
-    #[tokio::test]
     async fn node_compare_detects_nested_differences() {
         let (left, right) = make_nested_dirs();
         let fs = LocalFs::new("test");
@@ -1146,23 +841,6 @@ mod tests {
             lo.sub_entries.is_some(),
             "orphan subtree should be attached"
         );
-    }
-
-    #[tokio::test]
-    async fn compare_walks_into_orphan_dirs() {
-        let (left, right) = make_orphan_dirs();
-        let fs: Arc<dyn FileSystem> = Arc::new(LocalFs::new("test"));
-        let cache = ContentCache::default_config();
-        let config = CompareConfig::full();
-
-        let result =
-            compare_directories(&fs, &left, &right, &config, Some(&cache))
-                .await
-                .unwrap();
-
-        check_orphan_subtrees(&result);
-
-        fs_err::remove_dir_all(left.parent().unwrap()).ok();
     }
 
     #[tokio::test]

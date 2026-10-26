@@ -91,8 +91,7 @@ pub mod webdav;
 // Re-exports for convenience.
 pub use compare::{
     CompareConfig, DirComparison, DirEntry, DirEntryStatus, EntryInfo,
-    compare_directories, compare_directories_node,
-    compare_directories_pair_node,
+    compare_directories_node, compare_directories_pair_node,
 };
 pub use error::{FsError, FsOperation, Result};
 pub use file::FsFile;
@@ -107,7 +106,7 @@ pub use ftp::{FtpConfig, FtpDirId, FtpFileId, FtpFs, FtpNodeId};
 pub use grammar::{Grammar, GrammarRule, Importance};
 pub use hash::{
     ContentCache, ContentCacheConfig, ContentId, hash_and_cache_node,
-    hash_bytes, hash_file, hash_file_node,
+    hash_bytes, hash_file_node,
 };
 pub use human::{format_date, format_size};
 pub use identity::{DirId, FileId, FileSystemId, NodeId};
@@ -128,9 +127,7 @@ pub use resolver::{
     resolve_provider,
 };
 pub use s3::{S3Config, S3DirId, S3FileId, S3Fs, S3NodeId};
-pub use scan::{
-    ScanConfig, ScanEntry, ScanResult, scan_directory, scan_directory_node,
-};
+pub use scan::{ScanConfig, ScanEntry, ScanResult, scan_directory_node};
 pub use secrets::{NullPrompter, Prompter, Secrets, TtyPrompter};
 pub use session::{
     ProviderRef, Session, SessionConfig, SessionManager, SessionSettings,
@@ -138,12 +135,9 @@ pub use session::{
     list_saved_sessions_in,
 };
 pub use sftp::{SftpConfig, SftpDirId, SftpFileId, SftpFs, SftpNodeId};
-// `capture_snapshot` is deprecated in favour of `capture_snapshot_node`
-// and only stays re-exported until the CLI stops calling it.
-#[allow(deprecated)]
 pub use snapshot::{
     ProviderId, Snapshot, SnapshotEntry, SnapshotEntryStatus, SnapshotManager,
-    capture_snapshot, capture_snapshot_node, entry_matches_node,
+    capture_snapshot_node, entry_matches_node,
 };
 pub use sync::{
     SyncOperation, SyncResult, SyncRules, plan_sync, plan_sync_pair,

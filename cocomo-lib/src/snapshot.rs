@@ -28,10 +28,7 @@
 //! to [`NodeId`] values first via
 //! [`NodeFileSystem::resolve_path`](crate::fs::NodeFileSystem::resolve_path).
 
-use std::{
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -39,11 +36,9 @@ use uuid::Uuid;
 
 use crate::{
     FsError, Result,
-    fs::{FileSystem, NodeFileSystem},
+    fs::NodeFileSystem,
     node::Node,
-    scan::{
-        ScanConfig, ScanEntry, ScanResult, scan_directory, scan_directory_node,
-    },
+    scan::{ScanConfig, ScanEntry, ScanResult, scan_directory_node},
 };
 
 // ---------------------------------------------------------------------------
@@ -279,46 +274,15 @@ impl Snapshot {
 // Snapshot capture
 // ---------------------------------------------------------------------------
 
-/// Capture a snapshot of a directory tree from a live filesystem.
-///
-/// Scans the directory tree using the path-based [`FileSystem`] API. Hash
-/// computation is deferred: the returned snapshot entries have empty hashes.
-/// Callers that need hashes should compute them on demand when comparing
-/// against a live filesystem.
-#[deprecated(note = "use `capture_snapshot_node` instead")]
-pub async fn capture_snapshot(
-    fs: &Arc<dyn FileSystem>,
-    provider_id: ProviderId,
-    root_path: &Path,
-) -> Result<Snapshot> {
-    let mut snapshot = Snapshot::new(provider_id, root_path.to_path_buf());
-
-    // Scan the directory tree.
-    let scan_result =
-        scan_directory(fs, root_path, &ScanConfig::default()).await?;
-
-    // A partial scan would produce a misleading snapshot; refuse to capture
-    // one that is missing entries.
-    if !scan_result.errors.is_empty() {
-        return Err(FsError::Incomplete {
-            errors: scan_result.errors,
-        });
-    }
-
-    // Populate snapshot entries from the scan result.
-    collect_entries_from_scan(root_path, &scan_result, &mut snapshot);
-
-    Ok(snapshot)
-}
-
 /// Capture a snapshot of a directory tree from a live node-based
 /// filesystem.
 ///
 /// Scans the directory tree using the node-based [`NodeFileSystem`]
 /// API, so it works with any provider implementing that trait, including
-/// [`Provider`](crate::provider::Provider), without going through a `dyn
-/// FileSystem` trait object. Hash computation is deferred like in
-/// [`capture_snapshot`]: the returned snapshot entries have empty hashes.
+/// [`Provider`](crate::provider::Provider). Hash computation is deferred:
+/// the returned snapshot entries have empty hashes.
+/// Callers that need hashes should compute them on demand when comparing
+/// against a live filesystem.
 pub async fn capture_snapshot_node<N>(
     fs: &N,
     provider_id: ProviderId,
@@ -520,10 +484,8 @@ impl SnapshotManager {
 
 #[cfg(test)]
 mod tests {
-    use tempfile::tempdir;
-
     use super::*;
-    use crate::{FsOperation, local::LocalFs, mockfs::MockFs};
+    use crate::{FsOperation, mockfs::MockFs};
 
     #[test]
     fn provider_id_new() {
@@ -729,35 +691,6 @@ mod tests {
         assert_eq!(mgr.snapshots().len(), 0);
     }
 
-    #[allow(deprecated)]
-    #[tokio::test]
-    async fn capture_snapshot_node_matches_path_based_capture() {
-        let temp = tempdir().unwrap();
-        let root = temp.path().join("tree");
-        fs_err::create_dir_all(root.join("sub")).unwrap();
-        fs_err::write(root.join("a.txt"), b"alpha").unwrap();
-        fs_err::write(root.join("sub").join("b.txt"), b"bravo").unwrap();
-
-        let fs: Arc<dyn FileSystem> = Arc::new(LocalFs::new("test"));
-        let by_path = capture_snapshot(&fs, ProviderId::local(), &root)
-            .await
-            .unwrap();
-        let fs_node = LocalFs::new("test");
-        let by_node =
-            capture_snapshot_node(&fs_node, ProviderId::local(), &root)
-                .await
-                .unwrap();
-
-        assert_eq!(by_path.entry_count(), by_node.entry_count());
-        for entry in &by_node.entries {
-            let other = by_path.get_entry(&entry.path).unwrap_or_else(|| {
-                panic!("path-based snapshot lacks {:?}", entry.path)
-            });
-            assert_eq!(other.is_dir, entry.is_dir);
-            assert_eq!(other.size, entry.size);
-        }
-    }
-
     #[tokio::test]
     async fn capture_snapshot_node_on_mock_fs() {
         let fs = MockFs::new("mock")
@@ -804,36 +737,6 @@ mod tests {
             Path::new("/root"),
         )
         .await;
-
-        match result {
-            Err(FsError::Incomplete { errors }) => {
-                assert_eq!(errors.len(), 1);
-                assert!(matches!(errors[0], FsError::PermissionDenied { .. }));
-            }
-            other => panic!("expected Err(Incomplete), got {other:?}"),
-        }
-    }
-
-    #[allow(deprecated)]
-    #[tokio::test]
-    async fn capture_snapshot_with_scan_errors_returns_incomplete() {
-        let fs: Arc<dyn FileSystem> = Arc::new(
-            MockFs::new("mock")
-                .with_dir("/root")
-                .with_file("/root/a.txt", "alpha")
-                .with_dir("/root/sub")
-                .with_error(
-                    "/root/sub",
-                    FsError::PermissionDenied {
-                        operation: FsOperation::ReadDir,
-                        path: PathBuf::from("/root/sub"),
-                    },
-                ),
-        );
-
-        let result =
-            capture_snapshot(&fs, ProviderId::local(), Path::new("/root"))
-                .await;
 
         match result {
             Err(FsError::Incomplete { errors }) => {

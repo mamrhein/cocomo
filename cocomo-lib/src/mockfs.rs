@@ -1487,7 +1487,7 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use super::*;
-    use crate::hash::{hash_bytes, hash_file};
+    use crate::hash::{hash_bytes, hash_file_node};
 
     #[tokio::test]
     async fn metadata_reflects_tree() {
@@ -1568,7 +1568,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stream_error_surfaces_in_hash_file() {
+    async fn stream_error_surfaces_in_hash_file_node() {
         let fs = MockFs::new("mock")
             .with_file("/broken.bin", vec![0u8; CHUNK_SIZE * 2 + 3])
             .with_stream_error(
@@ -1579,15 +1579,23 @@ mod tests {
                     message: "injected".to_string(),
                 },
             );
-        let err = hash_file(&fs, Path::new("/broken.bin")).await.unwrap_err();
+        let id = fs.resolve_path(Path::new("/broken.bin")).await.unwrap();
+        let node = fs.get_node(id).unwrap();
+        let err = hash_file_node(&fs, FileId::new(*id.get()), &node)
+            .await
+            .unwrap_err();
         assert!(matches!(err, FsError::Io { .. }));
     }
 
     #[tokio::test]
-    async fn hash_file_reads_every_chunk() {
+    async fn hash_file_node_reads_every_chunk() {
         let data = Bytes::from_static(b"hello world");
         let fs = MockFs::new("mock").with_file("/f.txt", &data);
-        let hash = hash_file(&fs, Path::new("/f.txt")).await.unwrap();
+        let id = fs.resolve_path(Path::new("/f.txt")).await.unwrap();
+        let node = fs.get_node(id).unwrap();
+        let hash = hash_file_node(&fs, FileId::new(*id.get()), &node)
+            .await
+            .unwrap();
         assert_eq!(hash, hash_bytes(&data));
     }
 
