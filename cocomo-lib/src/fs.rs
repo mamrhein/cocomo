@@ -166,7 +166,11 @@ pub trait NodeFileSystem: Send + Sync {
     type FsId: Copy + Eq + Hash + Debug + Default;
 
     /// Concrete type used to identify nodes within this filesystem.
-    type Nid: Copy + Eq + Hash + Debug + Default;
+    ///
+    /// Node identifiers travel across thread boundaries (they are held
+    /// across `await` points and inside `Send` streams), hence the `Send`
+    /// bound.
+    type Nid: Copy + Eq + Hash + Debug + Default + Send;
 
     /// Provider-specific error type, convertible into [`FsError`].
     type Error: Into<FsError>;
@@ -239,6 +243,33 @@ pub trait NodeFileSystem: Send + Sync {
         id: FileId<Self::Nid>,
         range: Option<Range<u64>>,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<Bytes>> + Send>>>;
+
+    // ── Path conveniences ──
+
+    /// Resolve `path` to a node and return its metadata.
+    ///
+    /// Convenience for callers that still address nodes by path: the path
+    /// is resolved exactly once here, then the metadata is read from the
+    /// cached node.
+    async fn metadata_path(&self, path: &Path) -> Result<Metadata> {
+        let id = self.resolve_path(path).await?;
+        self.node_metadata(id)
+    }
+
+    /// Resolve `path` to a node and read the file's content in a single
+    /// call.
+    ///
+    /// Convenience for callers that still address files by path: the path
+    /// is resolved exactly once here, then all I/O goes through the node
+    /// identifier. `range` is optional for sparse reads.
+    async fn read_path(
+        &self,
+        path: &Path,
+        range: Option<Range<u64>>,
+    ) -> Result<Bytes> {
+        let id = self.resolve_path(path).await?;
+        self.read_node(FileId::new(*id.get()), range).await
+    }
 }
 
 // ---------------------------------------------------------------------------

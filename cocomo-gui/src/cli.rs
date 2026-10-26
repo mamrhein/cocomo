@@ -32,7 +32,9 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use clap::Parser;
-use cocomo_lib::{Endpoint, FileSystem, NullPrompter, Url, resolve_provider};
+use cocomo_lib::{
+    Endpoint, NodeFileSystem, NullPrompter, Url, resolve_provider,
+};
 
 /// cocomo — COmpare, COpy & MOve directories and files.
 #[derive(Parser, Debug)]
@@ -120,8 +122,8 @@ impl Cli {
             resolve_startup_side(right, self.profile.as_deref()).await?;
 
         // Validate that both endpoints exist and are of the same type.
-        let left_meta = left.fs().metadata(left.path()).await?;
-        let right_meta = right.fs().metadata(right.path()).await?;
+        let left_meta = left.fs().metadata_path(left.path()).await?;
+        let right_meta = right.fs().metadata_path(right.path()).await?;
 
         if left_meta.is_file() && right_meta.is_file() {
             return Err(anyhow::anyhow!(
