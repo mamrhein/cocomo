@@ -58,11 +58,11 @@ impl Summary {
 /// Returns a flat `Vec` of visible entries (for flat output modes) and a
 /// [`Summary`] with per-status counts.
 ///
-/// When `use_tree_filter` is `true` (tree mode), only visible directories are
-/// descended into, matching the behavior of [`render_tree_entries`]. When
-/// `false` (flat text, CSV, JSON), all subdirectories are always visited, so
-/// that children of filtered-out directories are still counted if they pass
-/// the filter themselves.
+/// When `use_tree_filter` is `true` (text tree output), only visible
+/// directories are descended into, matching the behavior of
+/// [`render_tree_entries`]. When `false` (CSV, JSON), all subdirectories are
+/// always visited, so that children of filtered-out directories are still
+/// counted if they pass the filter themselves.
 pub(super) fn collect_and_count(
     entries: &[DirEntry],
     args: &DirCompareArgs,
@@ -117,18 +117,6 @@ pub(super) fn collect_and_count_into(
             );
         }
     }
-}
-
-/// Count the entries at this level that would be visible in tree mode:
-/// directories are always shown as structural nodes; files are filtered.
-pub(super) fn count_visible_tree_children(
-    entries: &[DirEntry],
-    args: &DirCompareArgs,
-) -> usize {
-    entries
-        .iter()
-        .filter(|e| should_show_in_tree(e, args))
-        .count()
 }
 
 // ---------------------------------------------------------------------------
@@ -356,8 +344,7 @@ mod tests {
         // In tree mode, directories are always shown but children of filtered
         // directories are not counted.
         let comp = make_nested_comparison();
-        let mut args = test_args();
-        args.tree = true;
+        let args = test_args();
         let (visible, summary) = collect_and_count(&comp.entries, &args, true);
         // Root level: 1 dir + 1 file = 2 entries (all visible with default
         // args) Sub-level (sub/): 3 entries

@@ -314,11 +314,11 @@ mod dir_compare {
 
     #[test]
     fn nested_orphan_dirs_are_listed() {
-        // Contents of orphan directories must appear in the comparison,
-        // both in flat and in tree mode.
+        // Contents of orphan directories must appear in the comparison when
+        // the scan depth is unlimited.
         let dir = create_dirs_with_nested_orphans();
         cmd()
-            .args(["dir", "compare"])
+            .args(["dir", "compare", "-m"])
             .args([
                 dir.path().join("left").to_str().unwrap(),
                 dir.path().join("right").to_str().unwrap(),
@@ -335,21 +335,22 @@ mod dir_compare {
     }
 
     #[test]
-    fn nested_orphan_dirs_are_listed_in_tree_mode() {
+    fn default_depth_limits_scan_to_top_level() {
+        // Without `-m` the scan stops at depth 1, so nested entries are not
+        // listed while top-level entries (including dirs) are.
         let dir = create_dirs_with_nested_orphans();
         cmd()
-            .args(["dir", "compare", "--tree"])
+            .args(["dir", "compare"])
             .args([
                 dir.path().join("left").to_str().unwrap(),
                 dir.path().join("right").to_str().unwrap(),
             ])
             .assert()
             .code(1)
-            .stdout(predicate::str::contains("orphan_sub"))
-            .stdout(predicate::str::contains("deep.txt"))
-            .stdout(predicate::str::contains("inner"))
-            .stdout(predicate::str::contains("g.txt"))
-            .stdout(predicate::str::contains("6 orphans"));
+            .stdout(predicate::str::contains("sub/"))
+            .stdout(predicate::str::contains("top_orphan"))
+            .stdout(predicate::str::contains("deep.txt").not())
+            .stdout(predicate::str::contains("g.txt").not());
     }
 
     #[test]
@@ -450,9 +451,11 @@ mod dir_compare {
 
     #[test]
     fn tree_output_produces_tree_chars() {
-        let dir = create_test_dirs();
+        // Only entries below the top-most level carry tree indicators, so use
+        // the nested fixture with an unlimited scan depth.
+        let dir = create_nested_test_dirs();
         cmd()
-            .args(["dir", "compare", "--tree"])
+            .args(["dir", "compare", "-m"])
             .args([
                 dir.path().join("left").to_str().unwrap(),
                 dir.path().join("right").to_str().unwrap(),
@@ -469,7 +472,7 @@ mod dir_compare {
     fn tree_output_with_nested_dirs() {
         let dir = create_nested_test_dirs();
         cmd()
-            .args(["dir", "compare", "--tree"])
+            .args(["dir", "compare", "-m"])
             .args([
                 dir.path().join("left").to_str().unwrap(),
                 dir.path().join("right").to_str().unwrap(),
@@ -527,9 +530,9 @@ mod dir_compare {
 
     #[test]
     fn tree_with_color_always_includes_ansi() {
-        let dir = create_test_dirs();
+        let dir = create_nested_test_dirs();
         cmd()
-            .args(["dir", "compare", "--tree", "--color", "always"])
+            .args(["dir", "compare", "-m", "--color", "always"])
             .args([
                 dir.path().join("left").to_str().unwrap(),
                 dir.path().join("right").to_str().unwrap(),
@@ -774,7 +777,7 @@ mod dir_compare {
     fn excl_hidden_with_tree_excludes_hidden_dirs() {
         let dir = create_test_dirs_with_hidden();
         cmd()
-            .args(["dir", "compare", "--tree", "--excl-hidden"])
+            .args(["dir", "compare", "--excl-hidden"])
             .args([
                 dir.path().join("left").to_str().unwrap(),
                 dir.path().join("right").to_str().unwrap(),
@@ -790,7 +793,7 @@ mod dir_compare {
     fn dirs_only_shows_only_dirs_in_tree() {
         let dir = create_test_dirs_with_hidden();
         cmd()
-            .args(["dir", "compare", "--tree", "--dirs-only"])
+            .args(["dir", "compare", "--dirs-only"])
             .args([
                 dir.path().join("left").to_str().unwrap(),
                 dir.path().join("right").to_str().unwrap(),
@@ -905,7 +908,7 @@ mod dir_compare {
     fn dirs_only_and_excl_hidden_combined() {
         let dir = create_test_dirs_with_hidden();
         cmd()
-            .args(["dir", "compare", "--tree", "--dirs-only", "--excl-hidden"])
+            .args(["dir", "compare", "--dirs-only", "--excl-hidden"])
             .args([
                 dir.path().join("left").to_str().unwrap(),
                 dir.path().join("right").to_str().unwrap(),

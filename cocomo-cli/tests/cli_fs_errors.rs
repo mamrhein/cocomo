@@ -123,9 +123,13 @@ async fn dir_compare_surfaces_mid_walk_subdir_error() {
         )
         .with_dir("/right");
 
-    let result =
-        run_with_mock(mock, &["cocomo", "dir", "compare", "/left", "/right"])
-            .await;
+    let result = run_with_mock(
+        mock,
+        // `-m` (no value) lifts the default depth limit so the walk reaches
+        // the unreadable subdirectory.
+        &["cocomo", "dir", "compare", "-m", "/left", "/right"],
+    )
+    .await;
 
     match result {
         Err(CliError::FsErrors(errors)) => {

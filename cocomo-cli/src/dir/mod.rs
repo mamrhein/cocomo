@@ -32,8 +32,7 @@ use cocomo_lib::{
 };
 pub(crate) use display::format_size;
 use render::{
-    print_comparison_csv, print_comparison_json, print_comparison_text,
-    print_comparison_tree,
+    print_comparison_csv, print_comparison_json, print_comparison_tree,
 };
 use sort::sort_entries;
 use summary::{collect_and_count, print_summary};
@@ -89,22 +88,16 @@ pub(crate) async fn dir_compare<R: EndpointResolver>(
     };
 
     // Flatten, filter, and count visible entries in one pass so that both
-    // the output and the summary reflect the same set of entries.
-    let use_tree_filter = args.format == OutputFormat::Text && args.tree;
+    // the output and the summary reflect the same set of entries. Text
+    // output is rendered as a tree, so the tree-aware filter must match
+    // what the renderer shows.
+    let use_tree_filter = args.format == OutputFormat::Text;
     let (mut visible_entries, summary) =
         collect_and_count(&comparison.entries, args, use_tree_filter);
 
     match args.format {
         OutputFormat::Text => {
-            if args.tree {
-                print_comparison_tree(&comparison, args);
-            } else {
-                if let Some(sort) = args.sort {
-                    sort_entries(&mut visible_entries, sort);
-                }
-                let mut stdout = std::io::stdout();
-                print_comparison_text(&visible_entries, args, &mut stdout);
-            }
+            print_comparison_tree(&comparison, args);
         }
         OutputFormat::Csv => {
             if let Some(sort) = args.sort {

@@ -96,7 +96,7 @@ mod dir_compare {
         let left = "/tmp/left";
         let right = "/tmp/right";
         cmd()
-            .args(["dir", "compare", "--max-depth", "abc"])
+            .args(["dir", "compare", "--max-depth=abc"])
             .args([left, right])
             .assert()
             .failure()
