@@ -133,9 +133,6 @@ pub struct DirCompareArgs {
     /// Control ANSI color output.
     #[arg(long, default_value = "auto")]
     pub(crate) color: ColorMode,
-    /// Hide modification timestamp columns in text output.
-    #[arg(long)]
-    pub(crate) no_mtime: bool,
     /// Suppress the summary line(s) at the end of output.
     #[arg(long)]
     pub(crate) no_summary: bool,
@@ -400,7 +397,6 @@ impl DirCompareArgs {
             report: None,
             report_format: ReportFormatArg::Text,
             color: ColorMode::Never,
-            no_mtime: false,
             no_summary: false,
             summary: SummaryMode::Brief,
             sort: None,

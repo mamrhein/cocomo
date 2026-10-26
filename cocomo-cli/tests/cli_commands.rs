@@ -544,35 +544,6 @@ mod dir_compare {
     }
 
     #[test]
-    fn text_output_includes_mtime_by_default() {
-        let dir = create_test_dirs();
-        cmd()
-            .args(["dir", "compare"])
-            .args([
-                dir.path().join("left").to_str().unwrap(),
-                dir.path().join("right").to_str().unwrap(),
-            ])
-            .assert()
-            .code(1)
-            .stdout(predicate::str::contains("Size"))
-            .stdout(predicate::str::contains("Modified"));
-    }
-
-    #[test]
-    fn no_mtime_flag_hides_timestamp_columns() {
-        let dir = create_test_dirs();
-        cmd()
-            .args(["dir", "compare", "--no-mtime"])
-            .args([
-                dir.path().join("left").to_str().unwrap(),
-                dir.path().join("right").to_str().unwrap(),
-            ])
-            .assert()
-            .code(1)
-            .stdout(predicate::str::contains("Modified").not());
-    }
-
-    #[test]
     fn csv_includes_is_dir_column() {
         let dir = create_test_dirs();
         cmd()

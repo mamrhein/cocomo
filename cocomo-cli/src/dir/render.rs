@@ -13,8 +13,7 @@ use cocomo_lib::compare::DirEntry;
 
 use super::{
     display::{
-        Colorizer, format_date_display, format_modified, format_size,
-        terminal_width, truncate_name,
+        Colorizer, format_modified, format_size, terminal_width, truncate_name,
     },
     filter::{is_dir_entry, should_show_in_tree},
     sort::sort_entry_refs,
@@ -25,6 +24,10 @@ use crate::cli::DirCompareArgs;
 // ---------------------------------------------------------------------------
 // Rendering
 // ---------------------------------------------------------------------------
+
+const SIZE_COL_WIDTH: usize = 6;
+const MODIFIED_COL_WIDTH: usize = 19;
+const META_DATA_WIDTH: usize = SIZE_COL_WIDTH + 1 + MODIFIED_COL_WIDTH;
 
 /// Recursively render a directory comparison as an indented tree using
 /// box-drawing characters, with optional ANSI color on the status symbols.
@@ -42,7 +45,7 @@ pub(super) fn render_tree_entries(
     output: &mut dyn Write,
     colorizer: &Colorizer,
     args: &DirCompareArgs,
-    name_width: usize,
+    name_col_width: usize,
 ) {
     let mut visible: Vec<&DirEntry> = entries
         .iter()
@@ -52,14 +55,9 @@ pub(super) fn render_tree_entries(
         sort_entry_refs(&mut visible, sort);
     }
 
-    let show_mtime = !args.no_mtime;
     let prefix_len = prefix.chars().count();
-    // Total name area = name_width + 2.
-    // Within the name area: prefix + tree indicator (3, or 0 at the top-most
-    // level) + name_field.
     let indicator_width = usize::from(depth > 0) * 3;
-    let name_field_width = name_width
-        .saturating_add(2)
+    let name_field_width = name_col_width
         .saturating_sub(prefix_len)
         .saturating_sub(indicator_width)
         .max(1);
@@ -93,12 +91,11 @@ pub(super) fn render_tree_entries(
             .as_ref()
             .map(|l| {
                 let size_str = format_size(l.size);
-                let date_str = format_date_display(&l.modified);
-                if show_mtime {
-                    format!("{:>6} {}", size_str, date_str)
-                } else {
-                    format!("{:>6}", size_str)
-                }
+                let date_str = format_modified(&l.modified);
+                format!(
+                    "{size_str:>0$} {date_str:<1$}",
+                    SIZE_COL_WIDTH, MODIFIED_COL_WIDTH
+                )
             })
             .unwrap_or_default();
 
@@ -107,26 +104,21 @@ pub(super) fn render_tree_entries(
             .as_ref()
             .map(|r| {
                 let size_str = format_size(r.size);
-                let date_str = format_date_display(&r.modified);
-                if show_mtime {
-                    format!("{:>6} {}", size_str, date_str)
-                } else {
-                    format!("{:>6}", size_str)
-                }
+                let date_str = format_modified(&r.modified);
+                format!(
+                    "{size_str:>0$} {date_str:<1$}",
+                    SIZE_COL_WIDTH, MODIFIED_COL_WIDTH
+                )
             })
             .unwrap_or_default();
 
         let status_sym =
             colorizer.colorize(entry.status.symbol(), entry.status);
 
-        let mut row = format!(
-            "{prefix}{indicator}{:<w$}",
-            display_name,
-            w = name_field_width
+        let row = format!(
+            "{}{}{:<3$} {left_meta:<4$} {status_sym} {right_meta:<4$}",
+            prefix, indicator, display_name, name_field_width, META_DATA_WIDTH
         );
-        row += &format!(" {:<23}", left_meta);
-        row += &format!(" {}", status_sym);
-        row += &format!(" {:<23}", right_meta);
         writeln!(output, "{}", row).unwrap();
 
         // Recurse into subdirectories.
@@ -148,7 +140,7 @@ pub(super) fn render_tree_entries(
                 output,
                 colorizer,
                 args,
-                name_width,
+                name_col_width,
             );
         }
     }
@@ -193,33 +185,27 @@ fn render_comparison_tree(
 
     let colorizer = Colorizer::new(args.color);
 
-    let show_mtime = !args.no_mtime;
-    // Fixed overhead: dir indicator + space (2) + left metadata (24) +
-    // status (2) + right metadata (24) = 52. No path column in tree mode.
-    let fixed_width = 2 + 24 + 2 + 24;
-    let name_width = match terminal_width() {
+    // Fixed overhead: space + left metadata + space + status + space + right
+    // metadata
+    let fixed_width = 2 * META_DATA_WIDTH + 4;
+    let name_col_width = match terminal_width() {
         Some(term_w) => term_w.saturating_sub(fixed_width).max(10),
         None => 40,
     };
 
-    // Header row — no type column (directories are marked with a "/"
-    // suffix).
-    let meta_header = if show_mtime {
-        format!("{:^6} {:^16}", "Size", "Modified")
-    } else {
-        format!("{:^6}", "Size")
-    };
-    let mut header = format!("{:<w$}", "Name", w = name_width + 2);
-    header += &format!(" {:^23}", meta_header);
-    header += &format!(" {}", "S");
-    header += &format!(" {:^23}", meta_header);
+    // Header row
+    let meta_header = format!(
+        "{:^2$} {:^3$}",
+        "Size", "Modified", SIZE_COL_WIDTH, MODIFIED_COL_WIDTH
+    );
+    let header = format!(
+        "{:<1$} {meta_header} S {meta_header}",
+        "Name", name_col_width
+    );
     writeln!(output, "{}", header).unwrap();
 
     // Separator line matching column widths.
-    let mut sep = "-".repeat(name_width + 2);
-    sep += &format!(" {:^23}", "-----------------------");
-    sep += &format!(" {}", "-");
-    sep += &format!(" {:^23}", "-----------------------");
+    let sep = "─".repeat(terminal_width().unwrap_or(40));
     writeln!(output, "{}", sep).unwrap();
 
     render_tree_entries(
@@ -229,7 +215,7 @@ fn render_comparison_tree(
         output,
         &colorizer,
         args,
-        name_width,
+        name_col_width,
     );
 }
 
@@ -545,27 +531,6 @@ mod tests {
         let output = String::from_utf8(buf).unwrap();
         assert!(output.contains("\x1b[32m")); // green for Same
         assert!(output.contains("\x1b[35m")); // magenta for RightOnly
-    }
-
-    #[test]
-    fn tree_mtime_columns_by_default() {
-        let comp = make_test_comparison();
-        let mut buf = Vec::new();
-        render_comparison_tree_to_vec(&comp, &test_args(), &mut buf);
-        let output = String::from_utf8(buf).unwrap();
-        assert!(output.contains("Size"));
-        assert!(output.contains("Modified"));
-    }
-
-    #[test]
-    fn tree_no_mtime_hides_timestamp_columns() {
-        let comp = make_test_comparison();
-        let mut args = test_args();
-        args.no_mtime = true;
-        let mut buf = Vec::new();
-        render_comparison_tree_to_vec(&comp, &args, &mut buf);
-        let output = String::from_utf8(buf).unwrap();
-        assert!(!output.contains("Modified"));
     }
 
     #[test]

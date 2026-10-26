@@ -77,17 +77,6 @@ pub(super) fn format_modified(rfc3339: &str) -> String {
         .unwrap_or_else(|_| rfc3339.to_string())
 }
 
-/// Format a date string for display in the combined size+date column,
-/// truncating to 16 characters to match the TUI's `format_date` behavior.
-pub(super) fn format_date_display(date_str: &str) -> String {
-    let formatted = format_modified(date_str);
-    if formatted.len() > 16 {
-        formatted[..16].to_string()
-    } else {
-        formatted
-    }
-}
-
 /// Return the terminal width in columns, but only when stdout is a TTY.
 /// Returns `None` for piped or redirected output so that automated tests
 /// and CI get deterministic results.
