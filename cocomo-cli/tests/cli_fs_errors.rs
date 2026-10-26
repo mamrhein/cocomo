@@ -127,7 +127,7 @@ async fn dir_compare_surfaces_mid_walk_subdir_error() {
         mock,
         // `-m` (no value) lifts the default depth limit so the walk reaches
         // the unreadable subdirectory.
-        &["cocomo", "dir", "compare", "/left", "/right", "-m"],
+        &["cocomo", "dir", "compare", "-m", "/left", "/right"],
     )
     .await;
 

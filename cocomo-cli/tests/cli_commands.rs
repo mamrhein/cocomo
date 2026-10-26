@@ -318,14 +318,11 @@ mod dir_compare {
         // the scan depth is unlimited.
         let dir = create_dirs_with_nested_orphans();
         cmd()
-            .args(["dir", "compare"])
+            .args(["dir", "compare", "-m"])
             .args([
                 dir.path().join("left").to_str().unwrap(),
                 dir.path().join("right").to_str().unwrap(),
             ])
-            // `-m` without a value means unlimited depth; placed after the
-            // positional args so clap does not consume them as its value.
-            .arg("-m")
             .assert()
             .code(1)
             .stdout(predicate::str::contains("orphan_sub"))
@@ -458,12 +455,11 @@ mod dir_compare {
         // the nested fixture with an unlimited scan depth.
         let dir = create_nested_test_dirs();
         cmd()
-            .args(["dir", "compare"])
+            .args(["dir", "compare", "-m"])
             .args([
                 dir.path().join("left").to_str().unwrap(),
                 dir.path().join("right").to_str().unwrap(),
             ])
-            .arg("-m")
             .assert()
             .code(1)
             .stdout(predicate::str::contains("\u{251c}")) // ├
@@ -476,12 +472,11 @@ mod dir_compare {
     fn tree_output_with_nested_dirs() {
         let dir = create_nested_test_dirs();
         cmd()
-            .args(["dir", "compare"])
+            .args(["dir", "compare", "-m"])
             .args([
                 dir.path().join("left").to_str().unwrap(),
                 dir.path().join("right").to_str().unwrap(),
             ])
-            .arg("-m")
             .assert()
             .code(1)
             .stdout(predicate::str::contains("sub/"))
@@ -537,12 +532,11 @@ mod dir_compare {
     fn tree_with_color_always_includes_ansi() {
         let dir = create_nested_test_dirs();
         cmd()
-            .args(["dir", "compare", "--color", "always"])
+            .args(["dir", "compare", "-m", "--color", "always"])
             .args([
                 dir.path().join("left").to_str().unwrap(),
                 dir.path().join("right").to_str().unwrap(),
             ])
-            .arg("-m")
             .assert()
             .code(1)
             .stdout(predicate::str::contains("\x1b[32m")) // green for Same
