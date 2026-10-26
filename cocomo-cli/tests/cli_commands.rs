@@ -450,7 +450,9 @@ mod dir_compare {
 
     #[test]
     fn tree_output_produces_tree_chars() {
-        let dir = create_test_dirs();
+        // Only entries below the top-most level carry tree indicators, so use
+        // the nested fixture.
+        let dir = create_nested_test_dirs();
         cmd()
             .args(["dir", "compare", "--tree"])
             .args([
@@ -527,7 +529,7 @@ mod dir_compare {
 
     #[test]
     fn tree_with_color_always_includes_ansi() {
-        let dir = create_test_dirs();
+        let dir = create_nested_test_dirs();
         cmd()
             .args(["dir", "compare", "--tree", "--color", "always"])
             .args([

@@ -136,9 +136,14 @@ pub(super) fn print_comparison_text(
 
 /// Recursively render a directory comparison as an indented tree using
 /// box-drawing characters, with optional ANSI color on the status symbols.
+///
+/// The top-most level (`depth == 0`) is rendered flush left without any tree
+/// indicator; deeper levels are prefixed with a 3-character indicator
+/// (`├─ `, `└─ ` or the continuation `│  ` / `   `).
 pub(super) fn render_tree_entries(
     entries: &[DirEntry],
     prefix: &str,
+    depth: usize,
     output: &mut dyn Write,
     colorizer: &Colorizer,
     args: &DirCompareArgs,
@@ -152,19 +157,26 @@ pub(super) fn render_tree_entries(
     let show_mtime = !args.no_mtime;
     let prefix_len = prefix.chars().count();
     // Total name area = name_width + 2 (matching flat output).
-    // Within the name area: prefix + connector (2) + space (1) + name_field.
+    // Within the name area: prefix + tree indicator (3, or 0 at the top-most
+    // level) + name_field.
+    let indicator_width = usize::from(depth > 0) * 3;
     let name_field_width = name_width
+        .saturating_add(2)
         .saturating_sub(prefix_len)
-        .saturating_sub(1)
+        .saturating_sub(indicator_width)
         .max(1);
 
     let count = visible.len();
     for (i, entry) in visible.iter().enumerate() {
         let is_last = i == count - 1;
-        let connector = if is_last {
-            "\u{2514}\u{2500}" // └─
+        // Tree indicator: 2 box-drawing chars + 1 space; omitted entirely at
+        // the top-most level.
+        let indicator = if depth == 0 {
+            ""
+        } else if is_last {
+            "\u{2514}\u{2500} " // └─
         } else {
-            "\u{251c}\u{2500}" // ├─
+            "\u{251c}\u{2500} " // ├─
         };
 
         let is_dir = is_dir_entry(entry);
@@ -216,7 +228,7 @@ pub(super) fn render_tree_entries(
             colorizer.colorize(entry.status.symbol(), entry.status);
 
         let mut row = format!(
-            "{prefix}{connector} {:<w$}",
+            "{prefix}{indicator}{:<w$}",
             display_name,
             w = name_field_width
         );
@@ -227,13 +239,20 @@ pub(super) fn render_tree_entries(
 
         // Recurse into subdirectories.
         if is_dir && let Some(sub) = &entry.sub_entries {
-            let child_prefix = format!(
-                "{prefix}{}",
-                if is_last { "  " } else { "\u{2502} " }
-            );
+            // Continuation prefix, as wide as the indicator column; empty at
+            // the top-most level since it has no indicator column.
+            let continuation = if depth == 0 {
+                ""
+            } else if is_last {
+                "   "
+            } else {
+                "\u{2502}  " // │ + 2 spaces
+            };
+            let child_prefix = format!("{prefix}{continuation}");
             render_tree_entries(
                 &sub.entries,
                 &child_prefix,
+                depth + 1,
                 output,
                 colorizer,
                 args,
@@ -249,12 +268,15 @@ pub(super) fn render_tree_entries(
 pub(super) fn render_tree_entries_to_vec(
     entries: &[DirEntry],
     prefix: &str,
+    depth: usize,
     buf: &mut Vec<u8>,
     colorizer: &Colorizer,
     args: &DirCompareArgs,
     name_width: usize,
 ) {
-    render_tree_entries(entries, prefix, buf, colorizer, args, name_width);
+    render_tree_entries(
+        entries, prefix, depth, buf, colorizer, args, name_width,
+    );
 }
 
 /// Wrapper around [`print_comparison_text`] that writes to a `Vec<u8>` buffer,
@@ -305,12 +327,10 @@ pub(super) fn print_comparison_tree(
     sep += &format!(" {:^23}", "-----------------------");
     writeln!(stdout, "{}", sep).unwrap();
 
-    // Root of the tree.
-    writeln!(stdout, ".").unwrap();
-
     render_tree_entries(
         &comparison.entries,
         "",
+        0,
         &mut stdout,
         &colorizer,
         args,
@@ -447,8 +467,17 @@ pub(super) fn print_comparison_json(entries: &[DirEntry], summary: &Summary) {
 
 #[cfg(test)]
 mod tests {
+    use std::{collections::HashMap, sync::Arc};
+
+    use cocomo_lib::compare::{
+        DirComparison, DirEntry, DirEntryStatus, EntryInfo,
+    };
+
     use super::{
-        super::{display::Colorizer, test_helpers::make_test_comparison},
+        super::{
+            display::Colorizer,
+            test_helpers::{make_nested_comparison, make_test_comparison},
+        },
         render_comparison_text_to_vec, render_tree_entries_to_vec,
     };
     use crate::cli::{ColorMode, DirCompareArgs};
@@ -461,11 +490,14 @@ mod tests {
 
     #[test]
     fn tree_rendering_produces_box_drawing_chars() {
-        let comp = make_test_comparison();
+        // Only nested entries carry tree indicators, so use a fixture with a
+        // subdirectory.
+        let comp = make_nested_comparison();
         let mut buf = Vec::new();
         render_tree_entries_to_vec(
             &comp.entries,
             "",
+            0,
             &mut buf,
             &Colorizer::new(ColorMode::Never),
             &test_args(),
@@ -474,12 +506,110 @@ mod tests {
         let output = String::from_utf8(buf).unwrap();
         assert!(output.contains('\u{251c}')); // ├
         assert!(output.contains('\u{2514}')); // └
+        assert!(output.contains("sub/"));
         assert!(output.contains("same.txt"));
         assert!(output.contains("diff.txt"));
         assert!(output.contains("only_left.txt"));
-        assert!(output.contains("only_right.txt"));
         // Metadata columns should be present (size + modified date).
         assert!(output.contains("2024-03-15"));
+    }
+
+    #[test]
+    fn tree_rendering_top_level_has_no_indicator() {
+        // The top-most level is rendered flush left, without any tree
+        // indicator.
+        let comp = make_test_comparison();
+        let mut buf = Vec::new();
+        render_tree_entries_to_vec(
+            &comp.entries,
+            "",
+            0,
+            &mut buf,
+            &Colorizer::new(ColorMode::Never),
+            &test_args(),
+            40,
+        );
+        let output = String::from_utf8(buf).unwrap();
+        assert!(!output.contains('\u{251c}')); // no ├
+        assert!(!output.contains('\u{2514}')); // no └
+        assert!(!output.contains('\u{2502}')); // no │
+        assert!(output.starts_with("same.txt"));
+    }
+
+    #[test]
+    fn tree_rendering_indicator_width_matches_example() {
+        // Build the fixture
+        //     level 1a
+        //     ├─ level 2a
+        //     ├─ level 2b
+        //     │  └─ level 3a
+        //     └─ level 2c
+        //     level 1b
+        // and verify the indicator column: 2 box-drawing chars + 1 space at
+        // every level below the top-most.
+        let info = |name: &str, is_dir: bool| EntryInfo {
+            name: name.to_string(),
+            path: name.to_string(),
+            size: 0,
+            modified: String::new(),
+            is_dir,
+            hash: None,
+        };
+        let file = |name: &str| DirEntry {
+            name: name.to_string(),
+            status: DirEntryStatus::Same,
+            left: Some(info(name, false)),
+            right: Some(info(name, false)),
+            center: None,
+            sub_entries: None,
+        };
+        let dir = |name: &str, children: Vec<DirEntry>| DirEntry {
+            name: name.to_string(),
+            status: DirEntryStatus::Same,
+            left: Some(info(name, true)),
+            right: Some(info(name, true)),
+            center: None,
+            sub_entries: Some(Arc::new(DirComparison {
+                entries: children,
+                counts: HashMap::new(),
+                errors: vec![],
+            })),
+        };
+        let comp = DirComparison {
+            entries: vec![
+                dir(
+                    "level 1a",
+                    vec![
+                        file("level 2a"),
+                        dir("level 2b", vec![file("level 3a")]),
+                        file("level 2c"),
+                    ],
+                ),
+                file("level 1b"),
+            ],
+            counts: HashMap::new(),
+            errors: vec![],
+        };
+        let mut buf = Vec::new();
+        render_tree_entries_to_vec(
+            &comp.entries,
+            "",
+            0,
+            &mut buf,
+            &Colorizer::new(ColorMode::Never),
+            &test_args(),
+            40,
+        );
+        let output = String::from_utf8(buf).unwrap();
+        let lines: Vec<&str> = output.lines().collect();
+        assert_eq!(lines.len(), 6);
+        assert!(lines[0].starts_with("level 1a/"));
+        assert!(lines[1].starts_with("\u{251c}\u{2500} level 2a")); // ├─
+        assert!(lines[2].starts_with("\u{251c}\u{2500} level 2b")); // ├─
+        // Continuation (│ + 2 spaces) aligns with the 3-char indicator.
+        assert!(lines[3].starts_with("\u{2502}  \u{2514}\u{2500} level 3a"));
+        assert!(lines[4].starts_with("\u{2514}\u{2500} level 2c")); // └─
+        assert!(lines[5].starts_with("level 1b"));
     }
 
     #[test]
@@ -489,6 +619,7 @@ mod tests {
         render_tree_entries_to_vec(
             &comp.entries,
             "",
+            0,
             &mut buf,
             &Colorizer::new(ColorMode::Always),
             &test_args(),
