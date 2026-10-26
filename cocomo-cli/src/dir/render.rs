@@ -18,7 +18,7 @@ use super::{
     },
     filter::{is_dir_entry, should_show_in_tree},
     sort::sort_entry_refs,
-    summary::{Summary, count_visible_tree_children},
+    summary::Summary,
 };
 use crate::cli::DirCompareArgs;
 
@@ -79,15 +79,9 @@ pub(super) fn render_tree_entries(
 
         let is_dir = is_dir_entry(entry);
 
-        // Build display name (including "/" for directories and child count).
+        // Build display name (directories are marked with a "/" suffix).
         let display_name = if is_dir {
-            if let Some(sub) = &entry.sub_entries {
-                let child_count =
-                    count_visible_tree_children(&sub.entries, args);
-                format!("{}/ ({})", entry.name, child_count)
-            } else {
-                format!("{}/", entry.name)
-            }
+            format!("{}/", entry.name)
         } else {
             entry.name.clone()
         };

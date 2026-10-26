@@ -119,18 +119,6 @@ pub(super) fn collect_and_count_into(
     }
 }
 
-/// Count the entries at this level that would be visible in tree mode:
-/// directories are always shown as structural nodes; files are filtered.
-pub(super) fn count_visible_tree_children(
-    entries: &[DirEntry],
-    args: &DirCompareArgs,
-) -> usize {
-    entries
-        .iter()
-        .filter(|e| should_show_in_tree(e, args))
-        .count()
-}
-
 // ---------------------------------------------------------------------------
 // Summary printing
 // ---------------------------------------------------------------------------
