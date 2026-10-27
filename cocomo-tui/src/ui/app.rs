@@ -398,7 +398,7 @@ mod render_tests {
             APP_STATE, AppState, SessionMode, SessionView, SyncStage,
             TransferOp,
         },
-        ui::theme::cocomo_palette,
+        ui::{frame::SPINNER_FRAMES, theme::cocomo_palette},
     };
 
     /// Render the full `App` offscreen and flatten the buffer to text.
@@ -458,6 +458,28 @@ mod render_tests {
         assert!(
             text.contains("Welcome") && text.contains('└'),
             "welcome panel not rendered at full height:\n{text}"
+        );
+    }
+
+    #[test]
+    fn pending_task_renders_the_busy_indicator_in_the_status_bar() {
+        let mut app = dir_session_state();
+        app.pending_tasks.push("Planning sync");
+        let text = render(app);
+        // The indicator leads the status bar; the tick stays on its first
+        // frame because offscreen rendering has no tokio runtime.
+        assert!(
+            text.contains(&format!(
+                "{} Planning sync\u{2026}",
+                SPINNER_FRAMES[0]
+            )),
+            "busy indicator missing from the status bar:\n{text}"
+        );
+        // Without a pending task the indicator is gone.
+        let idle = render(dir_session_state());
+        assert!(
+            !idle.contains("Planning sync"),
+            "busy indicator rendered without pending work:\n{idle}"
         );
     }
 

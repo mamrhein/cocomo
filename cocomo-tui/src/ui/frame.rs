@@ -17,8 +17,12 @@
 //!
 //! The module also hosts [`tabs_hit_item`] and [`tabs_item_x`], the click
 //! mapping and title anchor shared by the menu and tab bars, which both
-//! render through ratatui's `Tabs`, and [`hint_line`], the shared bottom
-//! hint of every modal.
+//! render through ratatui's `Tabs`, [`hint_line`], the shared bottom hint
+//! of every modal, and the busy indicator ([`use_busy_tick`] plus
+//! [`busy_indicator`]) the two comparison views prepend to their status
+//! bar while background tasks run.
+
+use std::time::Duration;
 
 use ratatui_kit::{
     prelude::*,
@@ -28,6 +32,70 @@ use ratatui_kit::{
         text::{Line, Span, Text as RataText},
     },
 };
+
+use crate::state::APP_STATE;
+
+/// Frames of the busy-indicator spinner (rotating braille dots).
+pub(super) const SPINNER_FRAMES: [char; 10] =
+    ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+
+/// Interval between spinner animation steps.
+const BUSY_TICK_INTERVAL: Duration = Duration::from_millis(120);
+
+/// Return the spinner glyph for `tick`, wrapping through the frames.
+pub(super) fn spinner_glyph(tick: u8) -> char {
+    SPINNER_FRAMES[usize::from(tick) % SPINNER_FRAMES.len()]
+}
+
+/// Advance a local frame counter while the app has pending background
+/// work, and return the current value.
+///
+/// The future runs once for the lifetime of the calling component and
+/// sleeps between steps. It writes the tick only while
+/// [`crate::state::AppState::is_busy`], so an idle app spends no frames on
+/// the animation; the writes that do happen wake just this component, which
+/// re-reads the busy label from the [`APP_STATE`] atom it subscribes to
+/// anyway. Offscreen render tests drive the tree without a tokio runtime,
+/// so the loop exits early there and the indicator simply stays on its
+/// first frame.
+///
+/// Call unconditionally at the top of a view component (stable hook order)
+/// and pass the returned tick to [`busy_indicator`].
+pub(super) fn use_busy_tick(hooks: &mut Hooks) -> u8 {
+    let mut tick = hooks.use_state(|| 0_u8);
+    hooks.use_future(async move {
+        if tokio::runtime::Handle::try_current().is_err() {
+            return;
+        }
+        loop {
+            tokio::time::sleep(BUSY_TICK_INTERVAL).await;
+            if APP_STATE.state().read().is_busy() {
+                tick.set(tick.get().wrapping_add(1));
+            }
+        }
+    });
+    tick.get()
+}
+
+/// Build the leading `(spinner, label)` spans of a busy status bar.
+///
+/// The spinner and label carry `style` (the caller's status highlight);
+/// the trailing separator is unstyled bar chrome, matching the `|`
+/// separators the comparison views already use between their status
+/// sections.
+pub(super) fn busy_indicator(
+    tick: u8,
+    label: &'static str,
+    style: Style,
+) -> Vec<Span<'static>> {
+    vec![
+        Span::styled(
+            format!("{} {label}\u{2026}", spinner_glyph(tick)),
+            style,
+        ),
+        Span::raw("  |  "),
+    ]
+}
 
 /// Build the bottom hint line of a modal from `(key, action)` pairs.
 ///
@@ -146,10 +214,37 @@ pub(super) fn HelpBar(props: &HelpBarProps) -> impl Into<AnyElement<'static>> {
 
 #[cfg(test)]
 mod tests {
+    use ratatui_kit::ratatui::style::Color;
+
     use super::*;
 
     fn titles(names: &[&str]) -> Vec<Line<'static>> {
         names.iter().map(|n| Line::from(n.to_string())).collect()
+    }
+
+    #[test]
+    fn spinner_glyph_wraps_through_the_frames() {
+        assert_eq!(spinner_glyph(0), SPINNER_FRAMES[0]);
+        assert_eq!(spinner_glyph(3), SPINNER_FRAMES[3]);
+        assert_eq!(
+            spinner_glyph(SPINNER_FRAMES.len() as u8),
+            SPINNER_FRAMES[0]
+        );
+    }
+
+    #[test]
+    fn busy_indicator_prefixes_label_with_spinner_and_separator() {
+        let spans =
+            busy_indicator(0, "Comparing", Style::new().fg(Color::Yellow));
+        let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(
+            text,
+            format!("{} Comparing\u{2026}  |  ", SPINNER_FRAMES[0])
+        );
+        // Only the spinner and label take the caller's style; the
+        // separator stays plain bar chrome.
+        assert_eq!(spans[0].style.fg, Some(Color::Yellow));
+        assert_eq!(spans[1].style, Style::new());
     }
 
     #[test]

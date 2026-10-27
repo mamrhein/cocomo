@@ -58,8 +58,9 @@ pub enum SessionMode {
     /// The user is typing a command-line command (`:`).
     Command { input: String },
     /// The transfer dialog (`c` copy, `d` delete, `v` move) is open for the
-    /// selected entry. Not a text-entry mode: the dialog's own input layer keeps the
-    /// shell and the table from seeing keys, so `is_editing` stays `false`.
+    /// selected entry. Not a text-entry mode: the dialog's own input layer
+    /// keeps the shell and the table from seeing keys, so `is_editing` stays
+    /// `false`.
     Transfer { op: TransferOp },
     /// The sync confirmation modal is open for the planned sync (`S`). Like
     /// [`SessionMode::Transfer`], the modal's exclusive input layer owns
@@ -1135,6 +1136,14 @@ pub struct AppState {
     /// Set when an operation that cannot be attributed to a specific session
     /// fails (e.g. the initial comparison launched at startup).
     pub error_message: Option<String>,
+    /// Labels of the background tasks currently in flight.
+    ///
+    /// `crate::controller::spawn_task` registers the label when it spawns a
+    /// task and removes it again when the task finishes (success, failure,
+    /// or aborted extraction), so a non-empty list means the UI is waiting
+    /// on work it cannot cancel. The comparison views render
+    /// [`AppState::busy_label`] as a spinner in their status bar.
+    pub pending_tasks: Vec<&'static str>,
 }
 
 /// Global reactive application state, subscribed to via
@@ -1157,7 +1166,21 @@ impl AppState {
             menu: None,
             show_help: false,
             error_message: None,
+            pending_tasks: Vec::new(),
         }
+    }
+
+    /// Whether any controller-spawned background task is still running.
+    pub fn is_busy(&self) -> bool {
+        !self.pending_tasks.is_empty()
+    }
+
+    /// Label of the most recently started pending task.
+    ///
+    /// This is what the status bars' busy indicator shows; when several
+    /// tasks run concurrently the newest one owns the indicator.
+    pub fn busy_label(&self) -> Option<&'static str> {
+        self.pending_tasks.last().copied()
     }
 
     /// Add a session and switch to it.
@@ -1805,7 +1828,8 @@ mod tests {
 
     #[test]
     fn preview_aggregates_items_over_all_targets() {
-        let targets = vec![target(true, true, false), target(true, false, false)];
+        let targets =
+            vec![target(true, true, false), target(true, false, false)];
         let items = TransferChoice::Left.preview(TransferOp::Copy, &targets);
         assert_eq!(items.len(), 2);
         assert!(
@@ -1819,7 +1843,11 @@ mod tests {
                 .preview(TransferOp::Move, &[target(true, false, false)])
                 .is_empty()
         );
-        assert!(TransferChoice::Abort.preview(TransferOp::Copy, &targets).is_empty());
+        assert!(
+            TransferChoice::Abort
+                .preview(TransferOp::Copy, &targets)
+                .is_empty()
+        );
     }
 
     #[test]
@@ -2051,5 +2079,24 @@ mod tests {
         let target = mismatched.transfer_target().unwrap();
         assert!(!target.has_left && !target.has_right);
         assert!(target.note.is_some());
+    }
+
+    #[test]
+    fn pending_tasks_drive_the_busy_accessors() {
+        let mut app = AppState::new();
+        assert!(!app.is_busy());
+        assert_eq!(app.busy_label(), None);
+
+        app.pending_tasks.push("Comparing");
+        app.pending_tasks.push("Syncing");
+        assert!(app.is_busy());
+        // The most recently started task owns the indicator.
+        assert_eq!(app.busy_label(), Some("Syncing"));
+
+        app.pending_tasks.remove(1);
+        assert_eq!(app.busy_label(), Some("Comparing"));
+        app.pending_tasks.clear();
+        assert!(!app.is_busy());
+        assert_eq!(app.busy_label(), None);
     }
 }

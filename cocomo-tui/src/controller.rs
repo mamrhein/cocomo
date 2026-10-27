@@ -438,11 +438,17 @@ fn update_session(id: usize, f: impl FnOnce(&mut SessionView)) {
 /// An `Err` from `work` is reported via [`report_error`], prefixed with
 /// `err_context`. This is the only place where the "never hold a guard
 /// across an `await`" invariant needs to be satisfied.
+///
+/// Every task is registered under `busy_label` in
+/// [`AppState::pending_tasks`] for as long as it runs, so the status bars
+/// can show a busy indicator without each call site managing the bookkeeping
+/// itself.
 fn spawn_task<In, Out, Fut, Extract, Work, Apply>(
     extract: Extract,
     work: Work,
     apply: Apply,
     err_context: &'static str,
+    busy_label: &'static str,
 ) where
     In: Send + 'static,
     Out: Send + 'static,
@@ -451,13 +457,18 @@ fn spawn_task<In, Out, Fut, Extract, Work, Apply>(
     Work: FnOnce(In) -> Fut + Send + 'static,
     Apply: FnOnce(&mut AppState, Out) + Send + 'static,
 {
+    APP_STATE.state().write().pending_tasks.push(busy_label);
     tokio::spawn(async move {
         let input = {
             let state = APP_STATE.state();
             let app = state.read();
             match extract(&app) {
                 Some(input) => input,
-                None => return,
+                None => {
+                    drop(app);
+                    task_finished(busy_label);
+                    return;
+                }
             }
         };
 
@@ -468,7 +479,25 @@ fn spawn_task<In, Out, Fut, Extract, Work, Apply>(
             }
             Err(e) => report_error(format!("{err_context}: {e}")),
         }
+        task_finished(busy_label);
     });
+}
+
+/// Drop one registration of `label` from the pending-task list.
+///
+/// Labels are matched by value, not by task identity: two tasks sharing a
+/// label are interchangeable for the busy indicator, so it does not matter
+/// which instance a finishing task removes. An unknown label is a no-op.
+fn task_finished(label: &'static str) {
+    let state = APP_STATE.state();
+    let mut app = state.write();
+    if let Some(index) = app
+        .pending_tasks
+        .iter()
+        .position(|pending| *pending == label)
+    {
+        app.pending_tasks.remove(index);
+    }
 }
 
 /// Process a [`SessionAction`] returned by the key handlers.
@@ -501,6 +530,7 @@ pub(crate) fn process_session_action(action: SessionAction) {
                 },
                 |app, session| app.add_session(session),
                 "Comparison failed",
+                "Comparing",
             );
         }
         SessionAction::OpenFile { left, right } => {
@@ -509,6 +539,7 @@ pub(crate) fn process_session_action(action: SessionAction) {
                 move |_| async move { run_text_comparison(left, right).await },
                 |app, session| app.add_session(session),
                 "Text comparison failed",
+                "Comparing",
             );
         }
         SessionAction::GoUp => {
@@ -533,6 +564,7 @@ pub(crate) fn process_session_action(action: SessionAction) {
                 },
                 |app, session| app.add_session(session),
                 "Comparison failed",
+                "Comparing",
             );
         }
         SessionAction::Reload => {
@@ -561,6 +593,7 @@ pub(crate) fn process_session_action(action: SessionAction) {
                     }
                 },
                 "Comparison failed",
+                "Comparing",
             );
         }
         SessionAction::PlanSync { operation } => {
@@ -604,6 +637,7 @@ pub(crate) fn process_session_action(action: SessionAction) {
                     }
                 },
                 "Sync planning failed",
+                "Planning sync",
             );
         }
         SessionAction::ExecuteSync => {
@@ -629,6 +663,7 @@ pub(crate) fn process_session_action(action: SessionAction) {
                     }
                 },
                 "Sync execution failed",
+                "Syncing",
             );
         }
         SessionAction::SaveSession { name } => {
@@ -648,6 +683,7 @@ pub(crate) fn process_session_action(action: SessionAction) {
                 },
                 |_app, ()| {},
                 "Failed to save session",
+                "Saving session",
             );
         }
         SessionAction::ListSessions => {
@@ -679,6 +715,7 @@ pub(crate) fn process_session_action(action: SessionAction) {
                     }
                 },
                 "Failed to list saved sessions",
+                "Listing sessions",
             );
         }
         SessionAction::LoadSession { path } => {
@@ -690,6 +727,7 @@ pub(crate) fn process_session_action(action: SessionAction) {
                 },
                 |app, session| app.add_session(session),
                 "Session load failed",
+                "Loading session",
             );
         }
         SessionAction::Transfer { items } => {
@@ -775,6 +813,7 @@ pub(crate) fn process_session_action(action: SessionAction) {
                     }
                 },
                 "Comparison after transfer failed",
+                "Transferring",
             );
         }
         SessionAction::GenerateReport {
@@ -806,6 +845,7 @@ pub(crate) fn process_session_action(action: SessionAction) {
                     }
                 },
                 "Report generation failed",
+                "Generating report",
             );
         }
         SessionAction::None => {}
@@ -1473,6 +1513,26 @@ mod tests {
             false,
         ));
         app
+    }
+
+    #[test]
+    fn task_finished_drops_one_label_instance() {
+        APP_STATE.set(dir_app_state());
+        APP_STATE.state().write().pending_tasks.extend_from_slice(&[
+            "Comparing",
+            "Syncing",
+            "Comparing",
+        ]);
+        // Only the first matching registration is dropped; tasks sharing a
+        // label are interchangeable for the busy indicator.
+        task_finished("Comparing");
+        assert_eq!(
+            APP_STATE.state().read().pending_tasks,
+            vec!["Syncing", "Comparing"]
+        );
+        // A label no task registered is a no-op.
+        task_finished("Unknown");
+        assert_eq!(APP_STATE.state().read().pending_tasks.len(), 2);
     }
 
     #[test]
