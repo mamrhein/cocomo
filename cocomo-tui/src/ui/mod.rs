@@ -56,6 +56,7 @@ mod rows;
 mod session_browser;
 mod session_table;
 mod settings_modal;
+mod summary;
 mod sync_confirm;
 mod tab_bar;
 mod text_diff;

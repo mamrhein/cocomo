@@ -29,7 +29,7 @@
 
 use std::path::PathBuf;
 
-use cocomo_lib::{SyncOperation, TransferItem};
+use cocomo_lib::SyncOperation;
 use ratatui_kit::{
     components::tui_input::{Input, InputRequest},
     crossterm::event::{KeyCode, KeyEvent, KeyModifiers},
@@ -172,6 +172,8 @@ pub enum Cmd {
     CopyDialog,
     /// Open the delete dialog for the selected entry (`d`).
     DeleteDialog,
+    /// Open the move dialog for the selected entry (`v`).
+    MoveDialog,
     /// Confirm the given option of the open transfer dialog.
     DialogPick(TransferChoice),
     /// Close the transfer dialog without transferring.
@@ -357,6 +359,13 @@ const KEYMAP: &[KeyBinding] = &[
         help: Some(("d", "delete")),
     },
     KeyBinding {
+        key: KeyCode::Char('v'),
+        modifiers: NONE,
+        scope: KeyScope::DirNormal,
+        cmd: Cmd::MoveDialog,
+        help: Some(("v", "move")),
+    },
+    KeyBinding {
         key: KeyCode::Char('r'),
         modifiers: NONE,
         scope: KeyScope::DirNormal,
@@ -496,6 +505,13 @@ const KEYMAP: &[KeyBinding] = &[
         scope: KeyScope::TextNormal,
         cmd: Cmd::DeleteDialog,
         help: Some(("d", "delete")),
+    },
+    KeyBinding {
+        key: KeyCode::Char('v'),
+        modifiers: NONE,
+        scope: KeyScope::TextNormal,
+        cmd: Cmd::MoveDialog,
+        help: Some(("v", "move")),
     },
     KeyBinding {
         key: KeyCode::Char('/'),
@@ -1121,6 +1137,7 @@ fn execute(cmd: Cmd, session: &mut SessionView) -> SessionAction {
         }
         Cmd::CopyDialog => open_dialog(session, TransferOp::Copy),
         Cmd::DeleteDialog => open_dialog(session, TransferOp::Delete),
+        Cmd::MoveDialog => open_dialog(session, TransferOp::Move),
         Cmd::DialogPick(choice) => dialog_choice(session, choice),
         Cmd::DialogAbort => {
             session.ui.mode = SessionMode::Normal;
@@ -1320,7 +1337,7 @@ pub(crate) fn cycle_sync_op(
 /// Open the transfer dialog for the current selection.
 ///
 /// A no-op when nothing is selected (or no selected entry exists on
-/// either side), so `c`/`d` on an empty table simply do nothing.
+/// either side), so `c`/`d`/`v` on an empty table simply do nothing.
 fn open_dialog(session: &mut SessionView, op: TransferOp) -> SessionAction {
     if !session.transfer_targets().is_empty() {
         session.ui.mode = SessionMode::Transfer { op };
@@ -1357,10 +1374,7 @@ pub fn dialog_choice(
         return SessionAction::None;
     }
     session.ui.mode = SessionMode::Normal;
-    let items: Vec<TransferItem> = targets
-        .iter()
-        .flat_map(|target| target.items(op, choice))
-        .collect();
+    let items = choice.preview(op, &targets);
     if items.is_empty() {
         SessionAction::None
     } else {
@@ -2308,8 +2322,12 @@ mod tests {
     }
 
     #[test]
-    fn c_and_d_open_the_transfer_dialog() {
-        for (key, op) in [('c', TransferOp::Copy), ('d', TransferOp::Delete)] {
+    fn c_d_and_v_open_the_transfer_dialog() {
+        for (key, op) in [
+            ('c', TransferOp::Copy),
+            ('d', TransferOp::Delete),
+            ('v', TransferOp::Move),
+        ] {
             let mut session = dir_session_with_sides();
             session.ui.table_state.select(Some(0));
             assert_eq!(

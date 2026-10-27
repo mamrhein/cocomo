@@ -388,7 +388,7 @@ pub(crate) fn App(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 mod render_tests {
     use cocomo_lib::{
         DirComparison, DirEntry, DirEntryStatus, Endpoint, EntryInfo,
-        SyncResult,
+        SyncResult, TransferAction, TransferItem,
     };
     use ratatui_kit::{ratatui::buffer::Buffer, test_util::render_frames};
 
@@ -532,13 +532,29 @@ mod render_tests {
         assert!(screen.contains("left \u{2192} right"), "{screen}");
         assert!(screen.contains("j/k select"), "{screen}");
         assert!(screen.contains("Enter confirm"), "{screen}");
-        // The first option the selection activates carries the cursor; the
-        // summary of what would change is listed above the options.
-        assert!(row_with(&screen, "left \u{2192} right").contains('\u{25b8}'));
+        // The first option the selection activates carries the cursor and
+        // previews its effect; the change summary of that option is listed
+        // below the options.
+        let cursor_row = row_with(&screen, "left \u{2192} right");
+        assert!(cursor_row.contains('\u{25b8}'), "{cursor_row}");
+        assert!(cursor_row.contains("(1 file)"), "{cursor_row}");
+        assert!(
+            screen.contains("copy left \u{2192} right: 1 file"),
+            "{screen}"
+        );
         assert!(screen.contains("both.txt"), "{screen}");
         // A delete offers `both` under the same key code.
         let deleted = render(sides_state(TransferOp::Delete));
         assert!(deleted.contains("Delete") && deleted.contains("[b]"));
+        // A move offers the same arrows and previews the move as its
+        // effect.
+        let moved = render(sides_state(TransferOp::Move));
+        assert!(moved.contains("Move"), "{moved}");
+        assert!(moved.contains("left \u{2192} right"), "{moved}");
+        assert!(
+            moved.contains("move left \u{2192} right: 1 file"),
+            "{moved}"
+        );
     }
 
     #[test]
@@ -559,6 +575,43 @@ mod render_tests {
         // Rejecting leaves the modal rendered nowhere.
         let closed = render(dir_session_state());
         assert!(!closed.contains("[y] Execute"), "{closed}");
+    }
+
+    #[test]
+    fn sync_confirm_modal_lists_the_planned_changes() {
+        let mut app = dir_session_state();
+        {
+            let session = app.active_mut().unwrap();
+            session.set_sync(SyncStage::Planned(SyncResult {
+                planned: vec![
+                    TransferItem::new(
+                        TransferAction::CopyRight,
+                        "a.txt".into(),
+                        false,
+                        "a.txt".into(),
+                    ),
+                    TransferItem::new(
+                        TransferAction::DeleteRight,
+                        "b.txt".into(),
+                        false,
+                        "b.txt".into(),
+                    ),
+                ],
+                ..Default::default()
+            }));
+            session.ui.mode = SessionMode::SyncConfirm;
+        }
+        let screen = render(app);
+        // The totals name the concrete change, not just a count.
+        assert!(
+            screen.contains("copy left \u{2192} right: 1 file"),
+            "{screen}"
+        );
+        assert!(screen.contains("delete right: 1 file"), "{screen}");
+        // The per-item rows list the affected paths.
+        assert!(screen.contains("a.txt"), "{screen}");
+        assert!(screen.contains("b.txt"), "{screen}");
+        assert!(screen.contains("[y] Execute"), "{screen}");
     }
 
     #[test]

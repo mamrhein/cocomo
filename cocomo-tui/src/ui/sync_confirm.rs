@@ -13,9 +13,12 @@
 //! [`SessionMode::SyncConfirm`]; this component turns that mode into an
 //! [`OptionList`] with the two decisions of the whole planned batch: `[y]`
 //! executes, `[n]`/`Esc` rejects. The cursor starts on Cancel, so a bare
-//! `Enter` cannot execute by accident. There is no per-item review: the
-//! preview table behind the modal lists every planned transfer, and
-//! rejecting keeps it on screen for closer inspection.
+//! `Enter` cannot execute by accident. Above the decisions the
+//! [`change_summary`] of the planned items lists the change the approval
+//! would apply (per-action totals and affected paths, collapsed beyond a
+//! cap); the preview table behind the modal still lists every planned
+//! transfer in full, and rejecting keeps it on screen for closer
+//! inspection.
 //!
 //! Like `TransferDialog` the component lives in the App shell and reads the
 //! active session, so one implementation serves every dir tab. It owns an
@@ -30,7 +33,7 @@ use ratatui_kit::{
     prelude::*,
     ratatui::{
         layout::{Constraint, Direction},
-        text::Line,
+        text::{Line, Text as RataText},
         widgets::Padding,
     },
 };
@@ -38,6 +41,7 @@ use ratatui_kit::{
 use super::{
     frame::hint_line,
     option_list::{OptionItem, OptionList},
+    summary::change_summary,
     theme::CocomoTheme,
 };
 use crate::{
@@ -54,8 +58,9 @@ pub(super) fn SyncConfirmModal(
     let theme = hooks.use_component_theme::<CocomoTheme>();
 
     // Resolve the pending plan from the active session; the modal only
-    // opens on a planned (not yet executed) sync. The content line names
-    // the operation and the number of transfers the approval would run.
+    // opens on a planned (not yet executed) sync. The first content line
+    // names the operation and the number of transfers the approval would
+    // run; the [`change_summary`] below it spells out the concrete changes.
     let content = app_handle
         .read()
         .active()
@@ -66,12 +71,14 @@ pub(super) fn SyncConfirmModal(
                 return None;
             };
             let count = result.planned_count();
-            Some(format!(
+            let mut lines = vec![Line::from(format!(
                 "{}: {} transfer{} planned.",
                 dir.sync_operation.label(),
                 count,
                 if count == 1 { "" } else { "s" }
-            ))
+            ))];
+            lines.extend(change_summary(&result.planned, &theme));
+            Some(lines)
         });
     let open = content.is_some();
 
@@ -107,9 +114,9 @@ pub(super) fn SyncConfirmModal(
         return element!(Modal(open: false)).into_any();
     };
 
-    // Two border rows plus the padding around the content: the plan summary
-    // and the two decision rows.
-    let height = 4 + 1 + 2;
+    // Two border rows plus the padding around the content: the plan
+    // summary and the two decision rows.
+    let height = 4 + content.len() as u16 + 2;
 
     element!(
         Modal(
@@ -117,7 +124,8 @@ pub(super) fn SyncConfirmModal(
             // Reuse this component's layer instead of letting `Modal` mint
             // its own, which would deafen the handler above.
             layer: Some(layer),
-            width: Constraint::Length(48),
+            // Wide enough for the summary's action label and path columns.
+            width: Constraint::Percentage(60),
             height: Constraint::Length(height),
         ) {
             Border(
@@ -135,7 +143,7 @@ pub(super) fn SyncConfirmModal(
                 .centered(),
                 padding: Padding::uniform(1),
             ) {
-                Text(text: content)
+                Text(text: RataText::from(content))
                 OptionList<bool>(
                     items: vec![
                         OptionItem::new(true, "Execute").key("y"),

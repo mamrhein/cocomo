@@ -99,6 +99,10 @@ where
     pub(super) items: Vec<OptionItem<T>>,
     /// Called with the option when a row is confirmed.
     pub(super) on_select: Handler<'static, T>,
+    /// Called with the option the cursor moves to, including the row the
+    /// list seeds to on mount. Lets a dialog mirror the highlighted
+    /// option's effect below the list; disabled rows are never highlighted.
+    pub(super) on_highlight: Option<Handler<'static, T>>,
     /// Row to start at; the first selectable row at or after it wins, so a
     /// disabled default slides to the next option instead of highlighting
     /// nothing.
@@ -120,6 +124,7 @@ where
         Self {
             items: Vec::new(),
             on_select: Handler::default(),
+            on_highlight: None,
             default_index: None,
             empty_message: None,
             height: Constraint::Fill(1),
@@ -154,21 +159,32 @@ where
     // or the default changes, which covers both the first mount and a list
     // that arrives asynchronously while the dialog stays open.
     let mut index = hooks.use_state(|| seed(&items, default_index));
+
+    // The key and the pointer closures confirm and highlight through the
+    // same callbacks; `Handler` is not `Clone`, so each is shared behind an
+    // `Rc<RefCell>`.
+    let on_select = Rc::new(RefCell::new(props.on_select.take()));
+    let on_highlight = Rc::new(RefCell::new(props.on_highlight.take()));
+
+    // Cursor into the list. The effect re-seeds it whenever the item count
+    // or the default changes, which covers both the first mount and a list
+    // that arrives asynchronously while the dialog stays open. The seeded
+    // row is reported to `on_highlight` so a dialog mirrors it right away.
     let seed_items = items.clone();
+    let seed_highlight = Rc::clone(&on_highlight);
     hooks.use_effect(
         move || {
-            index.set_no_update(seed(&seed_items, default_index));
+            let next = seed(&seed_items, default_index);
+            index.set_no_update(next);
+            fire_highlight(&seed_highlight, &seed_items, next);
         },
         (count, default_index),
     );
     let mut hover = hooks.use_state(|| None::<usize>);
 
-    // The key and the pointer closure confirm through the same callback;
-    // `Handler` is not `Clone`, so it is shared behind an `Rc<RefCell>`.
-    let on_select = Rc::new(RefCell::new(props.on_select.take()));
-
     hooks.use_event_handler(EventScope::Current, EventPriority::Normal, {
         let on_select = Rc::clone(&on_select);
+        let on_highlight = Rc::clone(&on_highlight);
         let items = items.clone();
         move |event| {
             let Event::Key(key) = event else {
@@ -178,21 +194,31 @@ where
                 return EventResult::Ignored;
             }
 
+            // Every cursor move is mirrored to `on_highlight`, so a dialog
+            // can track the option under the cursor.
             match key.code {
                 KeyCode::Char('j') | KeyCode::Down => {
-                    index.set(step(&items, index.get(), true));
+                    let next = step(&items, index.get(), true);
+                    index.set(next);
+                    fire_highlight(&on_highlight, &items, next);
                     EventResult::Consumed
                 }
                 KeyCode::Char('k') | KeyCode::Up => {
-                    index.set(step(&items, index.get(), false));
+                    let next = step(&items, index.get(), false);
+                    index.set(next);
+                    fire_highlight(&on_highlight, &items, next);
                     EventResult::Consumed
                 }
                 KeyCode::Home => {
-                    index.set(seed(&items, Some(0)));
+                    let next = seed(&items, Some(0));
+                    index.set(next);
+                    fire_highlight(&on_highlight, &items, next);
                     EventResult::Consumed
                 }
                 KeyCode::End => {
-                    index.set(seed_back(&items, Some(items.len() - 1)));
+                    let next = seed_back(&items, Some(items.len() - 1));
+                    index.set(next);
+                    fire_highlight(&on_highlight, &items, next);
                     EventResult::Consumed
                 }
                 KeyCode::Enter => {
@@ -216,6 +242,7 @@ where
             },
             {
                 let on_select = Rc::clone(&on_select);
+                let on_highlight = Rc::clone(&on_highlight);
                 let items = items.clone();
                 move |ev| {
                     // `position` shares the draw-area coordinates of
@@ -250,6 +277,7 @@ where
                                 row.filter(|&row| !items[row].disabled);
                             hover.set(None);
                             index.set(enabled);
+                            fire_highlight(&on_highlight, &items, enabled);
                             confirm(
                                 &items,
                                 enabled,
@@ -383,6 +411,23 @@ fn step<T>(
         }
     }
     None
+}
+
+/// Report the selectable row under the cursor to `on_highlight` (when the
+/// caller supplied a handler).
+fn fire_highlight<T>(
+    on_highlight: &RefCell<Option<Handler<'static, T>>>,
+    items: &[OptionItem<T>],
+    current: Option<usize>,
+) where
+    T: Clone,
+{
+    let Some(item) = current.and_then(|row| items.get(row)) else {
+        return;
+    };
+    if let Some(handler) = on_highlight.borrow_mut().as_mut() {
+        handler(item.value.clone());
+    }
 }
 
 /// Report the selectable row under the cursor to `on_select`.

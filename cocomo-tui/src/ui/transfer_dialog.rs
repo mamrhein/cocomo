@@ -7,14 +7,20 @@
 // $Source$
 // $Revision$
 
-//! Transfer dialog: the confirmation step of `c` (copy) and `d` (delete).
+//! Transfer dialog: the confirmation step of `c` (copy), `d` (delete) and
+//! `v` (move).
 //!
 //! The dialog lists the four options of the operation as an
 //! [`OptionList`], each row labelled with its accelerator (`[l]` left, `[r]`
 //! right, `[b]` both (delete only), `[Esc]` abort), and shows what the
-//! transfer would act on above that list. Options the current selection
-//! does not activate stay listed but dimmed and unselectable; activation is
-//! decided by [`TransferChoice::is_enabled`] over the whole selection: `l`
+//! transfer would act on above that list. Each option also carries the
+//! effect it would have over the whole selection (`(3 files, 1 dir)`), and
+//! below the list the [`change_summary`] of the option under the cursor
+//! spells out the concrete changes (per-action totals and affected paths),
+//! so the dialog answers *what will change*, not just what is selected.
+//! Options the current selection does not activate stay listed but dimmed
+//! and unselectable (an empty effect); activation is decided by
+//! [`TransferChoice::is_enabled`] over the whole selection: `l`
 //! needs at least one entry with a left side, `r` one with a right side, `b`
 //! one with both; abort is always active. Pressing the accelerator of a
 //! dimmed option is absorbed (the dialog stays open), and the confirmed
@@ -32,7 +38,9 @@
 //! which is what keeps the table and the shell from reacting behind the
 //! dialog.
 
-use cocomo_lib::{DirEntry, EntryInfo, format_date, format_size};
+use cocomo_lib::{
+    DirEntry, EntryInfo, TransferItem, format_date, format_size,
+};
 use ratatui_kit::{
     crossterm::event::{Event, KeyEventKind},
     prelude::*,
@@ -47,6 +55,7 @@ use ratatui_kit::{
 use super::{
     frame::hint_line,
     option_list::{OptionItem, OptionList},
+    summary::{change_summary, count_totals},
     theme::CocomoTheme,
 };
 use crate::{
@@ -63,6 +72,8 @@ struct DialogData {
     op: TransferOp,
     /// What the transfer would act on, rendered for the user.
     summary: Vec<Line<'static>>,
+    /// The entries the transfer would act on, for the option previews.
+    targets: Vec<TransferTarget>,
     /// The four options, with the ones the selection does not activate
     /// marked disabled.
     items: Vec<OptionItem<TransferChoice>>,
@@ -79,6 +90,13 @@ pub(super) fn TransferDialog(
 ) -> impl Into<AnyElement<'static>> {
     let app_handle = hooks.use_atom(&APP_STATE);
     let theme = hooks.use_component_theme::<CocomoTheme>();
+
+    // The option the list's cursor is on, mirrored by its `on_highlight`
+    // callback; it drives the change summary below the list. Stored with
+    // the op it belongs to so a highlight from a previous open cannot leak
+    // into a dialog for a different operation.
+    let mut highlighted =
+        hooks.use_state(|| None::<(TransferOp, TransferChoice)>);
 
     // Resolve the dialog from the active session. While the dialog is open
     // its input layer blocks every lower handler, so the selection cannot
@@ -100,15 +118,21 @@ pub(super) fn TransferDialog(
             Some(DialogData {
                 op,
                 summary: summary_lines(s, &targets, &theme),
+                targets: targets.clone(),
                 items: op
                     .choices()
                     .into_iter()
                     .map(|choice| {
-                        OptionItem::new(choice, choice.label(op))
-                            .key(choice.key())
-                            .disabled(
-                                !choice.is_enabled(op, has_left, has_right),
-                            )
+                        let item = OptionItem::new(choice, choice.label(op))
+                            .key(choice.key());
+                        let item =
+                            match effect_hint(&choice.preview(op, &targets)) {
+                                Some(hint) => item.hint(hint),
+                                None => item,
+                            };
+                        item.disabled(
+                            !choice.is_enabled(op, has_left, has_right),
+                        )
                     })
                     .collect(),
             })
@@ -151,10 +175,32 @@ pub(super) fn TransferDialog(
     };
 
     // Two border rows plus the padding around the content: the summary,
-    // then one row per option.
+    // then one row per option, then the change summary of the highlighted
+    // option.
+    //
+    // The change summary describes the option under the cursor; until the
+    // list reports its seeded cursor it falls back to the first enabled
+    // option, the same row the list seeds to.
+    let changes = match highlighted.get() {
+        Some((op, choice)) if op == data.op => {
+            change_summary(&choice.preview(data.op, &data.targets), &theme)
+        }
+        _ => data
+            .items
+            .iter()
+            .find(|item| !item.disabled)
+            .map(|item| {
+                change_summary(
+                    &item.value.preview(data.op, &data.targets),
+                    &theme,
+                )
+            })
+            .unwrap_or_default(),
+    };
     let summary_rows = data.summary.len().max(1) as u16;
     let option_rows = data.items.len() as u16;
-    let height = 4 + summary_rows + option_rows;
+    let change_rows = changes.len() as u16;
+    let height = 4 + summary_rows + option_rows + change_rows;
 
     element!(
         Modal(
@@ -191,13 +237,48 @@ pub(super) fn TransferDialog(
                     on_select: Handler::from(move |choice| {
                         pick_transfer_choice(choice);
                     }),
+                    on_highlight: Handler::from(move |choice| {
+                        highlighted.set(Some((data.op, choice)));
+                    }),
                     default_index: Some(0),
                     height: Constraint::Length(option_rows),
                 )
+                if change_rows > 0 {
+                    View(height: Constraint::Length(change_rows)) {
+                        Text(text: RataText::from(changes))
+                    }
+                }
             }
         }
     )
     .into_any()
+}
+
+/// Render the effect of a choice's preview as its hint column, e.g.
+/// `(3 files, 1 dir)`.
+///
+/// Entries present on both sides under a two-sided choice (delete `b`) are
+/// counted once, so the hint names the entries the change touches rather
+/// than the number of transfer items it produces.
+fn effect_hint(items: &[TransferItem]) -> Option<String> {
+    if items.is_empty() {
+        return None;
+    }
+    let mut files = 0;
+    let mut dirs = 0;
+    let mut seen: Vec<&str> = Vec::new();
+    for item in items {
+        if seen.contains(&item.rel_path.as_str()) {
+            continue;
+        }
+        seen.push(&item.rel_path);
+        if item.is_dir {
+            dirs += 1;
+        } else {
+            files += 1;
+        }
+    }
+    Some(format!("({})", count_totals(files, dirs)))
 }
 
 /// Render what the transfer would act on.
