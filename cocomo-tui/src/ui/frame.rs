@@ -15,8 +15,9 @@
 //! border, so a full box would only steal vertical space from the main
 //! view area.
 //!
-//! The module also hosts [`tabs_hit_item`], the click mapping shared by
-//! the menu and tab bars, which both render through ratatui's `Tabs`.
+//! The module also hosts [`tabs_hit_item`] and [`tabs_item_x`], the click
+//! mapping and title anchor shared by the menu and tab bars, which both
+//! render through ratatui's `Tabs`.
 
 use ratatui_kit::{
     prelude::*,
@@ -47,6 +48,30 @@ pub(super) fn tabs_hit_item(
             return Some(i);
         }
         cursor = end.saturating_add(divider_width);
+    }
+    None
+}
+
+/// Return the x offset at which the item with `index` starts, `None` when
+/// the index is past the last item.
+///
+/// The inverse of [`tabs_hit_item`]: it walks the same
+/// `[pad-left][title][pad-right][divider]` layout from the left edge, so a
+/// dropdown can be anchored under its own title.
+pub(super) fn tabs_item_x(
+    titles: &[Line<'static>],
+    index: usize,
+    divider_width: u16,
+) -> Option<u16> {
+    let mut cursor = 0u16;
+    for (i, title) in titles.iter().enumerate() {
+        if i == index {
+            return Some(cursor);
+        }
+        cursor = cursor
+            .saturating_add(title.width() as u16)
+            .saturating_add(2)
+            .saturating_add(divider_width);
     }
     None
 }
@@ -119,5 +144,18 @@ mod tests {
     #[test]
     fn tabs_hit_item_is_empty_without_titles() {
         assert_eq!(tabs_hit_item(0, &[], 3), None);
+    }
+
+    #[test]
+    fn tabs_item_x_anchors_at_the_start_of_an_item() {
+        let items = titles(&["Sessions", "Help"]);
+        assert_eq!(tabs_item_x(&items, 0, 3), Some(0));
+        assert_eq!(tabs_item_x(&items, 1, 3), Some(13));
+        assert_eq!(tabs_item_x(&items, 2, 3), None);
+        // Every anchor is a cell the hit mapping attributes to its item.
+        for index in 0..2 {
+            let x = tabs_item_x(&items, index, 3).unwrap();
+            assert_eq!(tabs_hit_item(x, &items, 3), Some(index));
+        }
     }
 }

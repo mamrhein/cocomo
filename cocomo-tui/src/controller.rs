@@ -1209,12 +1209,7 @@ pub(crate) enum MenuOutcome {
     Quit,
 }
 
-/// Open the menu dropdown at `bar_index`.
-pub(crate) fn open_menu(bar_index: usize) {
-    APP_STATE.state().write().menu = MenuState::open(bar_index);
-}
-
-/// Toggle the menu dropdown at `bar_index` (menu bar click).
+/// Toggle the menu dropdown at `bar_index` (menu bar click, `Alt+<accel>`).
 ///
 /// Clicking the open title closes the dropdown; clicking another title
 /// switches to its dropdown.
@@ -1258,6 +1253,26 @@ pub(crate) fn move_menu_item(delta: isize) {
 /// Dismiss the open dropdown without executing an item.
 pub(crate) fn close_menu() {
     APP_STATE.state().write().menu = None;
+}
+
+/// Move the highlight to the dropdown row `item` and confirm it (a click on
+/// a dropdown row).
+///
+/// A row the open menu does not have is reported as handled without
+/// touching the state, so a stale click cannot move the highlight.
+pub(crate) fn pick_menu_item(item: usize) -> MenuOutcome {
+    {
+        let state = APP_STATE.state();
+        let mut app = state.write();
+        let Some(menu) = app.menu.as_mut() else {
+            return MenuOutcome::Handled;
+        };
+        if menu.menu().is_none_or(|def| item >= def.items.len()) {
+            return MenuOutcome::Handled;
+        }
+        menu.item = item;
+    }
+    confirm_menu_item()
 }
 
 /// Execute the highlighted dropdown item and close the dropdown.
@@ -1521,10 +1536,16 @@ mod tests {
         menu::MENUS.iter().position(|m| m.title == title).unwrap()
     }
 
+    /// Open a dropdown through `toggle_menu`, the only entry point the bar
+    /// and the Alt accelerators use.
+    fn open_menu(bar_index: usize) {
+        toggle_menu(bar_index);
+    }
+
     #[test]
-    fn open_menu_selects_the_dropdown() {
+    fn toggle_menu_opens_the_dropdown_under_its_index() {
         APP_STATE.set(AppState::new());
-        open_menu(1);
+        toggle_menu(1);
         assert_eq!(
             APP_STATE.state().read().menu,
             Some(MenuState {
@@ -1533,7 +1554,7 @@ mod tests {
             })
         );
         // An unknown index closes the menu instead of panicking.
-        open_menu(menu::count());
+        toggle_menu(menu::count());
         assert_eq!(APP_STATE.state().read().menu, None);
     }
 
@@ -1669,5 +1690,27 @@ mod tests {
         });
         assert_eq!(confirm_menu_item(), MenuOutcome::CloseTab);
         assert_eq!(APP_STATE.state().read().menu, None);
+    }
+
+    #[test]
+    fn pick_menu_item_confirms_the_clicked_row() {
+        APP_STATE.set(dir_app_state());
+        open_menu(menu_index("Sessions"));
+        // A row the dropdown does not have changes neither the highlight
+        // nor the open state.
+        let rows = menu::menu_at(menu_index("Sessions")).unwrap().items.len();
+        assert_eq!(pick_menu_item(rows), MenuOutcome::Handled);
+        assert_eq!(APP_STATE.state().read().menu.unwrap().item, 0);
+        // The quit row is reported to the caller, and the dropdown closes.
+        let quit = menu::menu_at(menu_index("Sessions"))
+            .unwrap()
+            .items
+            .iter()
+            .position(|i| i.cmd == Cmd::Quit)
+            .unwrap();
+        assert_eq!(pick_menu_item(quit), MenuOutcome::Quit);
+        assert_eq!(APP_STATE.state().read().menu, None);
+        // Without an open menu the click is inert.
+        assert_eq!(pick_menu_item(0), MenuOutcome::Handled);
     }
 }
