@@ -50,6 +50,7 @@ mod dir_compare;
 mod filter_panel;
 mod frame;
 mod menu_bar;
+mod option_list;
 mod report_modal;
 mod rows;
 mod session_browser;

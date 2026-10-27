@@ -17,15 +17,40 @@
 //!
 //! The module also hosts [`tabs_hit_item`] and [`tabs_item_x`], the click
 //! mapping and title anchor shared by the menu and tab bars, which both
-//! render through ratatui's `Tabs`.
+//! render through ratatui's `Tabs`, and [`hint_line`], the shared bottom
+//! hint of every modal.
 
 use ratatui_kit::{
     prelude::*,
     ratatui::{
         layout::Constraint,
-        text::{Line, Text as RataText},
+        style::{Modifier, Style},
+        text::{Line, Span, Text as RataText},
     },
 };
+
+/// Build the bottom hint line of a modal from `(key, action)` pairs.
+///
+/// Every dialog renders its key map with the same wording, `·` separator,
+/// and surrounding padding, so the only degrees of freedom are the pairs
+/// themselves. The key spans are bold to stand out from the action text;
+/// the caller applies the theme's dim style (and centering), which keeps
+/// the color decision with the other border chrome.
+pub(super) fn hint_line(hints: &[(&str, &str)]) -> Line<'static> {
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    for (index, (key, action)) in hints.iter().enumerate() {
+        spans.push(Span::raw(if index == 0 { " " } else { " \u{b7} " }));
+        spans.push(Span::styled(
+            (*key).to_string(),
+            Style::new().add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::raw(format!(" {action}")));
+    }
+    if !spans.is_empty() {
+        spans.push(Span::raw(" "));
+    }
+    Line::from(spans)
+}
 
 /// Map an x coordinate local to a [`ratatui::widgets::Tabs`] row to the
 /// index of the item it hits, `None` on a divider or past the last item.
@@ -125,6 +150,31 @@ mod tests {
 
     fn titles(names: &[&str]) -> Vec<Line<'static>> {
         names.iter().map(|n| Line::from(n.to_string())).collect()
+    }
+
+    #[test]
+    fn hint_line_bold_formats_each_key_action_pair() {
+        let line = hint_line(&[
+            ("j/k", "select"),
+            ("Enter", "confirm"),
+            ("Esc", "cancel"),
+        ]);
+        // One bold span per key, plain spans around it, `·` between pairs.
+        let text: String =
+            line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text, " j/k select · Enter confirm · Esc cancel ");
+        let bold: Vec<&str> = line
+            .spans
+            .iter()
+            .filter(|s| s.style.add_modifier.contains(Modifier::BOLD))
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert_eq!(bold, vec!["j/k", "Enter", "Esc"]);
+    }
+
+    #[test]
+    fn hint_line_is_empty_without_hints() {
+        assert!(hint_line(&[]).spans.is_empty());
     }
 
     #[test]

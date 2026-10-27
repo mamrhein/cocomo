@@ -220,19 +220,27 @@ fn session_keys_report_their_controller_actions() {
 }
 
 #[test]
-fn sync_confirm_mode_defers_to_the_modal() {
+fn sync_confirm_scope_leaves_navigation_to_the_modal() {
     let mut session = dir_session();
     // The controller records the plan and enters the confirm mode once
-    // the dry-run arrives; from then on the session handler claims
-    // nothing, leaving every key — including `Esc` — to the modal's
-    // exclusive input layer, so the preview cannot be cancelled behind
-    // the modal.
+    // the dry-run arrives. The approval modal owns its decision keys (`y`
+    // executes, `n`/`Esc` reject) but leaves navigation to the `OptionList`
+    // child it renders, which consumes it in the modal's exclusive input
+    // layer, so the table behind the modal cannot move.
     session.set_sync(SyncStage::Planned(SyncResult::default()));
     session.ui.mode = SessionMode::SyncConfirm;
     assert_eq!(press(&mut session, KeyCode::Char('j')), None);
-    assert_eq!(press(&mut session, KeyCode::Esc), None);
+    assert_eq!(
+        press(&mut session, KeyCode::Char('y')),
+        Some(SessionAction::ExecuteSync)
+    );
+    assert_eq!(session.ui.mode, SessionMode::Normal);
+    // Rejecting closes the modal and keeps the preview on screen for
+    // closer inspection.
+    session.ui.mode = SessionMode::SyncConfirm;
+    assert_eq!(press(&mut session, KeyCode::Esc), Some(SessionAction::None));
+    assert_eq!(session.ui.mode, SessionMode::Normal);
     assert!(session.dir().unwrap().sync.is_some());
-    assert_eq!(session.ui.mode, SessionMode::SyncConfirm);
 }
 
 #[test]

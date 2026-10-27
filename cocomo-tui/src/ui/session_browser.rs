@@ -9,8 +9,8 @@
 
 //! Session browser modal: the `O` entry point for saved sessions.
 //!
-//! The modal lists the saved session files in a `Select`; `Enter` loads
-//! the highlighted session, `n` closes the browser and enters the
+//! The modal lists the saved session files in an [`OptionList`]; `Enter`
+//! loads the highlighted session, `n` closes the browser and enters the
 //! save-name prompt to create a new one, and `Esc` closes it. The list is
 //! filled asynchronously by the `ListSessions` action the browser
 //! dispatches on open, so the modal shows a placeholder until the listing
@@ -19,7 +19,7 @@
 //! Like `TransferDialog` the component lives in the App shell and reads
 //! the active session. Its handler runs in the modal's exclusive input
 //! layer with `EventPriority::High` and owns only `Esc` and `n`;
-//! `j`/`k`/`Enter` are reported as unbound so the `Select` child in the
+//! `j`/`k`/`Enter` are reported as unbound so the `OptionList` child in the
 //! same layer navigates and confirms.
 
 use ratatui_kit::{
@@ -32,7 +32,11 @@ use ratatui_kit::{
     },
 };
 
-use super::theme::CocomoTheme;
+use super::{
+    frame::hint_line,
+    option_list::{OptionItem, OptionList},
+    theme::CocomoTheme,
+};
 use crate::{
     controller::{dispatch_browser_key, load_saved_session},
     state::{APP_STATE, SessionMode},
@@ -68,6 +72,9 @@ pub(super) fn SessionBrowser(
                 return EventResult::Ignored;
             }
 
+            // The browser owns `Esc` and `n` (via the keymap); an unowned
+            // key stays unclaimed here, so the `OptionList` child in the
+            // same layer gets `j`/`k`/`Enter`.
             if dispatch_browser_key(key) {
                 EventResult::Consumed
             } else {
@@ -76,11 +83,21 @@ pub(super) fn SessionBrowser(
         },
     );
 
-    let items = sessions.unwrap_or_default();
+    let Some(items) = sessions else {
+        // Closed: a zero-sized `Modal` instead of a `Fragment` whose default
+        // `Fill(1)` height would steal the main view's rows. Returning early
+        // also unmounts the option list, so every open starts at the top.
+        return element!(Modal(open: false)).into_any();
+    };
+
+    let items: Vec<OptionItem<String>> = items
+        .into_iter()
+        .map(|name| OptionItem::new(name.clone(), name))
+        .collect();
 
     element!(
         Modal(
-            open: open,
+            open: true,
             // Reuse this component's layer; see `FilterPanel`.
             layer: Some(layer),
             width: Constraint::Length(48),
@@ -92,26 +109,26 @@ pub(super) fn SessionBrowser(
                 top_title: Line::from(" Sessions ")
                     .style(theme.title)
                     .centered(),
-                bottom_title: Line::from(
-                    " j/k select · Enter load · n new · Esc close ",
-                )
+                bottom_title: hint_line(&[
+                    ("j/k", "select"),
+                    ("Enter", "load"),
+                    ("n", "new"),
+                    ("Esc", "cancel"),
+                ])
                 .style(theme.dim)
                 .centered(),
                 padding: Padding::uniform(1),
             ) {
-                Select<String>(
+                OptionList<String>(
                     items: items,
                     on_select: Handler::from(move |name: String| {
                         load_saved_session(name);
                     }),
-                    active: true,
                     default_index: Some(0),
-                    empty_message: TextParagraph::from(
-                        "No saved sessions yet.",
-                    ),
-                    height: Constraint::Fill(1),
+                    empty_message: Line::from("No saved sessions yet."),
                 )
             }
         }
     )
+    .into_any()
 }

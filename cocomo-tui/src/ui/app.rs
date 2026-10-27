@@ -386,12 +386,18 @@ pub(crate) fn App(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
 #[cfg(test)]
 mod render_tests {
-    use cocomo_lib::Endpoint;
+    use cocomo_lib::{
+        DirComparison, DirEntry, DirEntryStatus, Endpoint, EntryInfo,
+        SyncResult,
+    };
     use ratatui_kit::{ratatui::buffer::Buffer, test_util::render_frames};
 
     use super::*;
     use crate::{
-        state::{AppState, SessionView},
+        state::{
+            APP_STATE, AppState, SessionMode, SessionView, SyncStage,
+            TransferOp,
+        },
         ui::theme::cocomo_palette,
     };
 
@@ -472,6 +478,124 @@ mod render_tests {
         let closed = render(dir_session_state());
         assert!(!closed.contains("open session browser"), "{closed}");
         assert!(closed.contains("Loading comparison"), "{closed}");
+    }
+
+    /// Dir session whose single entry exists on both sides, so the transfer
+    /// dialog has a target and every option key applies to it.
+    fn sides_state(op: TransferOp) -> AppState {
+        let info = |name: &str| EntryInfo {
+            name: name.into(),
+            path: name.into(),
+            is_dir: false,
+            ..Default::default()
+        };
+        let mut session = SessionView::new_dir_compare(
+            Endpoint::local("/left"),
+            Endpoint::local("/right"),
+            false,
+        );
+        session.set_comparison(Some(DirComparison {
+            entries: vec![DirEntry {
+                name: "both.txt".into(),
+                status: DirEntryStatus::Different,
+                left: Some(info("both.txt")),
+                right: Some(info("both.txt")),
+                center: None,
+                sub_entries: None,
+            }],
+            ..Default::default()
+        }));
+        session.ui.table_state.select(Some(0));
+        session.ui.mode = SessionMode::Transfer { op };
+        let mut app = AppState::new();
+        app.add_session(session);
+        app
+    }
+
+    /// The row of the rendered screen containing `needle`.
+    fn row_with<'a>(screen: &'a str, needle: &str) -> &'a str {
+        screen
+            .lines()
+            .find(|row| row.contains(needle))
+            .unwrap_or_else(|| panic!("{needle:?} not on screen:\n{screen}"))
+    }
+
+    #[test]
+    fn transfer_dialog_lists_every_option_with_its_key_code() {
+        let screen = render(sides_state(TransferOp::Copy));
+        // All four options are listed, each labelled with its bracketed
+        // accelerator, and the shared hint line explains the navigation.
+        assert!(screen.contains("Copy"), "{screen}");
+        for key in ["[l]", "[r]", "[b]", "[Esc]"] {
+            assert!(screen.contains(key), "missing {key:?}:\n{screen}");
+        }
+        assert!(screen.contains("left \u{2192} right"), "{screen}");
+        assert!(screen.contains("j/k select"), "{screen}");
+        assert!(screen.contains("Enter confirm"), "{screen}");
+        // The first option the selection activates carries the cursor; the
+        // summary of what would change is listed above the options.
+        assert!(row_with(&screen, "left \u{2192} right").contains('\u{25b8}'));
+        assert!(screen.contains("both.txt"), "{screen}");
+        // A delete offers `both` under the same key code.
+        let deleted = render(sides_state(TransferOp::Delete));
+        assert!(deleted.contains("Delete") && deleted.contains("[b]"));
+    }
+
+    #[test]
+    fn sync_confirm_modal_offers_the_two_decisions() {
+        let mut app = dir_session_state();
+        {
+            let session = app.active_mut().unwrap();
+            session.set_sync(SyncStage::Planned(SyncResult::default()));
+            session.ui.mode = SessionMode::SyncConfirm;
+        }
+        let screen = render(app);
+        assert!(screen.contains("planned"), "{screen}");
+        assert!(screen.contains("[y] Execute"), "{screen}");
+        assert!(screen.contains("[n] Cancel"), "{screen}");
+        // The cursor starts on Cancel, so a bare `Enter` cannot execute.
+        assert!(row_with(&screen, "Cancel").contains('\u{25b8}'));
+        assert!(!row_with(&screen, "Execute").contains('\u{25b8}'));
+        // Rejecting leaves the modal rendered nowhere.
+        let closed = render(dir_session_state());
+        assert!(!closed.contains("[y] Execute"), "{closed}");
+    }
+
+    #[test]
+    fn session_browser_lists_the_saved_sessions() {
+        let mut app = dir_session_state();
+        app.active_mut().unwrap().ui.mode = SessionMode::SessionBrowser {
+            saved_sessions: vec!["alpha".into(), "beta".into()],
+        };
+        let screen = render(app);
+        assert!(screen.contains("alpha"), "{screen}");
+        assert!(screen.contains("beta"), "{screen}");
+        assert!(screen.contains("Enter load"), "{screen}");
+        assert!(screen.contains("n new"), "{screen}");
+        assert!(row_with(&screen, "alpha").contains('\u{25b8}'));
+    }
+
+    #[test]
+    fn session_browser_placeholders_while_the_list_is_empty() {
+        let mut app = dir_session_state();
+        app.active_mut().unwrap().ui.mode = SessionMode::SessionBrowser {
+            saved_sessions: Vec::new(),
+        };
+        let screen = render(app);
+        assert!(screen.contains("No saved sessions yet."), "{screen}");
+        assert!(!screen.contains('\u{25b8}'), "{screen}");
+    }
+
+    #[test]
+    fn settings_modal_shows_the_values_and_toggle_keys() {
+        let mut app = dir_session_state();
+        app.active_mut().unwrap().ui.mode = SessionMode::Settings;
+        let screen = render(app);
+        assert!(screen.contains("Compare content"), "{screen}");
+        assert!(screen.contains("Hide identical"), "{screen}");
+        assert!(screen.contains("Sync operation"), "{screen}");
+        assert!(screen.contains("Enter toggle"), "{screen}");
+        assert!(row_with(&screen, "Compare content").contains('\u{25b8}'));
     }
 }
 

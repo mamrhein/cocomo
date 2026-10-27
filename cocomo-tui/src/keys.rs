@@ -17,6 +17,7 @@
 //! dropdown, [`KeyScope::Dialog`] to the open
 //! transfer dialog, [`KeyScope::FilterPanel`], [`KeyScope::SessionBrowser`],
 //! [`KeyScope::Settings`] and [`KeyScope::Report`] to the modal panels,
+//! [`KeyScope::SyncConfirm`] to the sync approval modal,
 //! and [`KeyScope::Editing`] is the root-layer fallback while a text-entry
 //! mode is active.
 //!
@@ -75,18 +76,22 @@ pub enum KeyScope {
     Editing,
     /// The transfer dialog is open. Its accelerators live here so they stay
     /// documented in the table; navigation and `Enter` are owned by the
-    /// dialog's `Select` component and deliberately not listed.
+    /// dialog's `OptionList` component and deliberately not listed.
     Dialog,
     /// The filter panel modal is open. `Enter` applies, `Tab` moves the
     /// focus; keys the focused child widget owns (text editing, `Space` on
     /// the status list) are deliberately not listed.
     FilterPanel,
     /// The session browser modal is open. `j`/`k`/`Enter` are owned by its
-    /// `Select` child and deliberately not listed.
+    /// `OptionList` child and deliberately not listed.
     SessionBrowser,
     /// The settings modal is open. `Enter` toggles the highlighted entry
-    /// through its `Select` child and is deliberately not listed.
+    /// through its `OptionList` child and is deliberately not listed.
     Settings,
+    /// The sync approval modal is open. `y` executes the planned batch, `n`
+    /// and `Esc` reject it; `j`/`k`/`Enter` are owned by its `OptionList`
+    /// child and deliberately not listed.
+    SyncConfirm,
     /// The report modal is open. `Enter` generates from every section but
     /// the format list (where the `Select` child owns it) and is handled
     /// dynamically, so it is deliberately not listed.
@@ -153,6 +158,8 @@ pub enum Cmd {
     GoUp,
     /// Cancel the sync preview, else clear the filter.
     Cancel,
+    /// Execute the planned sync from the approval modal (`y`).
+    SyncExecute,
     /// Jump to the next difference group.
     NextDiff,
     /// Jump to the previous difference group.
@@ -504,8 +511,8 @@ const KEYMAP: &[KeyBinding] = &[
         cmd: Cmd::StartCommand,
         help: Some((":", "command")),
     },
-    // -- Transfer dialog (its own input layer; the `Select` inside owns
-    //    j/k/Enter, so only the accelerators are listed here). --
+    // -- Transfer dialog (its own input layer; the `OptionList` inside
+    //    owns j/k/Enter, so only the accelerators are listed here). --
     KeyBinding {
         key: KeyCode::Esc,
         modifiers: NONE,
@@ -591,6 +598,43 @@ const KEYMAP: &[KeyBinding] = &[
         key: KeyCode::Esc,
         modifiers: NONE,
         scope: KeyScope::Settings,
+        cmd: Cmd::PanelClose,
+        help: None,
+    },
+    // -- Sync approval modal (its own input layer; the `OptionList` inside
+    //    owns j/k/Enter, so only the decision keys are listed). --
+    KeyBinding {
+        key: KeyCode::Char('y'),
+        modifiers: NONE,
+        scope: KeyScope::SyncConfirm,
+        cmd: Cmd::SyncExecute,
+        help: None,
+    },
+    KeyBinding {
+        key: KeyCode::Char('Y'),
+        modifiers: NONE,
+        scope: KeyScope::SyncConfirm,
+        cmd: Cmd::SyncExecute,
+        help: None,
+    },
+    KeyBinding {
+        key: KeyCode::Char('n'),
+        modifiers: NONE,
+        scope: KeyScope::SyncConfirm,
+        cmd: Cmd::PanelClose,
+        help: None,
+    },
+    KeyBinding {
+        key: KeyCode::Char('N'),
+        modifiers: NONE,
+        scope: KeyScope::SyncConfirm,
+        cmd: Cmd::PanelClose,
+        help: None,
+    },
+    KeyBinding {
+        key: KeyCode::Esc,
+        modifiers: NONE,
+        scope: KeyScope::SyncConfirm,
         cmd: Cmd::PanelClose,
         help: None,
     },
@@ -884,11 +928,7 @@ pub fn handle_session_key(
         SessionMode::Settings => return handle_settings_key(session, key),
         SessionMode::Report { .. } => return handle_report_key(session, key),
         SessionMode::SyncConfirm => {
-            // The sync confirmation modal owns every key while it is open;
-            // its exclusive input layer normally blocks this handler
-            // already, and claiming nothing here is the belt-and-braces
-            // counterpart.
-            return None;
+            return handle_sync_confirm_key(session, key);
         }
         _ => {}
     }
@@ -1056,6 +1096,12 @@ fn execute(cmd: Cmd, session: &mut SessionView) -> SessionAction {
             }
             session.set_cursor(Some(0));
             SessionAction::None
+        }
+        Cmd::SyncExecute => {
+            // Approving the modal closes it and hands the plan to the
+            // executor; the preview stays on the session for review.
+            session.ui.mode = SessionMode::Normal;
+            SessionAction::ExecuteSync
         }
         Cmd::NextDiff => {
             jump_diff(session, 1);
@@ -1388,7 +1434,7 @@ fn handle_filter_panel_key(
 /// Handle a key for the open session browser modal.
 ///
 /// The browser owns `Esc` (close) and `n` (create new); `j`/`k`/`Enter`
-/// pass through to its `Select` child, which loads the highlighted
+/// pass through to its `OptionList` child, which loads the highlighted
 /// session.
 fn handle_browser_key(
     session: &mut SessionView,
@@ -1404,7 +1450,7 @@ fn handle_browser_key(
 /// Handle a key for the open settings modal.
 ///
 /// The modal owns only `Esc`; `Enter` toggles the highlighted entry
-/// through its `Select` child.
+/// through its `OptionList` child.
 fn handle_settings_key(
     session: &mut SessionView,
     key: KeyEvent,
@@ -1413,6 +1459,22 @@ fn handle_settings_key(
         return None;
     }
     let cmd = lookup(KeyScope::Settings, key)?;
+    Some(execute(cmd, session))
+}
+
+/// Handle a key for the open sync approval modal.
+///
+/// The modal owns `y` (execute) and `n`/`Esc` (reject, i.e. close and keep
+/// the preview); `j`/`k`/`Enter` pass through to its `OptionList` child,
+/// which confirms the highlighted option.
+fn handle_sync_confirm_key(
+    session: &mut SessionView,
+    key: KeyEvent,
+) -> Option<SessionAction> {
+    if !matches!(session.ui.mode, SessionMode::SyncConfirm) {
+        return None;
+    }
+    let cmd = lookup(KeyScope::SyncConfirm, key)?;
     Some(execute(cmd, session))
 }
 
@@ -2432,16 +2494,26 @@ mod tests {
     }
 
     #[test]
-    fn sync_confirm_mode_claims_no_session_keys() {
-        // While the confirmation modal is open its exclusive input layer
-        // owns every key, so the session handler must claim nothing: even
-        // bound keys like `j` and `Esc` report as unbound (the layer
-        // swallows them) and the selection cannot move behind the modal.
+    fn sync_confirm_scope_owns_only_its_keys() {
+        // While the approval modal is open it claims `y`/`Y` (execute) and
+        // `n`/`N`/`Esc` (reject); `j` stays unbound so the `OptionList`
+        // child in the same input layer navigates, and the table behind the
+        // modal cannot move.
         let mut session = dir_session();
+        for (code, action) in [
+            (KeyCode::Char('y'), SessionAction::ExecuteSync),
+            (KeyCode::Char('Y'), SessionAction::ExecuteSync),
+            (KeyCode::Char('n'), SessionAction::None),
+            (KeyCode::Char('N'), SessionAction::None),
+            (KeyCode::Esc, SessionAction::None),
+        ] {
+            session.ui.mode = SessionMode::SyncConfirm;
+            assert_eq!(press(&mut session, code), Some(action), "{:?}", code);
+            assert_eq!(session.ui.mode, SessionMode::Normal, "{:?}", code);
+        }
         session.ui.mode = SessionMode::SyncConfirm;
         assert_eq!(press(&mut session, KeyCode::Char('j')), None);
         assert_eq!(session.ui.table_state.selected(), Some(0));
-        assert_eq!(press(&mut session, KeyCode::Esc), None);
     }
 
     #[test]

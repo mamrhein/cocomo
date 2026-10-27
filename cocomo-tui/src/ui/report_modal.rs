@@ -38,7 +38,7 @@ use ratatui_kit::{
     },
 };
 
-use super::theme::CocomoTheme;
+use super::{frame::hint_line, theme::CocomoTheme};
 use crate::{
     controller::{dispatch_report_key, set_report_format, set_report_options},
     state::{APP_STATE, ReportDraft, ReportFocus, SessionMode},
@@ -180,9 +180,11 @@ pub(super) fn ReportModal(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 top_title: Line::from(" Report ")
                     .style(theme.title)
                     .centered(),
-                bottom_title: Line::from(
-                    " Tab focus · Enter generate · Esc close ",
-                )
+                bottom_title: hint_line(&[
+                    ("Tab", "focus"),
+                    ("Enter", "generate"),
+                    ("Esc", "cancel"),
+                ])
                 .style(theme.dim)
                 .centered(),
                 padding: Padding::uniform(1),

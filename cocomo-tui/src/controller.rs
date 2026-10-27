@@ -39,12 +39,12 @@ use ratatui_kit::crossterm::event::KeyEvent;
 
 use crate::{
     error::{Result, TuiError},
-    keys::{self, Cmd, cycle_sync_op, handle_session_key},
+    keys::{self, Cmd, cycle_sync_op, dialog_choice, handle_session_key},
     menu::{self, MenuState},
     session_store::session_to_config,
     state::{
         APP_STATE, AppState, NamePattern, SessionAction, SessionContent,
-        SessionMode, SessionView, SettingItem, SyncStage,
+        SessionMode, SessionView, SettingItem, SyncStage, TransferChoice,
     },
 };
 
@@ -844,6 +844,27 @@ pub(crate) fn dispatch_dialog_key(key: KeyEvent) -> bool {
     dispatch_key(|s| matches!(s.ui.mode, SessionMode::Transfer { .. }), key)
 }
 
+/// Confirm the transfer-dialog option the cursor highlights.
+///
+/// Dispatched by the dialog's `OptionList` on `Enter` or a click. The
+/// choice resolves through the same [`dialog_choice`] path as the
+/// accelerator keys, so an option the selection does not activate is
+/// absorbed and the dialog stays open.
+pub(crate) fn pick_transfer_choice(choice: TransferChoice) {
+    let action = {
+        let state = APP_STATE.state();
+        let mut app = state.write();
+        let Some(session) = app
+            .active_mut()
+            .filter(|s| matches!(s.ui.mode, SessionMode::Transfer { .. }))
+        else {
+            return;
+        };
+        dialog_choice(session, choice)
+    };
+    process_session_action(action);
+}
+
 /// Handle a key press for the open filter panel modal.
 ///
 /// Like [`dispatch_dir_key`], scoped to a session whose filter panel is
@@ -874,6 +895,11 @@ pub(crate) fn dispatch_report_key(key: KeyEvent) -> bool {
     dispatch_key(|s| matches!(s.ui.mode, SessionMode::Report { .. }), key)
 }
 
+/// Handle a key press for the open sync approval modal.
+pub(crate) fn dispatch_sync_confirm_key(key: KeyEvent) -> bool {
+    dispatch_key(|s| matches!(s.ui.mode, SessionMode::SyncConfirm), key)
+}
+
 /// Approve the planned sync: close the confirmation modal and execute.
 ///
 /// Bound to the modal's confirm action (`y`/`Enter`). Execution re-derives
@@ -897,8 +923,9 @@ pub(crate) fn confirm_sync() {
 /// Reject the planned sync: close the confirmation modal, keeping the
 /// preview on screen for review.
 ///
-/// Bound to the modal's cancel action (`n`/`N`/`Esc`). From the preview,
-/// `Esc` discards it and `S` re-plans and re-confirms.
+/// Bound to the modal's cancel action (`n`/`Esc`, or `Enter` while the
+/// list highlights Cancel). From the preview, `Esc` discards it and `S`
+/// re-plans and re-confirms.
 pub(crate) fn reject_sync() {
     let state = APP_STATE.state();
     let mut app = state.write();

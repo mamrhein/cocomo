@@ -37,7 +37,7 @@ use ratatui_kit::{
     },
 };
 
-use super::theme::CocomoTheme;
+use super::{frame::hint_line, theme::CocomoTheme};
 use crate::{
     controller::{dispatch_filter_panel_key, set_filter_panel_statuses},
     state::{APP_STATE, FilterDraft, FilterFocus, SessionMode},
@@ -169,9 +169,12 @@ pub(super) fn FilterPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 top_title: Line::from(" Filter ")
                     .style(theme.title)
                     .centered(),
-                bottom_title: Line::from(
-                    " Tab focus · Space toggle · Enter apply · Esc close ",
-                )
+                bottom_title: hint_line(&[
+                    ("Tab", "focus"),
+                    ("Space", "toggle"),
+                    ("Enter", "apply"),
+                    ("Esc", "cancel"),
+                ])
                 .style(theme.dim)
                 .centered(),
                 padding: Padding::uniform(1),
