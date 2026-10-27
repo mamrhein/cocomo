@@ -13,9 +13,11 @@
 //! their help-bar labels, so dispatch and documentation cannot drift apart.
 //! Scopes partition key ownership: [`KeyScope::Global`] bindings belong to
 //! the App shell, [`KeyScope::DirNormal`] and [`KeyScope::TextNormal`]
-//! bindings to the two session views, [`KeyScope::Dialog`] to the open
+//! bindings to the two session views, [`KeyScope::Menu`] to an open menu
+//! dropdown, [`KeyScope::Dialog`] to the open
 //! transfer dialog, [`KeyScope::FilterPanel`], [`KeyScope::SessionBrowser`],
 //! [`KeyScope::Settings`] and [`KeyScope::Report`] to the modal panels,
+//! [`KeyScope::SyncConfirm`] to the sync approval modal,
 //! and [`KeyScope::Editing`] is the root-layer fallback while a text-entry
 //! mode is active.
 //!
@@ -27,7 +29,7 @@
 
 use std::path::PathBuf;
 
-use cocomo_lib::{SyncOperation, TransferItem};
+use cocomo_lib::SyncOperation;
 use ratatui_kit::{
     components::tui_input::{Input, InputRequest},
     crossterm::event::{KeyCode, KeyEvent, KeyModifiers},
@@ -42,7 +44,7 @@ use crate::{
     state::{
         FilterDraft, FilterFocus, NamePattern, ReportDraft, ReportFocus,
         ReportSelection, SessionAction, SessionContent, SessionMode,
-        SessionView, TransferChoice, TransferOp,
+        SessionView, StatusFilter, TransferChoice, TransferOp,
     },
 };
 
@@ -50,6 +52,8 @@ use crate::{
 const NONE: KeyModifiers = KeyModifiers::NONE;
 /// Shorthand for a Ctrl binding.
 const CTRL: KeyModifiers = KeyModifiers::CONTROL;
+/// Shorthand for an Alt binding.
+const ALT: KeyModifiers = KeyModifiers::ALT;
 
 /// Which handler owns a binding.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -60,24 +64,34 @@ pub enum KeyScope {
     DirNormal,
     /// A text-comparison session in normal mode.
     TextNormal,
+    /// A menu dropdown is open. The App shell routes keys here first
+    /// while [`crate::state::AppState::menu`] is `Some`; the navigation
+    /// keys live in this table so they stay documented, and the shell
+    /// claims every other key so lower handlers cannot react behind the
+    /// dropdown.
+    Menu,
     /// Any session while a text-entry mode is active. The input components
     /// capture keys in their own layers; this scope is only the root-layer
     /// fallback that cancels the mode.
     Editing,
     /// The transfer dialog is open. Its accelerators live here so they stay
     /// documented in the table; navigation and `Enter` are owned by the
-    /// dialog's `Select` component and deliberately not listed.
+    /// dialog's `OptionList` component and deliberately not listed.
     Dialog,
     /// The filter panel modal is open. `Enter` applies, `Tab` moves the
     /// focus; keys the focused child widget owns (text editing, `Space` on
     /// the status list) are deliberately not listed.
     FilterPanel,
     /// The session browser modal is open. `j`/`k`/`Enter` are owned by its
-    /// `Select` child and deliberately not listed.
+    /// `OptionList` child and deliberately not listed.
     SessionBrowser,
     /// The settings modal is open. `Enter` toggles the highlighted entry
-    /// through its `Select` child and is deliberately not listed.
+    /// through its `OptionList` child and is deliberately not listed.
     Settings,
+    /// The sync approval modal is open. `y` executes the planned batch, `n`
+    /// and `Esc` reject it; `j`/`k`/`Enter` are owned by its `OptionList`
+    /// child and deliberately not listed.
+    SyncConfirm,
     /// The report modal is open. `Enter` generates from every section but
     /// the format list (where the `Select` child owns it) and is handled
     /// dynamically, so it is deliberately not listed.
@@ -92,9 +106,12 @@ pub enum Cmd {
     CloseTab,
     /// Switch to the next tab, or the previous one with Shift.
     SwitchTab,
-    /// Select the previous menu item.
+    /// Open the menu at the given bar index (`Alt+<accel>`; a test keeps
+    /// the bindings in sync with [`crate::menu::MENUS`]).
+    MenuOpen(usize),
+    /// Select the previous menu on the bar.
     MenuPrev,
-    /// Select the next menu item.
+    /// Select the next menu on the bar.
     MenuNext,
     /// Quit the application.
     Quit,
@@ -121,6 +138,10 @@ pub enum Cmd {
     CycleSyncOpForward,
     /// Cycle the sync operation backward.
     CycleSyncOpBackward,
+    /// Select the given sync operation (dropdown item).
+    SetSyncOp(SyncOperation),
+    /// Toggle the visibility of one entry-status class (dropdown item).
+    ToggleStatusFilter(StatusFilter),
     /// Enter save-session mode.
     StartSaveSession,
     /// Open the session browser modal and list saved sessions (`O`).
@@ -137,6 +158,8 @@ pub enum Cmd {
     GoUp,
     /// Cancel the sync preview, else clear the filter.
     Cancel,
+    /// Execute the planned sync from the approval modal (`y`).
+    SyncExecute,
     /// Jump to the next difference group.
     NextDiff,
     /// Jump to the previous difference group.
@@ -149,6 +172,8 @@ pub enum Cmd {
     CopyDialog,
     /// Open the delete dialog for the selected entry (`d`).
     DeleteDialog,
+    /// Open the move dialog for the selected entry (`v`).
+    MoveDialog,
     /// Confirm the given option of the open transfer dialog.
     DialogPick(TransferChoice),
     /// Close the transfer dialog without transferring.
@@ -159,6 +184,15 @@ pub enum Cmd {
     StartCommand,
     /// Leave a text-entry mode without applying it.
     CancelEdit,
+    // -- Menu scope: executed by the App shell while a menu is open. --
+    /// Highlight the previous item in the open dropdown (`k`).
+    MenuUp,
+    /// Highlight the next item in the open dropdown (`j`).
+    MenuDown,
+    /// Run the highlighted dropdown item (`Enter`).
+    MenuConfirm,
+    /// Close the open dropdown without running anything (`Esc`).
+    MenuClose,
     // -- Modal panel scopes: executed by the panel handlers. --
     /// Close an open modal panel without applying it.
     PanelClose,
@@ -325,6 +359,13 @@ const KEYMAP: &[KeyBinding] = &[
         help: Some(("d", "delete")),
     },
     KeyBinding {
+        key: KeyCode::Char('v'),
+        modifiers: NONE,
+        scope: KeyScope::DirNormal,
+        cmd: Cmd::MoveDialog,
+        help: Some(("v", "move")),
+    },
+    KeyBinding {
         key: KeyCode::Char('r'),
         modifiers: NONE,
         scope: KeyScope::DirNormal,
@@ -466,6 +507,13 @@ const KEYMAP: &[KeyBinding] = &[
         help: Some(("d", "delete")),
     },
     KeyBinding {
+        key: KeyCode::Char('v'),
+        modifiers: NONE,
+        scope: KeyScope::TextNormal,
+        cmd: Cmd::MoveDialog,
+        help: Some(("v", "move")),
+    },
+    KeyBinding {
         key: KeyCode::Char('/'),
         modifiers: NONE,
         scope: KeyScope::TextNormal,
@@ -479,8 +527,8 @@ const KEYMAP: &[KeyBinding] = &[
         cmd: Cmd::StartCommand,
         help: Some((":", "command")),
     },
-    // -- Transfer dialog (its own input layer; the `Select` inside owns
-    //    j/k/Enter, so only the accelerators are listed here). --
+    // -- Transfer dialog (its own input layer; the `OptionList` inside
+    //    owns j/k/Enter, so only the accelerators are listed here). --
     KeyBinding {
         key: KeyCode::Esc,
         modifiers: NONE,
@@ -569,6 +617,43 @@ const KEYMAP: &[KeyBinding] = &[
         cmd: Cmd::PanelClose,
         help: None,
     },
+    // -- Sync approval modal (its own input layer; the `OptionList` inside
+    //    owns j/k/Enter, so only the decision keys are listed). --
+    KeyBinding {
+        key: KeyCode::Char('y'),
+        modifiers: NONE,
+        scope: KeyScope::SyncConfirm,
+        cmd: Cmd::SyncExecute,
+        help: None,
+    },
+    KeyBinding {
+        key: KeyCode::Char('Y'),
+        modifiers: NONE,
+        scope: KeyScope::SyncConfirm,
+        cmd: Cmd::SyncExecute,
+        help: None,
+    },
+    KeyBinding {
+        key: KeyCode::Char('n'),
+        modifiers: NONE,
+        scope: KeyScope::SyncConfirm,
+        cmd: Cmd::PanelClose,
+        help: None,
+    },
+    KeyBinding {
+        key: KeyCode::Char('N'),
+        modifiers: NONE,
+        scope: KeyScope::SyncConfirm,
+        cmd: Cmd::PanelClose,
+        help: None,
+    },
+    KeyBinding {
+        key: KeyCode::Esc,
+        modifiers: NONE,
+        scope: KeyScope::SyncConfirm,
+        cmd: Cmd::PanelClose,
+        help: None,
+    },
     // -- Report modal. --
     KeyBinding {
         key: KeyCode::Esc,
@@ -582,6 +667,50 @@ const KEYMAP: &[KeyBinding] = &[
         modifiers: NONE,
         scope: KeyScope::Report,
         cmd: Cmd::PanelFocusNext,
+        help: None,
+    },
+    // -- Menu dropdown (open; the App shell routes keys here first and
+    //    claims everything else, so only the navigation keys are listed). --
+    KeyBinding {
+        key: KeyCode::Char('j'),
+        modifiers: NONE,
+        scope: KeyScope::Menu,
+        cmd: Cmd::MenuDown,
+        help: None,
+    },
+    KeyBinding {
+        key: KeyCode::Down,
+        modifiers: NONE,
+        scope: KeyScope::Menu,
+        cmd: Cmd::MenuDown,
+        help: None,
+    },
+    KeyBinding {
+        key: KeyCode::Char('k'),
+        modifiers: NONE,
+        scope: KeyScope::Menu,
+        cmd: Cmd::MenuUp,
+        help: None,
+    },
+    KeyBinding {
+        key: KeyCode::Up,
+        modifiers: NONE,
+        scope: KeyScope::Menu,
+        cmd: Cmd::MenuUp,
+        help: None,
+    },
+    KeyBinding {
+        key: KeyCode::Enter,
+        modifiers: NONE,
+        scope: KeyScope::Menu,
+        cmd: Cmd::MenuConfirm,
+        help: None,
+    },
+    KeyBinding {
+        key: KeyCode::Esc,
+        modifiers: NONE,
+        scope: KeyScope::Menu,
+        cmd: Cmd::MenuClose,
         help: None,
     },
     // -- Text-entry modes (root-layer fallback; the input layers normally
@@ -636,6 +765,51 @@ const KEYMAP: &[KeyBinding] = &[
         cmd: Cmd::MenuNext,
         help: None,
     },
+    // -- Alt accelerators: one per menu, opening its dropdown directly.
+    //    A test keeps these in sync with `menu::MENUS`; they carry no help
+    //    label because the menu bar itself renders the accels. --
+    KeyBinding {
+        key: KeyCode::Char('s'),
+        modifiers: ALT,
+        scope: KeyScope::Global,
+        cmd: Cmd::MenuOpen(0),
+        help: None,
+    },
+    KeyBinding {
+        key: KeyCode::Char('c'),
+        modifiers: ALT,
+        scope: KeyScope::Global,
+        cmd: Cmd::MenuOpen(1),
+        help: None,
+    },
+    KeyBinding {
+        key: KeyCode::Char('y'),
+        modifiers: ALT,
+        scope: KeyScope::Global,
+        cmd: Cmd::MenuOpen(2),
+        help: None,
+    },
+    KeyBinding {
+        key: KeyCode::Char('v'),
+        modifiers: ALT,
+        scope: KeyScope::Global,
+        cmd: Cmd::MenuOpen(3),
+        help: None,
+    },
+    KeyBinding {
+        key: KeyCode::Char('f'),
+        modifiers: ALT,
+        scope: KeyScope::Global,
+        cmd: Cmd::MenuOpen(4),
+        help: None,
+    },
+    KeyBinding {
+        key: KeyCode::Char('h'),
+        modifiers: ALT,
+        scope: KeyScope::Global,
+        cmd: Cmd::MenuOpen(5),
+        help: None,
+    },
     KeyBinding {
         key: KeyCode::Char('q'),
         modifiers: NONE,
@@ -682,6 +856,19 @@ pub fn lookup(scope: KeyScope, key: KeyEvent) -> Option<Cmd> {
                     || !key.modifiers.intersects(CTRL | KeyModifiers::ALT))
         })
         .map(|b| b.cmd)
+}
+
+/// Return the help-bar key label of `cmd`, if a labelled binding runs it.
+///
+/// Menu items use this to display the keyboard counterpart of their
+/// command, so the dropdown never carries a second label table that could
+/// drift from the keymap.
+pub fn key_hint(cmd: Cmd) -> Option<&'static str> {
+    KEYMAP
+        .iter()
+        .find(|b| b.cmd == cmd && b.help.is_some())?
+        .help
+        .map(|(keys, _)| keys)
 }
 
 /// Build the help bar lines for the given scopes from the keymap.
@@ -757,11 +944,7 @@ pub fn handle_session_key(
         SessionMode::Settings => return handle_settings_key(session, key),
         SessionMode::Report { .. } => return handle_report_key(session, key),
         SessionMode::SyncConfirm => {
-            // The sync confirmation modal owns every key while it is open;
-            // its exclusive input layer normally blocks this handler
-            // already, and claiming nothing here is the belt-and-braces
-            // counterpart.
-            return None;
+            return handle_sync_confirm_key(session, key);
         }
         _ => {}
     }
@@ -857,6 +1040,24 @@ fn execute(cmd: Cmd, session: &mut SessionView) -> SessionAction {
             }
             SessionAction::None
         }
+        Cmd::SetSyncOp(operation) => {
+            if let Some(dir) = session.dir_mut() {
+                dir.sync_operation = operation;
+            }
+            SessionAction::None
+        }
+        Cmd::ToggleStatusFilter(status) => {
+            if let Some(dir) = session.dir_mut() {
+                let show = match status {
+                    StatusFilter::Same => &mut dir.display.show_same,
+                    StatusFilter::Different => &mut dir.display.show_different,
+                    StatusFilter::Orphans => &mut dir.display.show_orphans,
+                };
+                *show = !*show;
+            }
+            session.set_cursor(Some(0));
+            SessionAction::None
+        }
         Cmd::StartSaveSession => {
             // Enter input mode; the name buffer lives in the mode itself.
             session.ui.mode = SessionMode::SaveSession {
@@ -912,6 +1113,12 @@ fn execute(cmd: Cmd, session: &mut SessionView) -> SessionAction {
             session.set_cursor(Some(0));
             SessionAction::None
         }
+        Cmd::SyncExecute => {
+            // Approving the modal closes it and hands the plan to the
+            // executor; the preview stays on the session for review.
+            session.ui.mode = SessionMode::Normal;
+            SessionAction::ExecuteSync
+        }
         Cmd::NextDiff => {
             jump_diff(session, 1);
             SessionAction::None
@@ -930,6 +1137,7 @@ fn execute(cmd: Cmd, session: &mut SessionView) -> SessionAction {
         }
         Cmd::CopyDialog => open_dialog(session, TransferOp::Copy),
         Cmd::DeleteDialog => open_dialog(session, TransferOp::Delete),
+        Cmd::MoveDialog => open_dialog(session, TransferOp::Move),
         Cmd::DialogPick(choice) => dialog_choice(session, choice),
         Cmd::DialogAbort => {
             session.ui.mode = SessionMode::Normal;
@@ -969,11 +1177,17 @@ fn execute(cmd: Cmd, session: &mut SessionView) -> SessionAction {
         Cmd::PanelFocusNext | Cmd::PanelApply | Cmd::PanelToggle => {
             SessionAction::None
         }
-        // Global commands are dispatched by the App shell, never here.
+        // Global and menu commands are dispatched by the App shell, never
+        // here.
         Cmd::CloseTab
         | Cmd::SwitchTab
+        | Cmd::MenuOpen(_)
         | Cmd::MenuPrev
         | Cmd::MenuNext
+        | Cmd::MenuUp
+        | Cmd::MenuDown
+        | Cmd::MenuConfirm
+        | Cmd::MenuClose
         | Cmd::Quit
         | Cmd::ToggleHelp => SessionAction::None,
     }
@@ -1123,7 +1337,7 @@ pub(crate) fn cycle_sync_op(
 /// Open the transfer dialog for the current selection.
 ///
 /// A no-op when nothing is selected (or no selected entry exists on
-/// either side), so `c`/`d` on an empty table simply do nothing.
+/// either side), so `c`/`d`/`v` on an empty table simply do nothing.
 fn open_dialog(session: &mut SessionView, op: TransferOp) -> SessionAction {
     if !session.transfer_targets().is_empty() {
         session.ui.mode = SessionMode::Transfer { op };
@@ -1160,10 +1374,7 @@ pub fn dialog_choice(
         return SessionAction::None;
     }
     session.ui.mode = SessionMode::Normal;
-    let items: Vec<TransferItem> = targets
-        .iter()
-        .flat_map(|target| target.items(op, choice))
-        .collect();
+    let items = choice.preview(op, &targets);
     if items.is_empty() {
         SessionAction::None
     } else {
@@ -1237,7 +1448,7 @@ fn handle_filter_panel_key(
 /// Handle a key for the open session browser modal.
 ///
 /// The browser owns `Esc` (close) and `n` (create new); `j`/`k`/`Enter`
-/// pass through to its `Select` child, which loads the highlighted
+/// pass through to its `OptionList` child, which loads the highlighted
 /// session.
 fn handle_browser_key(
     session: &mut SessionView,
@@ -1253,7 +1464,7 @@ fn handle_browser_key(
 /// Handle a key for the open settings modal.
 ///
 /// The modal owns only `Esc`; `Enter` toggles the highlighted entry
-/// through its `Select` child.
+/// through its `OptionList` child.
 fn handle_settings_key(
     session: &mut SessionView,
     key: KeyEvent,
@@ -1262,6 +1473,22 @@ fn handle_settings_key(
         return None;
     }
     let cmd = lookup(KeyScope::Settings, key)?;
+    Some(execute(cmd, session))
+}
+
+/// Handle a key for the open sync approval modal.
+///
+/// The modal owns `y` (execute) and `n`/`Esc` (reject, i.e. close and keep
+/// the preview); `j`/`k`/`Enter` pass through to its `OptionList` child,
+/// which confirms the highlighted option.
+fn handle_sync_confirm_key(
+    session: &mut SessionView,
+    key: KeyEvent,
+) -> Option<SessionAction> {
+    if !matches!(session.ui.mode, SessionMode::SyncConfirm) {
+        return None;
+    }
+    let cmd = lookup(KeyScope::SyncConfirm, key)?;
     Some(execute(cmd, session))
 }
 
@@ -1751,6 +1978,105 @@ mod tests {
     }
 
     #[test]
+    fn set_sync_op_selects_the_operation() {
+        let mut session = dir_session();
+        let action = run_menu_command(
+            &mut session,
+            Cmd::SetSyncOp(SyncOperation::MirrorRight),
+        );
+        assert!(matches!(action, SessionAction::None));
+        assert_eq!(
+            session.dir().unwrap().sync_operation,
+            SyncOperation::MirrorRight
+        );
+    }
+
+    #[test]
+    fn toggle_status_filter_flips_display_flags() {
+        let mut session = dir_session();
+        session.ui.table_state.select(Some(2));
+        run_menu_command(
+            &mut session,
+            Cmd::ToggleStatusFilter(StatusFilter::Same),
+        );
+        assert!(!session.dir().unwrap().display.show_same);
+        run_menu_command(
+            &mut session,
+            Cmd::ToggleStatusFilter(StatusFilter::Orphans),
+        );
+        assert!(!session.dir().unwrap().display.show_orphans);
+        assert!(session.dir().unwrap().display.show_different);
+        // Like the other filter toggles, the cursor resets.
+        assert_eq!(session.ui.table_state.selected(), Some(0));
+    }
+
+    #[test]
+    fn menu_scope_owns_only_navigation_keys() {
+        assert_eq!(
+            lookup(KeyScope::Menu, key(KeyCode::Char('j'))),
+            Some(Cmd::MenuDown)
+        );
+        assert_eq!(
+            lookup(KeyScope::Menu, key(KeyCode::Down)),
+            Some(Cmd::MenuDown)
+        );
+        assert_eq!(
+            lookup(KeyScope::Menu, key(KeyCode::Char('k'))),
+            Some(Cmd::MenuUp)
+        );
+        assert_eq!(
+            lookup(KeyScope::Menu, key(KeyCode::Up)),
+            Some(Cmd::MenuUp)
+        );
+        assert_eq!(
+            lookup(KeyScope::Menu, key(KeyCode::Enter)),
+            Some(Cmd::MenuConfirm)
+        );
+        assert_eq!(
+            lookup(KeyScope::Menu, key(KeyCode::Esc)),
+            Some(Cmd::MenuClose)
+        );
+        // The `←`/`→` menu switching stays in the Global scope.
+        assert!(lookup(KeyScope::Menu, key(KeyCode::Left)).is_none());
+        // Plain session keys belong to the shell's swallow rule, not to
+        // this scope.
+        assert!(lookup(KeyScope::Menu, key(KeyCode::Char('x'))).is_none());
+    }
+
+    #[test]
+    fn alt_accelerators_open_every_menu() {
+        for (index, menu) in crate::menu::MENUS.iter().enumerate() {
+            let key = KeyEvent::new(KeyCode::Char(menu.accel), ALT);
+            assert_eq!(
+                lookup(KeyScope::Global, key),
+                Some(Cmd::MenuOpen(index)),
+                "accel {} of menu {} is not bound",
+                menu.accel,
+                menu.title
+            );
+        }
+    }
+
+    #[test]
+    fn alt_keys_never_fire_plain_bindings() {
+        // Alt+S opens the Sessions menu instead of entering save mode.
+        let alt_s = KeyEvent::new(KeyCode::Char('s'), ALT);
+        assert!(lookup(KeyScope::DirNormal, alt_s).is_none());
+        assert_eq!(lookup(KeyScope::Global, alt_s), Some(Cmd::MenuOpen(0)));
+    }
+
+    #[test]
+    fn key_hint_returns_the_labelled_binding() {
+        assert_eq!(key_hint(Cmd::OpenSessionBrowser), Some("O"));
+        assert_eq!(key_hint(Cmd::ToggleHelp), Some("?"));
+        // Dialog accelerators carry no help label, so no hint either.
+        assert_eq!(key_hint(Cmd::DialogPick(TransferChoice::Left)), None);
+        assert_eq!(key_hint(Cmd::MenuUp), None);
+        // Labelled shell keys do report their hint.
+        assert_eq!(key_hint(Cmd::MenuPrev), Some("←/→"));
+    }
+
+    #[test]
     fn shift_n_jumps_to_prev_diff_and_wraps() {
         // Regression: N used to search for groups *after* the cursor, so it
         // jumped forward instead of backward.
@@ -1996,8 +2322,12 @@ mod tests {
     }
 
     #[test]
-    fn c_and_d_open_the_transfer_dialog() {
-        for (key, op) in [('c', TransferOp::Copy), ('d', TransferOp::Delete)] {
+    fn c_d_and_v_open_the_transfer_dialog() {
+        for (key, op) in [
+            ('c', TransferOp::Copy),
+            ('d', TransferOp::Delete),
+            ('v', TransferOp::Move),
+        ] {
             let mut session = dir_session_with_sides();
             session.ui.table_state.select(Some(0));
             assert_eq!(
@@ -2182,16 +2512,26 @@ mod tests {
     }
 
     #[test]
-    fn sync_confirm_mode_claims_no_session_keys() {
-        // While the confirmation modal is open its exclusive input layer
-        // owns every key, so the session handler must claim nothing: even
-        // bound keys like `j` and `Esc` report as unbound (the layer
-        // swallows them) and the selection cannot move behind the modal.
+    fn sync_confirm_scope_owns_only_its_keys() {
+        // While the approval modal is open it claims `y`/`Y` (execute) and
+        // `n`/`N`/`Esc` (reject); `j` stays unbound so the `OptionList`
+        // child in the same input layer navigates, and the table behind the
+        // modal cannot move.
         let mut session = dir_session();
+        for (code, action) in [
+            (KeyCode::Char('y'), SessionAction::ExecuteSync),
+            (KeyCode::Char('Y'), SessionAction::ExecuteSync),
+            (KeyCode::Char('n'), SessionAction::None),
+            (KeyCode::Char('N'), SessionAction::None),
+            (KeyCode::Esc, SessionAction::None),
+        ] {
+            session.ui.mode = SessionMode::SyncConfirm;
+            assert_eq!(press(&mut session, code), Some(action), "{:?}", code);
+            assert_eq!(session.ui.mode, SessionMode::Normal, "{:?}", code);
+        }
         session.ui.mode = SessionMode::SyncConfirm;
         assert_eq!(press(&mut session, KeyCode::Char('j')), None);
         assert_eq!(session.ui.table_state.selected(), Some(0));
-        assert_eq!(press(&mut session, KeyCode::Esc), None);
     }
 
     #[test]

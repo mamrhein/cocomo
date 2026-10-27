@@ -20,7 +20,9 @@ use ratatui_kit::{
 };
 
 use super::{
-    frame::{COMMAND_PLACEHOLDER, HelpBar, StatusBar},
+    frame::{
+        COMMAND_PLACEHOLDER, HelpBar, StatusBar, busy_indicator, use_busy_tick,
+    },
     rows::{CellRow, cell_row_renderer, dir_rows, sync_rows},
     session_table::SessionTable,
     theme::CocomoTheme,
@@ -58,6 +60,9 @@ pub(super) fn DirCompareView(
     // Terminal width drives the help bar wrapping; the hook re-renders on
     // resize. Must stay above the early returns below (stable hook order).
     let (term_width, _) = hooks.use_terminal_size();
+    // Spinner frame for the status bar's busy indicator. Like the hooks
+    // above it, it must stay above the early returns (stable hook order).
+    let busy_tick = use_busy_tick(&mut hooks);
 
     // Event handler for session-level keys (j/k, g/G, Enter, f, F, etc.).
     // The App component's global handler runs first and consumes global keys
@@ -175,6 +180,7 @@ pub(super) fn DirCompareView(
         )
     });
     let comparison_is_none = dir.comparison.is_none();
+    let busy_label = app.busy_label();
 
     drop(app);
 
@@ -208,6 +214,15 @@ pub(super) fn DirCompareView(
                 Span::raw(display),
             ])
         };
+
+    // A running background task takes the front of the status bar, so the
+    // spinner is visible whichever line (sync status or stats) is shown
+    // behind it.
+    if let Some(label) = busy_label {
+        let mut spans = busy_indicator(busy_tick, label, theme.sync_status);
+        spans.append(&mut status_bar_line.spans);
+        status_bar_line = Line::from(spans);
+    }
 
     // When the help bar is hidden, hint at the toggle key in the status bar
     // so the binding stays discoverable without spending a row on it.

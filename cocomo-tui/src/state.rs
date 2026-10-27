@@ -57,9 +57,10 @@ pub enum SessionMode {
     Search { query: String },
     /// The user is typing a command-line command (`:`).
     Command { input: String },
-    /// The transfer dialog (`c` copy, `d` delete) is open for the selected
-    /// entry. Not a text-entry mode: the dialog's own input layer keeps the
-    /// shell and the table from seeing keys, so `is_editing` stays `false`.
+    /// The transfer dialog (`c` copy, `d` delete, `v` move) is open for the
+    /// selected entry. Not a text-entry mode: the dialog's own input layer
+    /// keeps the shell and the table from seeing keys, so `is_editing` stays
+    /// `false`.
     Transfer { op: TransferOp },
     /// The sync confirmation modal is open for the planned sync (`S`). Like
     /// [`SessionMode::Transfer`], the modal's exclusive input layer owns
@@ -74,6 +75,9 @@ pub enum TransferOp {
     Copy,
     /// Delete the entry from one or both sides.
     Delete,
+    /// Move the entry to the other side (the lib executes it as a copy
+    /// plus a delete of the source).
+    Move,
 }
 
 impl TransferOp {
@@ -82,6 +86,7 @@ impl TransferOp {
         match self {
             Self::Copy => "Copy",
             Self::Delete => "Delete",
+            Self::Move => "Move",
         }
     }
 
@@ -118,8 +123,12 @@ impl TransferChoice {
     /// Return the dialog label of this option under `op`.
     pub fn label(self, op: TransferOp) -> &'static str {
         match (self, op) {
-            (Self::Left, TransferOp::Copy) => "left \u{2192} right",
-            (Self::Right, TransferOp::Copy) => "right \u{2192} left",
+            (Self::Left, TransferOp::Copy | TransferOp::Move) => {
+                "left \u{2192} right"
+            }
+            (Self::Right, TransferOp::Copy | TransferOp::Move) => {
+                "right \u{2192} left"
+            }
             (Self::Left, TransferOp::Delete) => "left",
             (Self::Right, TransferOp::Delete) => "right",
             (Self::Both, _) => "both",
@@ -141,8 +150,8 @@ impl TransferChoice {
     /// option under `op`.
     ///
     /// `l` needs a left side, `r` a right side, and `b` both sides; `abort`
-    /// is always active. `both` stays a delete-only option: copying in both
-    /// directions is order-dependent and nets out to a no-op in a 2-way
+    /// is always active. `both` stays a delete-only option: transferring in
+    /// both directions is order-dependent and nets out to a no-op in a 2-way
     /// compare.
     pub fn is_enabled(
         self,
@@ -156,6 +165,22 @@ impl TransferChoice {
             Self::Both => op == TransferOp::Delete && has_left && has_right,
             Self::Abort => true,
         }
+    }
+
+    /// The items this choice would transfer across `targets` under `op`.
+    ///
+    /// The dialog shows this preview as the option's approval summary, so
+    /// the user sees what will change before confirming; it is built from
+    /// the same [`TransferTarget::items`] the executor runs with.
+    pub fn preview(
+        self,
+        op: TransferOp,
+        targets: &[TransferTarget],
+    ) -> Vec<TransferItem> {
+        targets
+            .iter()
+            .flat_map(|target| target.items(op, self))
+            .collect()
     }
 }
 
@@ -200,6 +225,12 @@ impl TransferTarget {
             }
             (TransferOp::Copy, TransferChoice::Right) if self.has_right => {
                 vec![TransferAction::CopyLeft]
+            }
+            (TransferOp::Move, TransferChoice::Left) if self.has_left => {
+                vec![TransferAction::MoveRight]
+            }
+            (TransferOp::Move, TransferChoice::Right) if self.has_right => {
+                vec![TransferAction::MoveLeft]
             }
             (TransferOp::Delete, TransferChoice::Left) if self.has_left => {
                 vec![TransferAction::DeleteLeft]
@@ -410,6 +441,20 @@ impl ReportDraft {
             include_file_details: self.include_file_details,
         }
     }
+}
+
+/// The entry-status class a visibility toggle affects.
+///
+/// Used by [`crate::keys::Cmd::ToggleStatusFilter`] so a single command can
+/// target any of the three display-filter groups.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StatusFilter {
+    /// Entries that compare equal.
+    Same,
+    /// Entries that differ between the sides.
+    Different,
+    /// Entries that only exist on one side.
+    Orphans,
 }
 
 /// A toggleable entry of the settings modal (`,`).
@@ -1074,8 +1119,13 @@ pub struct AppState {
     pub sessions: Vec<SessionView>,
     /// Index of the currently active tab.
     pub active_tab: usize,
-    /// Index of the currently selected menu item.
-    pub menu_selection: usize,
+    /// The open dropdown of the menu bar.
+    ///
+    /// `None` means no menu is open; `Some` selects the menu at
+    /// `bar_index` and the highlighted dropdown item. While a menu is open,
+    /// the App shell routes navigation keys to
+    /// [`crate::keys::KeyScope::Menu`] instead of the session scopes.
+    pub menu: Option<crate::menu::MenuState>,
     /// Whether the bottom help bar is shown.
     ///
     /// Hidden by default so the main view area gets the row; toggled with
@@ -1086,6 +1136,14 @@ pub struct AppState {
     /// Set when an operation that cannot be attributed to a specific session
     /// fails (e.g. the initial comparison launched at startup).
     pub error_message: Option<String>,
+    /// Labels of the background tasks currently in flight.
+    ///
+    /// `crate::controller::spawn_task` registers the label when it spawns a
+    /// task and removes it again when the task finishes (success, failure,
+    /// or aborted extraction), so a non-empty list means the UI is waiting
+    /// on work it cannot cancel. The comparison views render
+    /// [`AppState::busy_label`] as a spinner in their status bar.
+    pub pending_tasks: Vec<&'static str>,
 }
 
 /// Global reactive application state, subscribed to via
@@ -1105,10 +1163,24 @@ impl AppState {
         Self {
             sessions: Vec::new(),
             active_tab: 0,
-            menu_selection: 0,
+            menu: None,
             show_help: false,
             error_message: None,
+            pending_tasks: Vec::new(),
         }
+    }
+
+    /// Whether any controller-spawned background task is still running.
+    pub fn is_busy(&self) -> bool {
+        !self.pending_tasks.is_empty()
+    }
+
+    /// Label of the most recently started pending task.
+    ///
+    /// This is what the status bars' busy indicator shows; when several
+    /// tasks run concurrently the newest one owns the indicator.
+    pub fn busy_label(&self) -> Option<&'static str> {
+        self.pending_tasks.last().copied()
     }
 
     /// Add a session and switch to it.
@@ -1609,12 +1681,13 @@ mod tests {
         ];
         assert_eq!(TransferOp::Copy.choices(), expected);
         assert_eq!(TransferOp::Delete.choices(), expected);
+        assert_eq!(TransferOp::Move.choices(), expected);
     }
 
     #[test]
     fn is_enabled_follows_the_sides_holding_the_entry() {
         use TransferChoice as C;
-        use TransferOp::{Copy, Delete};
+        use TransferOp::{Copy, Delete, Move};
 
         // `l` activates with a left side, `r` with a right side, `b` with
         // both, and `abort` always.
@@ -1627,9 +1700,10 @@ mod tests {
         assert!(!C::Both.is_enabled(Delete, false, true));
         assert!(C::Abort.is_enabled(Copy, false, false));
 
-        // Copying in both directions is a no-op, so `b` never activates
-        // for copy, even with both sides present.
+        // Copying or moving in both directions is a no-op, so `b` never
+        // activates for them, even with both sides present.
         assert!(!C::Both.is_enabled(Copy, true, true));
+        assert!(!C::Both.is_enabled(Move, true, true));
     }
 
     #[test]
@@ -1650,6 +1724,14 @@ mod tests {
         assert_eq!(
             actions(TransferOp::Copy, TransferChoice::Right),
             vec![TransferAction::CopyLeft]
+        );
+        assert_eq!(
+            actions(TransferOp::Move, TransferChoice::Left),
+            vec![TransferAction::MoveRight]
+        );
+        assert_eq!(
+            actions(TransferOp::Move, TransferChoice::Right),
+            vec![TransferAction::MoveLeft]
         );
         assert_eq!(
             actions(TransferOp::Delete, TransferChoice::Left),
@@ -1700,6 +1782,16 @@ mod tests {
         );
         assert!(
             left_only
+                .items(TransferOp::Move, TransferChoice::Right)
+                .is_empty()
+        );
+        assert!(
+            left_only
+                .items(TransferOp::Move, TransferChoice::Both)
+                .is_empty()
+        );
+        assert!(
+            left_only
                 .items(TransferOp::Delete, TransferChoice::Both)
                 .is_empty()
         );
@@ -1708,6 +1800,11 @@ mod tests {
         assert!(
             right_only
                 .items(TransferOp::Copy, TransferChoice::Left)
+                .is_empty()
+        );
+        assert!(
+            right_only
+                .items(TransferOp::Move, TransferChoice::Left)
                 .is_empty()
         );
         assert!(
@@ -1725,6 +1822,30 @@ mod tests {
         assert!(
             neither
                 .items(TransferOp::Delete, TransferChoice::Right)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn preview_aggregates_items_over_all_targets() {
+        let targets =
+            vec![target(true, true, false), target(true, false, false)];
+        let items = TransferChoice::Left.preview(TransferOp::Copy, &targets);
+        assert_eq!(items.len(), 2);
+        assert!(
+            items
+                .iter()
+                .all(|item| item.action == TransferAction::CopyRight)
+        );
+        // A choice no target supports, and `abort`, preview to nothing.
+        assert!(
+            TransferChoice::Right
+                .preview(TransferOp::Move, &[target(true, false, false)])
+                .is_empty()
+        );
+        assert!(
+            TransferChoice::Abort
+                .preview(TransferOp::Copy, &targets)
                 .is_empty()
         );
     }
@@ -1958,5 +2079,24 @@ mod tests {
         let target = mismatched.transfer_target().unwrap();
         assert!(!target.has_left && !target.has_right);
         assert!(target.note.is_some());
+    }
+
+    #[test]
+    fn pending_tasks_drive_the_busy_accessors() {
+        let mut app = AppState::new();
+        assert!(!app.is_busy());
+        assert_eq!(app.busy_label(), None);
+
+        app.pending_tasks.push("Comparing");
+        app.pending_tasks.push("Syncing");
+        assert!(app.is_busy());
+        // The most recently started task owns the indicator.
+        assert_eq!(app.busy_label(), Some("Syncing"));
+
+        app.pending_tasks.remove(1);
+        assert_eq!(app.busy_label(), Some("Comparing"));
+        app.pending_tasks.clear();
+        assert!(!app.is_busy());
+        assert_eq!(app.busy_label(), None);
     }
 }

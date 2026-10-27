@@ -22,7 +22,9 @@ use ratatui_kit::{
 
 use super::{
     diff_list::SessionDiffList,
-    frame::{COMMAND_PLACEHOLDER, HelpBar, StatusBar},
+    frame::{
+        COMMAND_PLACEHOLDER, HelpBar, StatusBar, busy_indicator, use_busy_tick,
+    },
     rows::{TextDiffRow, text_diff_rows},
     theme::CocomoTheme,
 };
@@ -55,6 +57,9 @@ pub(super) fn TextCompareView(
     // Terminal width drives the help bar wrapping; the hook re-renders on
     // resize. Must stay above the early returns below (stable hook order).
     let (term_width, _) = hooks.use_terminal_size();
+    // Spinner frame for the status bar's busy indicator. Like the hooks
+    // above it, it must stay above the early returns (stable hook order).
+    let busy_tick = use_busy_tick(&mut hooks);
 
     // Event handler for session-level keys (j/k, g/G, n/N, l/Tab).
     // The App component's global handler runs first and consumes global keys
@@ -135,6 +140,7 @@ pub(super) fn TextCompareView(
     let right_line_count = text.right_lines.len();
     let show_help = app.show_help;
     let mode = session.ui.mode.clone();
+    let busy_label = app.busy_label();
 
     // Compute the current diff-group position for the status bar. The row
     // styles already carry the per-line diff highlighting from the memo.
@@ -161,6 +167,15 @@ pub(super) fn TextCompareView(
         "{position_str}  |  Left: {left_line_count} lines  |  Right: \
          {right_line_count} lines"
     ));
+
+    // A running background task takes the front of the status bar (e.g. a
+    // transfer re-comparing this file), so the spinner is visible above the
+    // diff statistics.
+    if let Some(label) = busy_label {
+        let mut spans = busy_indicator(busy_tick, label, theme.sync_status);
+        spans.append(&mut status_bar_line.spans);
+        status_bar_line = Line::from(spans);
+    }
 
     // When the help bar is hidden, hint at the toggle key so the binding
     // stays discoverable without spending a row on it.

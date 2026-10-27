@@ -18,7 +18,7 @@
 //! inherits the whole scheme by reading the theme instead of hardcoding
 //! styles.
 
-use cocomo_lib::{DirEntryStatus, Importance};
+use cocomo_lib::{DirEntryStatus, Importance, TransferAction};
 use ratatui_kit::{
     prelude::*,
     ratatui::style::{Color, Modifier, Style},
@@ -194,6 +194,26 @@ impl CocomoTheme {
             DirEntryStatus::Conflict => self.status.conflict,
             DirEntryStatus::IdenticalNameDifferentType => {
                 self.status.type_conflict
+            }
+        };
+        Style::new().fg(color).add_modifier(Modifier::BOLD)
+    }
+
+    /// Return the bold style for a transfer action label.
+    ///
+    /// Shared by the sync-preview table and the approval-dialog change
+    /// summaries, so an action reads in the same color everywhere.
+    pub fn transfer_action_style(&self, action: TransferAction) -> Style {
+        let color = match action {
+            TransferAction::CopyLeft | TransferAction::CopyRight => {
+                self.transfer_copy
+            }
+            TransferAction::CopyCenter => self.transfer_copy_center,
+            TransferAction::DeleteLeft | TransferAction::DeleteRight => {
+                self.transfer_delete
+            }
+            TransferAction::MoveLeft | TransferAction::MoveRight => {
+                self.transfer_move
             }
         };
         Style::new().fg(color).add_modifier(Modifier::BOLD)

@@ -10,16 +10,17 @@
 //! Settings modal: the `,` entry point for the per-session toggles.
 //!
 //! The modal lists the three session settings (content comparison, hiding
-//! identical entries, sync operation) with their current values; `Enter`
-//! toggles or cycles the highlighted entry and keeps the modal open, so
-//! several settings can be changed in a row, and `Esc` closes it. The
-//! entries mirror the `C`, `F`, and `m` bindings — the modal is a
-//! discoverable front for the same state, not a second source of truth.
+//! identical entries, sync operation) with their current values in the
+//! hint column of an [`OptionList`]; `Enter` toggles or cycles the
+//! highlighted entry and keeps the modal open, so several settings can be
+//! changed in a row, and `Esc` closes it. The entries mirror the `C`, `F`,
+//! and `m` bindings — the modal is a discoverable front for the same
+//! state, not a second source of truth.
 //!
 //! Like `TransferDialog` the component lives in the App shell and reads
 //! the active session. Its handler owns only `Esc`; `j`/`k`/`Enter` are
-//! reported as unbound so the `Select` child in the same layer navigates
-//! and toggles.
+//! reported as unbound so the `OptionList` child in the same layer
+//! navigates and toggles.
 
 use ratatui_kit::{
     crossterm::event::{Event, KeyEventKind},
@@ -27,28 +28,19 @@ use ratatui_kit::{
     ratatui::{
         layout::{Constraint, Direction},
         text::Line,
-        widgets::{ListItem, Padding},
+        widgets::Padding,
     },
 };
 
-use super::theme::CocomoTheme;
+use super::{
+    frame::hint_line,
+    option_list::{OptionItem, OptionList},
+    theme::CocomoTheme,
+};
 use crate::{
     controller::{dispatch_settings_key, toggle_setting},
     state::{APP_STATE, SessionMode, SettingItem},
 };
-
-/// One rendered settings entry: the item to toggle and its current label.
-#[derive(Clone, Debug)]
-struct SettingRow {
-    item: SettingItem,
-    label: String,
-}
-
-impl From<SettingRow> for ListItem<'static> {
-    fn from(row: SettingRow) -> Self {
-        ListItem::from(row.label)
-    }
-}
 
 /// Settings modal rendered above the active session.
 #[component]
@@ -59,39 +51,31 @@ pub(super) fn SettingsModal(
     let theme = hooks.use_component_theme::<CocomoTheme>();
 
     // Build the rows from the active session's current settings, so the
-    // labels always reflect the effective state.
-    let rows: Vec<SettingRow> = app_handle
+    // hints always reflect the effective state. The row count is fixed, so
+    // rebuilding them per frame leaves the list's cursor where it is.
+    let rows: Option<Vec<OptionItem<SettingItem>>> = app_handle
         .read()
         .active()
         .filter(|s| matches!(s.ui.mode, SessionMode::Settings))
         .map(|s| {
             let dir = s.dir();
             vec![
-                SettingRow {
-                    item: SettingItem::CompareContent,
-                    label: format!(
-                        "Compare content: {}",
-                        on_off(dir.is_some_and(|d| d.compare_content))
+                OptionItem::new(
+                    SettingItem::CompareContent,
+                    "Compare content",
+                )
+                .hint(on_off(dir.is_some_and(|d| d.compare_content))),
+                OptionItem::new(SettingItem::HideSame, "Hide identical")
+                    .hint(on_off(dir.is_some_and(|d| !d.display.show_same))),
+                OptionItem::new(SettingItem::SyncOperation, "Sync operation")
+                    .hint(
+                        dir.map(|d| d.sync_operation.label())
+                            .unwrap_or("-")
+                            .to_string(),
                     ),
-                },
-                SettingRow {
-                    item: SettingItem::HideSame,
-                    label: format!(
-                        "Hide identical: {}",
-                        on_off(dir.is_some_and(|d| !d.display.show_same))
-                    ),
-                },
-                SettingRow {
-                    item: SettingItem::SyncOperation,
-                    label: format!(
-                        "Sync operation: {}",
-                        dir.map(|d| d.sync_operation.label()).unwrap_or("-")
-                    ),
-                },
             ]
-        })
-        .unwrap_or_default();
-    let open = !rows.is_empty();
+        });
+    let open = rows.is_some();
 
     let layer = hooks.use_input_layer(open, true);
     hooks.use_event_handler(
@@ -105,6 +89,9 @@ pub(super) fn SettingsModal(
                 return EventResult::Ignored;
             }
 
+            // The modal owns `Esc` (via the keymap); an unowned key stays
+            // unclaimed here, so the `OptionList` child in the same layer
+            // gets `j`/`k`/`Enter`.
             if dispatch_settings_key(key) {
                 EventResult::Consumed
             } else {
@@ -113,9 +100,15 @@ pub(super) fn SettingsModal(
         },
     );
 
+    let Some(items) = rows else {
+        // Closed: a zero-sized `Modal` instead of a `Fragment` whose default
+        // `Fill(1)` height would steal the main view's rows.
+        return element!(Modal(open: false)).into_any();
+    };
+
     element!(
         Modal(
-            open: open,
+            open: true,
             // Reuse this component's layer; see `FilterPanel`.
             layer: Some(layer),
             width: Constraint::Length(48),
@@ -127,25 +120,26 @@ pub(super) fn SettingsModal(
                 top_title: Line::from(" Settings ")
                     .style(theme.title)
                     .centered(),
-                bottom_title: Line::from(
-                    " j/k select · Enter toggle · Esc close ",
-                )
+                bottom_title: hint_line(&[
+                    ("j/k", "select"),
+                    ("Enter", "toggle"),
+                    ("Esc", "cancel"),
+                ])
                 .style(theme.dim)
                 .centered(),
                 padding: Padding::uniform(1),
             ) {
-                Select<SettingRow>(
-                    items: rows,
-                    on_select: Handler::from(move |row: SettingRow| {
-                        toggle_setting(row.item);
+                OptionList<SettingItem>(
+                    items: items,
+                    on_select: Handler::from(move |item: SettingItem| {
+                        toggle_setting(item);
                     }),
-                    active: true,
                     default_index: Some(0),
-                    height: Constraint::Fill(1),
                 )
             }
         }
     )
+    .into_any()
 }
 
 /// Render a boolean setting as `on`/`off`.

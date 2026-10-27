@@ -18,13 +18,12 @@
 use std::{collections::HashSet, sync::Arc};
 
 use cocomo_lib::{
-    Importance, LineInfo, TransferAction, TransferItem, format_date,
-    format_size,
+    Importance, LineInfo, TransferItem, format_date, format_size,
 };
 use ratatui_kit::{
     prelude::*,
     ratatui::{
-        style::{Modifier, Style},
+        style::Style,
         text::{Line, Span},
     },
 };
@@ -124,27 +123,12 @@ pub(super) fn sync_rows(
         .iter()
         .enumerate()
         .map(|(index, item)| {
-            let action_color = match item.action {
-                TransferAction::CopyLeft | TransferAction::CopyRight => {
-                    theme.transfer_copy
-                }
-                TransferAction::CopyCenter => theme.transfer_copy_center,
-                TransferAction::DeleteLeft | TransferAction::DeleteRight => {
-                    theme.transfer_delete
-                }
-                TransferAction::MoveLeft | TransferAction::MoveRight => {
-                    theme.transfer_move
-                }
-            };
             let dir_indicator = if item.is_dir { "\u{1F4C4} " } else { "  " };
             CellRow {
                 index,
                 cells: Arc::from(vec![
-                    TableCell::new(item.action.label().to_string()).style(
-                        Style::new()
-                            .fg(action_color)
-                            .add_modifier(Modifier::BOLD),
-                    ),
+                    TableCell::new(item.action.label().to_string())
+                        .style(theme.transfer_action_style(item.action)),
                     TableCell::new(format!(
                         "{}{}",
                         dir_indicator, item.rel_path
