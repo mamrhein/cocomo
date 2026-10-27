@@ -19,17 +19,11 @@ use ratatui_kit::{
 };
 
 use super::{
-    dir_compare::DirCompareView,
-    filter_panel::FilterPanel,
-    menu_bar::{MENU_TITLES, MenuBar},
-    report_modal::ReportModal,
-    session_browser::SessionBrowser,
-    settings_modal::SettingsModal,
-    sync_confirm::SyncConfirmModal,
-    tab_bar::TabBar,
-    text_diff::TextCompareView,
-    transfer_dialog::TransferDialog,
-    welcome::WelcomeScreen,
+    dir_compare::DirCompareView, filter_panel::FilterPanel, menu_bar::MenuBar,
+    report_modal::ReportModal, session_browser::SessionBrowser,
+    settings_modal::SettingsModal, sync_confirm::SyncConfirmModal,
+    tab_bar::TabBar, text_diff::TextCompareView,
+    transfer_dialog::TransferDialog, welcome::WelcomeScreen,
 };
 use crate::{
     controller,
@@ -69,8 +63,25 @@ pub(crate) fn App(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 return EventResult::Ignored;
             }
 
-            let Some(cmd) = keys::lookup(KeyScope::Global, key) else {
-                return EventResult::Ignored;
+            // While a menu dropdown is open, the Menu scope claims its
+            // navigation keys first; the Global scope still applies to the
+            // shell keys it owns. Any key neither scope claims is swallowed
+            // while a menu is open, so table and shell commands cannot fire
+            // behind the dropdown (phase 2 moves the dropdown into its own
+            // blocking input layer).
+            let menu_open = app_state.read().menu.is_some();
+            let cmd = if menu_open {
+                keys::lookup(KeyScope::Menu, key)
+                    .or_else(|| keys::lookup(KeyScope::Global, key))
+            } else {
+                keys::lookup(KeyScope::Global, key)
+            };
+            let Some(cmd) = cmd else {
+                return if menu_open {
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
+                };
             };
 
             match cmd {
@@ -85,20 +96,21 @@ pub(crate) fn App(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     let is_shift = key.modifiers.contains(KeyModifiers::SHIFT);
                     controller::switch_tab(if is_shift { -1 } else { 1 });
                 }
-                Cmd::MenuPrev => {
-                    let current = app_state.read().menu_selection;
-                    controller::set_menu_selection(if current > 0 {
-                        current - 1
-                    } else {
-                        MENU_TITLES.len() - 1
-                    });
-                }
-                Cmd::MenuNext => {
-                    let current = app_state.read().menu_selection;
-                    controller::set_menu_selection(
-                        (current + 1) % MENU_TITLES.len(),
-                    );
-                }
+                Cmd::MenuPrev => controller::switch_menu(-1),
+                Cmd::MenuNext => controller::switch_menu(1),
+                Cmd::MenuOpen(index) => controller::open_menu(index),
+                Cmd::MenuUp => controller::move_menu_item(-1),
+                Cmd::MenuDown => controller::move_menu_item(1),
+                Cmd::MenuConfirm => match controller::confirm_menu_item() {
+                    controller::MenuOutcome::Quit => exit(),
+                    controller::MenuOutcome::CloseTab => {
+                        if controller::close_active_tab() {
+                            exit();
+                        }
+                    }
+                    controller::MenuOutcome::Handled => {}
+                },
+                Cmd::MenuClose => controller::close_menu(),
                 Cmd::Quit => {
                     // Text-entry modes own `q` for their input fields;
                     // their input layers normally block this handler
@@ -146,7 +158,7 @@ pub(crate) fn App(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     // Read current state for rendering the menu and tab bars.
     let app = app_state.read();
-    let menu_selection = app.menu_selection;
+    let menu_selected = app.menu.map_or(0, |m| m.bar_index);
     let active_index = app.active_index();
     let active_view = match app.active().map(|s| &s.content) {
         Some(SessionContent::Dir(_)) => ActiveView::Dir,
@@ -158,9 +170,12 @@ pub(crate) fn App(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // read guard across element! rendering).
     let error_message = app.error_message.clone();
 
-    // Build menu bar tab titles.
-    let menu_titles: Vec<Line<'static>> =
-        MENU_TITLES.iter().map(|s| Line::from(*s)).collect();
+    // Build menu bar tab titles from the menu table, so bar and dropdowns
+    // cannot drift apart.
+    let menu_titles: Vec<Line<'static>> = crate::menu::MENUS
+        .iter()
+        .map(|m| Line::from(m.title))
+        .collect();
 
     // Build session tab titles.
     let tab_titles: Vec<Line<'static>> = app
@@ -175,9 +190,9 @@ pub(crate) fn App(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         View(flex_direction: Direction::Vertical) {
             MenuBar(
                 menu_titles: menu_titles,
-                selected: menu_selection,
+                selected: menu_selected,
                 on_select: Handler::from(move |index| {
-                    controller::activate_menu(index);
+                    controller::toggle_menu(index);
                 }),
             )
             TabBar(

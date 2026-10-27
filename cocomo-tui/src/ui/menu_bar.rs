@@ -8,6 +8,9 @@
 // $Revision$
 
 //! Top menu bar with tab-like navigation items.
+//!
+//! The titles come from [`crate::menu::MENUS`]; the dropdown rendering is
+//! added in a later phase.
 
 use ratatui_kit::{
     crossterm::event::MouseButton,
@@ -20,11 +23,6 @@ use ratatui_kit::{
 };
 
 use super::{frame::tabs_hit_item, mouse_enabled, theme::CocomoTheme};
-
-/// Menu bar item labels, in order: Sessions, Compare, Sync, View, Filter,
-/// Help.
-pub(super) const MENU_TITLES: [&str; 6] =
-    ["Sessions", "Compare", "Sync", "View", "Filter", "Help"];
 
 /// Width of the `" | "` divider between menu items.
 const DIVIDER_WIDTH: u16 = 3;
@@ -45,8 +43,8 @@ pub(super) struct MenuBarProps {
 ///
 /// Rendered borderless on a single row to keep the chrome compact; the
 /// selected item is highlighted with the theme's title style. Clicking an
-/// item activates its command (the keyboard counterparts are the existing
-/// keybindings, so no focus model is needed here).
+/// item toggles its dropdown (the keyboard counterparts are the Alt
+/// accelerators and the menu scope, so no focus model is needed here).
 #[component]
 pub(super) fn MenuBar(
     props: &mut MenuBarProps,

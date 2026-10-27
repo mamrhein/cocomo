@@ -412,6 +412,20 @@ impl ReportDraft {
     }
 }
 
+/// The entry-status class a visibility toggle affects.
+///
+/// Used by [`crate::keys::Cmd::ToggleStatusFilter`] so a single command can
+/// target any of the three display-filter groups.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StatusFilter {
+    /// Entries that compare equal.
+    Same,
+    /// Entries that differ between the sides.
+    Different,
+    /// Entries that only exist on one side.
+    Orphans,
+}
+
 /// A toggleable entry of the settings modal (`,`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SettingItem {
@@ -1074,8 +1088,13 @@ pub struct AppState {
     pub sessions: Vec<SessionView>,
     /// Index of the currently active tab.
     pub active_tab: usize,
-    /// Index of the currently selected menu item.
-    pub menu_selection: usize,
+    /// The open dropdown of the menu bar.
+    ///
+    /// `None` means no menu is open; `Some` selects the menu at
+    /// `bar_index` and the highlighted dropdown item. While a menu is open,
+    /// the App shell routes navigation keys to
+    /// [`crate::keys::KeyScope::Menu`] instead of the session scopes.
+    pub menu: Option<crate::menu::MenuState>,
     /// Whether the bottom help bar is shown.
     ///
     /// Hidden by default so the main view area gets the row; toggled with
@@ -1105,7 +1124,7 @@ impl AppState {
         Self {
             sessions: Vec::new(),
             active_tab: 0,
-            menu_selection: 0,
+            menu: None,
             show_help: false,
             error_message: None,
         }

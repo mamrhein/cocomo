@@ -40,6 +40,7 @@ use ratatui_kit::crossterm::event::KeyEvent;
 use crate::{
     error::{Result, TuiError},
     keys::{self, Cmd, cycle_sync_op, handle_session_key},
+    menu::{self, MenuState},
     session_store::session_to_config,
     state::{
         APP_STATE, AppState, NamePattern, SessionAction, SessionContent,
@@ -1197,41 +1198,105 @@ pub(crate) fn set_active_tab(index: usize) {
     APP_STATE.state().write().set_active_tab(index);
 }
 
-/// Select the menu item at `index`.
-pub(crate) fn set_menu_selection(index: usize) {
-    APP_STATE.state().write().menu_selection = index;
+/// What the caller must do after a menu item was confirmed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MenuOutcome {
+    /// The item ran (or was skipped); nothing further to do.
+    Handled,
+    /// The item requested closing the active tab.
+    CloseTab,
+    /// The item requested quitting the app.
+    Quit,
 }
 
-/// Activate the menu bar item at `index` (menu bar click).
+/// Open the menu dropdown at `bar_index`.
+pub(crate) fn open_menu(bar_index: usize) {
+    APP_STATE.state().write().menu = MenuState::open(bar_index);
+}
+
+/// Toggle the menu dropdown at `bar_index` (menu bar click).
 ///
-/// Each item maps onto the command of its keyboard counterpart (see
-/// [`crate::keys`]); the ones without a text-session equivalent are
-/// ignored when no directory session is active. `Help` toggles the global
-/// help bar and needs no session.
-pub(crate) fn activate_menu(index: usize) {
-    let cmd = match index {
-        0 => Cmd::OpenSessionBrowser,
-        1 => Cmd::Reload,
-        2 => Cmd::Sync,
-        3 => Cmd::ToggleHideSame,
-        4 => Cmd::OpenFilterPanel,
-        5 => {
-            toggle_help();
-            return;
+/// Clicking the open title closes the dropdown; clicking another title
+/// switches to its dropdown.
+pub(crate) fn toggle_menu(bar_index: usize) {
+    let state = APP_STATE.state();
+    let mut app = state.write();
+    if app.menu.is_some_and(|m| m.bar_index == bar_index) {
+        app.menu = None;
+    } else {
+        app.menu = MenuState::open(bar_index);
+    }
+}
+
+/// Switch to the next (`delta > 0`) or previous menu (←/→), wrapping
+/// around the bar.
+///
+/// When no menu is open yet, the keys open the first (forward) or last
+/// (backward) menu, so the bar stays reachable before any dropdown is
+/// shown.
+pub(crate) fn switch_menu(delta: isize) {
+    let state = APP_STATE.state();
+    let mut app = state.write();
+    match &mut app.menu {
+        Some(menu) => menu.switch_menu(delta),
+        None => {
+            app.menu =
+                MenuState::open(if delta > 0 { 0 } else { menu::count() - 1 });
         }
-        _ => return,
-    };
+    }
+}
+
+/// Move the highlighted dropdown item by `delta`.
+pub(crate) fn move_menu_item(delta: isize) {
+    let state = APP_STATE.state();
+    let mut app = state.write();
+    if let Some(menu) = &mut app.menu {
+        menu.move_item(delta);
+    }
+}
+
+/// Dismiss the open dropdown without executing an item.
+pub(crate) fn close_menu() {
+    APP_STATE.state().write().menu = None;
+}
+
+/// Execute the highlighted dropdown item and close the dropdown.
+///
+/// Quit and close-tab are reported to the caller as [`MenuOutcome`];
+/// help needs no session, and directory-only items are skipped when a
+/// text session is active. Everything else runs through the shared
+/// [`keys::run_menu_command`] dispatch, so menu and keyboard cannot
+/// drift apart.
+pub(crate) fn confirm_menu_item() -> MenuOutcome {
     let action = {
         let state = APP_STATE.state();
         let mut app = state.write();
-        app.menu_selection = index;
-        let Some(session) = app.active_mut().filter(|s| s.content.is_dir())
-        else {
-            return;
+        let Some(menu) = app.menu.take() else {
+            return MenuOutcome::Handled;
         };
-        keys::run_menu_command(session, cmd)
+        let Some(item) = menu.current() else {
+            return MenuOutcome::Handled;
+        };
+        match item.cmd {
+            Cmd::Quit => return MenuOutcome::Quit,
+            Cmd::CloseTab => return MenuOutcome::CloseTab,
+            Cmd::ToggleHelp => {
+                app.show_help = !app.show_help;
+                return MenuOutcome::Handled;
+            }
+            cmd => {
+                let Some(session) = app.active_mut() else {
+                    return MenuOutcome::Handled;
+                };
+                if item.requires_dir && !session.content.is_dir() {
+                    return MenuOutcome::Handled;
+                }
+                keys::run_menu_command(session, cmd)
+            }
+        }
     };
     process_session_action(action);
+    MenuOutcome::Handled
 }
 
 /// Insert pasted clipboard text into the active session's text-entry mode.
@@ -1451,25 +1516,114 @@ mod tests {
         assert_eq!(sanitize_paste("\u{7}\u{1b}"), None);
     }
 
-    #[test]
-    fn activate_menu_toggles_help_without_a_session() {
-        APP_STATE.set(AppState::new());
-        activate_menu(5);
-        assert!(APP_STATE.state().read().show_help);
+    /// Bar index of the menu with the given title.
+    fn menu_index(title: &str) -> usize {
+        menu::MENUS.iter().position(|m| m.title == title).unwrap()
     }
 
     #[test]
-    fn activate_menu_runs_the_dir_command_and_selects_the_item() {
+    fn open_menu_selects_the_dropdown() {
+        APP_STATE.set(AppState::new());
+        open_menu(1);
+        assert_eq!(
+            APP_STATE.state().read().menu,
+            Some(MenuState {
+                bar_index: 1,
+                item: 0
+            })
+        );
+        // An unknown index closes the menu instead of panicking.
+        open_menu(menu::count());
+        assert_eq!(APP_STATE.state().read().menu, None);
+    }
+
+    #[test]
+    fn toggle_menu_closes_the_open_title() {
+        APP_STATE.set(AppState::new());
+        toggle_menu(2);
+        assert_eq!(
+            APP_STATE.state().read().menu.map(|m| m.bar_index),
+            Some(2)
+        );
+        // A different title switches to its dropdown...
+        toggle_menu(3);
+        assert_eq!(
+            APP_STATE.state().read().menu.map(|m| m.bar_index),
+            Some(3)
+        );
+        // ...while a click on the open title closes it.
+        toggle_menu(3);
+        assert_eq!(APP_STATE.state().read().menu, None);
+    }
+
+    #[test]
+    fn switch_menu_opens_from_a_closed_bar() {
+        APP_STATE.set(AppState::new());
+        switch_menu(1);
+        assert_eq!(
+            APP_STATE.state().read().menu,
+            Some(MenuState {
+                bar_index: 0,
+                item: 0
+            })
+        );
+        // With a menu open, the keys wrap around the bar.
+        switch_menu(-1);
+        assert_eq!(
+            APP_STATE.state().read().menu.map(|m| m.bar_index),
+            Some(menu::count() - 1)
+        );
+        switch_menu(1);
+        assert_eq!(
+            APP_STATE.state().read().menu.map(|m| m.bar_index),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn menu_navigation_is_inert_without_an_open_menu() {
+        APP_STATE.set(AppState::new());
+        move_menu_item(1);
+        close_menu();
+        assert_eq!(confirm_menu_item(), MenuOutcome::Handled);
+        assert_eq!(APP_STATE.state().read().menu, None);
+    }
+
+    #[test]
+    fn move_menu_item_moves_the_highlight_and_close_dismisses() {
+        APP_STATE.set(AppState::new());
+        open_menu(0);
+        move_menu_item(1);
+        assert_eq!(APP_STATE.state().read().menu.unwrap().item, 1);
+        close_menu();
+        assert_eq!(APP_STATE.state().read().menu, None);
+    }
+
+    #[test]
+    fn confirm_menu_item_runs_the_dir_command_and_closes_the_dropdown() {
         APP_STATE.set(dir_app_state());
-        activate_menu(3); // View → ToggleHideSame
+        open_menu(menu_index("View"));
+        // The first View item hides identical entries.
+        assert_eq!(confirm_menu_item(), MenuOutcome::Handled);
         let state = APP_STATE.state();
         let app = state.read();
-        assert_eq!(app.menu_selection, 3);
+        assert_eq!(app.menu, None);
         assert!(!app.active().unwrap().dir().unwrap().display.show_same);
     }
 
     #[test]
-    fn activate_menu_dir_items_are_noops_on_a_text_session() {
+    fn confirm_menu_item_toggles_help_without_a_session() {
+        APP_STATE.set(AppState::new());
+        open_menu(menu_index("Help"));
+        assert_eq!(confirm_menu_item(), MenuOutcome::Handled);
+        let state = APP_STATE.state();
+        let app = state.read();
+        assert!(app.show_help);
+        assert_eq!(app.menu, None);
+    }
+
+    #[test]
+    fn confirm_menu_item_skips_dir_items_on_a_text_session() {
         let mut app = AppState::new();
         app.add_session(SessionView::new_text_compare(
             Endpoint::local("/left/a.txt"),
@@ -1480,11 +1634,40 @@ mod tests {
             Grammar::plain_text(),
         ));
         APP_STATE.set(app);
-        activate_menu(3);
-        // The item highlights, but no command runs on a text session.
+        open_menu(menu_index("View"));
+        assert_eq!(confirm_menu_item(), MenuOutcome::Handled);
+        // The dropdown closed, but the dir-only command did not run.
         let state = APP_STATE.state();
         let app = state.read();
-        assert_eq!(app.menu_selection, 3);
+        assert_eq!(app.menu, None);
         assert!(app.active().unwrap().ui.mode == SessionMode::Normal);
+    }
+
+    #[test]
+    fn confirm_menu_item_reports_quit_and_close_tab() {
+        APP_STATE.set(dir_app_state());
+        let sessions = menu::menu_at(menu_index("Sessions")).unwrap();
+        let quit = sessions
+            .items
+            .iter()
+            .position(|i| i.cmd == Cmd::Quit)
+            .unwrap();
+        let close = sessions
+            .items
+            .iter()
+            .position(|i| i.cmd == Cmd::CloseTab)
+            .unwrap();
+        APP_STATE.state().write().menu = Some(MenuState {
+            bar_index: menu_index("Sessions"),
+            item: quit,
+        });
+        assert_eq!(confirm_menu_item(), MenuOutcome::Quit);
+        assert_eq!(APP_STATE.state().read().menu, None);
+        APP_STATE.state().write().menu = Some(MenuState {
+            bar_index: menu_index("Sessions"),
+            item: close,
+        });
+        assert_eq!(confirm_menu_item(), MenuOutcome::CloseTab);
+        assert_eq!(APP_STATE.state().read().menu, None);
     }
 }

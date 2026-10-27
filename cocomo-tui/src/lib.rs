@@ -18,11 +18,13 @@
 //! `APP_STATE` atom, [`controller`] is the single owner of all state
 //! mutations and the bridge to `cocomo-lib`, [`error`] types the
 //! service-layer failures, [`keys`] is the single source of truth for key
-//! bindings, [`ui`] holds the ratatui-kit components, [`cli`] turns the
+//! bindings, [`menu`] is the single source of truth for the nested menu
+//! tree, [`ui`] holds the ratatui-kit components, [`cli`] turns the
 //! command-line arguments into the [`cli::Startup`] decision, and [`run`]
 //! wires everything together. The binary in `main.rs` only calls [`run`].
 //!
-//! The pure-logic modules ([`state`], [`keys`], [`diff_model`]) are public so
+//! The pure-logic modules ([`state`], [`keys`], [`menu`], [`diff_model`]) are
+//! public so
 //! the integration tests under `tests/` can drive the state machine directly,
 //! without a terminal or the async runtime. Everything else stays
 //! `pub(crate)`: it is wiring (CLI, UI, persistence) or mutates the global
@@ -30,6 +32,7 @@
 
 pub mod diff_model;
 pub mod keys;
+pub mod menu;
 pub mod state;
 
 pub(crate) mod cli;

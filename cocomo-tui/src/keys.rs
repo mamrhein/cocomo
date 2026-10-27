@@ -13,7 +13,8 @@
 //! their help-bar labels, so dispatch and documentation cannot drift apart.
 //! Scopes partition key ownership: [`KeyScope::Global`] bindings belong to
 //! the App shell, [`KeyScope::DirNormal`] and [`KeyScope::TextNormal`]
-//! bindings to the two session views, [`KeyScope::Dialog`] to the open
+//! bindings to the two session views, [`KeyScope::Menu`] to an open menu
+//! dropdown, [`KeyScope::Dialog`] to the open
 //! transfer dialog, [`KeyScope::FilterPanel`], [`KeyScope::SessionBrowser`],
 //! [`KeyScope::Settings`] and [`KeyScope::Report`] to the modal panels,
 //! and [`KeyScope::Editing`] is the root-layer fallback while a text-entry
@@ -42,7 +43,7 @@ use crate::{
     state::{
         FilterDraft, FilterFocus, NamePattern, ReportDraft, ReportFocus,
         ReportSelection, SessionAction, SessionContent, SessionMode,
-        SessionView, TransferChoice, TransferOp,
+        SessionView, StatusFilter, TransferChoice, TransferOp,
     },
 };
 
@@ -50,6 +51,8 @@ use crate::{
 const NONE: KeyModifiers = KeyModifiers::NONE;
 /// Shorthand for a Ctrl binding.
 const CTRL: KeyModifiers = KeyModifiers::CONTROL;
+/// Shorthand for an Alt binding.
+const ALT: KeyModifiers = KeyModifiers::ALT;
 
 /// Which handler owns a binding.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -60,6 +63,12 @@ pub enum KeyScope {
     DirNormal,
     /// A text-comparison session in normal mode.
     TextNormal,
+    /// A menu dropdown is open. The App shell routes keys here first
+    /// while [`crate::state::AppState::menu`] is `Some`; the navigation
+    /// keys live in this table so they stay documented, and the shell
+    /// claims every other key so lower handlers cannot react behind the
+    /// dropdown.
+    Menu,
     /// Any session while a text-entry mode is active. The input components
     /// capture keys in their own layers; this scope is only the root-layer
     /// fallback that cancels the mode.
@@ -92,9 +101,12 @@ pub enum Cmd {
     CloseTab,
     /// Switch to the next tab, or the previous one with Shift.
     SwitchTab,
-    /// Select the previous menu item.
+    /// Open the menu at the given bar index (`Alt+<accel>`; a test keeps
+    /// the bindings in sync with [`crate::menu::MENUS`]).
+    MenuOpen(usize),
+    /// Select the previous menu on the bar.
     MenuPrev,
-    /// Select the next menu item.
+    /// Select the next menu on the bar.
     MenuNext,
     /// Quit the application.
     Quit,
@@ -121,6 +133,10 @@ pub enum Cmd {
     CycleSyncOpForward,
     /// Cycle the sync operation backward.
     CycleSyncOpBackward,
+    /// Select the given sync operation (dropdown item).
+    SetSyncOp(SyncOperation),
+    /// Toggle the visibility of one entry-status class (dropdown item).
+    ToggleStatusFilter(StatusFilter),
     /// Enter save-session mode.
     StartSaveSession,
     /// Open the session browser modal and list saved sessions (`O`).
@@ -159,6 +175,15 @@ pub enum Cmd {
     StartCommand,
     /// Leave a text-entry mode without applying it.
     CancelEdit,
+    // -- Menu scope: executed by the App shell while a menu is open. --
+    /// Highlight the previous item in the open dropdown (`k`).
+    MenuUp,
+    /// Highlight the next item in the open dropdown (`j`).
+    MenuDown,
+    /// Run the highlighted dropdown item (`Enter`).
+    MenuConfirm,
+    /// Close the open dropdown without running anything (`Esc`).
+    MenuClose,
     // -- Modal panel scopes: executed by the panel handlers. --
     /// Close an open modal panel without applying it.
     PanelClose,
@@ -584,6 +609,50 @@ const KEYMAP: &[KeyBinding] = &[
         cmd: Cmd::PanelFocusNext,
         help: None,
     },
+    // -- Menu dropdown (open; the App shell routes keys here first and
+    //    claims everything else, so only the navigation keys are listed). --
+    KeyBinding {
+        key: KeyCode::Char('j'),
+        modifiers: NONE,
+        scope: KeyScope::Menu,
+        cmd: Cmd::MenuDown,
+        help: None,
+    },
+    KeyBinding {
+        key: KeyCode::Down,
+        modifiers: NONE,
+        scope: KeyScope::Menu,
+        cmd: Cmd::MenuDown,
+        help: None,
+    },
+    KeyBinding {
+        key: KeyCode::Char('k'),
+        modifiers: NONE,
+        scope: KeyScope::Menu,
+        cmd: Cmd::MenuUp,
+        help: None,
+    },
+    KeyBinding {
+        key: KeyCode::Up,
+        modifiers: NONE,
+        scope: KeyScope::Menu,
+        cmd: Cmd::MenuUp,
+        help: None,
+    },
+    KeyBinding {
+        key: KeyCode::Enter,
+        modifiers: NONE,
+        scope: KeyScope::Menu,
+        cmd: Cmd::MenuConfirm,
+        help: None,
+    },
+    KeyBinding {
+        key: KeyCode::Esc,
+        modifiers: NONE,
+        scope: KeyScope::Menu,
+        cmd: Cmd::MenuClose,
+        help: None,
+    },
     // -- Text-entry modes (root-layer fallback; the input layers normally
     //    capture keys exclusively). --
     KeyBinding {
@@ -636,6 +705,51 @@ const KEYMAP: &[KeyBinding] = &[
         cmd: Cmd::MenuNext,
         help: None,
     },
+    // -- Alt accelerators: one per menu, opening its dropdown directly.
+    //    A test keeps these in sync with `menu::MENUS`; they carry no help
+    //    label because the menu bar itself renders the accels. --
+    KeyBinding {
+        key: KeyCode::Char('s'),
+        modifiers: ALT,
+        scope: KeyScope::Global,
+        cmd: Cmd::MenuOpen(0),
+        help: None,
+    },
+    KeyBinding {
+        key: KeyCode::Char('c'),
+        modifiers: ALT,
+        scope: KeyScope::Global,
+        cmd: Cmd::MenuOpen(1),
+        help: None,
+    },
+    KeyBinding {
+        key: KeyCode::Char('y'),
+        modifiers: ALT,
+        scope: KeyScope::Global,
+        cmd: Cmd::MenuOpen(2),
+        help: None,
+    },
+    KeyBinding {
+        key: KeyCode::Char('v'),
+        modifiers: ALT,
+        scope: KeyScope::Global,
+        cmd: Cmd::MenuOpen(3),
+        help: None,
+    },
+    KeyBinding {
+        key: KeyCode::Char('f'),
+        modifiers: ALT,
+        scope: KeyScope::Global,
+        cmd: Cmd::MenuOpen(4),
+        help: None,
+    },
+    KeyBinding {
+        key: KeyCode::Char('h'),
+        modifiers: ALT,
+        scope: KeyScope::Global,
+        cmd: Cmd::MenuOpen(5),
+        help: None,
+    },
     KeyBinding {
         key: KeyCode::Char('q'),
         modifiers: NONE,
@@ -682,6 +796,19 @@ pub fn lookup(scope: KeyScope, key: KeyEvent) -> Option<Cmd> {
                     || !key.modifiers.intersects(CTRL | KeyModifiers::ALT))
         })
         .map(|b| b.cmd)
+}
+
+/// Return the help-bar key label of `cmd`, if a labelled binding runs it.
+///
+/// Menu items use this to display the keyboard counterpart of their
+/// command, so the dropdown never carries a second label table that could
+/// drift from the keymap.
+pub fn key_hint(cmd: Cmd) -> Option<&'static str> {
+    KEYMAP
+        .iter()
+        .find(|b| b.cmd == cmd && b.help.is_some())?
+        .help
+        .map(|(keys, _)| keys)
 }
 
 /// Build the help bar lines for the given scopes from the keymap.
@@ -857,6 +984,24 @@ fn execute(cmd: Cmd, session: &mut SessionView) -> SessionAction {
             }
             SessionAction::None
         }
+        Cmd::SetSyncOp(operation) => {
+            if let Some(dir) = session.dir_mut() {
+                dir.sync_operation = operation;
+            }
+            SessionAction::None
+        }
+        Cmd::ToggleStatusFilter(status) => {
+            if let Some(dir) = session.dir_mut() {
+                let show = match status {
+                    StatusFilter::Same => &mut dir.display.show_same,
+                    StatusFilter::Different => &mut dir.display.show_different,
+                    StatusFilter::Orphans => &mut dir.display.show_orphans,
+                };
+                *show = !*show;
+            }
+            session.set_cursor(Some(0));
+            SessionAction::None
+        }
         Cmd::StartSaveSession => {
             // Enter input mode; the name buffer lives in the mode itself.
             session.ui.mode = SessionMode::SaveSession {
@@ -969,11 +1114,17 @@ fn execute(cmd: Cmd, session: &mut SessionView) -> SessionAction {
         Cmd::PanelFocusNext | Cmd::PanelApply | Cmd::PanelToggle => {
             SessionAction::None
         }
-        // Global commands are dispatched by the App shell, never here.
+        // Global and menu commands are dispatched by the App shell, never
+        // here.
         Cmd::CloseTab
         | Cmd::SwitchTab
+        | Cmd::MenuOpen(_)
         | Cmd::MenuPrev
         | Cmd::MenuNext
+        | Cmd::MenuUp
+        | Cmd::MenuDown
+        | Cmd::MenuConfirm
+        | Cmd::MenuClose
         | Cmd::Quit
         | Cmd::ToggleHelp => SessionAction::None,
     }
@@ -1748,6 +1899,105 @@ mod tests {
             session.ui.mode,
             SessionMode::SessionBrowser { .. }
         ));
+    }
+
+    #[test]
+    fn set_sync_op_selects_the_operation() {
+        let mut session = dir_session();
+        let action = run_menu_command(
+            &mut session,
+            Cmd::SetSyncOp(SyncOperation::MirrorRight),
+        );
+        assert!(matches!(action, SessionAction::None));
+        assert_eq!(
+            session.dir().unwrap().sync_operation,
+            SyncOperation::MirrorRight
+        );
+    }
+
+    #[test]
+    fn toggle_status_filter_flips_display_flags() {
+        let mut session = dir_session();
+        session.ui.table_state.select(Some(2));
+        run_menu_command(
+            &mut session,
+            Cmd::ToggleStatusFilter(StatusFilter::Same),
+        );
+        assert!(!session.dir().unwrap().display.show_same);
+        run_menu_command(
+            &mut session,
+            Cmd::ToggleStatusFilter(StatusFilter::Orphans),
+        );
+        assert!(!session.dir().unwrap().display.show_orphans);
+        assert!(session.dir().unwrap().display.show_different);
+        // Like the other filter toggles, the cursor resets.
+        assert_eq!(session.ui.table_state.selected(), Some(0));
+    }
+
+    #[test]
+    fn menu_scope_owns_only_navigation_keys() {
+        assert_eq!(
+            lookup(KeyScope::Menu, key(KeyCode::Char('j'))),
+            Some(Cmd::MenuDown)
+        );
+        assert_eq!(
+            lookup(KeyScope::Menu, key(KeyCode::Down)),
+            Some(Cmd::MenuDown)
+        );
+        assert_eq!(
+            lookup(KeyScope::Menu, key(KeyCode::Char('k'))),
+            Some(Cmd::MenuUp)
+        );
+        assert_eq!(
+            lookup(KeyScope::Menu, key(KeyCode::Up)),
+            Some(Cmd::MenuUp)
+        );
+        assert_eq!(
+            lookup(KeyScope::Menu, key(KeyCode::Enter)),
+            Some(Cmd::MenuConfirm)
+        );
+        assert_eq!(
+            lookup(KeyScope::Menu, key(KeyCode::Esc)),
+            Some(Cmd::MenuClose)
+        );
+        // The `←`/`→` menu switching stays in the Global scope.
+        assert!(lookup(KeyScope::Menu, key(KeyCode::Left)).is_none());
+        // Plain session keys belong to the shell's swallow rule, not to
+        // this scope.
+        assert!(lookup(KeyScope::Menu, key(KeyCode::Char('x'))).is_none());
+    }
+
+    #[test]
+    fn alt_accelerators_open_every_menu() {
+        for (index, menu) in crate::menu::MENUS.iter().enumerate() {
+            let key = KeyEvent::new(KeyCode::Char(menu.accel), ALT);
+            assert_eq!(
+                lookup(KeyScope::Global, key),
+                Some(Cmd::MenuOpen(index)),
+                "accel {} of menu {} is not bound",
+                menu.accel,
+                menu.title
+            );
+        }
+    }
+
+    #[test]
+    fn alt_keys_never_fire_plain_bindings() {
+        // Alt+S opens the Sessions menu instead of entering save mode.
+        let alt_s = KeyEvent::new(KeyCode::Char('s'), ALT);
+        assert!(lookup(KeyScope::DirNormal, alt_s).is_none());
+        assert_eq!(lookup(KeyScope::Global, alt_s), Some(Cmd::MenuOpen(0)));
+    }
+
+    #[test]
+    fn key_hint_returns_the_labelled_binding() {
+        assert_eq!(key_hint(Cmd::OpenSessionBrowser), Some("O"));
+        assert_eq!(key_hint(Cmd::ToggleHelp), Some("?"));
+        // Dialog accelerators carry no help label, so no hint either.
+        assert_eq!(key_hint(Cmd::DialogPick(TransferChoice::Left)), None);
+        assert_eq!(key_hint(Cmd::MenuUp), None);
+        // Labelled shell keys do report their hint.
+        assert_eq!(key_hint(Cmd::MenuPrev), Some("←/→"));
     }
 
     #[test]
