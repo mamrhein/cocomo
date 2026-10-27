@@ -15,18 +15,20 @@
 
 use std::{ops::Range, sync::Arc};
 
-use cocomo_lib::{DirEntry, DirEntryStatus, Endpoint};
+use cocomo_lib::{DirEntry, DirEntryStatus, Endpoint, TransferAction};
 use gpui::{
     Action, Anchor, App, ClickEvent, ClipboardItem, Context, Div, ElementId,
     Entity, FocusHandle, FontFeatures, FontWeight, Hsla, KeyBinding,
-    MouseButton, Render, Role, SharedString, TestSupportExt as _,
-    UniformListScrollHandle, Window, actions,
+    MouseButton, Render, Role, ScrollStrategy, SharedString,
+    TestSupportExt as _, UniformListScrollHandle, Window, actions,
     assets::IconName,
+    base::{Disableable as _, Selectable as _},
     component::{
         ActiveTheme, Sizable as _, Theme,
+        breadcrumb::{Breadcrumb, BreadcrumbItem},
         button::{Button, ButtonVariants as _},
         h_flex,
-        menu::ContextMenuExt as _,
+        menu::{ContextMenuExt as _, DropdownMenu as _},
         popover::Popover,
         spinner::Spinner,
         status_bar::StatusBar,
@@ -39,9 +41,12 @@ use gpui::{
 };
 
 use crate::{
-    menus::{CopyPathLeft, CopyPathRight, ReloadCompare, SaveSession},
+    menus::{
+        CopyPathLeft, CopyPathRight, ReloadCompare, SaveSession,
+        ToggleShowDifferent, ToggleShowOrphans, ToggleShowSame,
+    },
     session_manager::GuiSessionManager,
-    state::{AppState, SortKey, StatusSummary, entry_endpoints},
+    state::{AppState, SortKey, StatusCategory, entry_endpoints},
 };
 
 // ---------------------------------------------------------------------------
@@ -50,7 +55,18 @@ use crate::{
 
 actions!(
     folder_compare,
-    [SelectNext, SelectPrev, EnterDir, LeaveDir, Reload]
+    [
+        SelectNext,
+        SelectPrev,
+        EnterDir,
+        LeaveDir,
+        Reload,
+        NextDifference,
+        PrevDifference,
+        SwapSides,
+        CopyToLeft,
+        CopyToRight,
+    ]
 );
 
 /// Action to open a text diff for a file in a new tab.
@@ -84,6 +100,15 @@ pub fn folder_compare_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("enter", EnterDir, None),
         KeyBinding::new("backspace", LeaveDir, None),
         KeyBinding::new("r", Reload, None),
+        // Walk the differences: the single highest-value navigation,
+        // matching the familiar next/previous-difference commands.
+        KeyBinding::new("cmd-]", NextDifference, None),
+        KeyBinding::new("f7", NextDifference, None),
+        KeyBinding::new("cmd-[", PrevDifference, None),
+        KeyBinding::new("shift-f7", PrevDifference, None),
+        // Reconcile a selected orphan toward each side.
+        KeyBinding::new("cmd-1", CopyToLeft, None),
+        KeyBinding::new("cmd-2", CopyToRight, None),
     ]
 }
 
@@ -128,6 +153,14 @@ impl FolderCompareView {
     /// Return the focus handle for keyboard navigation.
     pub fn focus_handle(&self, cx: &App) -> FocusHandle {
         self.state.read(cx).focus_handle(cx).clone()
+    }
+
+    /// Return the application-state entity this view renders.
+    ///
+    /// The window root reads the filter state from here to keep the View
+    /// menu's checkmarks in sync with the active tab.
+    pub fn folder_state(&self) -> Entity<AppState> {
+        self.state.clone()
     }
 
     /// Handle the select-next action.
@@ -296,6 +329,116 @@ impl FolderCompareView {
         }
     }
 
+    /// Scroll the list so the current selection is centered. Used after
+    /// difference walking, which can jump far from the visible range.
+    fn scroll_to_selection(&self, cx: &App) {
+        let selected = self.state.read(cx).selected_index();
+        self.scroll_handle
+            .scroll_to_item(selected, ScrollStrategy::Center);
+    }
+
+    /// Handle the next-difference action: jump to the following non-identical
+    /// entry among the visible rows.
+    fn handle_next_difference(
+        &mut self,
+        _: &NextDifference,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.state.update(cx, |state, cx| {
+            state.select_next_difference(cx);
+        });
+        self.scroll_to_selection(cx);
+    }
+
+    /// Handle the previous-difference action.
+    fn handle_prev_difference(
+        &mut self,
+        _: &PrevDifference,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.state.update(cx, |state, cx| {
+            state.select_previous_difference(cx);
+        });
+        self.scroll_to_selection(cx);
+    }
+
+    /// Handle the swap-sides action.
+    fn handle_swap_sides(
+        &mut self,
+        _: &SwapSides,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.state.update(cx, |state, cx| {
+            state.swap_sides(cx);
+        });
+    }
+
+    /// Handle copy-to-left: reconcile the selected orphan by copying it
+    /// from the right side to the left.
+    fn handle_copy_to_left(
+        &mut self,
+        _: &CopyToLeft,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.state.update(cx, |state, cx| {
+            state.transfer_selected(TransferAction::CopyLeft, cx);
+        });
+    }
+
+    /// Handle copy-to-right: reconcile the selected orphan by copying it
+    /// from the left side to the right.
+    fn handle_copy_to_right(
+        &mut self,
+        _: &CopyToRight,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.state.update(cx, |state, cx| {
+            state.transfer_selected(TransferAction::CopyRight, cx);
+        });
+    }
+
+    /// Handle a display-filter toggle dispatched from the View menu or the
+    /// toolbar filter dropdown. The filter state lives in [`AppState`].
+    fn handle_toggle_show_same(
+        &mut self,
+        _: &ToggleShowSame,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.state.update(cx, |state, cx| {
+            state.toggle_filter(StatusCategory::Same, cx);
+        });
+    }
+
+    /// Handle the show-different filter toggle.
+    fn handle_toggle_show_different(
+        &mut self,
+        _: &ToggleShowDifferent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.state.update(cx, |state, cx| {
+            state.toggle_filter(StatusCategory::Different, cx);
+        });
+    }
+
+    /// Handle the show-orphans filter toggle.
+    fn handle_toggle_show_orphans(
+        &mut self,
+        _: &ToggleShowOrphans,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.state.update(cx, |state, cx| {
+            state.toggle_filter(StatusCategory::Orphan, cx);
+        });
+    }
+
     // -----------------------------------------------------------------------
     // Session callbacks (used by TabBar)
     // -----------------------------------------------------------------------
@@ -345,6 +488,15 @@ impl Render for FolderCompareView {
             .on_action(cx.listener(Self::enter_dir))
             .on_action(cx.listener(Self::leave_dir))
             .on_action(cx.listener(Self::reload))
+            .on_action(cx.listener(Self::handle_next_difference))
+            .on_action(cx.listener(Self::handle_prev_difference))
+            .on_action(cx.listener(Self::handle_swap_sides))
+            .on_action(cx.listener(Self::handle_copy_to_left))
+            .on_action(cx.listener(Self::handle_copy_to_right))
+            // Display filters (View menu and toolbar filter dropdown).
+            .on_action(cx.listener(Self::handle_toggle_show_same))
+            .on_action(cx.listener(Self::handle_toggle_show_different))
+            .on_action(cx.listener(Self::handle_toggle_show_orphans))
             // Menu-dispatched actions that need view context.
             .on_action(cx.listener(Self::handle_reload_compare))
             .on_action(cx.listener(Self::handle_save_session))
@@ -358,17 +510,40 @@ impl Render for FolderCompareView {
 }
 
 impl FolderCompareView {
-    /// Render the header bar showing the compared paths and the status
-    /// legend trigger.
+    /// Render the header bar showing the compared paths, the pair
+    /// controls (up one level, swap sides), the display-filter dropdown,
+    /// the status legend trigger, and the navigation breadcrumb.
     fn render_header(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let left_path = self.state.read(cx).left().display();
-        let right_path = self.state.read(cx).right().display();
+        let (left_path, right_path, at_root, crumbs, root_label, filters) = {
+            let state = self.state.read(cx);
+            let crumbs: Vec<(SharedString, usize)> = state
+                .nav_steps()
+                .iter()
+                .enumerate()
+                .map(|(i, step)| (step.label.clone(), i + 1))
+                .collect();
+            (
+                state.left().display().to_string(),
+                state.right().display().to_string(),
+                state.nav_steps().is_empty(),
+                crumbs,
+                state.title().clone(),
+                state.filters(),
+            )
+        };
         let theme = cx.theme();
+        let state_entity = self.state.clone();
+        // The filter dropdown dispatches `ToggleShow*` actions; routing them
+        // through the view's focus handle reaches its `on_action` handlers
+        // even though opening the popup does not focus the list.
+        let menu_focus = self.focus_handle(cx);
 
-        div()
-            .flex()
+        // The two compared roots are the primary information of this view,
+        // so they take the full width; the window title already names the
+        // product, so no branding competes with the paths. Up and Swap act
+        // on both sides at once, mirroring a compare tool's pair controls.
+        let path_row = h_flex()
             .items_center()
-            .justify_between()
             .gap_2()
             .px_3()
             .py_1()
@@ -376,49 +551,89 @@ impl FolderCompareView {
             .border_b_1()
             .border_color(theme.border)
             .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .flex_1()
-                    .min_w_0()
-                    .child(
-                        div()
-                            .font_weight(FontWeight(600.))
-                            .text_color(theme.muted_foreground)
-                            .child("cocomo"),
-                    )
-                    .child(div().text_color(theme.muted_foreground).child("/"))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_color(theme.foreground)
-                            .child(left_path),
-                    ),
+                Button::new("up_btn")
+                    .icon(IconName::ArrowUpToLine)
+                    .ghost()
+                    .small()
+                    .disabled(at_root)
+                    .tooltip("Up one level")
+                    .accessibility_label("Up one level")
+                    // Update the state directly rather than dispatching
+                    // `LeaveDir`: a mouse click on the header does not move
+                    // keyboard focus to the list, and the action is owned by
+                    // the (possibly unfocused) view.
+                    .on_click({
+                        let state = state_entity.clone();
+                        move |_, _, cx| {
+                            state.update(cx, |state, cx| {
+                                state.navigate_up(cx);
+                            });
+                        }
+                    }),
             )
             .child(
                 div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
                     .flex_1()
                     .min_w_0()
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_color(theme.foreground)
-                            .child(right_path),
-                    )
-                    .child(div().text_color(theme.muted_foreground).child("/"))
-                    .child(
-                        div()
-                            .font_weight(FontWeight(600.))
-                            .text_color(theme.muted_foreground)
-                            .child("compare"),
+                    .truncate()
+                    .text_color(theme.foreground)
+                    .child(left_path),
+            )
+            .child(
+                Button::new("swap_btn")
+                    .icon(IconName::ArrowLeftRight)
+                    .ghost()
+                    .small()
+                    .tooltip("Swap sides")
+                    .accessibility_label("Swap sides")
+                    .on_click({
+                        let state = state_entity.clone();
+                        move |_, _, cx| {
+                            state.update(cx, |state, cx| {
+                                state.swap_sides(cx);
+                            });
+                        }
+                    }),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_color(theme.foreground)
+                    .child(right_path),
+            )
+            // Display filters live here (not in the shared toolbar) because
+            // they belong to the folder table. The button reads as active
+            // whenever any category is hidden.
+            .child(
+                Button::new("filter_btn")
+                    .icon(IconName::ListFilter)
+                    .ghost()
+                    .small()
+                    .selected(!filters.all_visible())
+                    .tooltip("Display filters")
+                    .accessibility_label("Display filters")
+                    .dropdown_menu_with_anchor(
+                        Anchor::TopRight,
+                        move |menu, _, _| {
+                            menu.action_context(menu_focus.clone())
+                                .menu_with_check(
+                                    "Show same",
+                                    filters.show_same,
+                                    Box::new(ToggleShowSame),
+                                )
+                                .menu_with_check(
+                                    "Show different",
+                                    filters.show_different,
+                                    Box::new(ToggleShowDifferent),
+                                )
+                                .menu_with_check(
+                                    "Show orphans",
+                                    filters.show_orphans,
+                                    Box::new(ToggleShowOrphans),
+                                )
+                        },
                     ),
             )
             // The legend explains every status marker; it belongs to this
@@ -437,7 +652,40 @@ impl FolderCompareView {
                             .accessibility_label("Status legend"),
                     )
                     .child(status_legend(theme)),
-            )
+            );
+
+        // The breadcrumb appears only once the pair has descended into a
+        // subfolder: the root crumb re-roots the view, later crumbs step
+        // back partway. The current (last) crumb is not clickable.
+        let depth = crumbs.len();
+        let breadcrumb = (!crumbs.is_empty()).then(|| {
+            let mut trail = Breadcrumb::new().child({
+                let root_state = state_entity.clone();
+                BreadcrumbItem::new(root_label.clone()).on_click(
+                    move |_, _, cx| {
+                        root_state.update(cx, |state, cx| {
+                            state.navigate_to_depth(0, cx);
+                        });
+                    },
+                )
+            });
+            for (i, (label, target)) in crumbs.into_iter().enumerate() {
+                let crumb_state = state_entity.clone();
+                let is_current = i + 1 == depth;
+                trail = trail.child(
+                    BreadcrumbItem::new(label).disabled(is_current).on_click(
+                        move |_, _, cx| {
+                            crumb_state.update(cx, |state, cx| {
+                                state.navigate_to_depth(target, cx);
+                            });
+                        },
+                    ),
+                );
+            }
+            v_flex().px_3().py_1().child(trail)
+        });
+
+        v_flex().child(path_row).children(breadcrumb)
     }
 
     /// Render the main content area with the entry list.
@@ -569,17 +817,19 @@ impl FolderCompareView {
 
     /// Render the status bar at the bottom.
     ///
-    /// Left region: neutral summary counts for the current comparison.
-    /// Right region: what is happening now — a spinner while loading, the
-    /// error in danger color, or the selection position within the list.
+    /// Left region: summary counts over the visible rows, so they stay
+    /// honest while a display filter is active. Right region: what is
+    /// happening now — a spinner with the in-flight label, the error in
+    /// danger color, the last transfer outcome, or the selection position
+    /// within the visible list.
     fn render_status_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let state = self.state.read(cx);
         let theme = cx.theme();
 
         let mut bar = StatusBar::new();
 
-        if let Some(comparison) = state.comparison() {
-            let summary = StatusSummary::from_comparison(comparison);
+        if state.comparison().is_some() {
+            let summary = state.visible_summary();
             bar = bar.left(
                 h_flex()
                     .items_center()
@@ -591,27 +841,34 @@ impl FolderCompareView {
             );
         }
 
+        let visible = state.entry_count();
         let status = if state.is_loading() {
+            let label = state.busy_label().unwrap_or("Loading comparison…");
             h_flex()
                 .items_center()
                 .gap_1p5()
                 .child(Spinner::new().xsmall())
-                .child("Loading comparison…")
+                .child(label.to_string())
                 .into_any_element()
         } else if let Some(err) = state.error() {
             div()
                 .text_color(theme.danger)
                 .child(err.to_string())
                 .into_any_element()
-        } else if let Some(comparison) = state.comparison() {
-            if comparison.entries.is_empty() {
+        } else if let Some(notice) = state.notice() {
+            div()
+                .text_color(theme.muted_foreground)
+                .child(notice.to_string())
+                .into_any_element()
+        } else if state.comparison().is_some() {
+            if visible == 0 {
                 div().child("No entries").into_any_element()
             } else {
                 div()
                     .child(format!(
                         "{} of {}",
                         state.selected_index() + 1,
-                        comparison.entries.len()
+                        visible
                     ))
                     .into_any_element()
             }
@@ -965,10 +1222,23 @@ impl EntryRowData {
                 }
             })
             .context_menu(move |menu, _, _| {
-                menu.menu("Open", open_data.open_action())
+                let menu = menu
+                    .menu("Open", open_data.open_action())
                     .separator()
                     .menu("Copy left path", Box::new(CopyPathLeft))
-                    .menu("Copy right path", Box::new(CopyPathRight))
+                    .menu("Copy right path", Box::new(CopyPathRight));
+                // Reconcile an orphan by copying it toward the side that is
+                // missing it. A differing entry needs a confirmation flow
+                // that is not built yet, so it is not offered here.
+                match status {
+                    DirEntryStatus::RightOnly => menu
+                        .separator()
+                        .menu("Copy to left", Box::new(CopyToLeft)),
+                    DirEntryStatus::LeftOnly => menu
+                        .separator()
+                        .menu("Copy to right", Box::new(CopyToRight)),
+                    _ => menu,
+                }
             })
             // Status: dot carries the semantic color, the glyph keeps the
             // meaning independent of color (see the legend popover).
@@ -1518,6 +1788,108 @@ mod tests {
             assert_eq!(state.sort_key(), SortKey::SizeLeft);
             assert!(state.is_sort_descending());
             assert_eq!(state.entry_at(0).unwrap().name, "alpha.txt");
+        });
+    }
+
+    /// UI integration test: the difference-walking and filter actions are
+    /// wired to the view. Renders the production view, focuses it, then
+    /// dispatches `NextDifference` and `ToggleShowSame` exactly as a
+    /// shortcut or menu item would, and checks the state responds.
+    #[gpui::test]
+    fn difference_walking_and_filtering_dispatch_through_the_view(
+        cx: &mut TestAppContext,
+    ) {
+        use cocomo_lib::{DirComparison, DirEntryStatus};
+        use gpui::{Bounds, WindowBounds, WindowOptions, test::TestWindowExt};
+
+        cx.update(gpui::init);
+
+        let same = |name: &str| DirEntry {
+            name: name.to_string(),
+            status: DirEntryStatus::Same,
+            left: Some(entry_info(name, false)),
+            right: Some(entry_info(name, false)),
+            center: None,
+            sub_entries: None,
+        };
+
+        let state = cx.new(|cx| {
+            let mut state = AppState::new(
+                Endpoint::local("/left"),
+                Endpoint::local("/right"),
+                "test".into(),
+                cx,
+            );
+            state.set_comparison_for_test(DirComparison {
+                entries: vec![
+                    same("a.txt"),
+                    entry(
+                        "b.txt",
+                        Some(entry_info("b.txt", false)),
+                        Some(entry_info("b.txt", false)),
+                    ),
+                    same("c.txt"),
+                ],
+                counts: Default::default(),
+                errors: Vec::new(),
+            });
+            state
+        });
+        let manager = cx.new(|_| {
+            GuiSessionManager::new(std::path::PathBuf::from(
+                "/tmp/cocomo-ui-tests",
+            ))
+        });
+
+        let (window, view) = cx.update(|cx| {
+            gpui::open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(
+                        Bounds::maximized(None, cx),
+                    )),
+                    ..Default::default()
+                },
+                cx,
+                |_, cx| {
+                    cx.new(|cx| {
+                        FolderCompareView::new(
+                            state.clone(),
+                            manager.clone(),
+                            cx,
+                        )
+                    })
+                },
+            )
+            .expect("failed to open the test window")
+        });
+
+        // Focus the view so a dispatched action reaches its handlers, then
+        // walk to the only difference (the identical rows are skipped).
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            let focus = view.read(cx).focus_handle(cx);
+            focus.focus(window, cx);
+            window.dispatch_action(Box::new(NextDifference), cx);
+        })
+        .expect("failed to dispatch the next-difference action");
+
+        cx.update(|cx| {
+            assert_eq!(state.read(cx).selected_entry().unwrap().name, "b.txt");
+        });
+
+        // Toggling the Same filter through the action hides the identical
+        // rows, leaving only the difference visible.
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.dispatch_action(Box::new(ToggleShowSame), cx);
+        })
+        .expect("failed to dispatch the show-same filter action");
+
+        cx.update(|cx| {
+            let state = state.read(cx);
+            assert!(!state.filters().show_same);
+            assert_eq!(state.entry_count(), 1);
+            assert_eq!(state.entry_at(0).unwrap().name, "b.txt");
         });
     }
 }

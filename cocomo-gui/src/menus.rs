@@ -14,7 +14,11 @@
 
 use gpui::{App, Entity, KeyBinding, Menu, MenuItem, actions};
 
-use crate::session_manager::GuiSessionManager;
+use crate::{
+    session_manager::GuiSessionManager,
+    state::DisplayFilters,
+    ui::{LeaveDir, NextDifference, PrevDifference, SwapSides},
+};
 
 // ---------------------------------------------------------------------------
 // Menu actions
@@ -65,52 +69,87 @@ pub fn menu_bindings() -> Vec<KeyBinding> {
 // Menu construction
 // ---------------------------------------------------------------------------
 
-/// Build and set the application menus.
-pub fn set_app_menus(cx: &mut App) {
-    cx.set_menus([
+/// Build the full application menu bar.
+///
+/// `filters` is the display-filter state of the active folder tab, or
+/// `None` when no folder tab is active (a text-diff tab or an empty
+/// window). When it is `None` the folder-only items are disabled and the
+/// filter checkmarks fall back to all-visible, so the menu never lies
+/// about state the user cannot act on.
+fn build_app_menus(filters: Option<DisplayFilters>) -> Vec<Menu> {
+    let is_folder = filters.is_some();
+    let filters = filters.unwrap_or_default();
+
+    vec![
         Menu::new("File").items([
-            MenuItem::action("New Compare...", NewCompare),
+            MenuItem::action("New compare…", NewCompare),
             MenuItem::separator(),
-            MenuItem::action("Open Session...", OpenSession),
+            MenuItem::action("Open session…", OpenSession),
             MenuItem::separator(),
-            MenuItem::action("Save Session", SaveSession),
-            MenuItem::action("Save Session As...", SaveSessionAs),
+            MenuItem::action("Save session", SaveSession),
+            MenuItem::action("Save session as…", SaveSessionAs),
             MenuItem::separator(),
-            MenuItem::action("Close Session", CloseSession),
-            MenuItem::action("Close All Sessions", CloseAllSessions),
+            MenuItem::action("Close session", CloseSession),
+            MenuItem::action("Close all sessions", CloseAllSessions),
             MenuItem::separator(),
             MenuItem::action("Quit", Quit),
         ]),
         Menu::new("Edit").items([
-            MenuItem::action("Copy Left Path", CopyPathLeft),
-            MenuItem::action("Copy Right Path", CopyPathRight),
+            MenuItem::action("Copy left path", CopyPathLeft),
+            MenuItem::action("Copy right path", CopyPathRight),
             MenuItem::separator(),
-            MenuItem::action("Select All", SelectAllEntries),
+            MenuItem::action("Select all", SelectAllEntries),
         ]),
         Menu::new("View").items([
-            MenuItem::action("Show Same", ToggleShowSame),
-            MenuItem::action("Show Different", ToggleShowDifferent),
-            MenuItem::action("Show Orphans", ToggleShowOrphans),
+            MenuItem::action("Show same", ToggleShowSame)
+                .checked(filters.show_same)
+                .disabled(!is_folder),
+            MenuItem::action("Show different", ToggleShowDifferent)
+                .checked(filters.show_different)
+                .disabled(!is_folder),
+            MenuItem::action("Show orphans", ToggleShowOrphans)
+                .checked(filters.show_orphans)
+                .disabled(!is_folder),
             MenuItem::separator(),
-            MenuItem::action("Toggle Word Wrap", ToggleWordWrap),
-            MenuItem::action("Toggle Line Numbers", ToggleLineNumbers),
+            MenuItem::action("Next difference", NextDifference)
+                .disabled(!is_folder),
+            MenuItem::action("Previous difference", PrevDifference)
+                .disabled(!is_folder),
+            MenuItem::separator(),
+            MenuItem::action("Swap sides", SwapSides).disabled(!is_folder),
+            MenuItem::action("Up one level", LeaveDir).disabled(!is_folder),
+            MenuItem::separator(),
+            MenuItem::action("Toggle word wrap", ToggleWordWrap),
+            MenuItem::action("Toggle line numbers", ToggleLineNumbers),
         ]),
         Menu::new("Session").items([
-            MenuItem::action("New Compare...", NewCompare),
-            MenuItem::action("Open Session...", OpenSession),
+            MenuItem::action("New compare…", NewCompare),
+            MenuItem::action("Open session…", OpenSession),
             MenuItem::separator(),
-            MenuItem::action("Save Session", SaveSession),
-            MenuItem::action("Save Session As...", SaveSessionAs),
+            MenuItem::action("Save session", SaveSession),
+            MenuItem::action("Save session as…", SaveSessionAs),
             MenuItem::separator(),
-            MenuItem::action("Reload Comparison", ReloadCompare),
+            MenuItem::action("Reload comparison", ReloadCompare),
             MenuItem::separator(),
-            MenuItem::action("Close Session", CloseSession),
-            MenuItem::action("Close All Sessions", CloseAllSessions),
+            MenuItem::action("Close session", CloseSession),
+            MenuItem::action("Close all sessions", CloseAllSessions),
         ]),
         Menu::new("Tools")
             .items([MenuItem::action("Preferences", Preferences)]),
         Menu::new("Help").items([MenuItem::action("About cocomo", About)]),
-    ]);
+    ]
+}
+
+/// Build and set the application menus with no active folder tab.
+pub fn set_app_menus(cx: &mut App) {
+    cx.set_menus(build_app_menus(None));
+}
+
+/// Rebuild the menu bar so the View menu reflects the active tab's filter
+/// state (checkmarks) and enables the folder-only commands. Called when
+/// the active tab changes.
+pub fn refresh_view_menus(filters: Option<DisplayFilters>, cx: &mut App) {
+    cx.set_menus(build_app_menus(filters));
 }
 
 // ---------------------------------------------------------------------------
@@ -180,18 +219,8 @@ pub fn register_menu_handlers(
         log::info!("select all — not yet implemented");
     });
 
-    // View menu — display filters.
-    cx.on_action(move |_action: &ToggleShowSame, _cx: &mut App| {
-        log::info!("toggle show same — filter not yet implemented");
-    });
-
-    cx.on_action(move |_action: &ToggleShowDifferent, _cx: &mut App| {
-        log::info!("toggle show different — filter not yet implemented");
-    });
-
-    cx.on_action(move |_action: &ToggleShowOrphans, _cx: &mut App| {
-        log::info!("toggle show orphans — filter not yet implemented");
-    });
+    // View menu — display filters are handled by the focused folder view,
+    // which owns the filter state; there is no global handler here.
 
     cx.on_action(move |_action: &ToggleWordWrap, _cx: &mut App| {
         log::info!("toggle word wrap — not yet implemented");

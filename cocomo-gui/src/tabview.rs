@@ -25,7 +25,10 @@ use gpui::{
 };
 
 use crate::{
-    session_manager::GuiSessionManager, text_diff::TextDiffView,
+    menus,
+    session_manager::GuiSessionManager,
+    state::{AppState, DisplayFilters},
+    text_diff::TextDiffView,
     ui::FolderCompareView,
 };
 
@@ -75,12 +78,21 @@ impl TabEntity {
     pub fn any_view(&self) -> AnyView {
         self.inner.any_view()
     }
+
+    /// Return the folder-compare state, if this tab is a folder compare.
+    ///
+    /// The window root uses this to sync the View menu's filter checkmarks
+    /// to the active tab; text-diff tabs return `None`.
+    pub fn folder_state(&self, cx: &App) -> Option<Entity<AppState>> {
+        self.inner.folder_state(cx)
+    }
 }
 
 /// Inner trait for type-erased tab entities.
 trait TabEntityInner: Any + Send + Sync {
     fn focus_handle(&self, cx: &App) -> FocusHandle;
     fn any_view(&self) -> AnyView;
+    fn folder_state(&self, cx: &App) -> Option<Entity<AppState>>;
     fn clone_inner(&self) -> Box<dyn TabEntityInner>;
 }
 
@@ -93,6 +105,10 @@ impl TabEntityInner for FolderTabEntity {
 
     fn any_view(&self) -> AnyView {
         self.0.clone().into()
+    }
+
+    fn folder_state(&self, cx: &App) -> Option<Entity<AppState>> {
+        Some(self.0.read(cx).folder_state())
     }
 
     fn clone_inner(&self) -> Box<dyn TabEntityInner> {
@@ -109,6 +125,10 @@ impl TabEntityInner for TextDiffTabEntity {
 
     fn any_view(&self) -> AnyView {
         self.0.clone().into()
+    }
+
+    fn folder_state(&self, _: &App) -> Option<Entity<AppState>> {
+        None
     }
 
     fn clone_inner(&self) -> Box<dyn TabEntityInner> {
@@ -181,18 +201,29 @@ impl Render for WindowRoot {
         // than as an unconditional side effect of `render`.
         // NavMotion::Immediate switches views without animation, which is
         // appropriate for tab switching.
+        let mut sync_filters: Option<Option<DisplayFilters>> = None;
         if (active_index != self.last_active_index
             || self.nav_stack_state.read(cx).is_empty())
             && let Some(tab) = tabs.get(active_index)
         {
             let view = tab.any_view();
             let focus = tab.focus_handle(cx);
+            // Capture the filter state while the session-manager borrow is
+            // alive; the menu refresh below needs `&mut App`.
+            let filters =
+                tab.folder_state(cx).map(|state| state.read(cx).filters());
             self.nav_stack_state.update(cx, |state, cx| {
                 state.clear(cx);
                 state.push(view, NavMotion::Immediate, cx);
             });
             self.last_active_index = active_index;
             focus.focus(window, cx);
+            sync_filters = Some(filters);
+        }
+        // The session-manager read borrow ends here, so the menu bar can be
+        // rebuilt (it needs `&mut App`) to reflect the active tab.
+        if let Some(filters) = sync_filters {
+            menus::refresh_view_menus(filters, cx);
         }
 
         let tab_bar_element =

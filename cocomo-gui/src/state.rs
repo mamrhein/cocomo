@@ -18,8 +18,9 @@ use std::cmp::Ordering;
 
 use cocomo_lib::{
     CompareConfig, ContentCache, DirComparison, DirEntry, DirEntryStatus,
-    Endpoint, ProviderRef, SessionConfig, SessionSettings, SessionType,
-    compare_directories_node, compare_directories_pair_node,
+    Endpoint, FsPair, ProviderRef, SessionConfig, SessionSettings,
+    SessionType, TransferAction, TransferItem, compare_directories_node,
+    compare_directories_pair_node, execute_transfers,
 };
 use gpui::{App, Context, FocusHandle, SharedString};
 
@@ -44,17 +45,104 @@ pub enum SortKey {
     DateRight,
 }
 
+// ---------------------------------------------------------------------------
+// Display filters
+// ---------------------------------------------------------------------------
+
+/// Coarse category an entry belongs to for display filtering.
+///
+/// The three categories partition every [`DirEntryStatus`], so the filter
+/// toggles and the status-bar summary counts always agree on where an
+/// entry is counted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StatusCategory {
+    /// Entry matches on both sides.
+    Same,
+    /// Entry exists on both sides but differs in content, type, or state.
+    Different,
+    /// Entry exists on only one side.
+    Orphan,
+}
+
+/// Map an entry status to its display-filter category.
+pub fn status_category(status: &DirEntryStatus) -> StatusCategory {
+    match status {
+        DirEntryStatus::Same | DirEntryStatus::SameBinary => {
+            StatusCategory::Same
+        }
+        DirEntryStatus::Similar
+        | DirEntryStatus::Different
+        | DirEntryStatus::Mergeable
+        | DirEntryStatus::Conflict
+        | DirEntryStatus::IdenticalNameDifferentType => {
+            StatusCategory::Different
+        }
+        DirEntryStatus::LeftOnly
+        | DirEntryStatus::RightOnly
+        | DirEntryStatus::CenterOnly => StatusCategory::Orphan,
+    }
+}
+
+/// Which entry categories the entry table displays.
+///
+/// Filters are display-only: the underlying comparison and the summary
+/// counts of hidden categories stay intact, so toggling a filter is
+/// always reversible without re-comparing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DisplayFilters {
+    /// Show entries that match on both sides.
+    pub show_same: bool,
+    /// Show entries that exist on both sides but differ.
+    pub show_different: bool,
+    /// Show entries that exist on only one side.
+    pub show_orphans: bool,
+}
+
+impl Default for DisplayFilters {
+    fn default() -> Self {
+        Self {
+            show_same: true,
+            show_different: true,
+            show_orphans: true,
+        }
+    }
+}
+
+impl DisplayFilters {
+    /// Whether every category is visible, i.e. no filtering is active.
+    pub fn all_visible(&self) -> bool {
+        self.show_same && self.show_different && self.show_orphans
+    }
+
+    /// Whether entries of `category` appear in the table.
+    pub fn shows(&self, category: StatusCategory) -> bool {
+        match category {
+            StatusCategory::Same => self.show_same,
+            StatusCategory::Different => self.show_different,
+            StatusCategory::Orphan => self.show_orphans,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Sorting
+// ---------------------------------------------------------------------------
+
 /// Compute the display order (indices into `entries`) for a sort.
 ///
-/// Missing side values always sort last regardless of direction, so an
-/// orphan never jumps to the top of a size or date sort. Ties break on
-/// name, which keeps the order stable and predictable across re-sorts.
+/// Entries hidden by `filters` are excluded outright. Missing side values
+/// always sort last regardless of direction, so an orphan never jumps to
+/// the top of a size or date sort. Ties break on name, which keeps the
+/// order stable and predictable across re-sorts.
 fn compute_display_order(
     entries: &[DirEntry],
     key: SortKey,
     descending: bool,
+    filters: &DisplayFilters,
 ) -> Vec<usize> {
-    let mut order: Vec<usize> = (0..entries.len()).collect();
+    let mut order: Vec<usize> = (0..entries.len())
+        .filter(|&i| filters.shows(status_category(&entries[i].status)))
+        .collect();
     order.sort_by(|&a, &b| {
         let (ea, eb) = (&entries[a], &entries[b]);
         let ord = match key {
@@ -149,6 +237,82 @@ pub(crate) fn entry_endpoints(
     (left, right)
 }
 
+/// One entered directory of the paired navigation, with the per-side
+/// relative path segments.
+///
+/// A side's `path` is relative to the current comparison root and the two
+/// sides may address the same entry through different paths, so each step
+/// records both segments. The label is the entry name shown in the
+/// breadcrumb.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NavStep {
+    /// Entry name, used as the breadcrumb label.
+    pub label: SharedString,
+    /// Left-side relative path segment.
+    pub left: String,
+    /// Right-side relative path segment.
+    pub right: String,
+}
+
+/// The compared endpoints at a given navigation depth.
+///
+/// Pure helper over the session roots and the entered steps, so endpoint
+/// recomputation is testable without triggering a comparison load.
+fn endpoints_at_depth(
+    root_left: &Endpoint,
+    root_right: &Endpoint,
+    steps: &[NavStep],
+) -> (Endpoint, Endpoint) {
+    let mut left = root_left.clone();
+    let mut right = root_right.clone();
+    for step in steps {
+        left = left.join(&step.left);
+        right = right.join(&step.right);
+    }
+    (left, right)
+}
+
+/// Build the navigation step recorded for entering `entry`.
+fn nav_step_for(entry: &DirEntry) -> NavStep {
+    NavStep {
+        label: entry.name.as_str().into(),
+        left: entry
+            .left
+            .as_ref()
+            .map_or(entry.name.as_str(), |l| l.path.as_str())
+            .to_string(),
+        right: entry
+            .right
+            .as_ref()
+            .map_or(entry.name.as_str(), |r| r.path.as_str())
+            .to_string(),
+    }
+}
+
+/// Build the reconcile transfer for an entry, if its status allows one.
+///
+/// Only orphans transfer without overwriting: a right-only entry copies
+/// to the left, a left-only entry copies to the right. Copying over an
+/// entry that exists on both sides needs a confirmation flow this GUI
+/// does not have yet, so those statuses produce no transfer.
+pub(crate) fn reconcile_transfer(entry: &DirEntry) -> Option<TransferItem> {
+    let (action, side) = match entry.status {
+        DirEntryStatus::RightOnly => {
+            (TransferAction::CopyLeft, entry.right.as_ref()?)
+        }
+        DirEntryStatus::LeftOnly => {
+            (TransferAction::CopyRight, entry.left.as_ref()?)
+        }
+        _ => return None,
+    };
+    Some(TransferItem::new(
+        action,
+        entry.name.clone(),
+        side.is_dir,
+        side.path.clone(),
+    ))
+}
+
 // ---------------------------------------------------------------------------
 // Application state
 // ---------------------------------------------------------------------------
@@ -171,15 +335,28 @@ pub struct AppState {
     sort_descending: bool,
     /// Entry indices in display order (positions into `comparison.entries`).
     ///
-    /// All row access and selection goes through this map so sorting never
-    /// reorders the underlying comparison data.
+    /// All row access and selection goes through this map so sorting and
+    /// filtering never reorder the underlying comparison data.
     display_order: Vec<usize>,
+    /// Which entry categories the table displays.
+    filters: DisplayFilters,
     /// Selected row index in display order.
     selected_index: usize,
-    /// Whether a comparison is currently in progress.
+    /// Whether a comparison or transfer is currently in progress.
     loading: bool,
+    /// Label for the in-flight operation, shown while `loading`.
+    busy_label: Option<SharedString>,
+    /// Outcome of the last completed transfer, shown until the next
+    /// navigation or operation.
+    notice: Option<SharedString>,
     /// Error message, if any.
     error: Option<String>,
+    /// Session root of the left side; the breadcrumb starts here.
+    root_left: Endpoint,
+    /// Session root of the right side.
+    root_right: Endpoint,
+    /// Directories entered since the session roots, oldest first.
+    nav_steps: Vec<NavStep>,
     /// Per-session comparison settings.
     settings: SessionSettings,
     /// Session type.
@@ -199,15 +376,21 @@ impl AppState {
         Self {
             focus_handle: cx.focus_handle(),
             title,
-            left,
-            right,
+            left: left.clone(),
+            right: right.clone(),
             comparison: None,
             sort_key: SortKey::Name,
             sort_descending: false,
             display_order: Vec::new(),
+            filters: DisplayFilters::default(),
             selected_index: 0,
             loading: false,
+            busy_label: None,
+            notice: None,
             error: None,
+            root_left: left,
+            root_right: right,
+            nav_steps: Vec::new(),
             settings: SessionSettings::default(),
             session_type: SessionType::DirCompare,
         }
@@ -225,15 +408,21 @@ impl AppState {
         Self {
             focus_handle: cx.focus_handle(),
             title,
-            left,
-            right,
+            left: left.clone(),
+            right: right.clone(),
             comparison: None,
             sort_key: SortKey::Name,
             sort_descending: false,
             display_order: Vec::new(),
+            filters: DisplayFilters::default(),
             selected_index: 0,
             loading: false,
+            busy_label: None,
+            notice: None,
             error: None,
+            root_left: left,
+            root_right: right,
+            nav_steps: Vec::new(),
             settings: config.settings.clone(),
             session_type: config.session_type,
         }
@@ -283,6 +472,36 @@ impl AppState {
         self.sort_descending
     }
 
+    /// Return the active display filters.
+    pub fn filters(&self) -> DisplayFilters {
+        self.filters
+    }
+
+    /// Return the directories entered since the session roots.
+    pub fn nav_steps(&self) -> &[NavStep] {
+        &self.nav_steps
+    }
+
+    /// Return the left session root (the breadcrumb's first crumb).
+    pub fn root_left(&self) -> &Endpoint {
+        &self.root_left
+    }
+
+    /// Return the right session root.
+    pub fn root_right(&self) -> &Endpoint {
+        &self.root_right
+    }
+
+    /// Return the label for the in-flight operation, if any.
+    pub fn busy_label(&self) -> Option<&str> {
+        self.busy_label.as_deref()
+    }
+
+    /// Return the outcome of the last completed transfer, if any.
+    pub fn notice(&self) -> Option<&str> {
+        self.notice.as_deref()
+    }
+
     /// Whether a comparison is currently in progress.
     pub fn is_loading(&self) -> bool {
         self.loading
@@ -323,6 +542,17 @@ impl AppState {
         self.display_order.len()
     }
 
+    /// Summary counts over the visible (filtered) entries, so the status
+    /// bar describes what the table actually shows.
+    pub fn visible_summary(&self) -> StatusSummary {
+        let Some(comparison) = self.comparison.as_ref() else {
+            return StatusSummary::default();
+        };
+        StatusSummary::from_entries(
+            self.display_order.iter().map(|&i| &comparison.entries[i]),
+        )
+    }
+
     /// Return the session type.
     #[allow(dead_code)]
     pub fn session_type(&self) -> SessionType {
@@ -353,12 +583,6 @@ impl AppState {
         }
     }
 
-    /// Update the endpoints from new values (e.g., after navigating).
-    pub fn update_paths(&mut self, left: Endpoint, right: Endpoint) {
-        self.left = left;
-        self.right = right;
-    }
-
     // -----------------------------------------------------------------------
     // Mutating operations (called via entity.update())
     // -----------------------------------------------------------------------
@@ -370,6 +594,7 @@ impl AppState {
         }
 
         self.loading = true;
+        self.busy_label = None;
         self.error = None;
         self.comparison = None;
         self.display_order.clear();
@@ -482,6 +707,45 @@ impl AppState {
         }
     }
 
+    /// Jump to the next entry that is not identical on both sides.
+    ///
+    /// Walks the visible display order (so filters apply) and wraps at
+    /// the end. A no-op when the list holds no differences.
+    pub fn select_next_difference(&mut self, cx: &mut Context<Self>) {
+        self.select_difference(1, cx);
+    }
+
+    /// Jump to the previous entry that is not identical on both sides.
+    pub fn select_previous_difference(&mut self, cx: &mut Context<Self>) {
+        self.select_difference(-1, cx);
+    }
+
+    /// Move the selection `direction` rows to the next non-`Same` entry,
+    /// wrapping around the visible list.
+    fn select_difference(&mut self, direction: isize, cx: &mut Context<Self>) {
+        let len = self.display_order.len() as isize;
+        if len == 0 {
+            return;
+        }
+        let Some(comparison) = self.comparison.as_ref() else {
+            return;
+        };
+        let start = self.selected_index as isize;
+        // A full turn covers every visible row, including wrapping back
+        // to the start; landing on the current row is a deliberate no-op.
+        for offset in 1..=len {
+            let index = (start + direction * offset).rem_euclid(len) as usize;
+            let status = comparison.entries[self.display_order[index]].status;
+            if status_category(&status) != StatusCategory::Same {
+                if index != self.selected_index {
+                    self.selected_index = index;
+                    cx.notify();
+                }
+                return;
+            }
+        }
+    }
+
     /// Navigate into a subdirectory if the selected entry is a directory.
     pub fn navigate_into_subdir(&mut self, cx: &mut Context<Self>) {
         let entry = match self.selected_entry() {
@@ -500,32 +764,174 @@ impl AppState {
         // relative to the current comparison root, so it must be joined onto
         // the endpoint path rather than used as the endpoint path directly
         // (which would drop the root and resolve to a non-existent location).
-        let left_sub = match &entry.left {
-            Some(left_info) => self.left.join(&left_info.path),
-            None => self.left.join(&entry.name),
-        };
-        let right_sub = match &entry.right {
-            Some(right_info) => self.right.join(&right_info.path),
-            None => self.right.join(&entry.name),
-        };
+        let step = nav_step_for(entry);
+        let left_sub = self.left.join(&step.left);
+        let right_sub = self.right.join(&step.right);
 
+        self.nav_steps.push(step);
         self.left = left_sub;
         self.right = right_sub;
+        self.notice = None;
         self.load_comparison(cx);
     }
 
     /// Navigate to parent directories.
+    ///
+    /// Inside the session this pops one breadcrumb step; at the session
+    /// root it moves both sides one level up and re-roots the session,
+    /// mirroring how a compare tool follows the user out of the pair.
     pub fn navigate_up(&mut self, cx: &mut Context<Self>) {
-        if let (Some(lp), Some(rp)) = (self.left.parent(), self.right.parent())
+        if self.nav_steps.pop().is_some() {
+            let (left, right) = endpoints_at_depth(
+                &self.root_left,
+                &self.root_right,
+                &self.nav_steps,
+            );
+            self.left = left;
+            self.right = right;
+        } else if let (Some(lp), Some(rp)) =
+            (self.left.parent(), self.right.parent())
         {
             self.left = lp;
             self.right = rp;
-            self.load_comparison(cx);
+            self.root_left = self.left.clone();
+            self.root_right = self.right.clone();
+        } else {
+            return;
         }
+        self.notice = None;
+        self.load_comparison(cx);
+    }
+
+    /// Navigate the pair to breadcrumb `depth` (0 is the session root).
+    ///
+    /// Clicks on the breadcrumb's current (last) crumb are ignored; the
+    /// pair is already there.
+    pub fn navigate_to_depth(&mut self, depth: usize, cx: &mut Context<Self>) {
+        if depth >= self.nav_steps.len() {
+            return;
+        }
+        self.nav_steps.truncate(depth);
+        let (left, right) = endpoints_at_depth(
+            &self.root_left,
+            &self.root_right,
+            &self.nav_steps,
+        );
+        self.left = left;
+        self.right = right;
+        self.notice = None;
+        self.load_comparison(cx);
+    }
+
+    /// Swap the two sides of the comparison, keeping the navigation
+    /// position: the entered steps stay, with their side segments
+    /// exchanged.
+    pub fn swap_sides(&mut self, cx: &mut Context<Self>) {
+        self.swap_sides_in_place();
+        self.notice = None;
+        self.load_comparison(cx);
+    }
+
+    /// Exchange the sides' endpoints, roots, and step segments without
+    /// triggering a reload.
+    fn swap_sides_in_place(&mut self) {
+        std::mem::swap(&mut self.left, &mut self.right);
+        std::mem::swap(&mut self.root_left, &mut self.root_right);
+        for step in &mut self.nav_steps {
+            std::mem::swap(&mut step.left, &mut step.right);
+        }
+    }
+
+    /// Copy the selected orphan entry toward `action`'s destination side,
+    /// then re-compare so the table reflects the transfer.
+    ///
+    /// The transfer only runs when `action` matches what the entry's
+    /// status allows, so a keyboard shortcut on a non-orphan entry is a
+    /// no-op rather than a surprise write in the other direction.
+    pub fn transfer_selected(
+        &mut self,
+        action: TransferAction,
+        cx: &mut Context<Self>,
+    ) {
+        if self.loading {
+            return;
+        }
+        let Some(entry) = self.selected_entry() else {
+            return;
+        };
+        let Some(item) = reconcile_transfer(entry) else {
+            return;
+        };
+        if item.action != action {
+            return;
+        }
+        let (busy, done) = match item.action {
+            TransferAction::CopyLeft => {
+                ("Copying to left…", "Copied to the left")
+            }
+            _ => ("Copying to right…", "Copied to the right"),
+        };
+        let name = item.name.clone();
+        self.loading = true;
+        self.busy_label = Some(busy.into());
+        self.notice = None;
+        cx.notify();
+
+        // The transfer writes through the node-based provider API, which
+        // needs the tokio reactor, so it runs on the shared runtime like
+        // the comparison itself. Both endpoints are moved into the task so
+        // the provider borrows the `FsPair` addresses outlive the await.
+        let left = self.left.clone();
+        let right = self.right.clone();
+        let join_handle = crate::runtime::spawn_on_tokio(async move {
+            let pair = if left.same_provider(&right) {
+                FsPair::Shared(left.fs())
+            } else {
+                FsPair::Separate(left.fs(), right.fs())
+            };
+            let result =
+                execute_transfers(&[item], left.path(), right.path(), pair)
+                    .await;
+            if result.is_ok() {
+                Ok(())
+            } else {
+                let details: Vec<String> =
+                    result.errors.iter().map(|e| e.to_string()).collect();
+                Err(anyhow::anyhow!(details.join("; ")))
+            }
+        });
+
+        let weak = cx.entity().downgrade();
+        cx.spawn(move |_, cx: &mut gpui::AsyncApp| {
+            let async_app = cx.clone();
+            async move {
+                let result = match join_handle.await {
+                    Ok(r) => r,
+                    Err(e) => Err(anyhow::anyhow!("task panicked: {e}")),
+                };
+                async_app.update(|cx| {
+                    if let Some(state) = weak.upgrade() {
+                        state.update(cx, |state, cx| {
+                            state.loading = false;
+                            state.busy_label = None;
+                            state.notice = Some(match result {
+                                Ok(()) => format!("{done} \"{name}\"").into(),
+                                Err(e) => format!("Copy failed: {e}").into(),
+                            });
+                            // Re-compare so the reconciled entry shows as
+                            // identical instead of stale.
+                            state.load_comparison(cx);
+                        });
+                    }
+                });
+            }
+        })
+        .detach();
     }
 
     /// Reload the current comparison.
     pub fn reload(&mut self, cx: &mut Context<Self>) {
+        self.notice = None;
         self.load_comparison(cx);
     }
 
@@ -551,6 +957,30 @@ impl AppState {
         cx.notify();
     }
 
+    /// Toggle the visibility of a status category.
+    ///
+    /// Selection follows the same entry across the change when it stays
+    /// visible (domain identity, not row index), matching the guidance to
+    /// preserve selection across filtering.
+    pub fn toggle_filter(
+        &mut self,
+        category: StatusCategory,
+        cx: &mut Context<Self>,
+    ) {
+        match category {
+            StatusCategory::Same => self.filters.show_same ^= true,
+            StatusCategory::Different => self.filters.show_different ^= true,
+            StatusCategory::Orphan => self.filters.show_orphans ^= true,
+        }
+        let selected_name = self.selected_entry().map(|e| e.name.clone());
+        self.recompute_display_order();
+        self.selected_index = selected_name
+            .as_deref()
+            .and_then(|name| self.display_index_of_name(name))
+            .unwrap_or(0);
+        cx.notify();
+    }
+
     /// Display-order position of the entry with the given name.
     fn display_index_of_name(&self, name: &str) -> Option<usize> {
         let comparison = self.comparison.as_ref()?;
@@ -559,7 +989,7 @@ impl AppState {
             .position(|&i| comparison.entries[i].name == name)
     }
 
-    /// Recompute the display order from the comparison and the active sort.
+    /// Recompute the display order from the comparison, sort, and filters.
     fn recompute_display_order(&mut self) {
         self.display_order =
             self.comparison.as_ref().map_or_else(Vec::new, |c| {
@@ -567,6 +997,7 @@ impl AppState {
                     &c.entries,
                     self.sort_key,
                     self.sort_descending,
+                    &self.filters,
                 )
             });
     }
@@ -607,6 +1038,7 @@ impl gpui::Focusable for AppState {
 // ---------------------------------------------------------------------------
 
 /// Summary counts for the comparison results.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct StatusSummary {
     /// Total number of entries.
     pub total: usize,
@@ -619,46 +1051,21 @@ pub struct StatusSummary {
 }
 
 impl StatusSummary {
-    /// Compute status summary from a comparison result.
-    pub fn from_comparison(comparison: &DirComparison) -> Self {
-        let total = comparison.entries.len();
-        let same = comparison
-            .entries
-            .iter()
-            .filter(|e| {
-                matches!(
-                    e.status,
-                    DirEntryStatus::Same | DirEntryStatus::SameBinary
-                )
-            })
-            .count();
-        let different = comparison
-            .entries
-            .iter()
-            .filter(|e| {
-                matches!(
-                    e.status,
-                    DirEntryStatus::Different | DirEntryStatus::Similar
-                )
-            })
-            .count();
-        let orphans = comparison
-            .entries
-            .iter()
-            .filter(|e| {
-                matches!(
-                    e.status,
-                    DirEntryStatus::LeftOnly | DirEntryStatus::RightOnly
-                )
-            })
-            .count();
-
-        Self {
-            total,
-            same,
-            different,
-            orphans,
+    /// Compute status summary over an arbitrary set of entries, e.g. the
+    /// visible rows of a filtered table.
+    pub fn from_entries<'a>(
+        entries: impl Iterator<Item = &'a DirEntry>,
+    ) -> Self {
+        let mut summary = Self::default();
+        for entry in entries {
+            summary.total += 1;
+            match status_category(&entry.status) {
+                StatusCategory::Same => summary.same += 1,
+                StatusCategory::Different => summary.different += 1,
+                StatusCategory::Orphan => summary.orphans += 1,
+            }
         }
+        summary
     }
 }
 
@@ -745,12 +1152,15 @@ mod tests {
     #[test]
     fn name_sort_is_case_insensitive_in_both_directions() {
         let entries = sample_entries();
-        let asc = compute_display_order(&entries, SortKey::Name, false);
+        let filters = DisplayFilters::default();
+        let asc =
+            compute_display_order(&entries, SortKey::Name, false, &filters);
         assert_eq!(
             names_in_order(&entries, &asc),
             ["Alpha.txt", "bravo.txt", "charlie.txt", "delta.txt"]
         );
-        let desc = compute_display_order(&entries, SortKey::Name, true);
+        let desc =
+            compute_display_order(&entries, SortKey::Name, true, &filters);
         assert_eq!(
             names_in_order(&entries, &desc),
             ["delta.txt", "charlie.txt", "bravo.txt", "Alpha.txt"]
@@ -760,7 +1170,12 @@ mod tests {
     #[test]
     fn status_sort_groups_by_status() {
         let entries = sample_entries();
-        let asc = compute_display_order(&entries, SortKey::Status, false);
+        let asc = compute_display_order(
+            &entries,
+            SortKey::Status,
+            false,
+            &DisplayFilters::default(),
+        );
         // DirEntryStatus order: Same < Different < LeftOnly < RightOnly.
         assert_eq!(
             names_in_order(&entries, &asc),
@@ -771,13 +1186,20 @@ mod tests {
     #[test]
     fn size_sort_keeps_missing_sides_last_in_both_directions() {
         let entries = sample_entries();
-        let asc = compute_display_order(&entries, SortKey::SizeLeft, false);
+        let filters = DisplayFilters::default();
+        let asc = compute_display_order(
+            &entries,
+            SortKey::SizeLeft,
+            false,
+            &filters,
+        );
         // Left sizes: 100, 200, 300; bravo.txt has no left side → last.
         assert_eq!(
             names_in_order(&entries, &asc),
             ["Alpha.txt", "charlie.txt", "delta.txt", "bravo.txt"]
         );
-        let desc = compute_display_order(&entries, SortKey::SizeLeft, true);
+        let desc =
+            compute_display_order(&entries, SortKey::SizeLeft, true, &filters);
         assert_eq!(
             names_in_order(&entries, &desc),
             ["delta.txt", "charlie.txt", "Alpha.txt", "bravo.txt"]
@@ -787,12 +1209,33 @@ mod tests {
     #[test]
     fn date_sort_orders_by_right_side_modified() {
         let entries = sample_entries();
-        let asc = compute_display_order(&entries, SortKey::DateRight, false);
+        let asc = compute_display_order(
+            &entries,
+            SortKey::DateRight,
+            false,
+            &DisplayFilters::default(),
+        );
         // Right dates: Alpha 01-01, delta 01-04, bravo 01-05; charlie has
         // no right side → last.
         assert_eq!(
             names_in_order(&entries, &asc),
             ["Alpha.txt", "delta.txt", "bravo.txt", "charlie.txt"]
+        );
+    }
+
+    #[test]
+    fn filters_exclude_hidden_categories_from_the_display_order() {
+        let entries = sample_entries();
+        let filters = DisplayFilters {
+            show_same: false,
+            show_different: true,
+            show_orphans: true,
+        };
+        let order =
+            compute_display_order(&entries, SortKey::Name, false, &filters);
+        assert_eq!(
+            names_in_order(&entries, &order),
+            ["bravo.txt", "charlie.txt", "delta.txt"]
         );
     }
 
@@ -898,5 +1341,318 @@ mod tests {
         );
         assert_eq!(left.display(), "/left/sub");
         assert_eq!(right.display(), "/right/other/sub");
+    }
+
+    #[gpui::test]
+    fn toggle_filter_hides_a_category_and_restores_selection(
+        cx: &mut TestAppContext,
+    ) {
+        let state = cx.new(|cx| {
+            let mut state = AppState::new(
+                Endpoint::local("/left"),
+                Endpoint::local("/right"),
+                "test".into(),
+                cx,
+            );
+            state.set_comparison_for_test(comparison(sample_entries()));
+            state
+        });
+
+        state.update(cx, |state, cx| {
+            // Name ascending: Alpha.txt (Same) is the first row.
+            state.select_row(0, cx);
+            state.toggle_filter(StatusCategory::Same, cx);
+
+            assert_eq!(state.entry_count(), 3);
+            assert!(!state.filters().all_visible());
+            // The selected Same entry vanished; selection falls back to
+            // the first visible row.
+            assert_eq!(state.selected_index(), 0);
+            assert_eq!(state.entry_at(0).unwrap().name, "bravo.txt");
+
+            // A visible selection survives toggling another filter.
+            state.select_row(2, cx);
+            assert_eq!(state.selected_entry().unwrap().name, "delta.txt");
+            state.toggle_filter(StatusCategory::Orphan, cx);
+            assert_eq!(state.entry_count(), 1);
+            assert_eq!(state.selected_entry().unwrap().name, "delta.txt");
+
+            // Restoring both filters brings every row back.
+            state.toggle_filter(StatusCategory::Orphan, cx);
+            state.toggle_filter(StatusCategory::Same, cx);
+            assert_eq!(state.entry_count(), 4);
+            assert!(state.filters().all_visible());
+        });
+    }
+
+    #[gpui::test]
+    fn next_difference_walks_visible_differences_and_wraps(
+        cx: &mut TestAppContext,
+    ) {
+        let state = cx.new(|cx| {
+            let mut state = AppState::new(
+                Endpoint::local("/left"),
+                Endpoint::local("/right"),
+                "test".into(),
+                cx,
+            );
+            state.set_comparison_for_test(comparison(sample_entries()));
+            state
+        });
+
+        state.update(cx, |state, cx| {
+            // Name ascending: Alpha.txt (Same), bravo.txt (RightOnly),
+            // charlie.txt (LeftOnly), delta.txt (Different).
+            state.select_row(0, cx);
+
+            state.select_next_difference(cx);
+            assert_eq!(state.selected_index(), 1);
+            state.select_next_difference(cx);
+            assert_eq!(state.selected_index(), 2);
+            state.select_next_difference(cx);
+            assert_eq!(state.selected_index(), 3);
+            // Wraps around to the first difference, skipping the leading
+            // identical row.
+            state.select_next_difference(cx);
+            assert_eq!(state.selected_index(), 1);
+
+            state.select_previous_difference(cx);
+            assert_eq!(state.selected_index(), 3);
+        });
+    }
+
+    #[gpui::test]
+    fn difference_walking_respects_filters_and_noops_without_differences(
+        cx: &mut TestAppContext,
+    ) {
+        // Only identical entries: walking must not move the selection.
+        let state = cx.new(|cx| {
+            let mut state = AppState::new(
+                Endpoint::local("/left"),
+                Endpoint::local("/right"),
+                "test".into(),
+                cx,
+            );
+            state.set_comparison_for_test(comparison(vec![entry(
+                "a.txt",
+                DirEntryStatus::Same,
+                Some(info("a.txt", 1, "")),
+                Some(info("a.txt", 1, "")),
+            )]));
+            state
+        });
+        state.update(cx, |state, cx| {
+            state.select_next_difference(cx);
+            assert_eq!(state.selected_index(), 0);
+        });
+
+        // With differences hidden, walking skips the hidden rows.
+        let state = cx.new(|cx| {
+            let mut state = AppState::new(
+                Endpoint::local("/left"),
+                Endpoint::local("/right"),
+                "test".into(),
+                cx,
+            );
+            state.set_comparison_for_test(comparison(sample_entries()));
+            state
+        });
+        state.update(cx, |state, cx| {
+            state.toggle_filter(StatusCategory::Orphan, cx);
+            // Visible: Alpha.txt (Same), delta.txt (Different).
+            state.select_row(0, cx);
+            state.select_next_difference(cx);
+            assert_eq!(state.selected_entry().unwrap().name, "delta.txt");
+            // Wrapping skips the hidden orphans and the visible Same row.
+            state.select_next_difference(cx);
+            assert_eq!(state.selected_entry().unwrap().name, "delta.txt");
+        });
+    }
+
+    #[gpui::test]
+    fn swap_sides_exchanges_endpoints_roots_and_step_sides(
+        cx: &mut TestAppContext,
+    ) {
+        let state = cx.new(|cx| {
+            AppState::new(
+                Endpoint::local("/left"),
+                Endpoint::local("/right"),
+                "test".into(),
+                cx,
+            )
+        });
+
+        state.update(cx, |state, _| {
+            // Exercise the pure bookkeeping half of the swap; the reload
+            // it triggers in the public method needs the tokio bridge and
+            // is covered by the manual pass.
+            state.nav_steps.push(NavStep {
+                label: "sub".into(),
+                left: "sub".into(),
+                right: "other/sub".into(),
+            });
+            state.left = state.left.join("sub");
+            state.right = state.right.join("other/sub");
+            state.swap_sides_in_place();
+            assert_eq!(state.left.display(), "/right/other/sub");
+            assert_eq!(state.right.display(), "/left/sub");
+            assert_eq!(state.root_left.display(), "/right");
+            assert_eq!(state.root_right.display(), "/left");
+            assert_eq!(state.nav_steps[0].left, "other/sub");
+            assert_eq!(state.nav_steps[0].right, "sub");
+        });
+    }
+
+    #[test]
+    fn endpoints_at_depth_join_each_step_side() {
+        let root_left = Endpoint::local("/left");
+        let root_right = Endpoint::local("/right");
+        let steps = vec![
+            NavStep {
+                label: "sub".into(),
+                left: "sub".into(),
+                right: "other/sub".into(),
+            },
+            NavStep {
+                label: "inner".into(),
+                left: "inner".into(),
+                right: "inner".into(),
+            },
+        ];
+        let (left, right) = endpoints_at_depth(&root_left, &root_right, &[]);
+        assert_eq!(left.display(), "/left");
+        assert_eq!(right.display(), "/right");
+        let (left, right) =
+            endpoints_at_depth(&root_left, &root_right, &steps);
+        assert_eq!(left.display(), "/left/sub/inner");
+        assert_eq!(right.display(), "/right/other/sub/inner");
+        let (left, right) =
+            endpoints_at_depth(&root_left, &root_right, &steps[..1]);
+        assert_eq!(left.display(), "/left/sub");
+        assert_eq!(right.display(), "/right/other/sub");
+    }
+
+    #[test]
+    fn nav_step_records_both_side_paths() {
+        let dir_entry = entry(
+            "sub",
+            DirEntryStatus::Same,
+            Some(info("sub", 1, "")),
+            Some(info("other/sub", 1, "")),
+        );
+        let step = nav_step_for(&dir_entry);
+        assert_eq!(step.label, "sub");
+        assert_eq!(step.left, "sub");
+        assert_eq!(step.right, "other/sub");
+
+        // A missing side falls back to the entry name.
+        let orphan = entry(
+            "only.txt",
+            DirEntryStatus::LeftOnly,
+            Some(info("only.txt", 1, "")),
+            None,
+        );
+        let step = nav_step_for(&orphan);
+        assert_eq!(step.right, "only.txt");
+    }
+
+    #[test]
+    fn reconcile_transfer_maps_orphans_only() {
+        let right_only = entry(
+            "new.txt",
+            DirEntryStatus::RightOnly,
+            None,
+            Some(info("nested/new.txt", 7, "")),
+        );
+        let item = reconcile_transfer(&right_only).unwrap();
+        assert_eq!(item.action, TransferAction::CopyLeft);
+        assert_eq!(item.name, "new.txt");
+        assert_eq!(item.rel_path, "nested/new.txt");
+
+        let left_only = entry(
+            "old.txt",
+            DirEntryStatus::LeftOnly,
+            Some(info("old.txt", 3, "")),
+            None,
+        );
+        let item = reconcile_transfer(&left_only).unwrap();
+        assert_eq!(item.action, TransferAction::CopyRight);
+        assert_eq!(item.rel_path, "old.txt");
+
+        // Entries on both sides would need a confirmation flow; no
+        // transfer is offered for them.
+        let different = entry(
+            "both.txt",
+            DirEntryStatus::Different,
+            Some(info("both.txt", 1, "")),
+            Some(info("both.txt", 2, "")),
+        );
+        assert!(reconcile_transfer(&different).is_none());
+    }
+
+    #[gpui::test]
+    fn transfer_selected_ignores_a_mismatched_direction(
+        cx: &mut TestAppContext,
+    ) {
+        let state = cx.new(|cx| {
+            let mut state = AppState::new(
+                Endpoint::local("/left"),
+                Endpoint::local("/right"),
+                "test".into(),
+                cx,
+            );
+            state.set_comparison_for_test(comparison(sample_entries()));
+            state
+        });
+
+        state.update(cx, |state, cx| {
+            // Name ascending: row 2 is charlie.txt (LeftOnly). Asking to
+            // copy it to the left must not silently copy it to the right.
+            state.select_row(2, cx);
+            state.transfer_selected(TransferAction::CopyLeft, cx);
+            assert!(!state.is_loading());
+            assert!(state.busy_label().is_none());
+            assert!(state.notice().is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn visible_summary_counts_only_visible_entries(cx: &mut TestAppContext) {
+        let state = cx.new(|cx| {
+            let mut state = AppState::new(
+                Endpoint::local("/left"),
+                Endpoint::local("/right"),
+                "test".into(),
+                cx,
+            );
+            state.set_comparison_for_test(comparison(sample_entries()));
+            state
+        });
+
+        state.update(cx, |state, cx| {
+            let summary = state.visible_summary();
+            assert_eq!(
+                (
+                    summary.total,
+                    summary.same,
+                    summary.different,
+                    summary.orphans
+                ),
+                (4, 1, 1, 2)
+            );
+
+            state.toggle_filter(StatusCategory::Same, cx);
+
+            let summary = state.visible_summary();
+            assert_eq!(
+                (
+                    summary.total,
+                    summary.same,
+                    summary.different,
+                    summary.orphans
+                ),
+                (3, 0, 1, 2)
+            );
+        });
     }
 }
