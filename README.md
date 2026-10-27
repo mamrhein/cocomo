@@ -6,7 +6,7 @@ remote file store.
 
 ## Endpoints
 
-Commands address their inputs as *endpoints*: a plain file system path or a
+Commands address their inputs as _endpoints_: a plain file system path or a
 URL.
 
 - `/abs/path` or `./rel/path` — a local path; a relative path is resolved
@@ -43,3 +43,14 @@ secret fails with exit code 2 rather than connecting anonymously.
 - `0` — success, no differences found
 - `1` — differences found (comparison commands only)
 - `2` — an error occurred
+
+## Menu accelerators in the TUI
+
+The menu bar of the TUI offers `Alt+<key>` accelerators to open a menu
+directly: `Alt+S` Sessions, `Alt+C` Compare, `Alt+Y` Sync, `Alt+V` View,
+`Alt+F` Filter and `Alt+H` Help. Delivery of `Alt+<char>` is
+terminal-dependent: some terminals send `Esc` followed by the character
+instead of a key event with the Alt modifier, so the accelerator may not
+reach the app there. Fallbacks: click a menu title, or use `←`/`→` to
+select a title, `j`/`k` and `Enter` to navigate and confirm a menu, and
+`Esc` to dismiss it.
