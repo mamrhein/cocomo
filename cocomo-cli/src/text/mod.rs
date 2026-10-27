@@ -12,7 +12,7 @@ mod diff;
 use std::path::Path;
 
 use cocomo_lib::{
-    FileSystem,
+    NodeFileSystem,
     text::{TextCompareSettings, compare_texts},
 };
 use diff::{generate_unified_diff, print_text_diff_table};
@@ -65,8 +65,8 @@ pub(super) async fn text_compare<R: EndpointResolver>(
         resolve_endpoint(resolver, &args.left, args.profile.as_deref())?;
     let (right_fs, right_path) =
         resolve_endpoint(resolver, &args.right, args.profile.as_deref())?;
-    let left_bytes = left_fs.read(&left_path, None).await?;
-    let right_bytes = right_fs.read(&right_path, None).await?;
+    let left_bytes = left_fs.read_path(&left_path, None).await?;
+    let right_bytes = right_fs.read_path(&right_path, None).await?;
     let left_content = String::from_utf8_lossy(&left_bytes);
     let right_content = String::from_utf8_lossy(&right_bytes);
 
@@ -124,8 +124,8 @@ pub(super) async fn text_diff<R: EndpointResolver>(
         resolve_endpoint(resolver, &args.left, args.profile.as_deref())?;
     let (right_fs, right_path) =
         resolve_endpoint(resolver, &args.right, args.profile.as_deref())?;
-    let left_bytes = left_fs.read(&left_path, None).await?;
-    let right_bytes = right_fs.read(&right_path, None).await?;
+    let left_bytes = left_fs.read_path(&left_path, None).await?;
+    let right_bytes = right_fs.read_path(&right_path, None).await?;
     let left_content = String::from_utf8_lossy(&left_bytes);
     let right_content = String::from_utf8_lossy(&right_bytes);
 

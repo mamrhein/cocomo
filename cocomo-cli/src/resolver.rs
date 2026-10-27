@@ -11,7 +11,7 @@ use std::{path::PathBuf, sync::Arc};
 
 pub use cocomo_lib::resolver::EndpointPair;
 use cocomo_lib::{
-    FileSystem, ProviderId, WritableFileSystem,
+    ProviderId, WritableFileSystem,
     provider::Provider,
     resolver::{endpoint_identity, resolve_provider},
     secrets::TtyPrompter,
@@ -30,10 +30,10 @@ use crate::error::CliError;
 /// `cocomo_lib::MockFs` to exercise the command logic against an in-memory
 /// tree with injected errors.
 pub trait EndpointResolver {
-    /// The filesystem type this resolver produces. It must support both the
-    /// path-based reads of the text commands and the node-based scan,
-    /// compare, and sync pipelines.
-    type Fs: FileSystem + WritableFileSystem<Nid = u64>;
+    /// The filesystem type this resolver produces. It must support the
+    /// node-based scan, compare, and sync pipelines and the path
+    /// conveniences of the text commands.
+    type Fs: WritableFileSystem<Nid = u64>;
 
     /// Resolve the provider that services `url`, authenticated with
     /// `profile_id` if given. Both sides of a pair command that address the

@@ -25,7 +25,7 @@ use std::sync::Arc;
 
 use clap::Parser;
 use cocomo_lib::{
-    Endpoint, FileSystem, Url, resolve_provider, secrets::TtyPrompter,
+    Endpoint, NodeFileSystem, Url, resolve_provider, secrets::TtyPrompter,
 };
 
 use crate::{controller::compare, error::TuiError, state::SessionView};
@@ -111,8 +111,8 @@ impl Cli {
             resolve_startup_side(right, self.profile.as_deref()).await?;
 
         // Validate that both endpoints exist and are of the same type.
-        let left_meta = left.fs().metadata(left.path()).await?;
-        let right_meta = right.fs().metadata(right.path()).await?;
+        let left_meta = left.fs().metadata_path(left.path()).await?;
+        let right_meta = right.fs().metadata_path(right.path()).await?;
 
         if left_meta.is_file() && right_meta.is_file() {
             return Err(anyhow::anyhow!(

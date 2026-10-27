@@ -9,9 +9,9 @@
 
 //! S3 filesystem provider.
 //!
-//! Provides access to Amazon S3 buckets through the [`FileSystem`],
-//! [`NodeFileSystem`], and [`WritableFileSystem`] traits. Uses `aws-sdk-s3`
-//! for the underlying client.
+//! Provides access to Amazon S3 buckets through the [`NodeFileSystem`]
+//! and [`WritableFileSystem`] traits. Uses `aws-sdk-s3` for the underlying
+//! client.
 //!
 //! # Configuration
 //!
@@ -39,9 +39,7 @@ use futures::Stream;
 use crate::{
     error::{FsError, Result},
     file::FsFile,
-    fs::{
-        DirStream, FileSystem, NodeFileSystem, OpenMode, WritableFileSystem,
-    },
+    fs::{NodeFileSystem, OpenMode, WritableFileSystem},
     identity::{DirId, FileId, FileSystemId, NodeId},
     meta::Metadata,
     node::Node,
@@ -129,100 +127,6 @@ impl S3Fs {
 }
 
 #[async_trait]
-impl FileSystem for S3Fs {
-    async fn metadata(&self, _path: &Path) -> Result<Metadata> {
-        unimplemented!("S3Fs::metadata — implement with aws-sdk-s3 HeadObject")
-    }
-
-    async fn read_dir(&self, _path: &Path) -> Result<DirStream<'_>> {
-        unimplemented!(
-            "S3Fs::read_dir — implement with aws-sdk-s3 ListObjectsV2"
-        )
-    }
-
-    async fn open(
-        &self,
-        _path: &Path,
-        _mode: OpenMode,
-    ) -> Result<Box<dyn FsFile>> {
-        unimplemented!(
-            "S3Fs::open — implement with aws-sdk-s3 GetObject/PutObject"
-        )
-    }
-
-    async fn read(
-        &self,
-        _path: &Path,
-        _range: Option<Range<u64>>,
-    ) -> Result<Bytes> {
-        unimplemented!(
-            "S3Fs::read — implement with aws-sdk-s3 GetObject (range request)"
-        )
-    }
-
-    async fn read_stream(
-        &self,
-        _path: &Path,
-        _range: Option<Range<u64>>,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<Bytes>> + Send>>> {
-        unimplemented!(
-            "S3Fs::read_stream — implement with aws-sdk-s3 GetObject body \
-             stream"
-        )
-    }
-
-    async fn write(&self, _path: &Path, _data: Bytes) -> Result<()> {
-        unimplemented!("S3Fs::write — implement with aws-sdk-s3 PutObject")
-    }
-
-    async fn create_dir(&self, _path: &Path) -> Result<()> {
-        unimplemented!(
-            "S3Fs::create_dir — implement with aws-sdk-s3 PutObject \
-             (zero-byte directory marker)"
-        )
-    }
-
-    async fn remove(&self, _path: &Path) -> Result<()> {
-        unimplemented!("S3Fs::remove — implement with aws-sdk-s3 DeleteObject")
-    }
-
-    async fn remove_all(&self, _path: &Path) -> Result<()> {
-        unimplemented!(
-            "S3Fs::remove_all — implement with aws-sdk-s3 DeleteObjects \
-             (batch)"
-        )
-    }
-
-    async fn rename(&self, _src: &Path, _dst: &Path) -> Result<()> {
-        unimplemented!("S3Fs::rename — implement via copy + delete")
-    }
-
-    async fn copy(&self, _src: &Path, _dst: &Path) -> Result<()> {
-        unimplemented!("S3Fs::copy — implement with aws-sdk-s3 CopyObject")
-    }
-
-    async fn read_link(&self, _path: &Path) -> Result<PathBuf> {
-        Err(FsError::Io {
-            operation: crate::error::FsOperation::ReadLink,
-            path: PathBuf::new(),
-            message: "S3 does not support symbolic links".into(),
-        })
-    }
-
-    async fn symlink(&self, _target: &Path, _link: &Path) -> Result<()> {
-        Err(FsError::Io {
-            operation: crate::error::FsOperation::Symlink,
-            path: PathBuf::new(),
-            message: "S3 does not support symbolic links".into(),
-        })
-    }
-
-    fn label(&self) -> &str {
-        &self.label
-    }
-}
-
-#[async_trait]
 impl NodeFileSystem for S3Fs {
     type FsId = u64;
     type Nid = u64;
@@ -232,7 +136,7 @@ impl NodeFileSystem for S3Fs {
         self.fs_id
     }
 
-    fn label_node(&self) -> &str {
+    fn label(&self) -> &str {
         &self.label
     }
 
@@ -441,8 +345,11 @@ mod tests {
         };
         let fs = S3Fs::new("test-s3", config);
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let result =
-            rt.block_on(fs.symlink(Path::new("/target"), Path::new("/link")));
+        let result = rt.block_on(fs.create_symlink(
+            DirId::new(0),
+            OsStr::new("link"),
+            Path::new("/target"),
+        ));
         assert!(result.is_err());
     }
 }

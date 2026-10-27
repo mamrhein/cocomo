@@ -14,8 +14,8 @@
 //! in the folder compare view.
 
 use cocomo_lib::{
-    Endpoint, FileSystem, FsError, LineInfo, TextCompareSettings, TextDiff,
-    compare_texts,
+    Endpoint, FsError, LineInfo, NodeFileSystem, TextCompareSettings,
+    TextDiff, compare_texts,
 };
 use gpui::{
     App, Context, Entity, FocusHandle, Render, SharedString, Window, actions,
@@ -163,7 +163,7 @@ impl TextDiffState {
         // legitimately not exist (an orphan entry).
         let join_handle = crate::runtime::spawn_on_tokio(async move {
             let read = |endpoint: Endpoint| async move {
-                match endpoint.fs().read(endpoint.path(), None).await {
+                match endpoint.fs().read_path(endpoint.path(), None).await {
                     Ok(bytes) => Ok::<_, anyhow::Error>(
                         String::from_utf8_lossy(&bytes).into_owned(),
                     ),

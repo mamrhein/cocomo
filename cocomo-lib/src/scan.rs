@@ -9,23 +9,15 @@
 
 //! Directory scanning that produces a tree of `ScanEntry` nodes.
 //!
-//! Uses the `FileSystem` trait to traverse directories, so it works with any
-//! provider. For the local filesystem, inode and device ID tracking is used
-//! to detect hard-link and symlink cycles and to scope inode uniqueness per
-//! mount point.
+//! Uses the node-based `NodeFileSystem` API to traverse directories, so it
+//! works with any provider. Cycle detection relies on the provider's node
+//! cache: if a directory resolves to an already-visited node ID, the cycle
+//! is skipped.
 
-use std::{
-    collections::HashMap,
-    mem,
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+use std::{collections::HashMap, mem, path::Path};
 
 use crate::{
-    error::Result,
-    fs::{FileSystem, NodeFileSystem},
-    identity::NodeId,
-    meta::Metadata,
+    error::Result, fs::NodeFileSystem, identity::NodeId, meta::Metadata,
     node::Node,
 };
 
@@ -74,161 +66,14 @@ pub struct ScanResult {
     pub errors: Vec<crate::error::FsError>,
 }
 
-/// Recursively scan a directory using the given `FileSystem` provider.
-///
-/// Tracks visited `(inode, device_id)` pairs to detect and skip hard-link and
-/// symlink cycles. Per-entry errors (e.g., permission denied) are collected
-/// rather than aborting the entire scan.
-///
-/// Uses an iterative BFS traversal to avoid async recursion issues.
-pub async fn scan_directory(
-    fs: &Arc<dyn FileSystem>,
-    path: &Path,
-    config: &ScanConfig,
-) -> Result<ScanResult> {
-    let mut result = ScanResult::default();
-    // Track visited inodes per device to detect cycles.
-    let mut visited: HashMap<(u64, u64), ()> = HashMap::new();
-
-    let root_meta = fs.metadata(path).await.map_err(|e| match e {
-        crate::error::FsError::NotFound { .. } => e,
-        _ => e,
-    })?;
-
-    if !root_meta.is_dir {
-        // The root is not a directory; return the single entry.
-        result.entries.push(ScanEntry {
-            name: path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default(),
-            path: path.to_string_lossy().into_owned(),
-            meta: root_meta,
-            children: None,
-        });
-        return Ok(result);
-    }
-
-    // Track the root directory's inode to prevent re-entering it.
-    if let (Some(ino), Some(dev)) = (root_meta.inode, root_meta.device_id) {
-        visited.insert((ino, dev), ());
-    }
-
-    // BFS work queue: (absolute_path, relative_path, depth)
-    let mut queue: Vec<(PathBuf, String, usize)> = Vec::new();
-    queue.push((path.to_path_buf(), String::new(), 0));
-
-    while let Some((dir_path, rel_prefix, depth)) = queue.pop() {
-        // Check max depth.
-        if let Some(max) = config.max_depth
-            && depth >= max
-        {
-            continue;
-        }
-
-        // Read directory entries.
-        let mut dir_stream = match fs.read_dir(&dir_path).await {
-            Ok(s) => s,
-            Err(e) => {
-                // A root that cannot be listed means the endpoint is
-                // unusable; abort instead of returning an empty result.
-                if depth == 0 {
-                    return Err(e);
-                }
-                result.errors.push(e);
-                continue;
-            }
-        };
-
-        use futures::StreamExt;
-
-        let mut entries: Vec<_> = Vec::new();
-        while let Some(entry_result) = dir_stream.next().await {
-            match entry_result {
-                Ok(em) => entries.push(em),
-                Err(e) => result.errors.push(e),
-            }
-        }
-
-        let mut root_children: Vec<ScanEntry> = Vec::new();
-
-        for entry_meta in entries {
-            let entry_path = dir_path.join(&entry_meta.name);
-            let rel_path = if rel_prefix.is_empty() {
-                entry_meta.name.clone()
-            } else {
-                format!("{rel_prefix}/{}", entry_meta.name)
-            };
-
-            // Cycle detection: skip already-visited inodes.
-            if let (Some(ino), Some(dev)) =
-                (entry_meta.meta.inode, entry_meta.meta.device_id)
-            {
-                if entry_meta.meta.is_dir && visited.contains_key(&(ino, dev))
-                {
-                    continue;
-                }
-                if entry_meta.meta.is_dir {
-                    visited.insert((ino, dev), ());
-                }
-            }
-
-            // Skip symlink targets unless configured to follow them.
-            if entry_meta.meta.is_symlink && !config.follow_symlinks {
-                root_children.push(ScanEntry {
-                    name: entry_meta.name,
-                    path: rel_path,
-                    meta: entry_meta.meta,
-                    children: None,
-                });
-                continue;
-            }
-
-            if entry_meta.meta.is_dir {
-                // Queue for BFS traversal.
-                queue.push((entry_path, rel_path.clone(), depth + 1));
-                // Add a placeholder entry that will be populated after
-                // scanning.
-                root_children.push(ScanEntry {
-                    name: entry_meta.name,
-                    path: rel_path,
-                    meta: entry_meta.meta,
-                    children: None,
-                });
-            } else {
-                root_children.push(ScanEntry {
-                    name: entry_meta.name,
-                    path: rel_path,
-                    meta: entry_meta.meta,
-                    children: None,
-                });
-            }
-        }
-
-        result.entries.extend(root_children);
-    }
-
-    // Second pass: link children to their parent directories.
-    // Because we used BFS, children of a directory appear after the directory
-    // in the flat list. We rebuild the tree by matching paths.
-    if !result.entries.is_empty() {
-        let flat = mem::take(&mut result.entries);
-        let tree = build_tree(flat);
-        result.entries = tree;
-    }
-
-    Ok(result)
-}
-
 // ---------------------------------------------------------------------------
-// Node-based scanning
+// Directory scanning
 // ---------------------------------------------------------------------------
 
 /// Recursively scan a directory using the node-based `NodeFileSystem` API.
 ///
-/// Unlike [`scan_directory`], this operates on opaque [`NodeId`] identifiers
-/// instead of paths, eliminating TOCTOU races. The provider's node cache is
-/// populated during the scan.
+/// Operates on opaque [`NodeId`] identifiers instead of paths, eliminating
+/// TOCTOU races. The provider's node cache is populated during the scan.
 ///
 /// Symlink cycle detection relies on the provider's cache: if a symlink
 /// resolves to an already-visited node ID, the cycle is detected.
@@ -450,7 +295,14 @@ fn build_tree(flat: Vec<ScanEntry>) -> Vec<ScanEntry> {
 
 #[cfg(test)]
 mod tests {
-    use std::{env, ops::Range, path::Path, pin::Pin, process};
+    use std::{
+        env,
+        ops::Range,
+        path::{Path, PathBuf},
+        pin::Pin,
+        process,
+        sync::Arc,
+    };
 
     use async_trait::async_trait;
     use bytes::Bytes;
@@ -458,8 +310,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        DirId, FileId, FileSystemId, FsError, FsFile, FsOperation, MockFs,
-        OpenMode, fs::DirStream, local::LocalFs,
+        DirId, FileId, FileSystemId, FsError, FsFile, FsOperation, Metadata,
+        MockFs, OpenMode, local::LocalFs,
     };
 
     async fn setup_test_dir() -> PathBuf {
@@ -471,113 +323,6 @@ mod tests {
         fs_err::write(base.join("sub/b.txt"), "bravo").unwrap();
         fs_err::write(base.join("sub/nested/c.txt"), "charlie").unwrap();
         base
-    }
-
-    #[tokio::test]
-    async fn scan_flat_directory() {
-        let base = setup_test_dir().await;
-        let fs: Arc<dyn FileSystem> = Arc::new(LocalFs::new("test"));
-
-        let result = scan_directory(&fs, &base, &ScanConfig::default())
-            .await
-            .unwrap();
-
-        let names: Vec<&str> =
-            result.entries.iter().map(|e| e.name.as_str()).collect();
-        assert!(names.contains(&"a.txt"));
-        assert!(names.contains(&"sub"));
-        assert_eq!(result.errors.len(), 0);
-
-        fs_err::remove_dir_all(&base).ok();
-    }
-
-    #[tokio::test]
-    async fn scan_recursive() {
-        let base = setup_test_dir().await;
-        let fs: Arc<dyn FileSystem> = Arc::new(LocalFs::new("test"));
-
-        let result = scan_directory(&fs, &base, &ScanConfig::default())
-            .await
-            .unwrap();
-
-        let sub = result
-            .entries
-            .iter()
-            .find(|e| e.name == "sub")
-            .expect("sub directory should exist");
-        assert!(sub.is_dir());
-        let children = sub.children().expect("sub should have children");
-        let child_names: Vec<&str> =
-            children.iter().map(|e| e.name.as_str()).collect();
-        assert!(child_names.contains(&"b.txt"));
-        assert!(child_names.contains(&"nested"));
-
-        fs_err::remove_dir_all(&base).ok();
-    }
-
-    #[tokio::test]
-    async fn scan_max_depth() {
-        let base = setup_test_dir().await;
-        let fs: Arc<dyn FileSystem> = Arc::new(LocalFs::new("test"));
-
-        let config = ScanConfig {
-            max_depth: Some(1),
-            ..Default::default()
-        };
-        let result = scan_directory(&fs, &base, &config).await.unwrap();
-
-        let sub = result
-            .entries
-            .iter()
-            .find(|e| e.name == "sub")
-            .expect("sub directory should exist");
-        assert!(
-            sub.children().is_none() || sub.children().unwrap().is_empty()
-        );
-
-        fs_err::remove_dir_all(&base).ok();
-    }
-
-    #[tokio::test]
-    async fn scan_nonexistent_path() {
-        let fs: Arc<dyn FileSystem> = Arc::new(LocalFs::new("test"));
-        let path = Path::new("/nonexistent/cocomo_scan_xyz");
-        let result = scan_directory(&fs, path, &ScanConfig::default()).await;
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn scan_single_file() {
-        let base = setup_test_dir().await;
-        let fs: Arc<dyn FileSystem> = Arc::new(LocalFs::new("test"));
-
-        let file_path = base.join("a.txt");
-        let result = scan_directory(&fs, &file_path, &ScanConfig::default())
-            .await
-            .unwrap();
-
-        assert_eq!(result.entries.len(), 1);
-        assert_eq!(result.entries[0].name, "a.txt");
-        assert!(!result.entries[0].is_dir());
-
-        fs_err::remove_dir_all(&base).ok();
-    }
-
-    #[tokio::test]
-    async fn scan_empty_directory() {
-        let base = env::temp_dir()
-            .join(format!("cocomo_scan_empty_{}", process::id()));
-        let _ = fs_err::remove_dir_all(&base);
-        fs_err::create_dir_all(&base).unwrap();
-
-        let fs: Arc<dyn FileSystem> = Arc::new(LocalFs::new("test"));
-        let result = scan_directory(&fs, &base, &ScanConfig::default())
-            .await
-            .unwrap();
-
-        assert!(result.entries.is_empty());
-
-        fs_err::remove_dir_all(&base).ok();
     }
 
     // -----------------------------------------------------------------------
@@ -697,87 +442,6 @@ mod tests {
     // Root-level error propagation
     // -----------------------------------------------------------------
 
-    /// A [`FileSystem`] that fails every `read_dir` but delegates all other
-    /// operations to the wrapped [`MockFs`]. Simulates a provider whose
-    /// connection drops after the root stat succeeds.
-    struct FailingReadDir(MockFs);
-
-    #[async_trait]
-    impl FileSystem for FailingReadDir {
-        async fn metadata(&self, path: &Path) -> Result<Metadata> {
-            self.0.metadata(path).await
-        }
-
-        async fn read_dir(&self, path: &Path) -> Result<DirStream<'_>> {
-            Err(FsError::Io {
-                operation: FsOperation::ReadDir,
-                path: path.to_path_buf(),
-                message: "connection lost".to_string(),
-            })
-        }
-
-        async fn open(
-            &self,
-            path: &Path,
-            mode: OpenMode,
-        ) -> Result<Box<dyn FsFile>> {
-            self.0.open(path, mode).await
-        }
-
-        async fn read(
-            &self,
-            path: &Path,
-            range: Option<Range<u64>>,
-        ) -> Result<Bytes> {
-            self.0.read(path, range).await
-        }
-
-        async fn read_stream(
-            &self,
-            path: &Path,
-            range: Option<Range<u64>>,
-        ) -> Result<Pin<Box<dyn Stream<Item = Result<Bytes>> + Send>>>
-        {
-            self.0.read_stream(path, range).await
-        }
-
-        async fn write(&self, path: &Path, data: Bytes) -> Result<()> {
-            self.0.write(path, data).await
-        }
-
-        async fn create_dir(&self, path: &Path) -> Result<()> {
-            self.0.create_dir(path).await
-        }
-
-        async fn remove(&self, path: &Path) -> Result<()> {
-            self.0.remove(path).await
-        }
-
-        async fn remove_all(&self, path: &Path) -> Result<()> {
-            self.0.remove_all(path).await
-        }
-
-        async fn rename(&self, src: &Path, dst: &Path) -> Result<()> {
-            self.0.rename(src, dst).await
-        }
-
-        async fn copy(&self, src: &Path, dst: &Path) -> Result<()> {
-            self.0.copy(src, dst).await
-        }
-
-        async fn read_link(&self, path: &Path) -> Result<PathBuf> {
-            self.0.read_link(path).await
-        }
-
-        async fn symlink(&self, target: &Path, link: &Path) -> Result<()> {
-            self.0.symlink(target, link).await
-        }
-
-        fn label(&self) -> &str {
-            self.0.label()
-        }
-    }
-
     /// A [`NodeFileSystem`] that fails every `read_dir_node` but delegates
     /// all other operations to the wrapped [`MockFs`]. Simulates a provider
     /// whose connection drops after the root resolves.
@@ -793,8 +457,8 @@ mod tests {
             self.0.id()
         }
 
-        fn label_node(&self) -> &str {
-            self.0.label_node()
+        fn label(&self) -> &str {
+            self.0.label()
         }
 
         async fn resolve_path(
@@ -859,46 +523,6 @@ mod tests {
         {
             self.0.read_stream_node(id, range).await
         }
-    }
-
-    #[tokio::test]
-    async fn scan_root_read_dir_error_aborts() {
-        let fs: Arc<dyn FileSystem> = Arc::new(FailingReadDir(
-            MockFs::new("mock")
-                .with_dir("/data")
-                .with_file("/data/a.txt", "alpha"),
-        ));
-
-        let result =
-            scan_directory(&fs, Path::new("/data"), &ScanConfig::default())
-                .await;
-
-        assert!(matches!(result, Err(FsError::Io { .. })));
-    }
-
-    #[tokio::test]
-    async fn scan_subdir_read_dir_error_is_collected() {
-        let fs: Arc<dyn FileSystem> = Arc::new(
-            MockFs::new("mock")
-                .with_dir("/data")
-                .with_file("/data/a.txt", "alpha")
-                .with_dir("/data/sub")
-                .with_error(
-                    "/data/sub",
-                    FsError::PermissionDenied {
-                        operation: FsOperation::ReadDir,
-                        path: PathBuf::from("/data/sub"),
-                    },
-                ),
-        );
-
-        let result =
-            scan_directory(&fs, Path::new("/data"), &ScanConfig::default())
-                .await
-                .unwrap();
-
-        assert_eq!(result.errors.len(), 1);
-        assert!(matches!(result.errors[0], FsError::PermissionDenied { .. }));
     }
 
     #[tokio::test]

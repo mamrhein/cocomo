@@ -712,12 +712,13 @@ mod tests {
     use super::*;
     use crate::{
         CompareConfig, DirEntry, DirEntryStatus, EntryInfo, LocalFs, MockFs,
-        compare::compare_directories_node, fs::FileSystem, hash::ContentCache,
+        compare::compare_directories_node, fs::NodeFileSystem,
+        hash::ContentCache,
     };
 
     /// Read a file's content from a `MockFs` tree.
     async fn mock_content(fs: &MockFs, path: &str) -> Vec<u8> {
-        fs.read(Path::new(path), None).await.unwrap().to_vec()
+        fs.read_path(Path::new(path), None).await.unwrap().to_vec()
     }
 
     fn make_test_dirs() -> (PathBuf, PathBuf) {
@@ -1234,7 +1235,11 @@ mod tests {
         );
         // The entry was copied across and removed from the source side.
         assert_eq!(mock_content(&dst, "/dst/moved.txt").await, b"payload");
-        assert!(src.read(Path::new("/src/moved.txt"), None).await.is_err());
+        assert!(
+            src.read_path(Path::new("/src/moved.txt"), None)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]

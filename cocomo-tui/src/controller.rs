@@ -29,8 +29,8 @@ use std::{
 };
 
 use cocomo_lib::{
-    CompareConfig, ContentCache, DirComparison, Endpoint, FileSystem, FsError,
-    FsPair, Grammar, LineInfo, NullPrompter, Prompter, Provider,
+    CompareConfig, ContentCache, DirComparison, Endpoint, FsError, FsPair,
+    Grammar, LineInfo, NodeFileSystem, NullPrompter, Prompter, Provider,
     SessionConfig, SyncOperation, SyncResult, SyncRules, TextCompareSettings,
     compare_texts, default_session_dir, execute_transfers,
     list_saved_sessions, report::generate_report,
@@ -123,7 +123,7 @@ fn build_text_settings(grammar: &Grammar) -> TextCompareSettings {
 /// other side as entirely added. Any other failure is propagated with the
 /// provider's structured error context instead of being swallowed.
 async fn read_text_file(fs: &Provider, path: &Path) -> Result<String> {
-    match fs.read(path, None).await {
+    match fs.read_path(path, None).await {
         Ok(bytes) => Ok(String::from_utf8_lossy(&bytes).into_owned()),
         Err(FsError::NotFound { .. }) => Ok(String::new()),
         Err(e) => Err(TuiError::Lib(e)),

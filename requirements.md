@@ -32,35 +32,37 @@ cocomo/
 
 ### 1.3 Key Dependencies
 
-| Layer          | Crate                   | Purpose                                               |
-| -------------- | ----------------------- | ----------------------------------------------------- |
-| Async runtime  | `tokio`                 | I/O event loop                                        |
-| Parallelism    | `rayon`                 | CPU-bound diffing                                     |
-| Filesystem I/O | `fs_err` + `walkdir`    | Rich error context; battle-tested directory traversal |
-| TUI            | `ratatui-kit`           | Component framework over ratatui + crossterm          |
-| GUI            | `gpui`                  | Desktop windowing (via Zed's toolkit)                 |
-| CLI            | `clap`                  | Argument parsing                                      |
-| Compression    | `flate2`, `zip`, `tar`  | Archive support                                       |
-| Crypto         | `sha2`, `blake3`        | Content hashing for fast equality checks              |
-| Image          | `image`                 | Picture comparison                                    |
-| CSV/TSV        | `csv`, `serde`          | Table comparison                                      |
-| Regex          | `regex`                 | Filters, grammars                                     |
-| Config         | `serde_json` / `toml`   | Settings and sessions                                 |
-| HTML report    | `askama`                | Templated output                                      |
+| Layer          | Crate                  | Purpose                                               |
+| -------------- | ---------------------- | ----------------------------------------------------- |
+| Async runtime  | `tokio`                | I/O event loop                                        |
+| Parallelism    | `rayon`                | CPU-bound diffing                                     |
+| Filesystem I/O | `fs_err` + `walkdir`   | Rich error context; battle-tested directory traversal |
+| TUI            | `ratatui-kit`          | Component framework over ratatui + crossterm          |
+| GUI            | `gpui`                 | Desktop windowing (via Zed's toolkit)                 |
+| CLI            | `clap`                 | Argument parsing                                      |
+| Compression    | `flate2`, `zip`, `tar` | Archive support                                       |
+| Crypto         | `sha2`, `blake3`       | Content hashing for fast equality checks              |
+| Image          | `image`                | Picture comparison                                    |
+| CSV/TSV        | `csv`, `serde`         | Table comparison                                      |
+| Regex          | `regex`                | Filters, grammars                                     |
+| Config         | `serde_json` / `toml`  | Settings and sessions                                 |
+| HTML report    | `askama`               | Templated output                                      |
 
 ---
 
 ## 2. cocomo_lib — Unified Async Filesystem Library
 
-### 2.1 Core Traits: `FileSystem`, `NodeFileSystem`, `WritableFileSystem`
+### 2.1 Core Traits: `NodeFileSystem`, `WritableFileSystem`
 
-The library provides two parallel APIs for filesystem access. The legacy
-path-based [`FileSystem`] trait remains for backward compatibility. The new
-node-based traits, [`NodeFileSystem`] and [`WritableFileSystem`], operate on
-opaque [`NodeId`] identifiers to eliminate TOCTOU races.
+The library provides a single node-based API for filesystem access. The
+[`NodeFileSystem`] and [`WritableFileSystem`] traits operate on opaque
+[`NodeId`] identifiers to eliminate TOCTOU races.
 
-Backends implement both API surfaces. Downstream modules migrate gradually
-from path-based to node-based operations.
+Paths are resolved exactly once at entry time via `resolve_path()`; callers
+that start from a path use the `metadata_path()` and `read_path()`
+conveniences, which resolve the path and then perform all I/O through the
+resulting node identifier. The former path-based `FileSystem` trait has been
+removed.
 
 #### 2.1.1 Opaque Identifiers
 
@@ -118,7 +120,7 @@ pub struct Metadata {
 }
 
 /// Classification of a filesystem node. File content is never stored in
-/// the node — it is always read via the `FileSystem` trait.
+/// the node — it is always read on demand via the `NodeFileSystem` trait.
 #[derive(Clone, Debug)]
 pub enum NodeKind {
     Directory { children: Option<Vec<String>> },
@@ -166,32 +168,7 @@ Each provider maintains its own in-memory node cache:
 The cache uses `parking_lot::RwLock` for interior mutability, enabling the
 provider to satisfy `Send + Sync` trait bounds required by `async_trait`.
 
-#### 2.1.4 Path-Based FileSystem Trait (legacy)
-
-The original [`FileSystem`] trait uses path-based operations. It remains
-unchanged for backward compatibility with existing downstream modules.
-
-```rust
-#[async_trait]
-pub trait FileSystem: Send + Sync {
-    async fn metadata(&self, path: &Path) -> Result<Metadata>;
-    async fn read_dir(&self, path: &Path) -> Result<DirStream<'_>>;
-    async fn open(&self, path: &Path, mode: OpenMode) -> Result<Box<dyn FsFile>>;
-    async fn read(&self, path: &Path, range: Option<Range<u64>>) -> Result<Bytes>;
-    async fn read_stream(&self, path: &Path, range: Option<Range<u64>>) -> Result<Pin<Box<dyn Stream<Item = Result<Bytes>> + Send>>>;
-    async fn write(&self, path: &Path, data: Bytes) -> Result<()>;
-    async fn create_dir(&self, path: &Path) -> Result<()>;
-    async fn remove(&self, path: &Path) -> Result<()>;
-    async fn remove_all(&self, path: &Path) -> Result<()>;
-    async fn rename(&self, src: &Path, dst: &Path) -> Result<()>;
-    async fn copy(&self, src: &Path, dst: &Path) -> Result<()>;
-    async fn read_link(&self, path: &Path) -> Result<PathBuf>;
-    async fn symlink(&self, target: &Path, link: &Path) -> Result<()>;
-    fn label(&self) -> &str;
-}
-```
-
-#### 2.1.5 NodeFileSystem Trait (new, read-only)
+#### 2.1.4 NodeFileSystem Trait (read-only)
 
 The [`NodeFileSystem`] trait operates on opaque node identifiers. Paths are
 resolved exactly once at entry time via `resolve_path()`, and all subsequent
@@ -205,7 +182,7 @@ pub trait NodeFileSystem: Send + Sync {
     type Error: Into<FsError>;
 
     fn id(&self) -> FileSystemId<Self::FsId>;
-    fn label_node(&self) -> &str;
+    fn label(&self) -> &str;
 
     // ── Resolution (path -> node, the entry point) ──
     async fn resolve_path(&self, path: &Path) -> Result<NodeId<Self::Nid>>;
@@ -222,6 +199,10 @@ pub trait NodeFileSystem: Send + Sync {
     async fn open_node(&self, id: FileId<Self::Nid>, mode: OpenMode) -> Result<Box<dyn FsFile>>;
     async fn read_node(&self, id: FileId<Self::Nid>, range: Option<Range<u64>>) -> Result<Bytes>;
     async fn read_stream_node(&self, id: FileId<Self::Nid>, range: Option<Range<u64>>) -> Result<Pin<Box<dyn Stream<Item = Result<Bytes>> + Send>>>;
+
+    // ── Path conveniences (default impls: resolve once, then node I/O) ──
+    async fn metadata_path(&self, path: &Path) -> Result<Metadata>;
+    async fn read_path(&self, path: &Path, range: Option<Range<u64>>) -> Result<Bytes>;
 }
 ```
 
@@ -231,7 +212,7 @@ mutability, and returning a reference tied to `&self` would require
 holding the lock for the lifetime of the borrow, which is incompatible
 with the `Send + Sync` requirement.
 
-#### 2.1.6 WritableFileSystem Trait (new, write operations)
+#### 2.1.5 WritableFileSystem Trait (write operations)
 
 The [`WritableFileSystem`] trait extends [`NodeFileSystem`] with mutation
 operations.
@@ -297,16 +278,15 @@ Secrets are encrypted at rest using the OS keyring (Secret Service / macOS Keych
 
 - Files are identified for equality by `(size, mtime, hash)` triple.
 - Hash is computed with `blake3` (fast, parallel). Streaming `Hasher::update()` is used for large files to avoid loading entire files into memory.
-- Two hashing functions are provided: `hash_file()` uses the path-based
-  [`FileSystem`] API, while `hash_file_node()` uses the node-based
-  [`NodeFileSystem`] API and reads content via `FileId` identifiers.
+- Content hashing goes through the node-based [`NodeFileSystem`] API:
+  `hash_file_node()` reads content via `FileId` identifiers.
 - An in-memory `ContentCache` stores recent hashes so repeated scans avoid re-reading.
 - Cache uses LRU eviction with a configurable max size and TTL to bound memory and open handles.
 - Cache entries are invalidated on write operations and by a TTL.
 
 ### 2.5.1 Structured Errors
 
-All `FileSystem` methods return `Result<T, FsError>` where `FsError` carries
+All filesystem operations return `Result<T, FsError>` where `FsError` carries
 rich context — the operation that failed, the path or node that was attempted,
 and the underlying cause — so that callers can produce actionable diagnostics.
 
@@ -431,14 +411,13 @@ filesystem. The walk is configured to:
 Per-entry traversal errors (e.g., permission denied) are reported individually
 rather than aborting the entire scan.
 
-**Node-based scanning and comparison**: the library also provides
+**Node-based scanning and comparison**: the library provides
 `scan_directory_node()` and `compare_directories_node()` functions that
-operate on the [`NodeFileSystem`] API. Unlike the path-based variants, these
-resolve paths to node identifiers exactly once and perform all subsequent
-I/O via opaque `NodeId` references, eliminating TOCTOU races. The
-`compare_directories_node()` function uses `hash_file_node()` for content
-hashing, which reads file content through the node-based stream API.
-Downstream modules migrate gradually to these node-based functions.
+operate on the [`NodeFileSystem`] API. These resolve paths to node
+identifiers exactly once and perform all subsequent I/O via opaque `NodeId`
+references, eliminating TOCTOU races. The `compare_directories_node()`
+function uses `hash_file_node()` for content hashing, which reads file
+content through the node-based stream API.
 
 **Sorting**: by name, size, modified date, type, status. Multi-column secondary sort.
 
@@ -854,9 +833,9 @@ pub struct ReportConfig {
 Capture a point-in-time view of a directory tree.
 
 Snapshots are stored as serializable TOML files (`.snap` extension). The
-[`capture_snapshot`](cocomo-lib/src/snapshot.rs) function scans a directory
-and records paths, sizes, modification times, and hashes. Content hashes
-are computed on demand when comparing against a live filesystem.
+[`capture_snapshot_node`](cocomo-lib/src/snapshot.rs) function scans a
+directory and records paths, sizes, modification times, and hashes. Content
+hashes are computed on demand when comparing against a live filesystem.
 
 ```rust
 /// A serializable identifier that references a provider. Resolved lazily
@@ -884,7 +863,7 @@ pub struct SnapshotEntry {
 }
 ```
 
-Snapshots are compared against live filesystems or other snapshots, avoiding re-reading files. The `provider_id` is resolved back to a live `Arc<dyn FileSystem>` via the provider registry when a snapshot is loaded for comparison.
+Snapshots are compared against live filesystems or other snapshots, avoiding re-reading files. The `provider_id` is resolved back to a live `Arc<Provider>` via the provider registry when a snapshot is loaded for comparison.
 
 ---
 
