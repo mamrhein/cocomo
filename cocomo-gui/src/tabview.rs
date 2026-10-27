@@ -19,9 +19,9 @@ use std::any::Any;
 use gpui::{
     AnyView, App, Context, Entity, FocusHandle, Render, Window,
     base::{NavMotion, NavStack, NavStackState},
+    component::ActiveTheme,
     div,
     prelude::*,
-    rgb,
 };
 
 use crate::{
@@ -121,6 +121,11 @@ impl TabEntityInner for TextDiffTabEntity {
 // ---------------------------------------------------------------------------
 
 /// The root entity of the main window.
+///
+/// Owns the window chrome (tab bar, toolbar) and keyboard focus: the
+/// active tab receives focus when the window opens and whenever the
+/// active tab changes. Tab views never request focus from their own
+/// `render`.
 pub struct WindowRoot {
     /// Handle to the session manager.
     session_manager: Entity<GuiSessionManager>,
@@ -131,11 +136,26 @@ pub struct WindowRoot {
 }
 
 impl WindowRoot {
-    /// Create a new window root.
+    /// Create a new window root, giving the initially active tab keyboard
+    /// focus.
+    ///
+    /// The tab's element is not in the tree yet; GPUI resolves the focus
+    /// path when the view first renders and `track_focus`es its handle.
     pub fn new(
         session_manager: Entity<GuiSessionManager>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let initial_focus = {
+            let mgr = session_manager.read(cx);
+            mgr.tab_entities()
+                .get(mgr.active_index())
+                .map(|tab| tab.focus_handle(cx))
+        };
+        if let Some(handle) = initial_focus {
+            handle.focus(window, cx);
+        }
+
         Self {
             session_manager,
             nav_stack_state: cx.new(|_| NavStackState::new()),
@@ -155,7 +175,10 @@ impl Render for WindowRoot {
         let tabs = mgr.tab_entities();
 
         // Sync the NavStackState with the active tab. When the active tab
-        // changes or the stack is empty, clear and push the new view.
+        // changes or the stack is empty, clear and push the new view and
+        // move keyboard focus to it. This branch runs once per activation,
+        // not on every frame, so focus is requested on activation rather
+        // than as an unconditional side effect of `render`.
         // NavMotion::Immediate switches views without animation, which is
         // appropriate for tab switching.
         if (active_index != self.last_active_index
@@ -163,17 +186,13 @@ impl Render for WindowRoot {
             && let Some(tab) = tabs.get(active_index)
         {
             let view = tab.any_view();
+            let focus = tab.focus_handle(cx);
             self.nav_stack_state.update(cx, |state, cx| {
                 state.clear(cx);
                 state.push(view, NavMotion::Immediate, cx);
             });
             self.last_active_index = active_index;
-        }
-
-        // Focus the active tab.
-        if let Some(tab) = tabs.get(active_index) {
-            let focus = tab.focus_handle(cx);
-            window.focus(&focus, cx);
+            focus.focus(window, cx);
         }
 
         let tab_bar_element =
@@ -184,13 +203,13 @@ impl Render for WindowRoot {
             .flex()
             .flex_col()
             .size_full()
-            .bg(rgb(0x1e1e2e))
-            .text_color(rgb(0xcdd6f4))
+            .bg(cx.theme().background)
+            .text_color(cx.theme().foreground)
             .text_sm()
             .child(tab_bar_element)
             .child(toolbar_element)
             .child(
-                div().flex_1().overflow_hidden().child(
+                div().flex_1().min_h_0().overflow_hidden().child(
                     NavStack::new(&self.nav_stack_state).size_full().item(
                         |page, _, _| page.size_full().into_any_element(),
                     ),

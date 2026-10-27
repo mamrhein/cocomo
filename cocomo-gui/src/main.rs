@@ -74,7 +74,9 @@ fn main() -> Result<()> {
         // process alive (with no window) after the user closes the window.
         cx.set_quit_mode(QuitMode::LastWindowClosed);
 
-        // Center the window on screen.
+        // Center the window on screen. The initial window size is a
+        // physical platform default (not layout geometry), so it is a
+        // deliberate `px` exception; all in-window layout uses rem helpers.
         let bounds = Bounds::centered(None, size(px(1200.), px(800.)), cx);
 
         // Create the session manager.
@@ -114,7 +116,11 @@ fn main() -> Result<()> {
                 ..Default::default()
             },
             cx,
-            |_, cx| cx.new(|cx| WindowRoot::new(session_manager.clone(), cx)),
+            |window, cx| {
+                cx.new(|cx| {
+                    WindowRoot::new(session_manager.clone(), window, cx)
+                })
+            },
         )
         .unwrap();
 

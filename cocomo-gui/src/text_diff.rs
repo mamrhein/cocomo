@@ -19,7 +19,9 @@ use cocomo_lib::{
 };
 use gpui::{
     App, Context, Entity, FocusHandle, Render, SharedString, Window, actions,
-    div, prelude::*, px, rgb,
+    component::{ActiveTheme, Theme},
+    div,
+    prelude::*,
 };
 
 // ---------------------------------------------------------------------------
@@ -254,24 +256,31 @@ impl gpui::Focusable for TextDiffState {
 // ---------------------------------------------------------------------------
 
 /// Side-by-side text diff view.
+///
+/// Like the folder compare view, this view renders only its own regions;
+/// window chrome and focus acquisition are owned by
+/// [`crate::tabview::WindowRoot`].
 pub struct TextDiffView {
     /// Handle to the diff state.
     state: Entity<TextDiffState>,
-    /// Whether key bindings have been registered.
-    bindings_registered: bool,
 }
 
 impl TextDiffView {
     /// Create a new text diff view.
     pub fn new(state: Entity<TextDiffState>, cx: &mut Context<Self>) -> Self {
+        // Register key bindings once at construction, not from `render`.
+        cx.bind_keys(vec![
+            gpui::KeyBinding::new("j", SelectNext, None),
+            gpui::KeyBinding::new("k", SelectPrev, None),
+            gpui::KeyBinding::new("down", SelectNext, None),
+            gpui::KeyBinding::new("up", SelectPrev, None),
+        ]);
+
         state.update(cx, |s, cx| {
             s.trigger_auto_load(cx);
         });
 
-        Self {
-            state,
-            bindings_registered: false,
-        }
+        Self { state }
     }
 
     /// Return the focus handle.
@@ -307,31 +316,24 @@ impl TextDiffView {
 impl Render for TextDiffView {
     fn render(
         &mut self,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        if !self.bindings_registered {
-            self.bindings_registered = true;
-            cx.bind_keys(vec![
-                gpui::KeyBinding::new("j", SelectNext, None),
-                gpui::KeyBinding::new("k", SelectPrev, None),
-                gpui::KeyBinding::new("down", SelectNext, None),
-                gpui::KeyBinding::new("up", SelectPrev, None),
-            ]);
-        }
-
-        window.focus(&self.state.read(cx).focus_handle(cx), cx);
-
-        let state = self.state.read(cx);
-        let title = state.title().to_string();
+        // Tracking the focus handle makes this region (with its
+        // `key_context` and `on_action` handlers) the focused region for
+        // keyboard input; `WindowRoot` moves focus here on activation.
+        let focus_handle = self.focus_handle(cx);
+        let theme = cx.theme();
+        let title = self.state.read(cx).title().clone();
 
         div()
             .key_context("TextDiff")
+            .track_focus(&focus_handle)
             .flex()
             .flex_col()
             .size_full()
-            .bg(rgb(0x1e1e2e))
-            .text_color(rgb(0xcdd6f4))
+            .bg(theme.background)
+            .text_color(theme.foreground)
             .text_xs()
             // Title bar.
             .child(
@@ -341,13 +343,13 @@ impl Render for TextDiffView {
                     .justify_between()
                     .px_3()
                     .py_1()
-                    .bg(rgb(0x181825))
+                    .bg(theme.muted)
                     .border_b_1()
-                    .border_color(rgb(0x313244))
-                    .child(SharedString::from(title))
+                    .border_color(theme.border)
+                    .child(div().text_color(theme.foreground).child(title))
                     .child(
                         div()
-                            .text_color(rgb(0x6c7086))
+                            .text_color(theme.muted_foreground)
                             .child(SharedString::from("text diff")),
                     ),
             )
@@ -355,6 +357,7 @@ impl Render for TextDiffView {
             .child(
                 div()
                     .flex_1()
+                    .min_h_0()
                     .overflow_hidden()
                     .p_2()
                     .child(self.render_content(cx)),
@@ -368,6 +371,7 @@ impl TextDiffView {
     /// Render the content area (loading, error, or diff).
     fn render_content(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         // Clone state data to avoid borrow issues.
+        let theme = cx.theme();
         let state = self.state.read(cx);
         let loading = state.is_loading();
         let error = state.error().map(|s| s.to_string());
@@ -386,23 +390,29 @@ impl TextDiffView {
 
         if loading {
             div()
-                .text_color(rgb(0x6c7086))
+                .text_color(theme.muted_foreground)
                 .child(SharedString::from("loading diff..."))
         } else if let Some(err) = error {
             div()
-                .text_color(rgb(0xf38ba8))
+                .text_color(theme.danger)
                 .child(SharedString::from(err))
         } else if !has_diff {
             div()
-                .text_color(rgb(0xa6e3a1))
+                .text_color(theme.success)
                 .child(SharedString::from("files are identical"))
         } else {
             div()
                 .flex()
                 .size_full()
                 .gap_2()
-                .child(Self::render_pane("left", &left_lines, selected_index))
                 .child(Self::render_pane(
+                    theme,
+                    "left",
+                    &left_lines,
+                    selected_index,
+                ))
+                .child(Self::render_pane(
+                    theme,
                     "right",
                     &right_lines,
                     selected_index,
@@ -412,6 +422,7 @@ impl TextDiffView {
 
     /// Render a single pane (left or right) as a simple list.
     fn render_pane(
+        theme: &Theme,
         label: &str,
         lines: &[(usize, String)],
         selected_index: usize,
@@ -420,10 +431,11 @@ impl TextDiffView {
             .flex()
             .flex_col()
             .flex_1()
-            .bg(rgb(0x11111b))
+            .min_w_0()
+            .bg(theme.background)
             .rounded_md()
             .border_1()
-            .border_color(rgb(0x313244))
+            .border_color(theme.border)
             .overflow_hidden()
             // Header.
             .child(
@@ -433,22 +445,25 @@ impl TextDiffView {
                     .justify_between()
                     .px_2()
                     .py_0p5()
-                    .bg(rgb(0x181825))
+                    .bg(theme.muted)
                     .border_b_1()
-                    .border_color(rgb(0x313244))
-                    .child(SharedString::from(label))
-                    .child(SharedString::from(format!(
-                        "{} lines",
-                        lines.len()
-                    ))),
+                    .border_color(theme.border)
+                    .child(
+                        div()
+                            .text_color(theme.foreground)
+                            .child(SharedString::from(label)),
+                    )
+                    .child(div().text_color(theme.muted_foreground).child(
+                        SharedString::from(format!("{} lines", lines.len())),
+                    )),
             )
             // Lines.
-            .child(div().flex_1().overflow_hidden().children(
+            .child(div().flex_1().min_h_0().overflow_hidden().children(
                 lines.iter().enumerate().map(|(i, (line_num, content))| {
                     let bg = if i == selected_index {
-                        rgb(0x313244)
+                        theme.accent
                     } else {
-                        rgb(0x1e1e2e)
+                        theme.background
                     };
                     div()
                         .flex()
@@ -457,10 +472,10 @@ impl TextDiffView {
                         .bg(bg)
                         .child(
                             div()
-                                .w(px(40.))
+                                .w_10()
                                 .text_right()
                                 .px_1()
-                                .text_color(rgb(0x6c7086))
+                                .text_color(theme.muted_foreground)
                                 .font(gpui::Font::default())
                                 .child(SharedString::from(format!(
                                     "{:>4}",
@@ -470,8 +485,10 @@ impl TextDiffView {
                         .child(
                             div()
                                 .flex_1()
+                                .min_w_0()
                                 .px_1()
                                 .overflow_hidden()
+                                .text_color(theme.foreground)
                                 .font(gpui::Font::default())
                                 .child(SharedString::from(content)),
                         )

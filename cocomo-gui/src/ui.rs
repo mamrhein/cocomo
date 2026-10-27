@@ -16,9 +16,12 @@ use std::{ops::Range, path::PathBuf};
 
 use cocomo_lib::{DirEntryStatus, Endpoint};
 use gpui::{
-    Action, App, Context, Entity, FocusHandle, Focusable, FontWeight,
-    KeyBinding, Render, SharedString, UniformListScrollHandle, Window,
-    actions, div, prelude::*, px, rgb, uniform_list,
+    Action, App, Context, Entity, FocusHandle, FontWeight, Hsla, KeyBinding,
+    Render, SharedString, UniformListScrollHandle, Window, actions,
+    component::{ActiveTheme, Theme},
+    div,
+    prelude::*,
+    uniform_list,
 };
 
 use crate::{
@@ -75,6 +78,11 @@ pub fn folder_compare_bindings() -> Vec<KeyBinding> {
 // ---------------------------------------------------------------------------
 
 /// The main folder comparison view.
+///
+/// Renders only its own regions (path header, entry list, status bar).
+/// The window chrome (tab bar, toolbar) and keyboard focus are owned by
+/// [`crate::tabview::WindowRoot`]; this view never requests focus from
+/// `render`.
 pub struct FolderCompareView {
     /// Handle to the application state.
     state: Entity<AppState>,
@@ -82,8 +90,6 @@ pub struct FolderCompareView {
     session_manager: Entity<GuiSessionManager>,
     /// Scroll handle for the entry list.
     scroll_handle: UniformListScrollHandle,
-    /// Whether key bindings have been registered.
-    bindings_registered: bool,
 }
 
 impl FolderCompareView {
@@ -102,7 +108,6 @@ impl FolderCompareView {
             state,
             session_manager,
             scroll_handle: UniformListScrollHandle::new(),
-            bindings_registered: false,
         }
     }
 
@@ -273,31 +278,21 @@ impl Render for FolderCompareView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        // Register key bindings on first render.
-        if !self.bindings_registered {
-            self.bindings_registered = true;
-            cx.bind_keys(folder_compare_bindings());
-        }
-
-        // Focus the app state for keyboard navigation.
-        window.focus(&self.state.focus_handle(cx), cx);
-
-        let tab_bar_element =
-            crate::chrome::tab_bar_element(self.session_manager.clone(), cx);
-        let toolbar_element = crate::chrome::toolbar_element();
+        // Key bindings are registered globally at startup; keyboard focus is
+        // acquired by `WindowRoot` on tab activation. Tracking the focus
+        // handle here makes this region (with its `key_context` and
+        // `on_action` handlers) the focused region for keyboard input.
+        let focus_handle = self.focus_handle(cx);
 
         div()
             .key_context("FolderCompare")
+            .track_focus(&focus_handle)
             .flex()
             .flex_col()
             .size_full()
-            .bg(rgb(0x1e1e2e))
-            .text_color(rgb(0xcdd6f4))
+            .bg(cx.theme().background)
+            .text_color(cx.theme().foreground)
             .text_sm()
-            // Tab bar
-            .child(tab_bar_element)
-            // Toolbar
-            .child(toolbar_element)
             // Header bar
             .child(self.render_header(cx))
             // Main content area
@@ -325,51 +320,61 @@ impl FolderCompareView {
         let state = self.state.read(cx);
         let left_path = state.left().display();
         let right_path = state.right().display();
+        let theme = cx.theme();
 
         div()
             .flex()
             .items_center()
             .justify_between()
+            .gap_2()
             .px_3()
             .py_1()
-            .bg(rgb(0x181825))
+            .bg(theme.muted)
             .border_b_1()
-            .border_color(rgb(0x313244))
+            .border_color(theme.border)
             .child(
                 div()
                     .flex()
+                    .items_center()
                     .gap_2()
+                    .flex_1()
+                    .min_w_0()
                     .child(
                         div()
                             .font_weight(FontWeight(600.))
-                            .text_color(rgb(0x89b4fa))
+                            .text_color(theme.muted_foreground)
                             .child("cocomo"),
                     )
-                    .child(div().text_color(rgb(0xa6adc8)).child("/"))
+                    .child(div().text_color(theme.muted_foreground).child("/"))
                     .child(
                         div()
+                            .flex_1()
+                            .min_w_0()
                             .truncate()
-                            .max_w(px(400.))
-                            .text_color(rgb(0xa6e3a1))
+                            .text_color(theme.foreground)
                             .child(left_path),
                     ),
             )
             .child(
                 div()
                     .flex()
+                    .items_center()
                     .gap_2()
+                    .flex_1()
+                    .min_w_0()
                     .child(
                         div()
+                            .flex_1()
+                            .min_w_0()
                             .truncate()
-                            .max_w(px(400.))
-                            .text_color(rgb(0xf38ba8))
+                            .text_color(theme.foreground)
                             .child(right_path),
                     )
-                    .child(div().text_color(rgb(0xa6adc8)).child("/"))
+                    .child(div().text_color(theme.muted_foreground).child("/"))
                     .child(
                         div()
                             .font_weight(FontWeight(600.))
-                            .text_color(rgb(0x89b4fa))
+                            .text_color(theme.muted_foreground)
                             .child("compare"),
                     ),
             )
@@ -384,6 +389,7 @@ impl FolderCompareView {
         let state = self.state.read(cx);
         let entry_count = state.entry_count();
         let is_loading = state.is_loading();
+        let theme = cx.theme();
 
         // Clone data needed inside the closure.
         let state_weak = self.state.downgrade();
@@ -392,18 +398,20 @@ impl FolderCompareView {
         div()
             .flex()
             .flex_1()
+            .min_h_0()
             .overflow_hidden()
             .p_1()
             .rounded_md()
             .border_1()
-            .border_color(rgb(0x313244))
-            .bg(rgb(0x1e1e2e))
+            .border_color(theme.border)
+            .bg(theme.background)
             // Column headers
-            .child(render_column_headers())
+            .child(render_column_headers(theme))
             // Entry list
             .child(
                 div()
                     .flex_1()
+                    .min_h_0()
                     .overflow_hidden()
                     .when(is_loading, |this| {
                         this.child(
@@ -412,7 +420,7 @@ impl FolderCompareView {
                                 .flex()
                                 .items_center()
                                 .justify_center()
-                                .text_color(rgb(0x6c7086))
+                                .text_color(theme.muted_foreground)
                                 .child("Loading comparison..."),
                         )
                     })
@@ -426,6 +434,7 @@ impl FolderCompareView {
                                       app: &mut App| {
                                     let mut items: Vec<gpui::AnyElement> =
                                         Vec::with_capacity(range.end - range.start);
+                                    let theme = app.theme();
                                     if let Some(state_entity) =
                                         state_weak.upgrade()
                                     {
@@ -442,14 +451,13 @@ impl FolderCompareView {
                                                         .entries
                                                         .get(i)
                                                 {
-                                                    use gpui::IntoElement;
                                                     items.push(
                                                         EntryRowData::new(
                                                             i,
                                                             entry,
                                                             i == selected,
                                                         )
-                                                        .render_row()
+                                                        .render_row(theme)
                                                         .into_any_element(),
                                                     );
                                                 }
@@ -467,11 +475,9 @@ impl FolderCompareView {
     }
 
     /// Render the status bar at the bottom.
-    fn render_status_bar(
-        &mut self,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    fn render_status_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let state = self.state.read(cx);
+        let theme = cx.theme();
 
         let status_text: SharedString = if state.is_loading() {
             SharedString::from("Loading comparison...")
@@ -491,13 +497,13 @@ impl FolderCompareView {
         };
 
         let text_color = if state.is_loading() {
-            rgb(0x89b4fa)
+            theme.muted_foreground
         } else if state.error().is_some() {
-            rgb(0xf38ba8)
+            theme.danger
         } else if state.comparison().is_some() {
-            rgb(0xa6adc8)
+            theme.secondary_foreground
         } else {
-            rgb(0x6c7086)
+            theme.muted_foreground
         };
 
         div()
@@ -506,39 +512,44 @@ impl FolderCompareView {
             .items_center()
             .px_3()
             .py_0p5()
-            .bg(rgb(0x181825))
+            .bg(theme.status_bar)
             .border_t_1()
-            .border_color(rgb(0x313244))
+            .border_color(theme.status_bar_border)
             .text_xs()
             .child(div().text_color(text_color).child(status_text))
             .child(
                 div()
-                    .text_color(rgb(0x6c7086))
+                    .text_color(theme.muted_foreground)
                     .child("j/k navigate  Enter open  Backspace up  r reload"),
             )
     }
 }
 
 /// Render the column header row.
-fn render_column_headers() -> impl IntoElement {
+///
+/// The fixed lane widths are shared with [`EntryRowData::render_row`] so
+/// headers and values stay aligned; they are functional data lanes, not
+/// decorative sizes.
+fn render_column_headers(theme: &Theme) -> impl IntoElement {
     div()
         .flex()
         .items_center()
+        .gap_1()
         .px_2()
         .py_1()
-        .bg(rgb(0x181825))
+        .bg(theme.muted)
         .border_b_1()
-        .border_color(rgb(0x313244))
+        .border_color(theme.border)
         .text_xs()
-        .text_color(rgb(0x6c7086))
+        .text_color(theme.muted_foreground)
         .font_weight(FontWeight(600.))
-        .child(div().w(px(16.)).child("sel"))
-        .child(div().w(px(16.)).child("st"))
-        .child(div().w(px(16.)).child("ty"))
+        .child(div().w_4().child("sel"))
+        .child(div().w_4().child("st"))
+        .child(div().w_4().child("ty"))
         .child(div().flex_1().child("name"))
-        .child(div().w(px(80.)).child("size"))
-        .child(div().w(px(60.)).child("left"))
-        .child(div().w(px(60.)).child("right"))
+        .child(div().w_20().child("size"))
+        .child(div().w_16().child("left"))
+        .child(div().w_16().child("right"))
 }
 
 // ---------------------------------------------------------------------------
@@ -606,12 +617,12 @@ impl EntryRowData {
 
 impl EntryRowData {
     /// Render a row as a div (for use in uniform_list).
-    fn render_row(self) -> impl IntoElement {
+    fn render_row(self, theme: &Theme) -> impl IntoElement {
         let EntryRowData {
             index,
             name,
             status,
-            is_dir: _is_dir,
+            is_dir,
             is_selected,
             left_size,
             right_size,
@@ -621,17 +632,16 @@ impl EntryRowData {
             right_path: _right_path,
         } = self;
 
-        let status_color = status_color(&status);
         let status_char = status_indicator(&status);
-        let dir_icon = if _is_dir { "D" } else { "F" };
+        let dir_icon = if is_dir { "D" } else { "F" };
         let selection_indicator = if is_selected { "► " } else { "  " };
 
         let bg_color = if is_selected {
-            rgb(0x313244)
+            theme.accent
         } else if index % 2 == 0 {
-            rgb(0x1e1e2e)
+            theme.background
         } else {
-            rgb(0x1a1a28)
+            theme.muted
         };
 
         let size_display = if has_left && has_right {
@@ -660,71 +670,110 @@ impl EntryRowData {
             .cursor_pointer()
             .child(
                 div()
-                    .w(px(16.))
-                    .text_color(rgb(0x89b4fa))
+                    .w_4()
+                    .text_color(theme.accent_foreground)
                     .child(selection_indicator),
             )
             .child(
                 div()
-                    .w(px(16.))
-                    .text_color(status_color)
+                    .w_4()
+                    .text_color(status_role(&status).color(theme))
                     .font_weight(FontWeight(700.))
                     .child(status_char),
             )
-            .child(div().w(px(16.)).text_color(rgb(0x6c7086)).child(dir_icon))
+            .child(
+                div()
+                    .w_4()
+                    .text_color(theme.muted_foreground)
+                    .child(dir_icon),
+            )
             .child(
                 div()
                     .flex_1()
+                    .min_w_0()
                     .overflow_hidden()
                     .whitespace_nowrap()
                     .text_color(if has_left || has_right {
-                        rgb(0xcdd6f4)
+                        theme.foreground
                     } else {
-                        rgb(0x6c7086)
+                        theme.muted_foreground
                     })
                     .child(name),
             )
             .child(
                 div()
-                    .w(px(80.))
-                    .text_color(rgb(0x6c7086))
+                    .w_20()
+                    .text_color(theme.muted_foreground)
                     .child(size_display),
             )
             .child(
                 div()
-                    .w(px(60.))
+                    .w_16()
                     .text_color(if has_left {
-                        rgb(0xa6e3a1)
+                        theme.foreground
                     } else {
-                        rgb(0x6c7086)
+                        theme.muted_foreground
                     })
                     .child(if has_left { "yes" } else { "—" }),
             )
             .child(
                 div()
-                    .w(px(60.))
+                    .w_16()
                     .text_color(if has_right {
-                        rgb(0xf38ba8)
+                        theme.foreground
                     } else {
-                        rgb(0x6c7086)
+                        theme.muted_foreground
                     })
                     .child(if has_right { "yes" } else { "—" }),
             )
     }
 }
 
-/// Get the status color for an entry.
-fn status_color(status: &DirEntryStatus) -> gpui::Hsla {
+/// Semantic color role for a directory entry status.
+///
+/// Statuses map onto a small set of semantic roles instead of a fixed RGB
+/// palette, so entry colors follow the active theme (light, dark, and
+/// custom). The glyph from [`status_indicator`] remains as a secondary,
+/// color-independent cue.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StatusRole {
+    /// Entry matches on both sides.
+    Success,
+    /// Entry differs in a way that may still be benign.
+    Warning,
+    /// Entry differs or cannot be reconciled.
+    Danger,
+    /// Entry exists on only one side, or needs a three-way decision.
+    Info,
+}
+
+impl StatusRole {
+    /// Resolve this role to a color from the active theme.
+    fn color(self, theme: &Theme) -> Hsla {
+        match self {
+            Self::Success => theme.success,
+            Self::Warning => theme.warning,
+            Self::Danger => theme.danger,
+            Self::Info => theme.info,
+        }
+    }
+}
+
+/// Map an entry status to its semantic color role.
+fn status_role(status: &DirEntryStatus) -> StatusRole {
     match status {
-        DirEntryStatus::Same | DirEntryStatus::SameBinary => gpui::green(),
-        DirEntryStatus::Similar => rgb(0xFFAA00).into(),
-        DirEntryStatus::Different => rgb(0xFF4444).into(),
-        DirEntryStatus::LeftOnly => rgb(0x44AAFF).into(),
-        DirEntryStatus::RightOnly => rgb(0xFF6644).into(),
-        DirEntryStatus::CenterOnly => rgb(0xAA44FF).into(),
-        DirEntryStatus::Mergeable => rgb(0x44FFAA).into(),
-        DirEntryStatus::Conflict => rgb(0xFF0000).into(),
-        DirEntryStatus::IdenticalNameDifferentType => rgb(0xFF8800).into(),
+        DirEntryStatus::Same | DirEntryStatus::SameBinary => {
+            StatusRole::Success
+        }
+        DirEntryStatus::Similar
+        | DirEntryStatus::IdenticalNameDifferentType => StatusRole::Warning,
+        DirEntryStatus::Different | DirEntryStatus::Conflict => {
+            StatusRole::Danger
+        }
+        DirEntryStatus::LeftOnly
+        | DirEntryStatus::RightOnly
+        | DirEntryStatus::CenterOnly
+        | DirEntryStatus::Mergeable => StatusRole::Info,
     }
 }
 
@@ -753,5 +802,33 @@ fn format_size(bytes: u64) -> String {
         format!("{:.1}M", bytes as f64 / (1024.0 * 1024.0))
     } else {
         format!("{:.1}G", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn status_role_maps_every_status() {
+        assert_eq!(status_role(&DirEntryStatus::Same), StatusRole::Success);
+        assert_eq!(
+            status_role(&DirEntryStatus::SameBinary),
+            StatusRole::Success
+        );
+        assert_eq!(status_role(&DirEntryStatus::Similar), StatusRole::Warning);
+        assert_eq!(
+            status_role(&DirEntryStatus::IdenticalNameDifferentType),
+            StatusRole::Warning
+        );
+        assert_eq!(
+            status_role(&DirEntryStatus::Different),
+            StatusRole::Danger
+        );
+        assert_eq!(status_role(&DirEntryStatus::Conflict), StatusRole::Danger);
+        assert_eq!(status_role(&DirEntryStatus::LeftOnly), StatusRole::Info);
+        assert_eq!(status_role(&DirEntryStatus::RightOnly), StatusRole::Info);
+        assert_eq!(status_role(&DirEntryStatus::CenterOnly), StatusRole::Info);
+        assert_eq!(status_role(&DirEntryStatus::Mergeable), StatusRole::Info);
     }
 }
