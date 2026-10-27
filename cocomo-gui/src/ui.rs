@@ -16,9 +16,9 @@ use std::{ops::Range, path::PathBuf};
 
 use cocomo_lib::{DirEntryStatus, Endpoint};
 use gpui::{
-    App, Context, Entity, FocusHandle, Focusable, FontWeight, KeyBinding,
-    Render, SharedString, UniformListScrollHandle, Window, actions, div,
-    prelude::*, px, rgb, uniform_list,
+    Action, App, Context, Entity, FocusHandle, Focusable, FontWeight,
+    KeyBinding, Render, SharedString, UniformListScrollHandle, Window,
+    actions, div, prelude::*, px, rgb, uniform_list,
 };
 
 use crate::{
@@ -37,73 +37,23 @@ actions!(
 );
 
 /// Action to open a text diff for a file in a new tab.
+#[derive(Action, Clone, Debug, PartialEq)]
+#[action(namespace = folder_compare, no_json)]
 pub struct OpenFileDiff {
     /// Left file endpoint.
     pub left_path: Endpoint,
     /// Right file endpoint (optional).
     pub right_path: Option<Endpoint>,
 }
-impl gpui::Action for OpenFileDiff {
-    fn boxed_clone(&self) -> Box<dyn gpui::Action> {
-        Box::new(self.clone())
-    }
-    fn partial_eq(&self, _other: &dyn gpui::Action) -> bool {
-        false
-    }
-    fn name(&self) -> &'static str {
-        "OpenFileDiff"
-    }
-    fn name_for_type() -> &'static str {
-        "OpenFileDiff"
-    }
-    fn build(
-        _value: gpui::private::serde_json::Value,
-    ) -> anyhow::Result<Box<dyn gpui::Action>> {
-        Err(anyhow::anyhow!("OpenFileDiff cannot be built from JSON"))
-    }
-}
-impl Clone for OpenFileDiff {
-    fn clone(&self) -> Self {
-        Self {
-            left_path: self.left_path.clone(),
-            right_path: self.right_path.clone(),
-        }
-    }
-}
 
 /// Action to open a directory compare in a new tab.
+#[derive(Action, Clone, Debug, PartialEq)]
+#[action(namespace = folder_compare, no_json)]
 pub struct OpenDirDiff {
     /// Left directory endpoint.
     pub left_path: Endpoint,
     /// Right directory endpoint.
     pub right_path: Endpoint,
-}
-impl gpui::Action for OpenDirDiff {
-    fn boxed_clone(&self) -> Box<dyn gpui::Action> {
-        Box::new(self.clone())
-    }
-    fn partial_eq(&self, _other: &dyn gpui::Action) -> bool {
-        false
-    }
-    fn name(&self) -> &'static str {
-        "OpenDirDiff"
-    }
-    fn name_for_type() -> &'static str {
-        "OpenDirDiff"
-    }
-    fn build(
-        _value: gpui::private::serde_json::Value,
-    ) -> anyhow::Result<Box<dyn gpui::Action>> {
-        Err(anyhow::anyhow!("OpenDirDiff cannot be built from JSON"))
-    }
-}
-impl Clone for OpenDirDiff {
-    fn clone(&self) -> Self {
-        Self {
-            left_path: self.left_path.clone(),
-            right_path: self.right_path.clone(),
-        }
-    }
 }
 // ---------------------------------------------------------------------------
 
@@ -202,7 +152,9 @@ impl FolderCompareView {
         // the endpoint path rather than used as the endpoint path directly
         // (which would drop the root and resolve to a non-existent location).
         let left_sub = match &entry.left {
-            Some(left_info) => self.state.read(cx).left().join(&left_info.path),
+            Some(left_info) => {
+                self.state.read(cx).left().join(&left_info.path)
+            }
             None => self.state.read(cx).left().join(&entry.name),
         };
         let right_sub = match &entry.right {
