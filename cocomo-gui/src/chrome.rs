@@ -14,8 +14,10 @@
 
 use gpui::{
     App, Entity, IntoElement, Window,
+    assets::IconName,
     base::Selectable,
     component::{
+        Sizable as _,
         button::{Button, ButtonVariants as _},
         tab::{Tab, TabBar},
         toolbar::{Toolbar, ToolbarGroup},
@@ -53,9 +55,14 @@ pub fn tab_bar_element(
         .enumerate()
         .map(|(i, (_id, name))| {
             let mgr_close = session_manager.clone();
+            // Icon-only control: needs an accessible name and a tooltip
+            // that clarifies the scope (closes the tab, not the window).
             let close_btn = Button::new(("close_tab", i))
-                .label("×")
-                .secondary()
+                .icon(IconName::Close)
+                .ghost()
+                .small()
+                .tooltip("Close tab")
+                .accessibility_label("Close tab")
                 .on_click(move |_, _, cx| {
                     mgr_close.update(cx, |m, cx| {
                         m.close_session(i, cx);
@@ -69,13 +76,17 @@ pub fn tab_bar_element(
         .collect();
 
     let mgr_new = session_manager.clone();
-    let new_btn = Button::new("new_tab_btn").label("+").secondary().on_click(
-        move |_, _, cx| {
+    let new_btn = Button::new("new_tab_btn")
+        .icon(IconName::Plus)
+        .ghost()
+        .small()
+        .tooltip("New compare")
+        .accessibility_label("New compare")
+        .on_click(move |_, _, cx| {
             mgr_new.update(cx, |m, cx| {
                 m.add_new_folder_tab(cx);
             });
-        },
-    );
+        });
 
     TabBar::new("session-tabs")
         .selected_index(active_index)
@@ -87,35 +98,45 @@ pub fn tab_bar_element(
 /// Build the toolbar element using `gpui-component`'s [`Toolbar`].
 ///
 /// Contains action buttons for New Compare, Save, Reload, and Close,
-/// each dispatching the corresponding application action.
+/// each dispatching the corresponding application action. The toolbar
+/// group renders its buttons with the quiet ghost treatment; every
+/// icon-only button carries a tooltip and an accessible name.
 pub fn toolbar_element() -> impl IntoElement {
     Toolbar::new("main-toolbar").child(
         ToolbarGroup::new("toolbar-actions")
-            .child(Button::new("toolbar_new").label("+").secondary().on_click(
-                |_, _, cx| {
-                    cx.dispatch_action(&NewCompare);
-                },
-            ))
+            .label("Session commands")
+            .child(
+                Button::new("toolbar_new")
+                    .icon(IconName::Plus)
+                    .tooltip("New compare")
+                    .accessibility_label("New compare")
+                    .on_click(|_, _, cx| {
+                        cx.dispatch_action(&NewCompare);
+                    }),
+            )
             .child(
                 Button::new("toolbar_save")
-                    .label("💾")
-                    .secondary()
+                    .icon(IconName::Save)
+                    .tooltip("Save session")
+                    .accessibility_label("Save session")
                     .on_click(|_, _, cx| {
                         cx.dispatch_action(&SaveSession);
                     }),
             )
             .child(
                 Button::new("toolbar_reload")
-                    .label("↻")
-                    .secondary()
+                    .icon(IconName::RefreshCw)
+                    .tooltip("Reload comparison")
+                    .accessibility_label("Reload comparison")
                     .on_click(|_, _, cx| {
                         cx.dispatch_action(&ReloadCompare);
                     }),
             )
             .child(
                 Button::new("toolbar_close")
-                    .label("✕")
-                    .secondary()
+                    .icon(IconName::Close)
+                    .tooltip("Close session")
+                    .accessibility_label("Close session")
                     .on_click(|_, _, cx| {
                         cx.dispatch_action(&CloseSession);
                     }),

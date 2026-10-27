@@ -286,7 +286,6 @@ impl AppState {
     }
 
     /// Select a row by index.
-    #[allow(dead_code)]
     pub fn select_row(&mut self, index: usize, cx: &mut Context<Self>) {
         if let Some(comparison) = &self.comparison
             && index < comparison.entries.len()
