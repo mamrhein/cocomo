@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  viewBox="0 0 512 512" width="512" height="512">
+  <style>
+    svg { --newer: "red"; --older: "grey"; }
+  </style>
+  <!-- Left column: newer circles -->
+  <circle cx="160" cy="112" r="64" style="fill: var(--newer)"/>
+  <circle cx="160" cy="256" r="64" style="fill: var(--newer)"/>
+  <circle cx="160" cy="400" r="64" style="fill: var(--newer)"/>
+  <!-- Right column: older circles -->
+  <circle cx="352" cy="112" r="64" style="fill: var(--older)"/>
+  <circle cx="352" cy="256" r="64" style="fill: var(--older)"/>
+  <circle cx="352" cy="400" r="64" style="fill: var(--older)"/>
+</svg>

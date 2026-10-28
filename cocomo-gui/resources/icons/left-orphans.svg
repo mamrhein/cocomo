@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  viewBox="0 0 512 512" width="512" height="512">
+  <style>
+    svg { --orphan: "blue"; }
+  </style>
+  <!-- Left column: newer circles -->
+  <circle cx="160" cy="112" r="64" style="fill: var(--orphan)"/>
+  <circle cx="160" cy="256" r="64" style="fill: var(--orphan)"/>
+  <circle cx="160" cy="400" r="64" style="fill: var(--orphan)"/>
+</svg>
