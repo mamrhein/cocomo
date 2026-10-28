@@ -152,6 +152,40 @@ pub(crate) fn App(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let mut exit = hooks.use_exit();
     let theme = hooks.use_component_theme::<CocomoTheme>();
 
+    // The framework's automatic `Ctrl+C` exit would end the session
+    // without warning, so it is disabled in favour of a double-press
+    // confirmation. `SystemContext` is shared by the whole tree; release
+    // its borrow before registering handlers or rendering children.
+    {
+        let mut system = hooks.use_context_mut::<SystemContext>();
+        system.set_auto_quit_on_ctrl_c(false);
+    }
+    // First press arms the confirmation prompt, the second one exits.
+    // `Global` + `High` runs before every input layer, so the confirming
+    // press quits even while a modal or an open dropdown owns input.
+    {
+        let mut quit_exit = hooks.use_exit();
+        hooks.use_event_handler(
+            EventScope::Global,
+            EventPriority::High,
+            move |event| {
+                let Event::Key(key) = event else {
+                    return EventResult::Ignored;
+                };
+                if key.kind != KeyEventKind::Press
+                    || key.code != KeyCode::Char('c')
+                    || !key.modifiers.contains(KeyModifiers::CONTROL)
+                {
+                    return EventResult::Ignored;
+                }
+                if controller::request_quit() {
+                    quit_exit();
+                }
+                EventResult::Consumed
+            },
+        );
+    }
+
     // Titles with their accelerator letter underlined. The dropdown
     // geometry and the click hit-test are derived from these very lines, so
     // bar, dropdown and mouse mapping cannot drift apart.
@@ -326,6 +360,7 @@ pub(crate) fn App(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // read guard across element! rendering).
     let error_message = app.error_message.clone();
     let show_shortcuts = app.show_shortcuts;
+    let quit_armed = app.quit_armed;
 
     // Build session tab titles.
     let tab_titles: Vec<Line<'static>> = app
@@ -366,6 +401,24 @@ pub(crate) fn App(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 close_hint: Line::from("Enter / Esc").centered(),
                 on_close: move |_: ()| {
                     controller::dismiss_error();
+                },
+            )
+            // Double-press `Ctrl+C` confirmation: the shell's `Global`
+            // handler armed the prompt on the first press; a second press
+            // exits (the handler runs above this modal's layer), while
+            // `Esc`, `Enter` or a click dismiss it without quitting.
+            AlertModal(
+                open: quit_armed,
+                title: Line::from(" Quit? "),
+                message: "Press Ctrl+C again to quit.",
+                close_hint: hint_line(&[
+                    ("Ctrl+C", "quit"),
+                    ("Esc / Enter", "cancel"),
+                ])
+                .style(theme.dim)
+                .centered(),
+                on_close: move |_: ()| {
+                    controller::cancel_quit();
                 },
             )
             // Copy/delete confirmation, driven by the active session's
@@ -491,6 +544,24 @@ mod render_tests {
         assert!(
             text.contains("Welcome") && text.contains('└'),
             "welcome panel not rendered at full height:\n{text}"
+        );
+    }
+
+    #[test]
+    fn quit_armed_renders_the_confirmation_prompt() {
+        let mut app = dir_session_state();
+        app.quit_armed = true;
+        let text = render(app);
+        assert!(
+            text.contains("Quit?")
+                && text.contains("Press Ctrl+C again to quit"),
+            "quit prompt missing while a Ctrl+C press is pending:\n{text}"
+        );
+        // Without a pending press the prompt is gone.
+        let calm = render(dir_session_state());
+        assert!(
+            !calm.contains("Press Ctrl+C again to quit"),
+            "quit prompt rendered while disarmed:\n{calm}"
         );
     }
 

@@ -1461,6 +1461,25 @@ pub(crate) fn dismiss_error() {
     APP_STATE.state().write().error_message = None;
 }
 
+/// Handle a `Ctrl+C` press: arm on the first one, quit on the second.
+///
+/// Returns `true` when the caller must exit the app (the confirming
+/// press); the first press only sets [`AppState::quit_armed`], which makes
+/// the shell render its confirmation prompt. The flag is cleared either
+/// way, so a dismissed prompt starts the next `Ctrl+C` from scratch.
+pub(crate) fn request_quit() -> bool {
+    let state = APP_STATE.state();
+    let mut app = state.write();
+    let quit = app.quit_armed;
+    app.quit_armed = !quit;
+    quit
+}
+
+/// Dismiss the quit confirmation prompt without quitting.
+pub(crate) fn cancel_quit() {
+    APP_STATE.state().write().quit_armed = false;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1784,6 +1803,29 @@ mod tests {
         toggle_shortcuts();
         close_shortcuts();
         assert!(!APP_STATE.state().read().show_shortcuts);
+    }
+
+    #[test]
+    fn request_quit_arms_on_the_first_press_and_quits_on_the_second() {
+        APP_STATE.set(AppState::new());
+        // The first press only arms the confirmation prompt.
+        assert!(!request_quit());
+        assert!(APP_STATE.state().read().quit_armed);
+        // The confirming press reports the quit and clears the flag.
+        assert!(request_quit());
+        assert!(!APP_STATE.state().read().quit_armed);
+    }
+
+    #[test]
+    fn cancel_quit_disarms_a_pending_press() {
+        APP_STATE.set(AppState::new());
+        assert!(!request_quit());
+        cancel_quit();
+        assert!(!APP_STATE.state().read().quit_armed);
+        // After a cancel, `Ctrl+C` starts over: it arms again instead of
+        // quitting.
+        assert!(!request_quit());
+        cancel_quit();
     }
 
     #[test]

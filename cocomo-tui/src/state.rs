@@ -1151,6 +1151,14 @@ pub struct AppState {
     /// on work it cannot cancel. The comparison views render
     /// [`AppState::busy_label`] as a spinner in their status bar.
     pub pending_tasks: Vec<&'static str>,
+    /// Whether a `Ctrl+C` press is awaiting its confirming second press.
+    ///
+    /// The framework's automatic `Ctrl+C` exit is disabled; the App shell
+    /// arms this flag on the first press and quits on the second (see
+    /// `controller::request_quit`). While it is set, the shell renders a
+    /// confirmation prompt that `Esc`, `Enter` or a click dismiss (see
+    /// `controller::cancel_quit`).
+    pub quit_armed: bool,
 }
 
 /// Global reactive application state, subscribed to via
@@ -1175,6 +1183,7 @@ impl AppState {
             show_shortcuts: false,
             error_message: None,
             pending_tasks: Vec::new(),
+            quit_armed: false,
         }
     }
 
