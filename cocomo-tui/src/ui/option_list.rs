@@ -137,7 +137,8 @@ impl<T> Props for OptionListProps<T> where T: Clone + Send + Sync + 'static {}
 /// Decision list shared by the confirmation dialogs.
 ///
 /// Each row renders as `▸ [key] label … hint`: the selection pointer, the
-/// bracketed accelerator in the theme's title style, the label padded to
+/// bracketed accelerator in the theme's title style (its key letter also
+/// underlined, so it survives a monochrome terminal), the label padded to
 /// the widest one, and the hint right-aligned in a shared dim column. The
 /// row the keyboard cursor addresses carries the theme's highlight style,
 /// the row under the pointer the hover style, and a disabled row is dimmed
@@ -466,9 +467,15 @@ fn option_row<T>(
     // the labels of a mixed list stay aligned.
     match item.key {
         Some(key) => {
-            let cell = format!("[{key}]");
-            let pad = gap(key_width + 2, cell.chars().count());
-            spans.push(Span::styled(format!("{cell}{pad}"), theme.title));
+            // The key letter is underlined on top of the title color, so
+            // the accelerator also reads on terminals without color.
+            let pad = gap(key_width, key.chars().count());
+            spans.push(Span::styled("[", theme.title));
+            spans.push(Span::styled(
+                (*key).to_string(),
+                theme.title.add_modifier(Modifier::UNDERLINED),
+            ));
+            spans.push(Span::styled(format!("]{pad}"), theme.title));
         }
         None => spans.push(Span::raw(" ".repeat(usize::from(key_width) + 2))),
     }
@@ -604,8 +611,44 @@ mod tests {
         assert!(
             row.spans
                 .iter()
-                .any(|s| &*s.content == "[l]  " && s.style == theme.title),
+                .any(|s| &*s.content == "[" && s.style == theme.title)
+                && row.spans.iter().any(|s| {
+                    &*s.content == "l"
+                        && s.style
+                            == theme.title.add_modifier(Modifier::UNDERLINED)
+                })
+                && row
+                    .spans
+                    .iter()
+                    .any(|s| &*s.content == "]  " && s.style == theme.title),
             "key code not rendered in the title style: {row:?}"
+        );
+    }
+
+    #[test]
+    fn option_row_underlines_the_key_letter() {
+        // The underline is the color-free cue for the accelerator, so it
+        // must sit on the key letter itself, not on the brackets.
+        let item = OptionItem::new(0, "left").key("l");
+        let theme = CocomoTheme::default();
+        let row = option_row(&item, false, false, 3, 6, 0, &theme);
+        let key_span = row
+            .spans
+            .iter()
+            .find(|s| s.content.starts_with('l'))
+            .unwrap_or_else(|| panic!("no key span in {row:?}"));
+        assert!(
+            key_span.style.add_modifier.contains(Modifier::UNDERLINED),
+            "key letter not underlined: {row:?}"
+        );
+        let bracket = row
+            .spans
+            .iter()
+            .find(|s| s.content.starts_with('['))
+            .expect("no opening bracket");
+        assert!(
+            !bracket.style.add_modifier.contains(Modifier::UNDERLINED),
+            "bracket must not be underlined: {row:?}"
         );
     }
 

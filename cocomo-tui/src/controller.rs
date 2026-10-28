@@ -1345,10 +1345,10 @@ pub(crate) fn pick_menu_item(item: usize) -> MenuOutcome {
 /// Execute the highlighted dropdown item and close the dropdown.
 ///
 /// Quit and close-tab are reported to the caller as [`MenuOutcome`];
-/// help needs no session, and directory-only items are skipped when a
-/// text session is active. Everything else runs through the shared
-/// [`keys::run_menu_command`] dispatch, so menu and keyboard cannot
-/// drift apart.
+/// help and the shortcut overlay need no session, and directory-only
+/// items are skipped when a text session is active. Everything else runs
+/// through the shared [`keys::run_menu_command`] dispatch, so menu and
+/// keyboard cannot drift apart.
 pub(crate) fn confirm_menu_item() -> MenuOutcome {
     let action = {
         let state = APP_STATE.state();
@@ -1364,6 +1364,10 @@ pub(crate) fn confirm_menu_item() -> MenuOutcome {
             Cmd::CloseTab => return MenuOutcome::CloseTab,
             Cmd::ToggleHelp => {
                 app.show_help = !app.show_help;
+                return MenuOutcome::Handled;
+            }
+            Cmd::ToggleShortcuts => {
+                app.show_shortcuts = !app.show_shortcuts;
                 return MenuOutcome::Handled;
             }
             cmd => {
@@ -1434,9 +1438,46 @@ pub(crate) fn toggle_help() {
     app.show_help = !app.show_help;
 }
 
+/// Toggle the shortcut overlay (`F1`).
+///
+/// Opening the overlay dismisses an open menu dropdown so the two
+/// blocking overlays never compete for input or paint over each other.
+pub(crate) fn toggle_shortcuts() {
+    let state = APP_STATE.state();
+    let mut app = state.write();
+    app.show_shortcuts = !app.show_shortcuts;
+    if app.show_shortcuts {
+        app.menu = None;
+    }
+}
+
+/// Dismiss the shortcut overlay (its `Esc`/`F1` close keys or a click).
+pub(crate) fn close_shortcuts() {
+    APP_STATE.state().write().show_shortcuts = false;
+}
+
 /// Dismiss the pending top-level error message.
 pub(crate) fn dismiss_error() {
     APP_STATE.state().write().error_message = None;
+}
+
+/// Handle a `Ctrl+C` press: arm on the first one, quit on the second.
+///
+/// Returns `true` when the caller must exit the app (the confirming
+/// press); the first press only sets [`AppState::quit_armed`], which makes
+/// the shell render its confirmation prompt. The flag is cleared either
+/// way, so a dismissed prompt starts the next `Ctrl+C` from scratch.
+pub(crate) fn request_quit() -> bool {
+    let state = APP_STATE.state();
+    let mut app = state.write();
+    let quit = app.quit_armed;
+    app.quit_armed = !quit;
+    quit
+}
+
+/// Dismiss the quit confirmation prompt without quitting.
+pub(crate) fn cancel_quit() {
+    APP_STATE.state().write().quit_armed = false;
 }
 
 #[cfg(test)]
@@ -1728,6 +1769,63 @@ mod tests {
         let app = state.read();
         assert!(app.show_help);
         assert_eq!(app.menu, None);
+    }
+
+    #[test]
+    fn confirm_menu_item_opens_shortcuts_without_a_session() {
+        APP_STATE.set(AppState::new());
+        open_menu(menu_index("Help"));
+        // The second Help item opens the shortcut overlay.
+        move_menu_item(1);
+        assert_eq!(confirm_menu_item(), MenuOutcome::Handled);
+        let state = APP_STATE.state();
+        let app = state.read();
+        assert!(app.show_shortcuts);
+        assert_eq!(app.menu, None);
+    }
+
+    #[test]
+    fn toggle_shortcuts_dismisses_the_open_dropdown() {
+        APP_STATE.set(AppState::new());
+        open_menu(menu_index("Help"));
+        toggle_shortcuts();
+        {
+            let state = APP_STATE.state();
+            let app = state.read();
+            assert!(app.show_shortcuts);
+            // The dropdown makes room for the overlay's exclusive layer.
+            assert_eq!(app.menu, None);
+        }
+        // `F1` again closes the overlay; the in-modal close key routes
+        // through `close_shortcuts`, which is idempotent.
+        toggle_shortcuts();
+        assert!(!APP_STATE.state().read().show_shortcuts);
+        toggle_shortcuts();
+        close_shortcuts();
+        assert!(!APP_STATE.state().read().show_shortcuts);
+    }
+
+    #[test]
+    fn request_quit_arms_on_the_first_press_and_quits_on_the_second() {
+        APP_STATE.set(AppState::new());
+        // The first press only arms the confirmation prompt.
+        assert!(!request_quit());
+        assert!(APP_STATE.state().read().quit_armed);
+        // The confirming press reports the quit and clears the flag.
+        assert!(request_quit());
+        assert!(!APP_STATE.state().read().quit_armed);
+    }
+
+    #[test]
+    fn cancel_quit_disarms_a_pending_press() {
+        APP_STATE.set(AppState::new());
+        assert!(!request_quit());
+        cancel_quit();
+        assert!(!APP_STATE.state().read().quit_armed);
+        // After a cancel, `Ctrl+C` starts over: it arms again instead of
+        // quitting.
+        assert!(!request_quit());
+        cancel_quit();
     }
 
     #[test]

@@ -234,11 +234,18 @@ pub const MENUS: &[MenuDef] = &[
     MenuDef {
         title: "Help",
         accel: 'h',
-        items: &[MenuItemDef {
-            label: "toggle help bar",
-            cmd: Cmd::ToggleHelp,
-            requires_dir: false,
-        }],
+        items: &[
+            MenuItemDef {
+                label: "toggle help bar",
+                cmd: Cmd::ToggleHelp,
+                requires_dir: false,
+            },
+            MenuItemDef {
+                label: "keyboard shortcuts",
+                cmd: Cmd::ToggleShortcuts,
+                requires_dir: false,
+            },
+        ],
     },
 ];
 
@@ -344,6 +351,20 @@ mod tests {
             assert!(
                 sync.items.iter().any(|i| i.cmd == Cmd::SetSyncOp(op)),
                 "Sync menu misses the operation {op:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn help_menu_lists_both_help_entry_points() {
+        let help = MENUS
+            .iter()
+            .find(|m| m.title == "Help")
+            .expect("no Help menu");
+        for cmd in [Cmd::ToggleHelp, Cmd::ToggleShortcuts] {
+            assert!(
+                help.items.iter().any(|i| i.cmd == cmd),
+                "Help menu misses the {cmd:?} item",
             );
         }
     }

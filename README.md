@@ -54,3 +54,19 @@ instead of a key event with the Alt modifier, so the accelerator may not
 reach the app there. Fallbacks: click a menu title, or use `←`/`→` to
 select a title, `j`/`k` and `Enter` to navigate and confirm a menu, and
 `Esc` to dismiss it.
+
+## Quitting the TUI
+
+`Ctrl+C` needs a double press: the first press opens a "Quit?"
+confirmation, a second `Ctrl+C` exits, and `Esc`, `Enter` or a click
+dismiss the prompt without quitting. This replaces the framework
+default of exiting on the first `Ctrl+C`, so a stray press cannot end a
+session mid-transfer. The `q` key and the Sessions menu's quit item
+still exit directly.
+
+## Shortcut reference in the TUI
+
+Press `F1` to open the shortcut overlay: a scrollable reference of every
+keyboard binding, grouped by context. `Esc`, `F1` or a click close it,
+and `j`/`k` scroll its body. The compact help bar at the bottom of a
+comparison view is independent of the overlay and toggled with `?`.

@@ -208,8 +208,9 @@ pub(super) struct MenuDropdownProps {
 /// Drawn as a `Positioned` overlay, so it takes no room in the flex layout
 /// and floats above the main view. Every row shows the selection pointer,
 /// the item label and — when the keymap labels the command — its key hint,
-/// right-aligned in a shared column. The row the keyboard cursor addresses
-/// carries the theme's highlight style.
+/// right-aligned in a shared column and underlined so it reads without
+/// color. The row the keyboard cursor addresses carries the theme's
+/// highlight style.
 #[component]
 pub(super) fn MenuDropdown(
     props: &MenuDropdownProps,
@@ -257,6 +258,10 @@ pub(super) fn MenuDropdown(
 
 /// Render one dropdown row: selection pointer, label padded to the common
 /// width, and the command's key hint right-aligned in its own column.
+///
+/// The hint is underlined on top of its dim bold style: the key code must
+/// also read on terminals without color, matching the underlined
+/// accelerators of [`menu_title`] and [`super::option_list::OptionList`].
 fn dropdown_row(
     item: &MenuItemDef,
     current: bool,
@@ -286,9 +291,12 @@ fn dropdown_row(
             .repeat(hint_width.saturating_sub(hint.chars().count() as u16)
                 as usize);
         spans.push(Span::raw("  "));
+        spans.push(Span::raw(hint_pad));
         spans.push(Span::styled(
-            format!("{hint_pad}{hint}"),
-            theme.dim.add_modifier(Modifier::BOLD),
+            hint.to_string(),
+            theme
+                .dim
+                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
         ));
     }
     spans.push(Span::raw(" "));
@@ -466,6 +474,39 @@ mod tests {
         assert_eq!(
             buf[(rect.x + rect.width - 1, rect.y + 2)].symbol(),
             "\u{2502}"
+        );
+    }
+
+    #[test]
+    fn dropdown_rows_underline_their_key_hint() {
+        let def = MENUS
+            .iter()
+            .find(|m| m.title == "Sessions")
+            .expect("Sessions menu");
+        // The first item is keyboard-bound (`O`), so its hint must carry
+        // the color-free underline cue like every other key code.
+        let item = def
+            .items
+            .iter()
+            .find(|i| key_hint(i.cmd).is_some())
+            .expect("item with a key hint");
+        let hint = key_hint(item.cmd).unwrap();
+        let theme = CocomoTheme::default();
+        let row = dropdown_row(
+            item,
+            false,
+            20,
+            hint.chars().count() as u16,
+            true,
+            theme,
+        );
+        let hint_span =
+            row.spans.iter().find(|s| s.content == hint).unwrap_or_else(
+                || panic!("hint {hint:?} missing from {row:?}"),
+            );
+        assert!(
+            hint_span.style.add_modifier.contains(Modifier::UNDERLINED),
+            "key hint not underlined: {row:?}"
         );
     }
 

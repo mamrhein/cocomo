@@ -31,7 +31,10 @@ use std::path::PathBuf;
 
 use cocomo_lib::SyncOperation;
 use ratatui_kit::{
-    components::tui_input::{Input, InputRequest},
+    components::{
+        ShortcutInfo, ShortcutInfoSection,
+        tui_input::{Input, InputRequest},
+    },
     crossterm::event::{KeyCode, KeyEvent, KeyModifiers},
     ratatui::{
         style::{Modifier, Style},
@@ -117,6 +120,8 @@ pub enum Cmd {
     Quit,
     /// Toggle the bottom help bar.
     ToggleHelp,
+    /// Toggle the shortcut overlay (`F1`).
+    ToggleShortcuts,
     // -- Session scopes: executed by `execute`. --
     /// Move the selection one row down.
     NextRow,
@@ -832,11 +837,13 @@ const KEYMAP: &[KeyBinding] = &[
         help: Some(("?", "help")),
     },
     KeyBinding {
+        // F1 opens the full keymap reference; unlike the help bar the
+        // overlay works without an active session.
         key: KeyCode::F(1),
         modifiers: NONE,
         scope: KeyScope::Global,
-        cmd: Cmd::ToggleHelp,
-        help: None,
+        cmd: Cmd::ToggleShortcuts,
+        help: Some(("F1", "shortcuts")),
     },
 ];
 
@@ -869,6 +876,37 @@ pub fn key_hint(cmd: Cmd) -> Option<&'static str> {
         .find(|b| b.cmd == cmd && b.help.is_some())?
         .help
         .map(|(keys, _)| keys)
+}
+
+/// Sections of the shortcut overlay, in display order: a human-readable
+/// title paired with the scope whose labelled bindings it documents.
+const SHORTCUT_SECTIONS: &[(&str, KeyScope)] = &[
+    ("General", KeyScope::Global),
+    ("Directory compare", KeyScope::DirNormal),
+    ("Text compare", KeyScope::TextNormal),
+];
+
+/// Build the sections of the shortcut overlay from the keymap.
+///
+/// Every labelled binding appears in the section of its scope, in
+/// [`KEYMAP`] order, so the overlay cannot drift from the dispatch table
+/// or the help bar. Bindings without a help label are deliberately left
+/// out: they are context chrome (dialog accelerators, menu navigation)
+/// that the owning UI labels itself.
+pub fn shortcut_sections() -> Vec<ShortcutInfoSection> {
+    SHORTCUT_SECTIONS
+        .iter()
+        .map(|(title, scope)| {
+            ShortcutInfoSection::new(
+                title.to_string(),
+                KEYMAP.iter().filter_map(|b| {
+                    let (keys, description) = b.help?;
+                    (b.scope == *scope)
+                        .then(|| ShortcutInfo::new(description, keys))
+                }),
+            )
+        })
+        .collect()
 }
 
 /// Build the help bar lines for the given scopes from the keymap.
@@ -1189,7 +1227,8 @@ fn execute(cmd: Cmd, session: &mut SessionView) -> SessionAction {
         | Cmd::MenuConfirm
         | Cmd::MenuClose
         | Cmd::Quit
-        | Cmd::ToggleHelp => SessionAction::None,
+        | Cmd::ToggleHelp
+        | Cmd::ToggleShortcuts => SessionAction::None,
     }
 }
 
@@ -2606,16 +2645,50 @@ mod tests {
     }
 
     #[test]
-    fn help_toggle_is_bound_in_the_shell() {
-        // `?` (typed with Shift on US layouts) and F1 both toggle the help
-        // bar; a NONE-modifier binding still fires for the Shift combo.
+    fn help_and_shortcut_keys_are_bound_in_the_shell() {
+        // `?` (typed with Shift on US layouts) toggles the help bar while
+        // F1 opens the shortcut overlay; a NONE-modifier binding still
+        // fires for the Shift combo.
         let question = KeyEvent::new(KeyCode::Char('?'), KeyModifiers::SHIFT);
         assert_eq!(lookup(KeyScope::Global, question), Some(Cmd::ToggleHelp));
         assert_eq!(
             lookup(KeyScope::Global, key(KeyCode::F(1))),
-            Some(Cmd::ToggleHelp)
+            Some(Cmd::ToggleShortcuts)
         );
         assert_eq!(lookup(KeyScope::DirNormal, key(KeyCode::F(1))), None);
+    }
+
+    #[test]
+    fn shortcut_sections_cover_every_labelled_binding() {
+        let sections = shortcut_sections();
+        let titles: Vec<&str> =
+            sections.iter().map(|s| s.title.as_str()).collect();
+        assert_eq!(
+            titles,
+            vec!["General", "Directory compare", "Text compare"]
+        );
+        // Every labelled binding of a section's scope shows up in it with
+        // its key label and description.
+        for &(title, scope) in SHORTCUT_SECTIONS {
+            let section = sections.iter().find(|s| s.title == title).unwrap();
+            for binding in KEYMAP.iter().filter(|b| b.scope == scope) {
+                let Some((keys, description)) = binding.help else {
+                    continue;
+                };
+                assert!(
+                    section.items.iter().any(|i| {
+                        i.keys == keys && i.description == description
+                    }),
+                    "section `{title}` misses `{keys} {description}`",
+                );
+            }
+            // Unlabelled aliases stay out.
+            let labelled = KEYMAP
+                .iter()
+                .filter(|b| b.scope == scope && b.help.is_some())
+                .count();
+            assert_eq!(section.items.len(), labelled);
+        }
     }
 
     #[test]
