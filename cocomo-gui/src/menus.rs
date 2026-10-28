@@ -174,15 +174,8 @@ pub fn register_menu_handlers(
         cx.quit();
     });
 
-    // Edit menu — copy paths.
-    cx.on_action(move |_action: &CopyPathLeft, _cx: &mut App| {
-        log::info!("copy left path — clipboard not yet implemented");
-    });
-
-    cx.on_action(move |_action: &CopyPathRight, _cx: &mut App| {
-        log::info!("copy right path — clipboard not yet implemented");
-    });
-
+    // Edit menu — copy paths are handled by the focused folder view, which
+    // owns the selection and writes the path to the clipboard.
     cx.on_action(move |_action: &SelectAllEntries, _cx: &mut App| {
         log::info!("select all — not yet implemented");
     });
