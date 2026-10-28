@@ -8,11 +8,12 @@
 // $Revision$
 
 //! Root `App` component: menu bar with its dropdown, tab bar, active view,
-//! and error modal.
+//! shortcut overlay, and error modal.
 
 use ratatui_kit::{
     crossterm::event::{
-        Event, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
+        Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton,
+        MouseEventKind,
     },
     prelude::*,
     ratatui::{
@@ -24,7 +25,7 @@ use ratatui_kit::{
 use super::{
     dir_compare::DirCompareView,
     filter_panel::FilterPanel,
-    frame::tabs_hit_item,
+    frame::{hint_line, tabs_hit_item},
     menu_bar::{
         DIVIDER_WIDTH, MenuBar, MenuDropdown, dropdown_hit_item,
         dropdown_rect, menu_title,
@@ -35,6 +36,7 @@ use super::{
     sync_confirm::SyncConfirmModal,
     tab_bar::TabBar,
     text_diff::TextCompareView,
+    theme::CocomoTheme,
     transfer_dialog::TransferDialog,
     welcome::WelcomeScreen,
 };
@@ -148,6 +150,7 @@ enum ActiveView {
 pub(crate) fn App(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let app_state = hooks.use_atom(&APP_STATE);
     let mut exit = hooks.use_exit();
+    let theme = hooks.use_component_theme::<CocomoTheme>();
 
     // Titles with their accelerator letter underlined. The dropdown
     // geometry and the click hit-test are derived from these very lines, so
@@ -179,8 +182,9 @@ pub(crate) fn App(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     // The Menu scope owns navigation, the Global scope the
                     // shell keys that stay useful with an open dropdown
                     // (`Alt+<accel>` switches menus, `?` still toggles the
-                    // help bar). Anything else is swallowed, so table and
-                    // session commands cannot fire behind the dropdown.
+                    // help bar, `F1` opens the shortcut overlay). Anything
+                    // else is swallowed, so table and session commands
+                    // cannot fire behind the dropdown.
                     let cmd = keys::lookup(KeyScope::Menu, key)
                         .or_else(|| keys::lookup(KeyScope::Global, key));
                     if let Some(cmd) = cmd
@@ -194,6 +198,9 @@ pub(crate) fn App(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             }
                             Cmd::Quit => menu_exit(),
                             Cmd::ToggleHelp => controller::toggle_help(),
+                            Cmd::ToggleShortcuts => {
+                                controller::toggle_shortcuts()
+                            }
                             _ => {}
                         }
                     }
@@ -272,6 +279,9 @@ pub(crate) fn App(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 Cmd::ToggleHelp => {
                     controller::toggle_help();
                 }
+                Cmd::ToggleShortcuts => {
+                    controller::toggle_shortcuts();
+                }
                 // Session keys are owned by the session view components.
                 _ => return EventResult::Ignored,
             }
@@ -315,6 +325,7 @@ pub(crate) fn App(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // Extract error message for the AlertModal (cloned to avoid holding the
     // read guard across element! rendering).
     let error_message = app.error_message.clone();
+    let show_shortcuts = app.show_shortcuts;
 
     // Build session tab titles.
     let tab_titles: Vec<Line<'static>> = app
@@ -370,6 +381,28 @@ pub(crate) fn App(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             SessionBrowser()
             SettingsModal()
             ReportModal()
+            // Full keymap reference behind F1 (idea d3). The framework
+            // modal owns an exclusive input layer while open and closes on
+            // its close keys or any click; `j`/`k` scroll its body. The
+            // sections are generated from the keymap, so the reference
+            // cannot drift from the actual bindings.
+            ShortcutInfoModal(
+                open: show_shortcuts,
+                width: Constraint::Percentage(66),
+                height: Constraint::Percentage(80),
+                title: Line::from(" Keyboard shortcuts "),
+                sections: keys::shortcut_sections(),
+                close_hint: hint_line(&[
+                    ("j/k", "scroll"),
+                    ("Esc / F1", "close"),
+                ])
+                .style(theme.dim)
+                .centered(),
+                close_keys: vec![KeyCode::Esc, KeyCode::F(1)],
+                on_close: move |_: ()| {
+                    controller::close_shortcuts();
+                },
+            )
             // Dropdown of the open menu. Last in the tree so the overlay
             // paints over everything else, and positioned in absolute
             // coordinates so it costs the main view no rows.
@@ -671,6 +704,24 @@ mod render_tests {
         assert!(screen.contains("Sync operation"), "{screen}");
         assert!(screen.contains("Enter toggle"), "{screen}");
         assert!(row_with(&screen, "Compare content").contains('\u{25b8}'));
+    }
+
+    #[test]
+    fn shortcuts_overlay_lists_the_generated_sections() {
+        let mut app = dir_session_state();
+        app.show_shortcuts = true;
+        let screen = render(app);
+        // The first section is visible at the top of the scrollable body:
+        // title, section header, and one of its key labels.
+        assert!(screen.contains("Keyboard shortcuts"), "{screen}");
+        assert!(screen.contains("General"), "{screen}");
+        assert!(screen.contains("Ctrl+W"), "{screen}");
+        assert!(screen.contains("Esc / F1 close"), "{screen}");
+        // Closed by default: the same session without the flag shows no
+        // overlay and the view below it stays visible.
+        let closed = render(dir_session_state());
+        assert!(!closed.contains("Keyboard shortcuts"), "{closed}");
+        assert!(closed.contains("Loading comparison"), "{closed}");
     }
 }
 

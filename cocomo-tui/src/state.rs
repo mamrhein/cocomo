@@ -1131,6 +1131,13 @@ pub struct AppState {
     /// Hidden by default so the main view area gets the row; toggled with
     /// `?` (see [`crate::keys::Cmd::ToggleHelp`]).
     pub show_help: bool,
+    /// Whether the shortcut overlay is shown.
+    ///
+    /// A scrollable reference of every labelled keymap binding, rendered
+    /// by the framework's `ShortcutInfoModal`. `F1` toggles it
+    /// ([`crate::keys::Cmd::ToggleShortcuts`]); `Esc`, `F1` or a click
+    /// close it. Unlike the help bar it works without an active session.
+    pub show_shortcuts: bool,
     /// Top-level error message to display in an `AlertModal`.
     ///
     /// Set when an operation that cannot be attributed to a specific session
@@ -1165,6 +1172,7 @@ impl AppState {
             active_tab: 0,
             menu: None,
             show_help: false,
+            show_shortcuts: false,
             error_message: None,
             pending_tasks: Vec::new(),
         }

@@ -54,3 +54,10 @@ instead of a key event with the Alt modifier, so the accelerator may not
 reach the app there. Fallbacks: click a menu title, or use `←`/`→` to
 select a title, `j`/`k` and `Enter` to navigate and confirm a menu, and
 `Esc` to dismiss it.
+
+## Shortcut reference in the TUI
+
+Press `F1` to open the shortcut overlay: a scrollable reference of every
+keyboard binding, grouped by context. `Esc`, `F1` or a click close it,
+and `j`/`k` scroll its body. The compact help bar at the bottom of a
+comparison view is independent of the overlay and toggled with `?`.
