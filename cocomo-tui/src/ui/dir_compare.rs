@@ -152,7 +152,16 @@ pub(super) fn DirCompareView(
     let sync_status: Option<String> =
         dir.sync.as_ref().map(|stage| match stage {
             SyncStage::Planned(result) => {
-                format!("Planned: {} transfers", result.planned_count())
+                let mut label =
+                    format!("Planned: {} transfers", result.planned_count());
+                if !result.conflicts.is_empty() {
+                    label.push_str(&format!(
+                        "  ({} name conflict{} skipped)",
+                        result.conflicts.len(),
+                        if result.conflicts.len() == 1 { "" } else { "s" }
+                    ));
+                }
+                label
             }
             SyncStage::Executed(_) => "Executed".to_string(),
         });

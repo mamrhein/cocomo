@@ -460,6 +460,7 @@ mod tests {
             }),
             center: None,
             sub_entries: None,
+            name_conflict: false,
         }
     }
 

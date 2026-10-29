@@ -292,7 +292,13 @@ fn nav_step_for(entry: &DirEntry) -> NavStep {
 /// to the left, a left-only entry copies to the right. Copying over an
 /// entry that exists on both sides needs a confirmation flow this GUI
 /// does not have yet, so those statuses produce no transfer.
+///
+/// Halves of a file-vs-directory name clash produce no transfer either:
+/// the target of a copy is ambiguous, so both are blocked.
 pub(crate) fn reconcile_transfer(entry: &DirEntry) -> Option<TransferItem> {
+    if entry.name_conflict {
+        return None;
+    }
     let (action, side) = match entry.status {
         DirEntryStatus::RightOnly => {
             (TransferAction::CopyLeft, entry.right.as_ref()?)
@@ -856,7 +862,21 @@ impl AppState {
         let Some(entry) = self.selected_entry() else {
             return;
         };
-        let Some(item) = reconcile_transfer(entry) else {
+        let item = reconcile_transfer(entry);
+        let conflict = entry.name_conflict.then(|| entry.name.clone());
+        let Some(item) = item else {
+            // A name clash is blocked in both directions: say so instead
+            // of a silent no-op.
+            if let Some(name) = conflict {
+                self.notice = Some(
+                    format!(
+                        "Skipped \"{name}\": a file and a directory share \
+                         this name"
+                    )
+                    .into(),
+                );
+                cx.notify();
+            }
             return;
         };
         if item.action != action {
@@ -1099,6 +1119,7 @@ mod tests {
             right,
             center: None,
             sub_entries: None,
+            name_conflict: false,
         }
     }
 
@@ -1585,6 +1606,29 @@ mod tests {
             Some(info("both.txt", 2, "")),
         );
         assert!(reconcile_transfer(&different).is_none());
+    }
+
+    #[test]
+    fn reconcile_transfer_blocks_name_conflicts() {
+        // Both halves of a file-vs-directory clash are blocked even though
+        // their orphan statuses would map to a copy direction.
+        let mut file_half = entry(
+            "notes",
+            DirEntryStatus::LeftOnly,
+            Some(info("notes", 4, "")),
+            None,
+        );
+        file_half.name_conflict = true;
+        assert!(reconcile_transfer(&file_half).is_none());
+
+        let mut dir_half = entry(
+            "notes",
+            DirEntryStatus::RightOnly,
+            None,
+            Some(info("notes", 4096, "")),
+        );
+        dir_half.name_conflict = true;
+        assert!(reconcile_transfer(&dir_half).is_none());
     }
 
     #[gpui::test]

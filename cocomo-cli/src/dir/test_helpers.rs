@@ -73,6 +73,7 @@ pub(super) fn make_test_comparison() -> DirComparison {
                 right: Some(same),
                 center: None,
                 sub_entries: None,
+                name_conflict: false,
             },
             DirEntry {
                 name: "diff.txt".to_string(),
@@ -81,6 +82,7 @@ pub(super) fn make_test_comparison() -> DirComparison {
                 right: Some(diff_right),
                 center: None,
                 sub_entries: None,
+                name_conflict: false,
             },
             DirEntry {
                 name: "only_left.txt".to_string(),
@@ -89,6 +91,7 @@ pub(super) fn make_test_comparison() -> DirComparison {
                 right: None,
                 center: None,
                 sub_entries: None,
+                name_conflict: false,
             },
             DirEntry {
                 name: "only_right.txt".to_string(),
@@ -97,6 +100,7 @@ pub(super) fn make_test_comparison() -> DirComparison {
                 right: Some(right_only),
                 center: None,
                 sub_entries: None,
+                name_conflict: false,
             },
         ],
         counts,
@@ -127,6 +131,7 @@ pub(super) fn make_hidden_file_entry() -> DirEntry {
         }),
         center: None,
         sub_entries: None,
+        name_conflict: false,
     }
 }
 
@@ -146,6 +151,7 @@ pub(super) fn make_dir_entry() -> DirEntry {
         right: None,
         center: None,
         sub_entries: None,
+        name_conflict: false,
     }
 }
 
@@ -203,6 +209,7 @@ pub(super) fn make_nested_comparison() -> DirComparison {
                 right: Some(sub_same),
                 center: None,
                 sub_entries: None,
+                name_conflict: false,
             },
             DirEntry {
                 name: "diff.txt".to_string(),
@@ -211,6 +218,7 @@ pub(super) fn make_nested_comparison() -> DirComparison {
                 right: Some(sub_diff_right),
                 center: None,
                 sub_entries: None,
+                name_conflict: false,
             },
             DirEntry {
                 name: "only_left.txt".to_string(),
@@ -219,6 +227,7 @@ pub(super) fn make_nested_comparison() -> DirComparison {
                 right: None,
                 center: None,
                 sub_entries: None,
+                name_conflict: false,
             },
         ],
         counts: HashMap::new(),
@@ -243,6 +252,7 @@ pub(super) fn make_nested_comparison() -> DirComparison {
                 right: Some(dir_info.clone()),
                 center: None,
                 sub_entries: Some(Arc::new(sub_comparison)),
+                name_conflict: false,
             },
             DirEntry {
                 name: "same.txt".to_string(),
@@ -251,6 +261,7 @@ pub(super) fn make_nested_comparison() -> DirComparison {
                 right: Some(same),
                 center: None,
                 sub_entries: None,
+                name_conflict: false,
             },
         ],
         counts: HashMap::new(),
@@ -309,6 +320,7 @@ pub(super) fn make_nested_comparison_with_hidden() -> DirComparison {
             }),
             center: None,
             sub_entries: None,
+            name_conflict: false,
         }],
         counts: HashMap::new(),
         errors: vec![],
@@ -335,6 +347,7 @@ pub(super) fn make_nested_comparison_with_hidden() -> DirComparison {
                 }),
                 center: None,
                 sub_entries: Some(Arc::new(hidden_sub)),
+                name_conflict: false,
             },
             DirEntry {
                 name: "sub".to_string(),
@@ -350,6 +363,7 @@ pub(super) fn make_nested_comparison_with_hidden() -> DirComparison {
                 }),
                 center: None,
                 sub_entries: Some(Arc::new(visible_sub)),
+                name_conflict: false,
             },
             DirEntry {
                 name: "visible.txt".to_string(),
@@ -365,6 +379,7 @@ pub(super) fn make_nested_comparison_with_hidden() -> DirComparison {
                 }),
                 center: None,
                 sub_entries: None,
+                name_conflict: false,
             },
         ],
         counts: HashMap::new(),

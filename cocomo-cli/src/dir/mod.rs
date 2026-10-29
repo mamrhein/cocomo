@@ -239,10 +239,21 @@ pub(crate) async fn dir_sync<R: EndpointResolver>(
         return Err(CliError::FsErrors(result.errors));
     }
 
+    // Report entries that were excluded from the plan because a file
+    // collides with a directory of the same name.
+    for conflict in &result.conflicts {
+        println!("skipped: {conflict}");
+    }
+
     // Print planned items.
     if result.planned.is_empty() {
-        println!("Directories are already in sync. No actions needed.");
-        return Ok(DiffResult::NoDiffs);
+        if result.conflicts.is_empty() {
+            println!("Directories are already in sync. No actions needed.");
+            return Ok(DiffResult::NoDiffs);
+        }
+        // Only clashes were found: something was reported even though no
+        // transfer was possible.
+        return Ok(DiffResult::HasDiffs);
     }
 
     let mode = if args.dry_run { "[DRY RUN] " } else { "" };

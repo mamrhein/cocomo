@@ -77,6 +77,11 @@ pub(super) fn SyncConfirmModal(
                 count,
                 if count == 1 { "" } else { "s" }
             ))];
+            // Name clashes are excluded from the plan; show them here so
+            // the approval covers what will *not* happen, too.
+            for conflict in &result.conflicts {
+                lines.push(Line::from(format!("skipped: {conflict}")));
+            }
             lines.extend(change_summary(&result.planned, &theme));
             Some(lines)
         });

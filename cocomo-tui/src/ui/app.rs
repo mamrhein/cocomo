@@ -628,6 +628,7 @@ mod render_tests {
                 right: Some(info("both.txt")),
                 center: None,
                 sub_entries: None,
+                name_conflict: false,
             }],
             ..Default::default()
         }));

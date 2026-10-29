@@ -156,6 +156,11 @@ impl TransferResult {
 /// Walks the comparison tree and collects all entries that match the given
 /// action. For example, [`TransferAction::CopyLeft`] will collect all
 /// `RightOnly` entries, because they need to be copied to the left side.
+///
+/// Entries flagged with [`crate::DirEntry::name_conflict`] are never
+/// collected: a file cannot be transferred onto a directory of the same
+/// name. Use [`crate::plan_sync_pair`] to have those clashes reported as
+/// [`crate::NameConflict`]s.
 pub fn plan_transfers(
     comparison: &DirComparison,
     action: TransferAction,
@@ -173,6 +178,11 @@ fn collect_transfer_items(
     let applicable = action.applicable_statuses();
 
     for entry in &comparison.entries {
+        // A file colliding with a directory of the same name is never a
+        // transfer candidate; the sync planner reports it instead.
+        if entry.name_conflict {
+            continue;
+        }
         if applicable.contains(&entry.status) {
             let is_dir = entry
                 .left
@@ -832,6 +842,7 @@ mod tests {
                     }),
                     center: None,
                     sub_entries: None,
+                    name_conflict: false,
                 },
                 DirEntry {
                     name: "same.txt".to_string(),
@@ -854,6 +865,7 @@ mod tests {
                     }),
                     center: None,
                     sub_entries: None,
+                    name_conflict: false,
                 },
             ],
             ..Default::default()
@@ -882,6 +894,7 @@ mod tests {
                 right: None,
                 center: None,
                 sub_entries: None,
+                name_conflict: false,
             }],
             ..Default::default()
         };
@@ -889,6 +902,58 @@ mod tests {
         let items = plan_transfers(&comparison, TransferAction::DeleteLeft);
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].name, "left_only.txt");
+    }
+
+    #[test]
+    fn plan_transfers_skips_name_conflicts() {
+        // Both halves of a file-vs-directory clash carry the flag, so no
+        // action may collect them.
+        let clash = |name: &str, is_left: bool, is_dir: bool| DirEntry {
+            name: name.to_string(),
+            status: if is_left {
+                DirEntryStatus::LeftOnly
+            } else {
+                DirEntryStatus::RightOnly
+            },
+            left: is_left.then(|| EntryInfo {
+                name: name.to_string(),
+                path: format!("/left/{name}"),
+                size: 10,
+                modified: "2026-01-01T00:00:00Z".to_string(),
+                is_dir,
+                hash: None,
+            }),
+            right: (!is_left).then(|| EntryInfo {
+                name: name.to_string(),
+                path: format!("/right/{name}"),
+                size: 10,
+                modified: "2026-01-01T00:00:00Z".to_string(),
+                is_dir,
+                hash: None,
+            }),
+            center: None,
+            sub_entries: None,
+            name_conflict: true,
+        };
+        let comparison = DirComparison {
+            entries: vec![
+                clash("notes", true, false),
+                clash("notes", false, true),
+            ],
+            ..Default::default()
+        };
+
+        for action in [
+            TransferAction::CopyLeft,
+            TransferAction::CopyRight,
+            TransferAction::DeleteLeft,
+            TransferAction::DeleteRight,
+        ] {
+            assert!(
+                plan_transfers(&comparison, action).is_empty(),
+                "{action:?} must not transfer a name conflict"
+            );
+        }
     }
 
     #[test]
@@ -908,6 +973,7 @@ mod tests {
                 right: None,
                 center: None,
                 sub_entries: None,
+                name_conflict: false,
             }],
             ..Default::default()
         });
@@ -928,6 +994,7 @@ mod tests {
                     right: None,
                     center: None,
                     sub_entries: None,
+                    name_conflict: false,
                 },
                 DirEntry {
                     name: "sub".to_string(),
@@ -943,6 +1010,7 @@ mod tests {
                     right: None,
                     center: None,
                     sub_entries: Some(sub_comparison),
+                    name_conflict: false,
                 },
             ],
             ..Default::default()

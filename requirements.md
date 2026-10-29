@@ -388,12 +388,14 @@ pub struct DirEntry {
     pub right: Option<EntryInfo>,
     pub center: Option<EntryInfo>,  // 3-way merge
     pub sub_entries: Option<Arc<DirComparison>>,  // for directories
+    pub name_conflict: bool,  // file vs. directory under the same name
 }
 ```
 
 A file is never compared against a directory: when one side has a file and
 the other a directory under the same name, both halves are reported as
-orphans of their own (`LeftOnly` and `RightOnly`).
+orphans of their own (`LeftOnly` and `RightOnly`), each flagged with
+`name_conflict`.
 
 **Scan modes** (per session settings):
 
@@ -755,6 +757,12 @@ pub enum SyncOperation {
 Mirror operations copy matching entries and delete orphans. Copy operations
 transfer entries without deleting anything. Update operations compare
 modification times and copy only newer files.
+
+Entries flagged with `name_conflict` (a file on one side, a directory on the
+other under the same name) are never part of a transfer plan: the planner
+excludes both halves and records them in `SyncResult.conflicts` as
+`NameConflict` values instead, once per colliding name. The remaining
+entries sync normally; the frontends show the skipped conflicts to the user.
 
 ### 6.2 Sync Safety
 

@@ -139,6 +139,7 @@ mod tests {
             right: None,
             center: None,
             sub_entries: None,
+            name_conflict: false,
         };
         assert!(is_dir_entry(&entry));
     }
@@ -221,6 +222,7 @@ mod tests {
             right: None,
             center: None,
             sub_entries: None,
+            name_conflict: false,
         };
         let mut args = test_args();
         args.excl_hidden = true;

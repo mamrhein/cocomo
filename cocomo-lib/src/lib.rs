@@ -140,8 +140,8 @@ pub use snapshot::{
     capture_snapshot_node, entry_matches_node,
 };
 pub use sync::{
-    SyncOperation, SyncResult, SyncRules, plan_sync, plan_sync_pair,
-    sync_directories, sync_directories_pair,
+    NameConflict, SyncOperation, SyncResult, SyncRules, plan_sync,
+    plan_sync_pair, sync_directories, sync_directories_pair,
 };
 pub use text::{
     AlignmentMode, LineInfo, TextCompareSettings, TextDiff, TextDifference,

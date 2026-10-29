@@ -22,7 +22,7 @@
 //! execute them. The returned [`SyncResult`] contains the planned actions
 //! for review.
 
-use std::path::Path;
+use std::{fmt, path::Path};
 
 use crate::{
     CompareConfig, DirComparison, DirEntryStatus,
@@ -126,8 +126,44 @@ pub struct SyncResult {
     /// Planned transfer items (present in dry-run mode or alongside
     /// execution).
     pub planned: Vec<TransferItem>,
+    /// Name clashes (file vs. directory) that were excluded from the
+    /// plan. They never appear in [`Self::planned`]; the caller must
+    /// surface them so the user learns why those entries were skipped.
+    pub conflicts: Vec<NameConflict>,
     /// Errors encountered during comparison or planning.
     pub errors: Vec<crate::FsError>,
+}
+
+/// A name that denotes a file on one side of the comparison and a
+/// directory on the other.
+///
+/// The two halves cannot be paired, so the comparison reports each as an
+/// orphan and every sync operation excludes them from planning; the planner
+/// records a conflict instead of a [`TransferItem`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NameConflict {
+    /// Entry name shared by the file and the directory.
+    pub name: String,
+    /// Path of the colliding entry, relative to the left comparison root.
+    pub path: String,
+    /// Whether the left half of the clash is the directory.
+    pub left_is_dir: bool,
+}
+
+impl fmt::Display for NameConflict {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let (left_kind, right_kind) = if self.left_is_dir {
+            ("directory", "file")
+        } else {
+            ("file", "directory")
+        };
+        write!(
+            f,
+            "name conflict: `{}` is a {left_kind} on the left and a \
+             {right_kind} on the right",
+            self.path
+        )
+    }
 }
 
 impl SyncResult {
@@ -198,11 +234,12 @@ where
         }
     };
 
-    let planned = plan_sync_items(&comparison, rules.operation);
+    let (planned, conflicts) = plan_sync_items(&comparison, rules.operation);
 
     Ok(SyncResult {
         transfer: None,
         planned,
+        conflicts,
         // Surface non-fatal scan errors instead of dropping them.
         errors: comparison.errors,
     })
@@ -291,44 +328,67 @@ where
 // Sync planning logic
 // ---------------------------------------------------------------------------
 
-/// Generate transfer items for a given sync operation.
+/// Generate transfer items and name conflicts for a given sync operation.
+///
+/// Entries whose name denotes a file on one side and a directory on the
+/// other never produce transfer items; they are collected as
+/// [`NameConflict`]s instead, reported once per colliding name.
 fn plan_sync_items(
     comparison: &DirComparison,
     operation: SyncOperation,
-) -> Vec<TransferItem> {
+) -> (Vec<TransferItem>, Vec<NameConflict>) {
+    let mut items = Vec::new();
+    let mut conflicts = Vec::new();
     match operation {
         SyncOperation::MirrorLeft => {
-            let mut items = Vec::new();
-            collect_mirror_items(comparison, &mut items, MirrorDir::Right);
-            items
+            collect_mirror_items(
+                comparison,
+                &mut items,
+                &mut conflicts,
+                MirrorDir::Right,
+            );
         }
         SyncOperation::MirrorRight => {
-            let mut items = Vec::new();
-            collect_mirror_items(comparison, &mut items, MirrorDir::Left);
-            items
+            collect_mirror_items(
+                comparison,
+                &mut items,
+                &mut conflicts,
+                MirrorDir::Left,
+            );
         }
         SyncOperation::UpdateNewer | SyncOperation::UpdateBoth => {
-            collect_update_newer_items(comparison)
+            collect_update_newer_items(comparison, &mut items, &mut conflicts);
         }
         SyncOperation::CopyLeft => {
             // Copy right-only and different to left.
-            let mut items = Vec::new();
-            collect_copy_items(comparison, &mut items, CopyDir::ToLeft);
-            items
+            collect_copy_items(
+                comparison,
+                &mut items,
+                &mut conflicts,
+                CopyDir::ToLeft,
+            );
         }
         SyncOperation::CopyRight => {
             // Copy left-only and different to right.
-            let mut items = Vec::new();
-            collect_copy_items(comparison, &mut items, CopyDir::ToRight);
-            items
+            collect_copy_items(
+                comparison,
+                &mut items,
+                &mut conflicts,
+                CopyDir::ToRight,
+            );
         }
-        SyncOperation::CopyNewer => collect_update_newer_items(comparison),
+        SyncOperation::CopyNewer => {
+            collect_update_newer_items(comparison, &mut items, &mut conflicts);
+        }
         SyncOperation::DeleteOrphans => {
-            let mut items = Vec::new();
-            collect_orphan_delete_items(comparison, &mut items);
-            items
+            collect_orphan_delete_items(
+                comparison,
+                &mut items,
+                &mut conflicts,
+            );
         }
     }
+    (items, conflicts)
 }
 
 /// Which direction to mirror.
@@ -353,13 +413,39 @@ fn is_orphan_dir(entry: &DirEntry) -> bool {
         || entry.right.as_ref().is_some_and(|r| r.is_dir))
 }
 
+/// Return `true` when the entry is a name clash that must be skipped.
+///
+/// Both halves of a file-vs-directory clash carry the flag; only the half
+/// with a left side records the conflict, so each colliding name is
+/// reported exactly once regardless of the operation.
+fn skip_name_conflict(
+    entry: &DirEntry,
+    conflicts: &mut Vec<NameConflict>,
+) -> bool {
+    if !entry.name_conflict {
+        return false;
+    }
+    if let Some(left) = &entry.left {
+        conflicts.push(NameConflict {
+            name: entry.name.clone(),
+            path: left.path.clone(),
+            left_is_dir: left.is_dir,
+        });
+    }
+    true
+}
+
 /// Collect transfer items for a mirror operation.
 fn collect_mirror_items(
     comparison: &DirComparison,
     items: &mut Vec<TransferItem>,
+    conflicts: &mut Vec<NameConflict>,
     direction: MirrorDir,
 ) {
     for entry in &comparison.entries {
+        if skip_name_conflict(entry, conflicts) {
+            continue;
+        }
         match entry.status {
             DirEntryStatus::LeftOnly => {
                 if direction == MirrorDir::Right {
@@ -451,7 +537,7 @@ fn collect_mirror_items(
         if !is_orphan_dir(entry)
             && let Some(ref sub) = entry.sub_entries
         {
-            collect_mirror_items(sub, items, direction);
+            collect_mirror_items(sub, items, conflicts, direction);
         }
     }
 }
@@ -467,9 +553,13 @@ enum CopyDir {
 fn collect_copy_items(
     comparison: &DirComparison,
     items: &mut Vec<TransferItem>,
+    conflicts: &mut Vec<NameConflict>,
     direction: CopyDir,
 ) {
     for entry in &comparison.entries {
+        if skip_name_conflict(entry, conflicts) {
+            continue;
+        }
         match entry.status {
             DirEntryStatus::LeftOnly => {
                 if direction == CopyDir::ToRight {
@@ -530,7 +620,7 @@ fn collect_copy_items(
         if !is_orphan_dir(entry)
             && let Some(ref sub) = entry.sub_entries
         {
-            collect_copy_items(sub, items, direction);
+            collect_copy_items(sub, items, conflicts, direction);
         }
     }
 }
@@ -538,10 +628,13 @@ fn collect_copy_items(
 /// Collect update-newer items.
 fn collect_update_newer_items(
     comparison: &DirComparison,
-) -> Vec<TransferItem> {
-    let mut items = Vec::new();
-
+    items: &mut Vec<TransferItem>,
+    conflicts: &mut Vec<NameConflict>,
+) {
     for entry in &comparison.entries {
+        if skip_name_conflict(entry, conflicts) {
+            continue;
+        }
         if matches!(
             entry.status,
             DirEntryStatus::Different | DirEntryStatus::Similar
@@ -572,19 +665,21 @@ fn collect_update_newer_items(
         }
 
         if let Some(ref sub) = entry.sub_entries {
-            items.extend(collect_update_newer_items(sub));
+            collect_update_newer_items(sub, items, conflicts);
         }
     }
-
-    items
 }
 
 /// Collect orphan deletion items.
 fn collect_orphan_delete_items(
     comparison: &DirComparison,
     items: &mut Vec<TransferItem>,
+    conflicts: &mut Vec<NameConflict>,
 ) {
     for entry in &comparison.entries {
+        if skip_name_conflict(entry, conflicts) {
+            continue;
+        }
         match entry.status {
             DirEntryStatus::LeftOnly => {
                 items.push(TransferItem::new(
@@ -618,7 +713,7 @@ fn collect_orphan_delete_items(
         if !is_orphan_dir(entry)
             && let Some(ref sub) = entry.sub_entries
         {
-            collect_orphan_delete_items(sub, items);
+            collect_orphan_delete_items(sub, items, conflicts);
         }
     }
 }
@@ -779,6 +874,7 @@ mod tests {
                     right: None,
                     center: None,
                     sub_entries: None,
+                    name_conflict: false,
                 },
                 DirEntry {
                     name: "same.txt".to_string(),
@@ -801,19 +897,24 @@ mod tests {
                     }),
                     center: None,
                     sub_entries: None,
+                    name_conflict: false,
                 },
             ],
             ..Default::default()
         };
 
         // Mirror left → right: copy left_only to right.
-        let items = plan_sync_items(&comparison, SyncOperation::MirrorLeft);
+        let (items, conflicts) =
+            plan_sync_items(&comparison, SyncOperation::MirrorLeft);
+        assert!(conflicts.is_empty());
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].action, TransferAction::CopyRight);
         assert_eq!(items[0].name, "left_only.txt");
 
         // Mirror right → left: delete left_only.
-        let items = plan_sync_items(&comparison, SyncOperation::MirrorRight);
+        let (items, conflicts) =
+            plan_sync_items(&comparison, SyncOperation::MirrorRight);
+        assert!(conflicts.is_empty());
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].action, TransferAction::DeleteLeft);
     }
@@ -836,6 +937,7 @@ mod tests {
                     right: None,
                     center: None,
                     sub_entries: None,
+                    name_conflict: false,
                 },
                 DirEntry {
                     name: "right_only.txt".to_string(),
@@ -851,15 +953,157 @@ mod tests {
                     }),
                     center: None,
                     sub_entries: None,
+                    name_conflict: false,
                 },
             ],
             ..Default::default()
         };
 
-        let items = plan_sync_items(&comparison, SyncOperation::DeleteOrphans);
+        let (items, conflicts) =
+            plan_sync_items(&comparison, SyncOperation::DeleteOrphans);
+        assert!(conflicts.is_empty());
         assert_eq!(items.len(), 2);
         assert_eq!(items[0].action, TransferAction::DeleteLeft);
         assert_eq!(items[1].action, TransferAction::DeleteRight);
+    }
+
+    /// Metadata for a clash fixture.
+    fn clash_info(name: &str, path: &str, is_dir: bool) -> EntryInfo {
+        EntryInfo {
+            name: name.to_string(),
+            path: path.to_string(),
+            size: if is_dir { 4096 } else { 10 },
+            modified: "2026-01-01T00:00:00Z".to_string(),
+            is_dir,
+            hash: None,
+        }
+    }
+
+    /// A comparison where a left-side file and a right-side directory share
+    /// the name `notes`, plus an unrelated left-only file.
+    fn name_clash_comparison() -> DirComparison {
+        DirComparison {
+            entries: vec![
+                DirEntry {
+                    name: "notes".to_string(),
+                    status: DirEntryStatus::LeftOnly,
+                    left: Some(clash_info("notes", "/left/notes", false)),
+                    right: None,
+                    center: None,
+                    sub_entries: None,
+                    name_conflict: true,
+                },
+                DirEntry {
+                    name: "notes".to_string(),
+                    status: DirEntryStatus::RightOnly,
+                    left: None,
+                    right: Some(clash_info("notes", "/right/notes", true)),
+                    center: None,
+                    // The clash directory is walked during comparison; its
+                    // children must never leak into the plan.
+                    sub_entries: Some(std::sync::Arc::new(DirComparison {
+                        entries: vec![DirEntry {
+                            name: "inner.txt".to_string(),
+                            status: DirEntryStatus::RightOnly,
+                            left: None,
+                            right: Some(clash_info(
+                                "inner.txt",
+                                "/right/notes/inner.txt",
+                                false,
+                            )),
+                            center: None,
+                            sub_entries: None,
+                            name_conflict: false,
+                        }],
+                        ..Default::default()
+                    })),
+                    name_conflict: true,
+                },
+                DirEntry {
+                    name: "solo.txt".to_string(),
+                    status: DirEntryStatus::LeftOnly,
+                    left: Some(clash_info(
+                        "solo.txt",
+                        "/left/solo.txt",
+                        false,
+                    )),
+                    right: None,
+                    center: None,
+                    sub_entries: None,
+                    name_conflict: false,
+                },
+            ],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn plan_reports_name_conflicts_instead_of_transferring_them() {
+        let comparison = name_clash_comparison();
+
+        for op in SyncOperation::ALL {
+            let (items, conflicts) = plan_sync_items(&comparison, op);
+            assert!(
+                items
+                    .iter()
+                    .all(|i| i.name != "notes" && i.name != "inner.txt"),
+                "{op:?} must not plan an operation on the clash: {items:?}"
+            );
+            assert_eq!(
+                conflicts.len(),
+                1,
+                "{op:?} must report the clash exactly once"
+            );
+            assert_eq!(conflicts[0].name, "notes");
+            assert_eq!(conflicts[0].path, "/left/notes");
+            assert!(!conflicts[0].left_is_dir);
+        }
+
+        // Non-conflicting orphans are still planned.
+        let (items, _) =
+            plan_sync_items(&comparison, SyncOperation::MirrorLeft);
+        assert_eq!(items.len(), 1, "planned: {items:?}");
+        assert_eq!(items[0].name, "solo.txt");
+    }
+
+    #[tokio::test]
+    async fn sync_skips_name_conflicts_and_still_executes() {
+        let base = env::temp_dir()
+            .join(format!("cocomo_sync_clash_{}", process::id()));
+        let _ = fs_err::remove_dir_all(&base);
+        let (left, right) = make_sync_dirs_at(&base);
+        fs_err::write(left.join("notes"), "file side").unwrap();
+        fs_err::create_dir_all(right.join("notes")).unwrap();
+        fs_err::write(right.join("notes/inner.txt"), "inner").unwrap();
+
+        let fs = LocalFs::new("test");
+        let rules = SyncRules {
+            operation: SyncOperation::MirrorLeft,
+            dry_run: false,
+            ..Default::default()
+        };
+
+        let result =
+            sync_directories(&fs, &left, &right, &rules).await.unwrap();
+
+        // The clash is reported, never planned.
+        assert_eq!(result.conflicts.len(), 1);
+        assert_eq!(result.conflicts[0].name, "notes");
+        assert!(!result.conflicts[0].left_is_dir);
+        assert!(
+            result.planned.iter().all(|i| i.name != "notes"),
+            "planned: {:?}",
+            result.planned
+        );
+
+        // Everything else executed: the clash halves both survived.
+        let transfer = result.transfer.expect("transfers should execute");
+        assert!(transfer.is_ok(), "errors: {:?}", transfer.errors);
+        assert!(fs_err::metadata(left.join("notes")).unwrap().is_file());
+        assert!(fs_err::metadata(right.join("notes")).unwrap().is_dir());
+        assert!(right.join("notes/inner.txt").exists());
+
+        fs_err::remove_dir_all(&base).ok();
     }
 
     #[tokio::test]

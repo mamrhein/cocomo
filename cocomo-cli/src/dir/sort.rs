@@ -97,6 +97,7 @@ mod tests {
             right,
             center: None,
             sub_entries: None,
+            name_conflict: false,
         }
     }
 

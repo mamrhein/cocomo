@@ -465,6 +465,7 @@ mod tests {
             right: Some(info(name, false)),
             center: None,
             sub_entries: None,
+            name_conflict: false,
         };
         let dir = |name: &str, children: Vec<DirEntry>| DirEntry {
             name: name.to_string(),
@@ -477,6 +478,7 @@ mod tests {
                 counts: HashMap::new(),
                 errors: vec![],
             })),
+            name_conflict: false,
         };
         let comp = DirComparison {
             entries: vec![

@@ -115,6 +115,10 @@ pub struct DirEntry {
     pub center: Option<EntryInfo>,
     /// Sub-entries for directories (recursive comparison result).
     pub sub_entries: Option<Arc<DirComparison>>,
+    /// Set on both orphan rows of a name clash where one side has a file
+    /// and the other a directory under the same name. Transfer operations
+    /// must not act on such entries.
+    pub name_conflict: bool,
 }
 
 /// Result of comparing two (or three) directory trees.
@@ -468,6 +472,7 @@ where
                 right: None,
                 center: None,
                 sub_entries: None,
+                name_conflict: true,
             },
             DirEntry {
                 name,
@@ -476,6 +481,7 @@ where
                 right: right_info,
                 center: None,
                 sub_entries: None,
+                name_conflict: true,
             },
         ]);
     }
@@ -505,6 +511,7 @@ where
         right: right_info,
         center: None,
         sub_entries: None,
+        name_conflict: false,
     }])
 }
 

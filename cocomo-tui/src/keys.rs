@@ -1406,9 +1406,10 @@ pub fn dialog_choice(
         return SessionAction::None;
     }
     // The option activates when any target supports it; `items` then
-    // contributes nothing for the targets that do not.
-    let has_left = targets.iter().any(|t| t.has_left);
-    let has_right = targets.iter().any(|t| t.has_right);
+    // contributes nothing for the targets that do not. Name clashes
+    // support nothing.
+    let has_left = targets.iter().any(|t| t.has_left && !t.name_conflict);
+    let has_right = targets.iter().any(|t| t.has_right && !t.name_conflict);
     if !choice.is_enabled(op, has_left, has_right) {
         return SessionAction::None;
     }
@@ -1760,6 +1761,7 @@ mod tests {
                 right: None,
                 center: None,
                 sub_entries: None,
+                name_conflict: false,
             })
             .collect();
         let mut session = SessionView::new_dir_compare(
@@ -1797,6 +1799,7 @@ mod tests {
             right: right.then(|| info(name)),
             center: None,
             sub_entries: None,
+            name_conflict: false,
         };
         let mut session = SessionView::new_dir_compare(
             Endpoint::local(std::path::PathBuf::from("/left")),
@@ -1837,6 +1840,7 @@ mod tests {
             }),
             center: None,
             sub_entries: None,
+            name_conflict: false,
         };
         let mut sub = file("sub", "sub");
         sub.left.as_mut().unwrap().is_dir = true;
@@ -1897,6 +1901,7 @@ mod tests {
                     }),
                     center: None,
                     sub_entries: None,
+                    name_conflict: false,
                 },
                 DirEntry {
                     name: "orphan.txt".into(),
@@ -1910,6 +1915,7 @@ mod tests {
                     right: None,
                     center: None,
                     sub_entries: None,
+                    name_conflict: false,
                 },
             ],
             ..Default::default()
@@ -2320,6 +2326,7 @@ mod tests {
                     right: None,
                     center: None,
                     sub_entries: None,
+                    name_conflict: false,
                 },
                 DirEntry {
                     name: "b".into(),
@@ -2328,6 +2335,7 @@ mod tests {
                     right: None,
                     center: None,
                     sub_entries: None,
+                    name_conflict: false,
                 },
                 DirEntry {
                     name: "c".into(),
@@ -2336,6 +2344,7 @@ mod tests {
                     right: None,
                     center: None,
                     sub_entries: None,
+                    name_conflict: false,
                 },
                 DirEntry {
                     name: "d".into(),
@@ -2344,6 +2353,7 @@ mod tests {
                     right: None,
                     center: None,
                     sub_entries: None,
+                    name_conflict: false,
                 },
             ],
             ..Default::default()

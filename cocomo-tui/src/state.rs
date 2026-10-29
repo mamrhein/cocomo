@@ -204,6 +204,10 @@ pub struct TransferTarget {
     /// Both endpoints address the same root, so one delete removes the entry
     /// for both sides.
     pub same_side: bool,
+    /// The name denotes a file on one side and a directory on the other.
+    /// Such a clash is never transferable: the counterpart would have to
+    /// be replaced by an entry of a different type.
+    pub name_conflict: bool,
     /// Why no side option could be offered, shown dimmed in the dialog.
     pub note: Option<&'static str>,
 }
@@ -211,14 +215,18 @@ pub struct TransferTarget {
 impl TransferTarget {
     /// Build the [`TransferItem`]s for `choice`.
     ///
-    /// Empty for [`TransferChoice::Abort`] and for options the entry does
-    /// not support, so a stale accelerator can never transfer something the
+    /// Empty for [`TransferChoice::Abort`], for entries caught in a
+    /// file-vs-directory name clash, and for options the entry does not
+    /// support, so a stale accelerator can never transfer something the
     /// dialog never offered.
     pub fn items(
         &self,
         op: TransferOp,
         choice: TransferChoice,
     ) -> Vec<TransferItem> {
+        if self.name_conflict {
+            return Vec::new();
+        }
         let actions: Vec<TransferAction> = match (op, choice) {
             (TransferOp::Copy, TransferChoice::Left) if self.has_left => {
                 vec![TransferAction::CopyRight]
@@ -1001,6 +1009,7 @@ impl SessionView {
                     has_left: shared,
                     has_right: shared,
                     same_side,
+                    name_conflict: false,
                     note: (!shared)
                         .then_some("the two sides have different file names"),
                 })
@@ -1063,7 +1072,10 @@ impl SessionView {
             has_left: entry.left.is_some(),
             has_right: entry.right.is_some(),
             same_side,
-            note: None,
+            name_conflict: entry.name_conflict,
+            note: entry
+                .name_conflict
+                .then_some("a file and a directory share this name"),
         })
     }
 
@@ -1312,6 +1324,7 @@ mod tests {
                     right: None,
                     center: None,
                     sub_entries: None,
+                    name_conflict: false,
                 })
                 .collect(),
             ..Default::default()
@@ -1338,6 +1351,7 @@ mod tests {
             right: Some(info()),
             center: None,
             sub_entries: sub.map(Arc::new),
+            name_conflict: false,
         }
     }
 
@@ -1669,6 +1683,7 @@ mod tests {
             right: right.then(|| info("right")),
             center: None,
             sub_entries: None,
+            name_conflict: false,
         }
     }
 
@@ -1684,7 +1699,34 @@ mod tests {
             has_left,
             has_right,
             same_side,
+            name_conflict: false,
             note: None,
+        }
+    }
+
+    #[test]
+    fn name_conflict_targets_offer_no_transfer() {
+        // Even a clash entry that exists on both sides (a file on one, a
+        // directory on the other) transfers in no direction.
+        let mut conflicted = target(true, true, false);
+        assert!(
+            !conflicted
+                .items(TransferOp::Copy, TransferChoice::Left)
+                .is_empty()
+        );
+        conflicted.name_conflict = true;
+        for op in [TransferOp::Copy, TransferOp::Move, TransferOp::Delete] {
+            for choice in [
+                TransferChoice::Left,
+                TransferChoice::Right,
+                TransferChoice::Both,
+                TransferChoice::Abort,
+            ] {
+                assert!(
+                    conflicted.items(op, choice).is_empty(),
+                    "{op:?} / {choice:?} must not transfer a name conflict"
+                );
+            }
         }
     }
 
@@ -1998,6 +2040,7 @@ mod tests {
                     right: None,
                     center: None,
                     sub_entries: None,
+                    name_conflict: false,
                 },
                 entry_with_sides("c", DirEntryStatus::Different, true, true),
             ],

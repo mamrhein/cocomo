@@ -67,6 +67,7 @@ fn dir_session() -> SessionView {
                 }),
                 center: None,
                 sub_entries: None,
+                name_conflict: false,
             },
             DirEntry {
                 name: "file.txt".into(),
@@ -80,6 +81,7 @@ fn dir_session() -> SessionView {
                 right: None,
                 center: None,
                 sub_entries: None,
+                name_conflict: false,
             },
         ],
         ..Default::default()
@@ -107,6 +109,7 @@ fn tree_session() -> SessionView {
         right: None,
         center: None,
         sub_entries: None,
+        name_conflict: false,
     };
     session.set_comparison(Some(DirComparison {
         entries: vec![
@@ -133,6 +136,7 @@ fn tree_session() -> SessionView {
                     ],
                     ..Default::default()
                 })),
+                name_conflict: false,
             },
             file("top.txt", "top.txt"),
         ],

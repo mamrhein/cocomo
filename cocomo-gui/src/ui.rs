@@ -1526,6 +1526,7 @@ mod tests {
             right,
             center: None,
             sub_entries: None,
+            name_conflict: false,
         }
     }
 
@@ -1799,6 +1800,7 @@ mod tests {
             right: Some(entry_info(name, false)),
             center: None,
             sub_entries: None,
+            name_conflict: false,
         };
 
         let state = cx.new(|cx| {
