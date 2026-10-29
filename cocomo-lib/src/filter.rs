@@ -147,7 +147,6 @@ impl DisplayFilters {
             | DirEntryStatus::CenterOnly => self.show_orphans,
             DirEntryStatus::Mergeable => self.show_mergeable,
             DirEntryStatus::Conflict => self.show_conflicts,
-            DirEntryStatus::IdenticalNameDifferentType => self.show_different,
         }
     }
 }

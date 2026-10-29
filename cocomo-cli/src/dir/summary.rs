@@ -200,7 +200,7 @@ pub(super) fn print_full_summary_to(
 }
 
 /// All `DirEntryStatus` variants in a stable display order.
-pub(super) fn all_statuses() -> [DirEntryStatus; 10] {
+pub(super) fn all_statuses() -> [DirEntryStatus; 9] {
     [
         DirEntryStatus::Same,
         DirEntryStatus::SameBinary,
@@ -211,7 +211,6 @@ pub(super) fn all_statuses() -> [DirEntryStatus; 10] {
         DirEntryStatus::CenterOnly,
         DirEntryStatus::Mergeable,
         DirEntryStatus::Conflict,
-        DirEntryStatus::IdenticalNameDifferentType,
     ]
 }
 
@@ -385,7 +384,7 @@ mod tests {
     #[test]
     fn all_statuses_returns_all_variants() {
         let statuses = all_statuses();
-        assert_eq!(statuses.len(), 10);
+        assert_eq!(statuses.len(), 9);
         // Verify no duplicates.
         for i in 0..statuses.len() {
             for j in (i + 1)..statuses.len() {

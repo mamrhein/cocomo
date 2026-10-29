@@ -92,10 +92,8 @@ fn entry_matches(entry: &DirEntry, config: &ReportConfig) -> bool {
         DirEntryStatus::LeftOnly
         | DirEntryStatus::RightOnly
         | DirEntryStatus::CenterOnly => config.include_orphans,
-        // Always include merge/conflict/mismatch entries.
-        DirEntryStatus::Mergeable
-        | DirEntryStatus::Conflict
-        | DirEntryStatus::IdenticalNameDifferentType => true,
+        // Always include merge/conflict entries.
+        DirEntryStatus::Mergeable | DirEntryStatus::Conflict => true,
     }
 }
 

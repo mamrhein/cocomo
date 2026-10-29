@@ -48,8 +48,6 @@ pub enum DirEntryStatus {
     Mergeable,
     /// Conflicting changes in a 3-way merge.
     Conflict,
-    /// Same name but different type (e.g., file vs. directory).
-    IdenticalNameDifferentType,
 }
 
 impl std::fmt::Display for DirEntryStatus {
@@ -64,9 +62,6 @@ impl std::fmt::Display for DirEntryStatus {
             DirEntryStatus::CenterOnly => write!(f, "center only"),
             DirEntryStatus::Mergeable => write!(f, "mergeable"),
             DirEntryStatus::Conflict => write!(f, "conflict"),
-            DirEntryStatus::IdenticalNameDifferentType => {
-                write!(f, "type mismatch")
-            }
         }
     }
 }
@@ -84,7 +79,6 @@ impl DirEntryStatus {
             DirEntryStatus::CenterOnly => "|",
             DirEntryStatus::Mergeable => "^",
             DirEntryStatus::Conflict => "X",
-            DirEntryStatus::IdenticalNameDifferentType => "?",
         }
     }
 }
@@ -310,6 +304,11 @@ where
 /// Directory entries whose subtree contains differences get their
 /// placeholder `Same` status refined to `Different`.
 ///
+/// A file is never compared against a directory: when one side has a file
+/// and the other a directory under the same name, both halves are
+/// reported as orphans of their own, and the directory half is walked like
+/// any other orphan directory.
+///
 /// `left_fs` and `right_fs` address the left and right side of the
 /// comparison; a file pair is hashed on the provider that owns it.
 // The side parameters are positional by design (left and right, not
@@ -350,7 +349,7 @@ where
             let left_entry = left_map.get(name).copied();
             let right_entry = right_map.get(name).copied();
 
-            let mut entry = match merge_entry_sync_node(
+            let merged = match merge_entry_sync_node(
                 left_fs,
                 right_fs,
                 left_root,
@@ -362,56 +361,76 @@ where
             )
             .await
             {
-                Ok(e) => e,
+                Ok(entries) => entries,
                 Err(e) => {
                     comparison.errors.push(e);
                     continue;
                 }
             };
 
-            // Recurse one level into the children that the scan already
-            // attached to the entries. This covers a directory pair and an
-            // orphan directory alike: for an orphan directory the absent
-            // side contributes an empty child list, so the whole subtree is
-            // compared and its entries stay left/right-only. A directory
-            // colliding with a file (`IdenticalNameDifferentType`) is not
-            // descended into.
-            let left_is_dir = left_entry.is_some_and(|e| e.is_dir());
-            let right_is_dir = right_entry.is_some_and(|e| e.is_dir());
-            let descend = (left_is_dir || right_is_dir)
-                && left_entry.is_none_or(|e| e.is_dir())
-                && right_entry.is_none_or(|e| e.is_dir());
+            // A name clash between a file and a directory yields two
+            // orphan entries; every other merge yields exactly one.
+            for mut entry in merged {
+                // Recurse one level into the children that the scan already
+                // attached to the entries. This covers a directory pair and
+                // an orphan directory alike: for an orphan directory the
+                // absent side contributes an empty child list, so the whole
+                // subtree is compared and its entries stay left/right-only.
+                // The decision is made from the merged entry's own sides so
+                // that the directory half of a file-vs-directory clash is
+                // descended into while the colliding file is ignored.
+                let left_is_dir =
+                    entry.left.as_ref().is_some_and(|i| i.is_dir);
+                let right_is_dir =
+                    entry.right.as_ref().is_some_and(|i| i.is_dir);
+                let descend = (left_is_dir || right_is_dir)
+                    && entry.left.as_ref().is_none_or(|i| i.is_dir)
+                    && entry.right.as_ref().is_none_or(|i| i.is_dir);
 
-            if descend {
-                let lc = left_entry.and_then(|e| e.children()).unwrap_or(&[]);
-                let rc = right_entry.and_then(|e| e.children()).unwrap_or(&[]);
+                if descend {
+                    let lc = if left_is_dir {
+                        left_entry.and_then(|e| e.children()).unwrap_or(&[])
+                    } else {
+                        &[]
+                    };
+                    let rc = if right_is_dir {
+                        right_entry.and_then(|e| e.children()).unwrap_or(&[])
+                    } else {
+                        &[]
+                    };
 
-                let sub = compare_children_node(
-                    left_fs, right_fs, lc, rc, left_root, right_root, config,
-                    cache,
-                )
-                .await;
+                    let sub = compare_children_node(
+                        left_fs, right_fs, lc, rc, left_root, right_root,
+                        config, cache,
+                    )
+                    .await;
 
-                let has_diff = sub.different_count() > 0;
-                entry.sub_entries = Some(Arc::new(sub));
-                // Only refine the `Same` placeholder of a shared directory;
-                // an orphan directory keeps its left/right-only status
-                // regardless of its subtree contents.
-                if has_diff && entry.status == DirEntryStatus::Same {
-                    entry.status = DirEntryStatus::Different;
+                    let has_diff = sub.different_count() > 0;
+                    entry.sub_entries = Some(Arc::new(sub));
+                    // Only refine the `Same` placeholder of a shared
+                    // directory; an orphan directory keeps its
+                    // left/right-only status regardless of its contents.
+                    if has_diff && entry.status == DirEntryStatus::Same {
+                        entry.status = DirEntryStatus::Different;
+                    }
                 }
-            }
 
-            *comparison.counts.entry(entry.status).or_insert(0) += 1;
-            comparison.entries.push(entry);
+                *comparison.counts.entry(entry.status).or_insert(0) += 1;
+                comparison.entries.push(entry);
+            }
         }
 
         comparison
     })
 }
 
-/// Merge a single pair of entries into a `DirEntry`. The side parameters
-/// decide which provider a file pair is hashed on.
+/// Merge a single pair of entries into one or more `DirEntry` rows. The
+/// side parameters decide which provider a file pair is hashed on.
+///
+/// A file is never compared against a directory: when the sides share a
+/// name but differ in type, the result is two orphan rows (`LeftOnly` for
+/// the left half, `RightOnly` for the right half) instead of a paired
+/// row. Every other merge produces exactly one row.
 #[allow(clippy::too_many_arguments)]
 async fn merge_entry_sync_node<L, R>(
     left_fs: &L,
@@ -422,7 +441,7 @@ async fn merge_entry_sync_node<L, R>(
     right: Option<&ScanEntry>,
     config: &CompareConfig,
     cache: Option<&ContentCache>,
-) -> Result<DirEntry>
+) -> Result<Vec<DirEntry>>
 where
     L: NodeFileSystem<Nid = u64>,
     R: NodeFileSystem<Nid = u64>,
@@ -436,10 +455,35 @@ where
     let left_info = left.map(scan_entry_to_info);
     let right_info = right.map(scan_entry_to_info);
 
+    if let (Some(le), Some(re)) = (left, right)
+        && le.meta.is_dir != re.meta.is_dir
+    {
+        // A file colliding with a directory is not a comparison
+        // candidate: each side becomes an orphan entry of its own.
+        return Ok(vec![
+            DirEntry {
+                name: name.clone(),
+                status: DirEntryStatus::LeftOnly,
+                left: left_info,
+                right: None,
+                center: None,
+                sub_entries: None,
+            },
+            DirEntry {
+                name,
+                status: DirEntryStatus::RightOnly,
+                left: None,
+                right: right_info,
+                center: None,
+                sub_entries: None,
+            },
+        ]);
+    }
+
     let status = if let (Some(le), Some(re)) = (left, right) {
-        if le.meta.is_dir != re.meta.is_dir {
-            DirEntryStatus::IdenticalNameDifferentType
-        } else if le.meta.is_dir {
+        // The type clash was handled above, so a pair is now either two
+        // directories or two files.
+        if le.meta.is_dir {
             DirEntryStatus::Same // placeholder; refined by caller
         } else {
             compare_file_status_node(
@@ -454,14 +498,14 @@ where
         DirEntryStatus::RightOnly
     };
 
-    Ok(DirEntry {
+    Ok(vec![DirEntry {
         name,
         status,
         left: left_info,
         right: right_info,
         center: None,
         sub_entries: None,
-    })
+    }])
 }
 
 /// Node-aware file comparison. Uses node IDs for hashing instead of
@@ -863,6 +907,108 @@ mod tests {
         check_orphan_subtrees(&result);
 
         fs_err::remove_dir_all(left.parent().unwrap()).ok();
+    }
+
+    // -----------------------------------------------------------------------
+    // File-vs-directory clash tests
+    // -----------------------------------------------------------------------
+
+    /// Look up all top-level entries with the given name.
+    fn entries_named<'a>(
+        comp: &'a DirComparison,
+        name: &str,
+    ) -> Vec<&'a DirEntry> {
+        comp.entries.iter().filter(|e| e.name == name).collect()
+    }
+
+    /// A file and a directory that share a name are never compared
+    /// against each other: both halves appear as orphan rows, the file
+    /// half is not descended into, and the directory half is walked like
+    /// any other orphan directory.
+    #[tokio::test]
+    async fn node_compare_reports_file_dir_clash_as_orphans() {
+        let base = env::temp_dir()
+            .join(format!("cocomo_clash_{}", std::process::id()));
+        let _ = fs_err::remove_dir_all(&base);
+
+        let left = base.join("left");
+        let right = base.join("right");
+
+        // Left: file `clash`, directory `dir-clash` with a nested file.
+        fs_err::create_dir_all(left.join("dir-clash/inner")).unwrap();
+        fs_err::write(left.join("clash"), "i am a file").unwrap();
+        fs_err::write(left.join("dir-clash/inner/n.txt"), "n").unwrap();
+
+        // Right: directory `clash` with a nested file, file `dir-clash`.
+        fs_err::create_dir_all(right.join("clash")).unwrap();
+        fs_err::write(right.join("clash/m.txt"), "m").unwrap();
+        fs_err::write(right.join("dir-clash"), "i am a file").unwrap();
+
+        let fs = LocalFs::new("test");
+        let config = CompareConfig::meta_data_only();
+
+        let result =
+            compare_directories_node(&fs, &left, &right, &config, None)
+                .await
+                .unwrap();
+
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+        // `clash`: a left-only file row and a right-only directory row.
+        let clash = entries_named(&result, "clash");
+        assert_eq!(clash.len(), 2, "both clash halves must be reported");
+        assert_eq!(clash[0].status, DirEntryStatus::LeftOnly);
+        assert!(
+            clash[0].left.as_ref().is_some_and(|i| !i.is_dir),
+            "left half should be a file"
+        );
+        assert!(clash[0].right.is_none(), "left half must not pair up");
+        assert!(
+            clash[0].sub_entries.is_none(),
+            "the colliding file must not be descended into"
+        );
+        assert_eq!(clash[1].status, DirEntryStatus::RightOnly);
+        assert!(
+            clash[1].right.as_ref().is_some_and(|i| i.is_dir),
+            "right half should be a directory"
+        );
+        assert!(clash[1].left.is_none(), "right half must not pair up");
+
+        // The directory half is walked like any other orphan directory.
+        let sub_clash = clash[1]
+            .sub_entries
+            .as_ref()
+            .expect("subtree of the orphan directory half missing");
+        assert_eq!(
+            status_of(sub_clash, "m.txt"),
+            Some(DirEntryStatus::RightOnly)
+        );
+
+        // The mirrored clash (`dir-clash`) behaves the same on the other
+        // side: left-only directory with subtree, right-only file.
+        let dir_clash = entries_named(&result, "dir-clash");
+        assert_eq!(dir_clash.len(), 2);
+        assert_eq!(dir_clash[0].status, DirEntryStatus::LeftOnly);
+        let sub_dir = dir_clash[0]
+            .sub_entries
+            .as_ref()
+            .expect("subtree of the orphan directory half missing");
+        assert_eq!(
+            status_of(sub_dir, "inner/n.txt"),
+            Some(DirEntryStatus::LeftOnly)
+        );
+        assert_eq!(dir_clash[1].status, DirEntryStatus::RightOnly);
+        assert!(dir_clash[1].sub_entries.is_none());
+
+        // All four clash rows count as orphans; none as differences.
+        assert_eq!(
+            result.orphan_count(),
+            4,
+            "both clash halves must count as orphans"
+        );
+        assert_eq!(result.different_count(), 0);
+
+        fs_err::remove_dir_all(&base).ok();
     }
 
     // -----------------------------------------------------------------------

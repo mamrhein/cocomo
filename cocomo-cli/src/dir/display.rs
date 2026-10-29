@@ -64,7 +64,6 @@ pub(super) fn color_code(status: DirEntryStatus) -> &'static str {
         DirEntryStatus::RightOnly => "35",                         // magenta
         DirEntryStatus::Mergeable => "34",                         // blue
         DirEntryStatus::Conflict => "31",                          // red
-        DirEntryStatus::IdenticalNameDifferentType => "93", // bright yellow
     }
 }
 
@@ -155,10 +154,6 @@ mod tests {
         assert_eq!(color_code(DirEntryStatus::RightOnly), "35");
         assert_eq!(color_code(DirEntryStatus::Mergeable), "34");
         assert_eq!(color_code(DirEntryStatus::Conflict), "31");
-        assert_eq!(
-            color_code(DirEntryStatus::IdenticalNameDifferentType),
-            "93"
-        );
         assert_eq!(color_code(DirEntryStatus::CenterOnly), "36");
         // Verify the colored output contains the code.
         assert!(

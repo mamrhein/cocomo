@@ -379,7 +379,6 @@ pub enum DirEntryStatus {
     CenterOnly,              // orphan in center (3-way)
     Mergeable,               // can be auto-merged (text, no conflicts)
     Conflict,                // conflicting changes in 3-way
-    IdenticalNameDifferentType, // e.g. file vs directory
 }
 
 pub struct DirEntry {
@@ -391,6 +390,10 @@ pub struct DirEntry {
     pub sub_entries: Option<Arc<DirComparison>>,  // for directories
 }
 ```
+
+A file is never compared against a directory: when one side has a file and
+the other a directory under the same name, both halves are reported as
+orphans of their own (`LeftOnly` and `RightOnly`).
 
 **Scan modes** (per session settings):
 

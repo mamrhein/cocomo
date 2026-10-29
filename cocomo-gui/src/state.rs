@@ -58,7 +58,7 @@ pub enum SortKey {
 pub enum StatusCategory {
     /// Entry matches on both sides.
     Same,
-    /// Entry exists on both sides but differs in content, type, or state.
+    /// Entry exists on both sides but differs in content or state.
     Different,
     /// Entry exists on only one side.
     Orphan,
@@ -73,10 +73,7 @@ pub fn status_category(status: &DirEntryStatus) -> StatusCategory {
         DirEntryStatus::Similar
         | DirEntryStatus::Different
         | DirEntryStatus::Mergeable
-        | DirEntryStatus::Conflict
-        | DirEntryStatus::IdenticalNameDifferentType => {
-            StatusCategory::Different
-        }
+        | DirEntryStatus::Conflict => StatusCategory::Different,
         DirEntryStatus::LeftOnly
         | DirEntryStatus::RightOnly
         | DirEntryStatus::CenterOnly => StatusCategory::Orphan,

@@ -106,8 +106,6 @@ pub(super) struct StatusColors {
     pub mergeable: Color,
     /// Magenta-violet for entries with a merge conflict.
     pub conflict: Color,
-    /// Yellow for same-named entries of different types.
-    pub type_conflict: Color,
 }
 
 impl StatusColors {
@@ -125,7 +123,6 @@ impl StatusColors {
             right_only: Color::Magenta,
             center_only: Color::White,
             conflict: Color::Rgb(255, 0, 255),
-            type_conflict: Color::Rgb(255, 255, 0),
         }
     }
 }
@@ -192,9 +189,6 @@ impl CocomoTheme {
             DirEntryStatus::CenterOnly => self.status.center_only,
             DirEntryStatus::Mergeable => self.status.mergeable,
             DirEntryStatus::Conflict => self.status.conflict,
-            DirEntryStatus::IdenticalNameDifferentType => {
-                self.status.type_conflict
-            }
         };
         Style::new().fg(color).add_modifier(Modifier::BOLD)
     }
@@ -246,7 +240,6 @@ mod tests {
             DirEntryStatus::CenterOnly,
             DirEntryStatus::Mergeable,
             DirEntryStatus::Conflict,
-            DirEntryStatus::IdenticalNameDifferentType,
         ];
         let mut styles: Vec<Style> = statuses
             .iter()

@@ -1343,8 +1343,7 @@ fn status_role(status: &DirEntryStatus) -> StatusRole {
         DirEntryStatus::Same | DirEntryStatus::SameBinary => {
             StatusRole::Success
         }
-        DirEntryStatus::Similar
-        | DirEntryStatus::IdenticalNameDifferentType => StatusRole::Warning,
+        DirEntryStatus::Similar => StatusRole::Warning,
         DirEntryStatus::Different | DirEntryStatus::Conflict => {
             StatusRole::Danger
         }
@@ -1366,7 +1365,6 @@ fn status_indicator(status: &DirEntryStatus) -> &'static str {
         DirEntryStatus::CenterOnly => "^",
         DirEntryStatus::Mergeable => "M",
         DirEntryStatus::Conflict => "C",
-        DirEntryStatus::IdenticalNameDifferentType => "T",
     }
 }
 
@@ -1403,7 +1401,7 @@ fn format_modified(modified: &str) -> String {
 ///
 /// Every [`DirEntryStatus`] value the table can show appears here, so the
 /// dot and glyph are never a color-only or cryptic-symbol-only cue.
-const STATUS_LEGEND: [(DirEntryStatus, &str, &str); 10] = [
+const STATUS_LEGEND: [(DirEntryStatus, &str, &str); 9] = [
     (
         DirEntryStatus::Same,
         "Same",
@@ -1448,11 +1446,6 @@ const STATUS_LEGEND: [(DirEntryStatus, &str, &str); 10] = [
         DirEntryStatus::Conflict,
         "Conflict",
         "Conflicting changes in a 3-way merge",
-    ),
-    (
-        DirEntryStatus::IdenticalNameDifferentType,
-        "Type mismatch",
-        "Same name, different type (file vs. directory)",
     ),
 ];
 
@@ -1644,10 +1637,6 @@ mod tests {
         );
         assert_eq!(status_role(&DirEntryStatus::Similar), StatusRole::Warning);
         assert_eq!(
-            status_role(&DirEntryStatus::IdenticalNameDifferentType),
-            StatusRole::Warning
-        );
-        assert_eq!(
             status_role(&DirEntryStatus::Different),
             StatusRole::Danger
         );
@@ -1681,7 +1670,6 @@ mod tests {
             DirEntryStatus::CenterOnly,
             DirEntryStatus::Mergeable,
             DirEntryStatus::Conflict,
-            DirEntryStatus::IdenticalNameDifferentType,
         ];
         for status in all {
             assert!(
