@@ -58,8 +58,8 @@ pub(crate) struct Cli {
 
 /// The startup decision derived from the parsed [`Cli`] arguments.
 pub(crate) enum Startup {
-    /// No paths were given: start with an empty untitled tab (the GUI
-    /// equivalent of the TUI's welcome screen).
+    /// No paths were given: start with the Home tab, the start screen
+    /// for launching new sessions and reopening saved ones.
     Welcome,
 
     /// A valid directory pair was given: open a folder-compare tab for

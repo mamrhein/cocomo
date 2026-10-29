@@ -119,6 +119,9 @@ pub struct MenuState {
     /// Whether the active tab is a folder compare (enables the
     /// folder-only commands).
     pub is_folder: bool,
+    /// Whether the active tab is the Home start screen (hides the
+    /// view-specific menus, which have nothing to act on).
+    pub is_home: bool,
     /// Whether the selected entry exists on only one side (enables the
     /// copy-to-side commands).
     pub selected_orphan: bool,
@@ -131,6 +134,7 @@ impl MenuState {
     pub fn empty() -> Self {
         Self {
             is_folder: false,
+            is_home: false,
             selected_orphan: false,
             log_open: true,
         }
@@ -141,17 +145,24 @@ impl MenuState {
 fn build_app_menus(state: MenuState) -> Vec<Menu> {
     let no_folder = !state.is_folder;
     let no_orphan = !(state.is_folder && state.selected_orphan);
+    // While Home is active there is no session to save or reload, and the
+    // view-specific menus (Edit, Actions, Search) have nothing to act on,
+    // so they are hidden entirely. The View menu stays: its log pane
+    // toggle works from every view.
+    let is_home = state.is_home;
 
-    vec![
+    let mut menus = vec![
         Menu::new("Session").items([
-            MenuItem::action("Save session", SaveSession),
-            MenuItem::action("Save session as…", SaveSessionAs),
+            MenuItem::action("Save session", SaveSession).disabled(is_home),
+            MenuItem::action("Save session as…", SaveSessionAs)
+                .disabled(is_home),
             MenuItem::action("Session settings…", SessionSettings)
                 .disabled(true),
             MenuItem::action("Clear session", ClearSession).disabled(true),
             MenuItem::separator(),
             MenuItem::action("Swap sides", SwapSides).disabled(no_folder),
-            MenuItem::action("Reload / recompare files", ReloadCompare),
+            MenuItem::action("Reload / recompare files", ReloadCompare)
+                .disabled(is_home),
             MenuItem::separator(),
             MenuItem::action("Report…", SessionReport).disabled(true),
             MenuItem::action("Info…", SessionInfo).disabled(true),
@@ -181,35 +192,46 @@ fn build_app_menus(state: MenuState) -> Vec<Menu> {
             MenuItem::separator(),
             MenuItem::action("Quit", Quit),
         ]),
-        Menu::new("Edit").items([
-            MenuItem::action("Copy left path", CopyPathLeft)
-                .disabled(no_folder),
-            MenuItem::action("Copy right path", CopyPathRight)
-                .disabled(no_folder),
-            MenuItem::separator(),
-            MenuItem::action("Select all", SelectAllEntries)
-                .disabled(no_folder),
-        ]),
-        Menu::new("Actions").items([
-            // Copying only makes sense for an entry that exists on one
-            // side; enabling otherwise would promise a no-op.
-            MenuItem::action("Copy to right", CopyToRight).disabled(no_orphan),
-            MenuItem::action("Copy to left", CopyToLeft).disabled(no_orphan),
-        ]),
-        Menu::new("Search").items([
-            MenuItem::action("Next difference", NextDifference)
-                .disabled(no_folder),
-            MenuItem::action("Previous difference", PrevDifference)
-                .disabled(no_folder),
-            MenuItem::separator(),
-            MenuItem::action("Next difference section", NextSection)
-                .disabled(true),
-            MenuItem::action("Previous difference section", PrevSection)
-                .disabled(true),
-            MenuItem::separator(),
-            MenuItem::action("Find filename…", FindFilename).disabled(true),
-            MenuItem::action("Replace…", ReplaceText).disabled(true),
-        ]),
+    ];
+
+    if !is_home {
+        menus.extend([
+            Menu::new("Edit").items([
+                MenuItem::action("Copy left path", CopyPathLeft)
+                    .disabled(no_folder),
+                MenuItem::action("Copy right path", CopyPathRight)
+                    .disabled(no_folder),
+                MenuItem::separator(),
+                MenuItem::action("Select all", SelectAllEntries)
+                    .disabled(no_folder),
+            ]),
+            Menu::new("Actions").items([
+                // Copying only makes sense for an entry that exists on one
+                // side; enabling otherwise would promise a no-op.
+                MenuItem::action("Copy to right", CopyToRight)
+                    .disabled(no_orphan),
+                MenuItem::action("Copy to left", CopyToLeft)
+                    .disabled(no_orphan),
+            ]),
+            Menu::new("Search").items([
+                MenuItem::action("Next difference", NextDifference)
+                    .disabled(no_folder),
+                MenuItem::action("Previous difference", PrevDifference)
+                    .disabled(no_folder),
+                MenuItem::separator(),
+                MenuItem::action("Next difference section", NextSection)
+                    .disabled(true),
+                MenuItem::action("Previous difference section", PrevSection)
+                    .disabled(true),
+                MenuItem::separator(),
+                MenuItem::action("Find filename…", FindFilename)
+                    .disabled(true),
+                MenuItem::action("Replace…", ReplaceText).disabled(true),
+            ]),
+        ]);
+    }
+
+    menus.extend([
         Menu::new("View").items([
             // Wired to the text view in a later phase; disabled until it
             // can actually change something.
@@ -229,7 +251,8 @@ fn build_app_menus(state: MenuState) -> Vec<Menu> {
         Menu::new("Tools")
             .items([MenuItem::action("Options…", Options).disabled(true)]),
         Menu::new("Help").items([MenuItem::action("About cocomo", About)]),
-    ]
+    ]);
+    menus
 }
 
 /// Build and set the application menus with no folder tab active.
@@ -299,7 +322,7 @@ pub fn register_menu_handlers(
                     mgr.update(&mut cx, |m, cx| m.load_session_file(path, cx));
                 match task.await {
                     Ok(config) => {
-                        let _ = cx.update(|cx| {
+                        cx.update(|cx| {
                             mgr.update(cx, |m, cx| {
                                 if let Err(e) =
                                     m.open_session_config(config, cx)
@@ -316,7 +339,7 @@ pub fn register_menu_handlers(
                     Err(e) => {
                         let message =
                             format!("Couldn't open the session. {e}");
-                        let _ = cx.update(|cx| {
+                        cx.update(|cx| {
                             log::push(LogLevel::Error, message.clone(), cx);
                             notify_error(message, cx);
                         });
@@ -344,7 +367,7 @@ pub fn register_menu_handlers(
             async move {
                 match task.await {
                     Ok(()) => {
-                        let _ = cx.update(|cx| {
+                        cx.update(|cx| {
                             log::push(
                                 LogLevel::Info,
                                 format!("Session saved: {name}"),
@@ -358,7 +381,7 @@ pub fn register_menu_handlers(
                     Err(e) => {
                         let message =
                             format!("Couldn't save the session. {e}");
-                        let _ = cx.update(|cx| {
+                        cx.update(|cx| {
                             log::push(LogLevel::Error, message.clone(), cx);
                             notify_error(message, cx);
                         });
@@ -538,7 +561,7 @@ fn save_session_as(
         async move {
             match task.await {
                 Ok(()) => {
-                    let _ = cx.update(|cx| {
+                    cx.update(|cx| {
                         log::push(
                             LogLevel::Info,
                             format!("Session saved as: {name}"),
@@ -551,7 +574,7 @@ fn save_session_as(
                 }
                 Err(e) => {
                     let message = format!("Couldn't save the session. {e}");
-                    let _ = cx.update(|cx| {
+                    cx.update(|cx| {
                         log::push(LogLevel::Error, message.clone(), cx);
                         notify_error(message, cx);
                     });
@@ -564,7 +587,7 @@ fn save_session_as(
 
 /// Surface a failed operation as an error notification in the active
 /// window, so a background-task failure is never silent.
-fn notify_error(message: String, cx: &mut App) {
+pub(crate) fn notify_error(message: String, cx: &mut App) {
     // The notification layer belongs to a window; without one there is
     // nowhere to show the message, and the log already recorded it.
     let Some(window) = cx.active_window() else {

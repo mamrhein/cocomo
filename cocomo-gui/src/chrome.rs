@@ -14,7 +14,6 @@
 //! presentation layer and theme system. Row 2 is view-specific and
 //! rendered by the active tab (see `crate::tabview::TabEntity::view_toolbar`).
 
-use cocomo_lib::SessionConfig;
 use gpui::{
     AnyElement, App, ElementId, Entity, IntoElement, Window,
     assets::IconName,
@@ -219,20 +218,24 @@ pub fn toolbar_element(
         .map(|state| state.read(cx).filter_mode());
     let no_folder = active_state.is_none();
 
-    // Home: the start screen lands in a later phase.
+    // Home: activate the Home tab, opening one when none exists yet.
+    let mgr_home = session_manager.clone();
     let home_btn = Button::new("toolbar_home")
         .icon(IconName::House)
         .ghost()
         .small()
-        .disabled(true)
-        .tooltip("Home view (coming soon)")
-        .accessibility_label("Home view");
+        .tooltip("Home")
+        .accessibility_label("Home")
+        .on_click(move |_, _, cx| {
+            mgr_home.update(cx, |m, cx| {
+                m.open_home(cx);
+            });
+        });
 
     // Sessions: pick a saved session to open it in a new tab. The
     // dedicated dropdown button keeps the trigger visibly pressed while
     // the popup is open.
-    let recents: Vec<SessionConfig> =
-        session_manager.read(cx).recent_sessions().to_vec();
+    let saved = session_manager.read(cx).recent_sessions().to_vec();
     let mgr_sessions = session_manager.clone();
     let sessions_btn = DropdownButton::new("toolbar_sessions")
         .button(
@@ -243,19 +246,19 @@ pub fn toolbar_element(
         )
         .menu_accessibility_label("Saved sessions")
         .dropdown_menu(move |menu, _, _| {
-            if recents.is_empty() {
+            if saved.is_empty() {
                 return menu.label("No saved sessions");
             }
             let mut menu = menu;
-            for config in recents.iter() {
+            for entry in saved.iter() {
                 let mgr = mgr_sessions.clone();
-                let config = config.clone();
+                let config = entry.config().clone();
                 menu = menu.item(
                     PopupMenuItem::new(config.name.clone()).on_click(
                         move |_, _, cx| {
                             mgr.update(cx, |m, cx| {
                                 if let Err(e) =
-                                    m.open_session_config(config.clone(), cx)
+                                    m.open_saved(config.clone(), cx)
                                 {
                                     log::push(
                                         LogLevel::Error,

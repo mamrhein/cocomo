@@ -32,6 +32,7 @@ use gpui::{
 };
 
 use crate::{
+    home::HomeView,
     log::{LogBuffer, LogLevel, LogPaneOpen},
     menus::{self, MenuState},
     session_manager::GuiSessionManager,
@@ -46,9 +47,9 @@ use crate::{
 
 /// A type-erased entity that can render itself.
 ///
-/// Stores either a [`FolderCompareView`] or [`TextDiffView`] entity behind
-/// a trait object, exposing only the methods needed for rendering, focus,
-/// the window title, and the view-specific toolbar row.
+/// Stores a [`FolderCompareView`], [`TextDiffView`], or [`HomeView`] entity
+/// behind a trait object, exposing only the methods needed for rendering,
+/// focus, the window title, and the view-specific toolbar row.
 pub struct TabEntity {
     inner: Box<dyn TabEntityInner>,
 }
@@ -73,6 +74,13 @@ impl TabEntity {
     pub fn from_text_diff(view: Entity<TextDiffView>) -> Self {
         Self {
             inner: Box::new(TextDiffTabEntity(view)),
+        }
+    }
+
+    /// Create from a home view.
+    pub fn from_home(view: Entity<HomeView>) -> Self {
+        Self {
+            inner: Box::new(HomeTabEntity(view)),
         }
     }
 
@@ -111,6 +119,14 @@ impl TabEntity {
     pub fn window_title(&self, cx: &App) -> SharedString {
         self.inner.window_title(cx)
     }
+
+    /// Whether this tab is the Home start screen.
+    ///
+    /// The window root uses this to hide the view-specific menus while
+    /// Home is active.
+    pub fn is_home(&self) -> bool {
+        self.inner.is_home()
+    }
 }
 
 /// Inner trait for type-erased tab entities.
@@ -124,6 +140,9 @@ trait TabEntityInner: Any + Send + Sync {
         cx: &mut App,
     ) -> Option<AnyElement>;
     fn window_title(&self, cx: &App) -> SharedString;
+    fn is_home(&self) -> bool {
+        false
+    }
     fn clone_inner(&self) -> Box<dyn TabEntityInner>;
 }
 
@@ -208,6 +227,39 @@ impl TabEntityInner for TextDiffTabEntity {
 
     fn clone_inner(&self) -> Box<dyn TabEntityInner> {
         Box::new(TextDiffTabEntity(self.0.clone()))
+    }
+}
+
+struct HomeTabEntity(Entity<HomeView>);
+
+impl TabEntityInner for HomeTabEntity {
+    fn focus_handle(&self, cx: &App) -> FocusHandle {
+        self.0.read(cx).focus_handle(cx)
+    }
+
+    fn any_view(&self) -> AnyView {
+        self.0.clone().into()
+    }
+
+    fn folder_state(&self, _: &App) -> Option<Entity<AppState>> {
+        None
+    }
+
+    fn view_toolbar(&self, _: &mut Window, _: &mut App) -> Option<AnyElement> {
+        // Home has no view-specific toolbar row.
+        None
+    }
+
+    fn window_title(&self, _: &App) -> SharedString {
+        "Cocomo — Home".into()
+    }
+
+    fn is_home(&self) -> bool {
+        true
+    }
+
+    fn clone_inner(&self) -> Box<dyn TabEntityInner> {
+        Box::new(HomeTabEntity(self.0.clone()))
     }
 }
 
@@ -413,6 +465,7 @@ impl Render for WindowRoot {
             active_tab.as_ref().and_then(|tab| tab.folder_state(cx));
         let menu_state = MenuState {
             is_folder: folder_state.is_some(),
+            is_home: active_tab.as_ref().is_some_and(TabEntity::is_home),
             selected_orphan: folder_state
                 .as_ref()
                 .is_some_and(|state| state.read(cx).selected_is_orphan()),

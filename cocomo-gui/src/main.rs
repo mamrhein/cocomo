@@ -15,6 +15,7 @@
 
 mod chrome;
 mod cli;
+mod home;
 mod log;
 mod menus;
 mod runtime;
@@ -100,12 +101,15 @@ fn main() -> Result<()> {
         // Register folder compare key bindings.
         cx.bind_keys(folder_compare_bindings());
 
+        // Register Home view key bindings.
+        cx.bind_keys(home::home_bindings());
+
         // Seed the initial tab from the startup decision: without CLI
-        // paths an empty untitled tab (the GUI equivalent of the TUI's
-        // welcome screen); with paths a folder-compare tab whose
-        // comparison loads asynchronously (failures surface in the UI).
+        // paths the Home tab (the start screen for new and saved
+        // sessions); with paths a folder-compare tab whose comparison
+        // loads asynchronously (failures surface in the UI).
         session_manager.update(cx, |mgr, cx| match startup {
-            Startup::Welcome => mgr.add_new_folder_tab(cx),
+            Startup::Welcome => mgr.open_home(cx),
             Startup::Session {
                 left,
                 right,
