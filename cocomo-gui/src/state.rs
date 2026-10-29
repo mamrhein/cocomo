@@ -24,6 +24,8 @@ use cocomo_lib::{
 };
 use gpui::{App, Context, FocusHandle, SharedString};
 
+use crate::log::{self, LogLevel};
+
 // ---------------------------------------------------------------------------
 // Sorting
 // ---------------------------------------------------------------------------
@@ -80,7 +82,21 @@ pub fn status_category(status: &DirEntryStatus) -> StatusCategory {
     }
 }
 
-/// Which entry categories the entry table displays.
+/// Exclusive display mode driven by the shared toolbar's toggle group.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FilterMode {
+    /// Every category is visible.
+    All,
+    /// Only entries that differ in any way (different or orphan).
+    Diffs,
+    /// Only entries that match on both sides.
+    Same,
+    /// A combination the toggle group cannot express; no button reads as
+    /// selected.
+    Custom,
+}
+
+/// Which entry categories the table displays.
 ///
 /// Filters are display-only: the underlying comparison and the summary
 /// counts of hidden categories stay intact, so toggling a filter is
@@ -362,6 +378,11 @@ pub struct AppState {
     nav_steps: Vec<NavStep>,
     /// Per-session comparison settings.
     settings: SessionSettings,
+    /// Current name-filter pattern shown in the toolbar's Filters combo.
+    ///
+    /// Kept apart from the settings history so an empty (cleared) filter
+    /// does not pollute the history list.
+    filter_current: Option<String>,
     /// Session type.
     session_type: SessionType,
 }
@@ -395,6 +416,7 @@ impl AppState {
             root_right: right,
             nav_steps: Vec::new(),
             settings: SessionSettings::default(),
+            filter_current: None,
             session_type: SessionType::DirCompare,
         }
     }
@@ -427,6 +449,7 @@ impl AppState {
             root_right: right,
             nav_steps: Vec::new(),
             settings: config.settings.clone(),
+            filter_current: config.settings.name_filter.last().cloned(),
             session_type: config.session_type,
         }
     }
@@ -606,11 +629,16 @@ impl AppState {
 
         let left = self.left.clone();
         let right = self.right.clone();
-        let title = self.title.clone();
         let left_display = left.display();
         let right_display = right.display();
         let compare_files = self.settings.compare_files;
         let weak = cx.entity().downgrade();
+
+        log::push(
+            LogLevel::Info,
+            format!("Load comparison: {left_display} ↔ {right_display}"),
+            cx,
+        );
 
         // Spawn the comparison on the tokio runtime because the providers
         // use tokio::fs internally and require a tokio reactor. Both sides
@@ -660,22 +688,32 @@ impl AppState {
                 };
                 async_app.update(|cx| {
                     if let Some(state) = weak.upgrade() {
-                        state.update(cx, |state, _| {
+                        state.update(cx, |state, cx| {
                             state.loading = false;
                             match result {
                                 Ok(comparison) => {
+                                    let count = comparison.entries.len();
                                     state.comparison = Some(comparison);
                                     state.recompute_display_order();
                                     state.selected_index = 0;
-                                    state.title = SharedString::from(format!(
-                                        "{title} — {left_display} vs \
-                                         {right_display}"
-                                    ));
+                                    log::push(
+                                        LogLevel::Info,
+                                        format!(
+                                            "Comparison completed: {count} \
+                                             entries"
+                                        ),
+                                        cx,
+                                    );
                                 }
                                 Err(e) => {
                                     state.error = Some(format!(
                                         "Comparison failed: {e}"
                                     ));
+                                    log::push(
+                                        LogLevel::Error,
+                                        format!("Comparison failed: {e}"),
+                                        cx,
+                                    );
                                 }
                             }
                         });
@@ -932,8 +970,24 @@ impl AppState {
                             state.loading = false;
                             state.busy_label = None;
                             state.notice = Some(match result {
-                                Ok(()) => format!("{done} \"{name}\"").into(),
-                                Err(e) => format!("Copy failed: {e}").into(),
+                                Ok(()) => {
+                                    let message = format!("{done} \"{name}\"");
+                                    log::push(
+                                        LogLevel::Info,
+                                        message.clone(),
+                                        cx,
+                                    );
+                                    message.into()
+                                }
+                                Err(e) => {
+                                    let message = format!("Copy failed: {e}");
+                                    log::push(
+                                        LogLevel::Error,
+                                        message.clone(),
+                                        cx,
+                                    );
+                                    message.into()
+                                }
                             });
                             // Re-compare so the reconciled entry shows as
                             // identical instead of stale.
@@ -996,6 +1050,110 @@ impl AppState {
             .and_then(|name| self.display_index_of_name(name))
             .unwrap_or(0);
         cx.notify();
+    }
+
+    /// The display mode the toolbar's exclusive toggle group shows.
+    pub fn filter_mode(&self) -> FilterMode {
+        let f = &self.filters;
+        if f.all_visible() {
+            FilterMode::All
+        } else if !f.show_same && f.show_different && f.show_orphans {
+            FilterMode::Diffs
+        } else if f.show_same && !f.show_different && !f.show_orphans {
+            FilterMode::Same
+        } else {
+            FilterMode::Custom
+        }
+    }
+
+    /// Apply an exclusive display mode from the toolbar's toggle group.
+    ///
+    /// "Diffs" keeps both difference categories (different and orphan);
+    /// a [`FilterMode::Custom`] combination is left untouched.
+    pub fn set_filter_mode(
+        &mut self,
+        mode: FilterMode,
+        cx: &mut Context<Self>,
+    ) {
+        let filters = match mode {
+            FilterMode::All => DisplayFilters::default(),
+            FilterMode::Diffs => DisplayFilters {
+                show_same: false,
+                show_different: true,
+                show_orphans: true,
+            },
+            FilterMode::Same => DisplayFilters {
+                show_same: true,
+                show_different: false,
+                show_orphans: false,
+            },
+            FilterMode::Custom => return,
+        };
+        if filters == self.filters {
+            return;
+        }
+        self.filters = filters;
+        let selected_name = self.selected_entry().map(|e| e.name.clone());
+        self.recompute_display_order();
+        self.selected_index = selected_name
+            .as_deref()
+            .and_then(|name| self.display_index_of_name(name))
+            .unwrap_or(0);
+        cx.notify();
+    }
+
+    /// The current name-filter pattern shown in the Filters combo.
+    pub fn filter_pattern(&self) -> Option<&str> {
+        self.filter_current.as_deref()
+    }
+
+    /// The entered filter patterns, oldest first (persisted in the
+    /// session settings).
+    pub fn filter_history(&self) -> &[String] {
+        &self.settings.name_filter
+    }
+
+    /// Record `pattern` as the current filter and append it to the
+    /// history stored in [`SessionSettings::name_filter`].
+    ///
+    /// An empty pattern clears the current filter but keeps the history,
+    /// so the dropdown still offers the previous entries.
+    pub fn push_filter_pattern(
+        &mut self,
+        pattern: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let pattern = pattern.trim();
+        if self.filter_current.as_deref() == Some(pattern) {
+            return;
+        }
+        self.filter_current = if pattern.is_empty() {
+            None
+        } else {
+            Some(pattern.to_string())
+        };
+        if !pattern.is_empty()
+            && self.settings.name_filter.last().map(String::as_str)
+                != Some(pattern)
+        {
+            self.settings.name_filter.push(pattern.to_string());
+        }
+        if pattern.is_empty() {
+            log::push(LogLevel::Info, "Filter cleared", cx);
+        } else {
+            log::push(LogLevel::Info, format!("Filter set: {pattern}"), cx);
+        }
+        cx.notify();
+    }
+
+    /// Whether the selected entry exists on only one side.
+    ///
+    /// Drives the enabled state of the Actions menu's copy-to-side
+    /// commands, which are no-ops for any other entry.
+    pub fn selected_is_orphan(&self) -> bool {
+        self.selected_entry().is_some_and(|e| {
+            status_category(&e.status) == StatusCategory::Orphan
+        })
     }
 
     /// Display-order position of the entry with the given name.

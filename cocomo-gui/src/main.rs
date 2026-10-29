@@ -15,6 +15,7 @@
 
 mod chrome;
 mod cli;
+mod log;
 mod menus;
 mod runtime;
 mod session_manager;
@@ -73,6 +74,11 @@ fn main() -> Result<()> {
         // this, the default quit mode on macOS is `Explicit`, keeping the
         // process alive (with no window) after the user closes the window.
         cx.set_quit_mode(QuitMode::LastWindowClosed);
+
+        // The log pane starts open; the menu bar reads both globals, so
+        // they must exist before `set_app_menus`.
+        cx.set_global(log::LogBuffer::default());
+        cx.set_global(log::LogPaneOpen(true));
 
         // Center the window on screen. The initial window size is a
         // physical platform default (not layout geometry), so it is a

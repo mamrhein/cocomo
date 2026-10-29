@@ -9,35 +9,47 @@
 
 //! Window chrome elements built on `gpui-component`.
 //!
-//! Provides styled tab bar and toolbar elements that integrate natively
-//! with the Kit's presentation layer and theme system.
+//! Provides the styled session tab bar (with per-tab context menus) and
+//! the shared toolbar row 1 that integrate natively with the Kit's
+//! presentation layer and theme system. Row 2 is view-specific and
+//! rendered by the active tab (see `crate::tabview::TabEntity::view_toolbar`).
 
+use cocomo_lib::SessionConfig;
 use gpui::{
-    App, Entity, IntoElement, Window,
+    AnyElement, App, ElementId, Entity, IntoElement, Window,
     assets::IconName,
-    base::Selectable,
+    base::{Disableable as _, Selectable as _},
     component::{
-        Sizable as _,
-        button::{Button, ButtonVariants as _},
+        ActiveTheme, Sizable as _, Theme,
+        button::{Button, ButtonVariants as _, DropdownButton},
+        menu::{ContextMenuExt as _, PopupMenuItem},
         tab::{Tab, TabBar},
         toolbar::{Toolbar, ToolbarGroup},
     },
+    div,
+    prelude::*,
 };
 
 use crate::{
-    menus::{CloseSession, NewCompare, ReloadCompare, SaveSession},
+    log::{self, LogLevel},
+    menus::SaveSession,
     session_manager::GuiSessionManager,
+    state::{AppState, FilterMode},
 };
+// ---------------------------------------------------------------------------
+// Tab bar
+// ---------------------------------------------------------------------------
 
 /// Build the session tab bar element using `gpui-component`'s [`TabBar`].
 ///
-/// Each tab shows the session name with a close button. A "+" button is
-/// appended as a suffix for creating new tabs. Tab activation is handled
-/// via the `TabBar`'s `on_click` callback.
+/// Each tab shows the session name with a close button and carries a
+/// context menu (move, save, close, close all). A "+" button is appended
+/// as a suffix for creating new tabs. Tab activation is handled via the
+/// `TabBar`'s `on_click` callback.
 pub fn tab_bar_element(
     session_manager: Entity<GuiSessionManager>,
     cx: &App,
-) -> impl IntoElement {
+) -> AnyElement {
     let (active_index, tab_ids) = {
         let mgr = session_manager.read(cx);
         (mgr.active_index(), mgr.open_tab_ids())
@@ -63,13 +75,63 @@ pub fn tab_bar_element(
                 .small()
                 .tooltip("Close tab")
                 .accessibility_label("Close tab")
-                .on_click(move |_, _, cx| {
+                .on_click(move |_, window, cx| {
+                    // Route through the manager so a dirty session gets
+                    // its save prompt before closing.
                     mgr_close.update(cx, |m, cx| {
-                        m.close_session(i, cx);
+                        m.request_close_session(i, window, cx);
                     });
                 });
+
+            // The context menu covers the tab's label area; the close
+            // button stays outside it so either affordance works.
+            let mgr_menu = session_manager.clone();
+            let label_area = div()
+                .id(ElementId::Name(format!("tab-ctx-{i}").into()))
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .child(name.clone())
+                .context_menu(move |menu, _, _| {
+                    let mgr = mgr_menu.clone();
+                    let mgr_close_all = mgr.clone();
+                    menu.item(
+                        PopupMenuItem::new("Move tab to new window")
+                            .disabled(true),
+                    )
+                    .item(
+                        // The save command acts on the active session;
+                        // offering it on an inactive tab would lie about
+                        // its scope.
+                        PopupMenuItem::new("Save session")
+                            .disabled(i != active_index)
+                            .on_click(|_, _, cx| {
+                                cx.dispatch_action(&SaveSession);
+                            }),
+                    )
+                    .separator()
+                    .item(PopupMenuItem::new("Close").on_click(
+                        move |_, window, cx| {
+                            mgr.update(cx, |m, cx| {
+                                m.request_close_session(i, window, cx);
+                            });
+                        },
+                    ))
+                    .item(
+                        PopupMenuItem::new("Close all").on_click(
+                            move |_, _, cx| {
+                                mgr_close_all.update(cx, |m, cx| {
+                                    while !m.is_empty() {
+                                        m.close_session(0, cx);
+                                    }
+                                });
+                            },
+                        ),
+                    )
+                });
+
             Tab::new()
-                .label(name.as_str())
+                .child(label_area)
                 .selected(i == active_index)
                 .suffix(close_btn)
         })
@@ -93,53 +155,208 @@ pub fn tab_bar_element(
         .on_click(on_click)
         .children(tabs)
         .suffix(new_btn)
+        .into_any_element()
 }
 
-/// Build the toolbar element using `gpui-component`'s [`Toolbar`].
+// ---------------------------------------------------------------------------
+// Toolbar row 1 (shared)
+// ---------------------------------------------------------------------------
+
+/// One button of the exclusive display-filter toggle group.
 ///
-/// Contains action buttons for New Compare, Save, Reload, and Close,
-/// each dispatching the corresponding application action. The toolbar
-/// group renders its buttons with the quiet ghost treatment; every
-/// icon-only button carries a tooltip and an accessible name.
-pub fn toolbar_element() -> impl IntoElement {
-    Toolbar::new("main-toolbar").child(
-        ToolbarGroup::new("toolbar-actions")
-            .label("Session commands")
-            .child(
-                Button::new("toolbar_new")
-                    .icon(IconName::Plus)
-                    .tooltip("New compare")
-                    .accessibility_label("New compare")
-                    .on_click(|_, _, cx| {
-                        cx.dispatch_action(&NewCompare);
-                    }),
-            )
-            .child(
-                Button::new("toolbar_save")
-                    .icon(IconName::Save)
-                    .tooltip("Save session")
-                    .accessibility_label("Save session")
-                    .on_click(|_, _, cx| {
-                        cx.dispatch_action(&SaveSession);
-                    }),
-            )
-            .child(
-                Button::new("toolbar_reload")
-                    .icon(IconName::RefreshCw)
-                    .tooltip("Reload comparison")
-                    .accessibility_label("Reload comparison")
-                    .on_click(|_, _, cx| {
-                        cx.dispatch_action(&ReloadCompare);
-                    }),
-            )
-            .child(
-                Button::new("toolbar_close")
-                    .icon(IconName::Close)
-                    .tooltip("Close session")
-                    .accessibility_label("Close session")
-                    .on_click(|_, _, cx| {
-                        cx.dispatch_action(&CloseSession);
-                    }),
-            ),
-    )
+/// The group is disabled while no folder tab is active; the "Diffs"
+/// button additionally takes the theme's danger color while selected, as
+/// the spec asks for a red difference state. Selection stays visible on
+/// its own, so color is never the only cue.
+fn filter_toggle(
+    id: &'static str,
+    icon: IconName,
+    tooltip: &'static str,
+    mode: FilterMode,
+    current: Option<FilterMode>,
+    danger_when_selected: bool,
+    theme: &Theme,
+    state: Option<Entity<AppState>>,
+) -> Button {
+    let button = Button::new(id)
+        .icon(icon)
+        .ghost()
+        .small()
+        .selected(current == Some(mode))
+        .disabled(state.is_none())
+        .tooltip(tooltip)
+        .accessibility_label(tooltip);
+    let button = if current == Some(mode) && danger_when_selected {
+        button.text_color(theme.danger)
+    } else {
+        button
+    };
+    match state {
+        Some(state) => button.on_click(move |_, _, cx| {
+            state.update(cx, |state, cx| {
+                state.set_filter_mode(mode, cx);
+            });
+        }),
+        None => button,
+    }
+}
+
+/// Build toolbar row 1 using `gpui-component`'s [`Toolbar`].
+///
+/// Row 1 is shared across all views: Home, the Sessions dropdown, the
+/// exclusive display-filter toggle group, Refresh, and Rules. Controls
+/// whose operations arrive in later phases render disabled with a
+/// tooltip that names the wait. `active_state` is the active folder
+/// tab's state, or `None` for text-diff tabs and an empty window.
+pub fn toolbar_element(
+    active_state: Option<Entity<AppState>>,
+    session_manager: Entity<GuiSessionManager>,
+    cx: &App,
+) -> AnyElement {
+    let theme = cx.theme();
+    let current_mode = active_state
+        .as_ref()
+        .map(|state| state.read(cx).filter_mode());
+    let no_folder = active_state.is_none();
+
+    // Home: the start screen lands in a later phase.
+    let home_btn = Button::new("toolbar_home")
+        .icon(IconName::House)
+        .ghost()
+        .small()
+        .disabled(true)
+        .tooltip("Home view (coming soon)")
+        .accessibility_label("Home view");
+
+    // Sessions: pick a saved session to open it in a new tab. The
+    // dedicated dropdown button keeps the trigger visibly pressed while
+    // the popup is open.
+    let recents: Vec<SessionConfig> =
+        session_manager.read(cx).recent_sessions().to_vec();
+    let mgr_sessions = session_manager.clone();
+    let sessions_btn = DropdownButton::new("toolbar_sessions")
+        .button(
+            Button::new("toolbar_sessions_btn")
+                .label("Sessions")
+                .ghost()
+                .small(),
+        )
+        .menu_accessibility_label("Saved sessions")
+        .dropdown_menu(move |menu, _, _| {
+            if recents.is_empty() {
+                return menu.label("No saved sessions");
+            }
+            let mut menu = menu;
+            for config in recents.iter() {
+                let mgr = mgr_sessions.clone();
+                let config = config.clone();
+                menu = menu.item(
+                    PopupMenuItem::new(config.name.clone()).on_click(
+                        move |_, _, cx| {
+                            mgr.update(cx, |m, cx| {
+                                if let Err(e) =
+                                    m.open_session_config(config.clone(), cx)
+                                {
+                                    log::push(
+                                        LogLevel::Error,
+                                        format!("Open session failed: {e}"),
+                                        cx,
+                                    );
+                                }
+                            });
+                        },
+                    ),
+                );
+            }
+            menu
+        });
+
+    let all_btn = filter_toggle(
+        "toolbar_filter_all",
+        IconName::Eye,
+        "Show all entries",
+        FilterMode::All,
+        current_mode,
+        false,
+        theme,
+        active_state.clone(),
+    );
+    let diffs_btn = filter_toggle(
+        "toolbar_filter_diffs",
+        IconName::Diff,
+        "Show differences only",
+        FilterMode::Diffs,
+        current_mode,
+        true,
+        theme,
+        active_state.clone(),
+    );
+    let same_btn = filter_toggle(
+        "toolbar_filter_same",
+        IconName::Equal,
+        "Show identical entries only",
+        FilterMode::Same,
+        current_mode,
+        false,
+        theme,
+        active_state.clone(),
+    );
+    // Minor differences (e.g. whitespace-only) are a text-comparison
+    // concept; the button is a placeholder until that lands.
+    let minor_btn = Button::new("toolbar_filter_minor")
+        .icon(IconName::Gauge)
+        .ghost()
+        .small()
+        .disabled(true)
+        .tooltip("Minor differences (coming soon)")
+        .accessibility_label("Minor differences");
+
+    // Refresh re-reads and re-compares the active session.
+    let refresh_btn = Button::new("toolbar_refresh")
+        .icon(IconName::RefreshCw)
+        .ghost()
+        .small()
+        .disabled(no_folder)
+        .tooltip("Reload comparison")
+        .accessibility_label("Reload comparison");
+    let refresh_btn = match active_state.clone() {
+        Some(state) => refresh_btn.on_click(move |_, _, cx| {
+            state.update(cx, |state, cx| {
+                state.reload(cx);
+            });
+        }),
+        None => refresh_btn,
+    };
+
+    // Rules opens the session-rules dialog (a later phase).
+    let rules_btn = Button::new("toolbar_rules")
+        .icon(IconName::Gavel)
+        .ghost()
+        .small()
+        .disabled(true)
+        .tooltip("Session rules (coming soon)")
+        .accessibility_label("Session rules");
+
+    Toolbar::new("main-toolbar")
+        .child(
+            ToolbarGroup::new("toolbar-nav")
+                .label("Navigation")
+                .child(home_btn)
+                .content(sessions_btn),
+        )
+        .child(
+            ToolbarGroup::new("toolbar-display")
+                .label("Display filters")
+                .child(all_btn)
+                .child(diffs_btn)
+                .child(same_btn)
+                .child(minor_btn),
+        )
+        .child(
+            ToolbarGroup::new("toolbar-ops")
+                .label("Operations")
+                .child(refresh_btn)
+                .child(rules_btn),
+        )
+        .into_any_element()
 }

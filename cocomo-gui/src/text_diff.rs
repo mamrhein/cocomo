@@ -288,6 +288,11 @@ impl TextDiffView {
         self.state.read(cx).focus_handle(cx).clone()
     }
 
+    /// The tab's display title (the file name or "Untitled").
+    pub fn title(&self, cx: &App) -> SharedString {
+        self.state.read(cx).title().clone()
+    }
+
     /// Handle select-next action.
     fn select_next(
         &mut self,

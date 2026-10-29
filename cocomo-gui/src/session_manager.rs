@@ -23,9 +23,15 @@ use cocomo_lib::{
     Endpoint, FsError, NullPrompter, ProviderRef, Session, SessionConfig,
     SessionSettings, SessionType,
 };
-use gpui::{App, AppContext, Context, Entity, Task};
+use gpui::{
+    App, AppContext as _, Context, Entity, Task,
+    component::{WindowExt as _, button::ButtonVariant},
+};
 
-use crate::tabview::TabEntity;
+use crate::{
+    log::{self, LogLevel},
+    tabview::TabEntity,
+};
 
 /// Type-erased node filesystem, matching what [`Session`] accepts.
 type AnyNodeFs =
@@ -84,7 +90,6 @@ impl GuiSessionManager {
     // -----------------------------------------------------------------------
 
     /// Return the open sessions' tab IDs and names.
-    #[allow(dead_code)]
     pub fn open_tab_ids(&self) -> Vec<(usize, String)> {
         self.open_sessions
             .iter()
@@ -103,7 +108,6 @@ impl GuiSessionManager {
     }
 
     /// Return the active session index.
-    #[allow(dead_code)]
     pub fn active_index(&self) -> usize {
         self.active_index
     }
@@ -119,7 +123,6 @@ impl GuiSessionManager {
     }
 
     /// Return the recent sessions loaded from disk.
-    #[allow(dead_code)]
     pub fn recent_sessions(&self) -> &[SessionConfig] {
         &self.recent_sessions
     }
@@ -164,11 +167,10 @@ impl GuiSessionManager {
         right: Endpoint,
         cx: &mut Context<Self>,
     ) {
-        let title = gpui::SharedString::from(format!(
-            "cocomo — {} vs {}",
-            left.display(),
-            right.display()
-        ));
+        // The tab title is the session name; the window title is composed
+        // by `WindowRoot` from the compared folder names, so the product
+        // name is not baked into the state.
+        let title = gpui::SharedString::from(config.name.clone());
 
         let state = cx.new(|cx| {
             crate::state::AppState::from_config(
@@ -188,6 +190,11 @@ impl GuiSessionManager {
             dirty: false,
             tab_entity,
         };
+        log::push(
+            LogLevel::Info,
+            format!("Opened session: {}", session.config.name),
+            cx,
+        );
         self.next_tab_id += 1;
         self.open_sessions.push(session);
         self.active_index = self.open_sessions.len() - 1;
@@ -280,6 +287,44 @@ impl GuiSessionManager {
         self.open_folder_tab(config, left, right, cx);
     }
 
+    /// Open a tab for a loaded session config, rebuilding both endpoints
+    /// from the provider refs recorded in it.
+    ///
+    /// Remote refs re-resolve without prompting (same rule as
+    /// [`Self::build_session`]); a ref that needs credentials fails and the
+    /// caller reports the error.
+    pub fn open_session_config(
+        &mut self,
+        config: SessionConfig,
+        cx: &mut Context<Self>,
+    ) -> Result<()> {
+        let prompter = NullPrompter;
+        let left = Endpoint::from_ref(
+            &config.left.provider,
+            config.left.path.clone(),
+            &prompter,
+        )
+        .with_context(|| {
+            format!(
+                "failed to resolve left endpoint: {}",
+                config.left.path.display()
+            )
+        })?;
+        let right = Endpoint::from_ref(
+            &config.right.provider,
+            config.right.path.clone(),
+            &prompter,
+        )
+        .with_context(|| {
+            format!(
+                "failed to resolve right endpoint: {}",
+                config.right.path.display()
+            )
+        })?;
+        self.open_folder_tab(config, left, right, cx);
+        Ok(())
+    }
+
     /// Return the active tab's content, if any.
     pub fn active_tab_content(&self) -> Option<&TabEntity> {
         self.open_sessions
@@ -318,7 +363,12 @@ impl GuiSessionManager {
             return;
         }
 
-        self.open_sessions.remove(index);
+        let removed = self.open_sessions.remove(index);
+        log::push(
+            LogLevel::Info,
+            format!("Closed session: {}", removed.config.name),
+            cx,
+        );
 
         // Adjust active index.
         if self.open_sessions.is_empty() {
@@ -330,6 +380,45 @@ impl GuiSessionManager {
         }
 
         cx.notify();
+    }
+
+    /// Close the session at `index`, prompting first when it has unsaved
+    /// changes.
+    ///
+    /// The prompt is an alert dialog because discarding unsaved session
+    /// edits cannot be undone.
+    pub fn request_close_session(
+        &mut self,
+        index: usize,
+        window: &mut gpui::Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session) = self.open_sessions.get(index) else {
+            return;
+        };
+        if !session.dirty {
+            self.close_session(index, cx);
+            return;
+        }
+        let name = session.config.name.clone();
+        let mgr = cx.entity().clone();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            // Clone per builder call: the builder is an `Fn` closure that
+            // may run on every layer rebuild.
+            let mgr = mgr.clone();
+            alert
+                .confirm()
+                .title(format!("Close \"{name}\"?"))
+                .description(
+                    "This session has unsaved changes. Closing discards them.",
+                )
+                .ok_text("Close without saving")
+                .ok_variant(ButtonVariant::Danger)
+                .on_ok(move |_, _, cx| {
+                    mgr.update(cx, |m, cx| m.close_session(index, cx));
+                    true
+                })
+        });
     }
 
     /// Close the active session.

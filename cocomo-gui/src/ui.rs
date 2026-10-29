@@ -17,21 +17,24 @@ use std::{ops::Range, sync::Arc};
 
 use cocomo_lib::{DirEntry, DirEntryStatus, Endpoint, TransferAction};
 use gpui::{
-    Action, Anchor, App, ClickEvent, ClipboardItem, Context, Div, ElementId,
-    Entity, FocusHandle, FontFeatures, FontWeight, Hsla, KeyBinding,
-    MouseButton, Render, Role, ScrollStrategy, SharedString,
-    TestSupportExt as _, UniformListScrollHandle, Window, actions,
+    Action, Anchor, AnyElement, App, ClickEvent, ClipboardItem, Context, Div,
+    ElementId, Entity, FocusHandle, FontFeatures, FontWeight, Hsla,
+    KeyBinding, MouseButton, Render, Role, ScrollStrategy, SharedString,
+    Subscription, TestSupportExt as _, UniformListScrollHandle, Window,
+    actions,
     assets::IconName,
-    base::{Disableable as _, Selectable as _},
+    base::Disableable as _,
     component::{
-        ActiveTheme, Sizable as _, Theme,
+        ActiveTheme, Sizable as _, Theme, WindowExt as _,
         breadcrumb::{Breadcrumb, BreadcrumbItem},
         button::{Button, ButtonVariants as _},
         h_flex,
-        menu::{ContextMenuExt as _, DropdownMenu as _},
+        input::{Input, InputEvent, InputState},
+        menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenuItem},
         popover::Popover,
         spinner::Spinner,
         status_bar::StatusBar,
+        toolbar::{Toolbar, ToolbarGroup},
         tooltip::Tooltip,
         v_flex,
     },
@@ -129,6 +132,14 @@ pub struct FolderCompareView {
     session_manager: Entity<GuiSessionManager>,
     /// Scroll handle for the entry list.
     scroll_handle: UniformListScrollHandle,
+    /// Editable name-filter combo in toolbar row 2.
+    ///
+    /// Created lazily on the first row-2 render: the row is rendered by
+    /// `WindowRoot`, which is where a window handle is available for
+    /// `InputState`.
+    filter_input: Option<Entity<InputState>>,
+    /// Subscription that commits the filter input on Enter.
+    _filter_subscription: Option<Subscription>,
 }
 
 impl FolderCompareView {
@@ -147,6 +158,8 @@ impl FolderCompareView {
             state,
             session_manager,
             scroll_handle: UniformListScrollHandle::new(),
+            filter_input: None,
+            _filter_subscription: None,
         }
     }
 
@@ -161,6 +174,204 @@ impl FolderCompareView {
     /// menu's checkmarks in sync with the active tab.
     pub fn folder_state(&self) -> Entity<AppState> {
         self.state.clone()
+    }
+
+    /// Render toolbar row 2 for this folder tab: pair controls, the
+    /// name-filter combo with history, the filter-editor trigger,
+    /// section navigation, and reload.
+    ///
+    /// Called by `WindowRoot` through [`crate::tabview::TabEntity`]; the
+    /// controls update [`AppState`] directly rather than dispatching
+    /// actions, because a toolbar click does not move keyboard focus to
+    /// the (possibly unfocused) view.
+    pub fn render_view_toolbar(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        // Create the filter input on first render and commit its value
+        // when the user presses Enter.
+        if self.filter_input.is_none() {
+            let input = cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder("Name filter, e.g. *.rs")
+            });
+            self._filter_subscription =
+                Some(cx.subscribe(&input, |this, input, event, cx| {
+                    if matches!(event, InputEvent::PressEnter { .. }) {
+                        let value = input.read(cx).value().to_string();
+                        this.state.update(cx, |state, cx| {
+                            state.push_filter_pattern(&value, cx);
+                        });
+                    }
+                }));
+            self.filter_input = Some(input);
+        }
+        let input = self.filter_input.clone().expect("just created");
+
+        let (pattern, history) = {
+            let state = self.state.read(cx);
+            (
+                state.filter_pattern().unwrap_or("").to_string(),
+                state.filter_history().to_vec(),
+            )
+        };
+        // Seed the input once from the session's stored pattern.
+        if !pattern.is_empty() && input.read(cx).value().is_empty() {
+            input.update(cx, |state, cx| {
+                state.set_value(pattern.clone(), window, cx);
+            });
+        }
+
+        let theme = cx.theme();
+
+        let swap_btn = Button::new("row2_swap")
+            .icon(IconName::ArrowLeftRight)
+            .ghost()
+            .small()
+            .tooltip("Swap sides")
+            .accessibility_label("Swap sides")
+            .on_click({
+                let state = self.state.clone();
+                move |_, _, cx| {
+                    state.update(cx, |state, cx| {
+                        state.swap_sides(cx);
+                    });
+                }
+            });
+
+        // Load cancellation arrives with the async-robustness phase.
+        let stop_btn = Button::new("row2_stop")
+            .icon(IconName::CircleStop)
+            .ghost()
+            .small()
+            .disabled(true)
+            .tooltip("Stop comparison (coming soon)")
+            .accessibility_label("Stop comparison");
+
+        // History dropdown: newest first; picking an entry makes it the
+        // current pattern again.
+        let state_entity = self.state.clone();
+        let history_input = input.clone();
+        let history_btn = Button::new("row2_filter_history")
+            .icon(IconName::ChevronDown)
+            .ghost()
+            .small()
+            .disabled(history.is_empty())
+            .tooltip("Filter history")
+            .accessibility_label("Filter history")
+            .dropdown_menu(move |menu, _, _| {
+                let input = history_input.clone();
+                let state = state_entity.clone();
+                let mut menu = menu;
+                for pattern in history.iter().rev() {
+                    let input = input.clone();
+                    let state = state.clone();
+                    let pattern = pattern.clone();
+                    menu = menu.item(
+                        PopupMenuItem::new(pattern.clone()).on_click(
+                            move |_, window, cx| {
+                                input.update(cx, |input, cx| {
+                                    input.set_value(
+                                        pattern.clone(),
+                                        window,
+                                        cx,
+                                    );
+                                });
+                                state.update(cx, |state, cx| {
+                                    state.push_filter_pattern(&pattern, cx);
+                                });
+                            },
+                        ),
+                    );
+                }
+                menu
+            });
+
+        // The full filter editor is a later phase; the dialog container
+        // already exists so the entry point is discoverable.
+        let filters_btn = Button::new("row2_filters_dialog")
+            .icon(IconName::Ellipsis)
+            .ghost()
+            .small()
+            .tooltip("Open filter editor")
+            .accessibility_label("Open filter editor")
+            .on_click(|_, window, cx| {
+                window.open_dialog(cx, |dialog, _, _| {
+                    dialog.title("Filters").child(
+                        "The full filter editor arrives in a later phase.",
+                    )
+                });
+            });
+
+        // Difference sections are a text-view concept; the buttons are
+        // placeholders here and wired for text tabs in a later phase.
+        let prev_section_btn = Button::new("row2_prev_section")
+            .icon(IconName::ChevronsUp)
+            .ghost()
+            .small()
+            .disabled(true)
+            .tooltip("Previous difference section (coming soon)")
+            .accessibility_label("Previous difference section");
+        let next_section_btn = Button::new("row2_next_section")
+            .icon(IconName::ChevronsDown)
+            .ghost()
+            .small()
+            .disabled(true)
+            .tooltip("Next difference section (coming soon)")
+            .accessibility_label("Next difference section");
+
+        let reload_btn = Button::new("row2_reload")
+            .icon(IconName::RefreshCw)
+            .ghost()
+            .small()
+            .tooltip("Reload comparison")
+            .accessibility_label("Reload comparison")
+            .on_click({
+                let state = self.state.clone();
+                move |_, _, cx| {
+                    state.update(cx, |state, cx| {
+                        state.reload(cx);
+                    });
+                }
+            });
+
+        Toolbar::new("view-toolbar")
+            .child(
+                ToolbarGroup::new("view-toolbar-pair")
+                    .label("Pair")
+                    .child(swap_btn)
+                    .child(stop_btn),
+            )
+            .child(
+                ToolbarGroup::new("view-toolbar-filter")
+                    .label("Filters")
+                    .content(
+                        h_flex()
+                            .items_center()
+                            .gap_1()
+                            .child(
+                                Input::new(&input)
+                                    .small()
+                                    .w_64()
+                                    .text_color(theme.foreground),
+                            )
+                            .child(history_btn)
+                            .child(filters_btn),
+                    ),
+            )
+            .child(
+                ToolbarGroup::new("view-toolbar-sections")
+                    .label("Sections")
+                    .child(prev_section_btn)
+                    .child(next_section_btn),
+            )
+            .child(
+                ToolbarGroup::new("view-toolbar-reload")
+                    .label("Reload")
+                    .child(reload_btn),
+            )
+            .into_any_element()
     }
 
     /// Handle the select-next action.
@@ -510,11 +721,13 @@ impl Render for FolderCompareView {
 }
 
 impl FolderCompareView {
-    /// Render the header bar showing the compared paths, the pair
-    /// controls (up one level, swap sides), the display-filter dropdown,
-    /// the status legend trigger, and the navigation breadcrumb.
+    /// Render the header bar showing the compared paths, the up-one-level
+    /// control, the status legend trigger, and the navigation breadcrumb.
+    ///
+    /// Pair controls (swap) and display filters live in the toolbar rows;
+    /// this header only names what is being compared.
     fn render_header(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let (left_path, right_path, at_root, crumbs, root_label, filters) = {
+        let (left_path, right_path, at_root, crumbs, root_label) = {
             let state = self.state.read(cx);
             let crumbs: Vec<(SharedString, usize)> = state
                 .nav_steps()
@@ -528,15 +741,10 @@ impl FolderCompareView {
                 state.nav_steps().is_empty(),
                 crumbs,
                 state.title().clone(),
-                state.filters(),
             )
         };
         let theme = cx.theme();
         let state_entity = self.state.clone();
-        // The filter dropdown dispatches `ToggleShow*` actions; routing them
-        // through the view's focus handle reaches its `on_action` handlers
-        // even though opening the popup does not focus the list.
-        let menu_focus = self.focus_handle(cx);
 
         // The two compared roots are the primary information of this view,
         // so they take the full width; the window title already names the
@@ -580,61 +788,12 @@ impl FolderCompareView {
                     .child(left_path),
             )
             .child(
-                Button::new("swap_btn")
-                    .icon(IconName::ArrowLeftRight)
-                    .ghost()
-                    .small()
-                    .tooltip("Swap sides")
-                    .accessibility_label("Swap sides")
-                    .on_click({
-                        let state = state_entity.clone();
-                        move |_, _, cx| {
-                            state.update(cx, |state, cx| {
-                                state.swap_sides(cx);
-                            });
-                        }
-                    }),
-            )
-            .child(
                 div()
                     .flex_1()
                     .min_w_0()
                     .truncate()
                     .text_color(theme.foreground)
                     .child(right_path),
-            )
-            // Display filters live here (not in the shared toolbar) because
-            // they belong to the folder table. The button reads as active
-            // whenever any category is hidden.
-            .child(
-                Button::new("filter_btn")
-                    .icon(IconName::ListFilter)
-                    .ghost()
-                    .small()
-                    .selected(!filters.all_visible())
-                    .tooltip("Display filters")
-                    .accessibility_label("Display filters")
-                    .dropdown_menu_with_anchor(
-                        Anchor::TopRight,
-                        move |menu, _, _| {
-                            menu.action_context(menu_focus.clone())
-                                .menu_with_check(
-                                    "Show same",
-                                    filters.show_same,
-                                    Box::new(ToggleShowSame),
-                                )
-                                .menu_with_check(
-                                    "Show different",
-                                    filters.show_different,
-                                    Box::new(ToggleShowDifferent),
-                                )
-                                .menu_with_check(
-                                    "Show orphans",
-                                    filters.show_orphans,
-                                    Box::new(ToggleShowOrphans),
-                                )
-                        },
-                    ),
             )
             // The legend explains every status marker; it belongs to this
             // view (the toolbar is shared with the text-diff tabs), so the
