@@ -789,7 +789,12 @@ pub(crate) fn process_session_action(action: SessionAction) {
                     };
                     match post {
                         PostTransfer::Dir(comparison) => {
-                            session.set_comparison(Some(comparison));
+                            // Keep the cursor on the transferred entry
+                            // instead of jumping to the first row; it is
+                            // usually still present after the re-compare,
+                            // only with a new status.
+                            session
+                                .set_comparison_keeping_selection(comparison);
                         }
                         PostTransfer::Text(content) => {
                             session.content = content;

@@ -826,6 +826,28 @@ impl SessionView {
         }
     }
 
+    /// Set a fresh directory comparison, keeping the selection on the entry
+    /// it currently points at.
+    ///
+    /// Used after a transfer: the entry under the cursor usually still
+    /// exists (its status merely changed), so the user keeps their place in
+    /// the tree. Only when the entry is gone — removed by the transfer or
+    /// hidden by the display filters — does the selection fall back to the
+    /// first row, matching [`SessionView::set_comparison`]. The drag
+    /// selection anchor is dropped either way.
+    pub fn set_comparison_keeping_selection(
+        &mut self,
+        comparison: DirComparison,
+    ) {
+        // Capture the path before the assignment drops the entries the
+        // selected row borrows from.
+        let selected = self.selected_row().map(|row| row.rel_path);
+        self.set_comparison(Some(comparison));
+        let index =
+            selected.as_deref().and_then(|path| self.row_index_of(path));
+        self.set_cursor(Some(index.unwrap_or(0)));
+    }
+
     /// Record the outcome of a sync run and reset the selection.
     ///
     /// Single owner of the `dir.sync` mutation: bumps the revision counter
@@ -1371,6 +1393,70 @@ mod tests {
         session.set_comparison(None);
         assert!(session.dir().unwrap().comparison.is_none());
         assert_eq!(session.ui.table_state.selected(), Some(0));
+    }
+
+    #[test]
+    fn set_comparison_keeping_selection_stays_on_the_entry() {
+        let mut session = dir_session();
+        session.set_comparison(Some(comparison(&[
+            ("a", DirEntryStatus::LeftOnly),
+            ("b", DirEntryStatus::Different),
+            ("c", DirEntryStatus::RightOnly),
+        ])));
+        session.set_cursor(Some(1));
+
+        // After the transfer the entry is still there, only its status
+        // changed, so the selection follows it instead of jumping to row 0.
+        session.set_comparison_keeping_selection(comparison(&[
+            ("a", DirEntryStatus::LeftOnly),
+            ("b", DirEntryStatus::Same),
+            ("c", DirEntryStatus::RightOnly),
+        ]));
+        assert_eq!(session.ui.table_state.selected(), Some(1));
+        assert_eq!(session.selected_row().unwrap().entry.name, "b");
+    }
+
+    #[test]
+    fn set_comparison_keeping_selection_tracks_a_moved_row() {
+        let mut session = dir_session();
+        session.set_comparison(Some(comparison(&[
+            ("a", DirEntryStatus::LeftOnly),
+            ("b", DirEntryStatus::Different),
+            ("c", DirEntryStatus::RightOnly),
+        ])));
+        session.set_cursor(Some(2));
+
+        // The entry above the selection disappears from the view (here by
+        // being filtered out), shifting the selected entry up one row.
+        session.dir_mut().unwrap().display.show_same = false;
+        session.set_comparison_keeping_selection(comparison(&[
+            ("a", DirEntryStatus::Same),
+            ("b", DirEntryStatus::Different),
+            ("c", DirEntryStatus::RightOnly),
+        ]));
+        assert_eq!(session.ui.table_state.selected(), Some(1));
+        assert_eq!(session.selected_row().unwrap().entry.name, "c");
+    }
+
+    #[test]
+    fn set_comparison_keeping_selection_falls_back_when_entry_is_gone() {
+        let mut session = dir_session();
+        session.set_comparison(Some(comparison(&[
+            ("a", DirEntryStatus::Different),
+            ("b", DirEntryStatus::LeftOnly),
+        ])));
+        session.set_cursor(Some(1));
+        session.ui.selection_anchor = Some(0);
+
+        // A deleted (or filtered-out) entry leaves nothing to keep: the
+        // selection falls back to the first row and the stale drag anchor
+        // is dropped.
+        session.set_comparison_keeping_selection(comparison(&[
+            ("a", DirEntryStatus::Different),
+            ("c", DirEntryStatus::RightOnly),
+        ]));
+        assert_eq!(session.ui.table_state.selected(), Some(0));
+        assert_eq!(session.ui.selection_anchor, None);
     }
 
     #[test]
