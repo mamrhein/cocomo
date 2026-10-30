@@ -25,6 +25,7 @@ use gpui::{
         ActiveTheme, Sizable as _, Theme, WindowExt as _,
         breadcrumb::{Breadcrumb, BreadcrumbItem},
         button::{Button, ButtonVariant, ButtonVariants as _},
+        checkbox::Checkbox,
         h_flex,
         input::{Input, InputEvent, InputState},
         menu::{DropdownMenu as _, PopupMenuItem},
@@ -40,6 +41,7 @@ use gpui::{
 
 use crate::{
     color::Side,
+    log::{self, LogLevel},
     menus::{
         CopyPathLeft, CopyPathRight, ReloadCompare, SaveSession, StopCompare,
         ToggleShowDifferent, ToggleShowOrphans, ToggleShowSame,
@@ -585,8 +587,8 @@ impl FolderCompareView {
         });
     }
 
-    /// Handle OpenFileDiff: dispatch to session manager to create a text diff
-    /// tab.
+    /// Handle OpenFileDiff: route the file pair through the file-format
+    /// registry (UI spec section 7.2) and open the matching view.
     fn handle_open_file_diff(
         &mut self,
         action: &OpenFileDiff,
@@ -597,8 +599,32 @@ impl FolderCompareView {
             // Fallback: use the same file on the other side.
             action.left_path.clone()
         });
+        let kind = crate::file_formats::FileFormatRegistry::view_kind(
+            action.left_path.path(),
+            cx,
+        );
+        if !kind.is_available() {
+            // The table, hex, and picture views arrive in later phases;
+            // say so instead of silently opening the wrong editor.
+            log::push(
+                LogLevel::Info,
+                format!(
+                    "The {kind:?} view is not available yet; {} was not \
+                     opened.",
+                    action.left_path.display()
+                ),
+                cx,
+            );
+            return;
+        }
+        let parent = self.state.downgrade();
         self.session_manager.update(cx, |mgr, cx| {
-            mgr.add_text_diff_tab(action.left_path.clone(), right_path, cx);
+            mgr.add_text_diff_tab(
+                action.left_path.clone(),
+                right_path,
+                Some(parent),
+                cx,
+            );
         });
     }
 
@@ -962,8 +988,9 @@ impl FolderCompareView {
             });
         } else {
             let right = if has_right { right.clone() } else { right };
+            let parent = self.state.downgrade();
             self.session_manager.update(cx, |mgr, cx| {
-                mgr.add_text_diff_tab(left, right, cx);
+                mgr.add_text_diff_tab(left, right, Some(parent), cx);
             });
         }
     }
@@ -1981,6 +2008,137 @@ fn status_legend(theme: &Theme) -> impl IntoElement {
                     )
             },
         )))
+}
+
+// ---------------------------------------------------------------------------
+// Session rules dialog
+// ---------------------------------------------------------------------------
+
+/// Body of the folder session's rules dialog. A `Render` entity so the
+/// checkboxes repaint as they are toggled.
+struct FolderRulesBody {
+    state: Entity<AppState>,
+    compare_files: bool,
+    compare_structure: bool,
+    ignore_whitespace: bool,
+    skip_blank_lines: bool,
+    skip_comments: bool,
+    name_filter: Entity<InputState>,
+}
+
+impl FolderRulesBody {
+    fn new(
+        state: Entity<AppState>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let settings = state.read(cx).settings().clone();
+        Self {
+            compare_files: settings.compare_files,
+            compare_structure: settings.compare_structure,
+            ignore_whitespace: settings.ignore_whitespace,
+            skip_blank_lines: settings.skip_blank_lines,
+            skip_comments: settings.skip_comments,
+            name_filter: cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder("Name filters (comma-separated globs)")
+                    .default_value(settings.name_filter.join(", "))
+            }),
+            state,
+        }
+    }
+
+    /// Push the drafted rules into the session and re-compare.
+    fn apply(&mut self, cx: &mut Context<Self>) {
+        let mut settings = self.state.read(cx).settings().clone();
+        settings.compare_files = self.compare_files;
+        settings.compare_structure = self.compare_structure;
+        settings.ignore_whitespace = self.ignore_whitespace;
+        settings.skip_blank_lines = self.skip_blank_lines;
+        settings.skip_comments = self.skip_comments;
+        settings.name_filter = self
+            .name_filter
+            .read(cx)
+            .value()
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        self.state
+            .update(cx, |state, cx| state.update_settings(settings, cx));
+    }
+}
+
+impl Render for FolderRulesBody {
+    fn render(
+        &mut self,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let row = |label: &'static str,
+                   checked: bool,
+                   handler: fn(&mut Self, bool)| {
+            Checkbox::new(label)
+                .label(label)
+                .checked(checked)
+                .on_change(cx.listener(move |this, checked, _, cx| {
+                    handler(this, *checked);
+                    cx.notify();
+                }))
+        };
+        v_flex()
+            .w_full()
+            .gap_2()
+            .child(row(
+                "Compare file contents",
+                self.compare_files,
+                |this, v| this.compare_files = v,
+            ))
+            .child(row(
+                "Compare directory structure",
+                self.compare_structure,
+                |this, v| this.compare_structure = v,
+            ))
+            .child(row(
+                "Ignore whitespace",
+                self.ignore_whitespace,
+                |this, v| this.ignore_whitespace = v,
+            ))
+            .child(row(
+                "Skip blank lines",
+                self.skip_blank_lines,
+                |this, v| this.skip_blank_lines = v,
+            ))
+            .child(row("Skip comment lines", self.skip_comments, |this, v| {
+                this.skip_comments = v
+            }))
+            .child(Input::new(&self.name_filter).small())
+            .child(
+                h_flex().justify_end().child(
+                    Button::new("folder_rules_apply")
+                        .label("Apply")
+                        .primary()
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.apply(cx);
+                        })),
+                ),
+            )
+    }
+}
+
+/// Open the rules dialog for a folder compare session.
+pub(crate) fn open_folder_rules_dialog(
+    state: Entity<AppState>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let body = cx.new(|cx| FolderRulesBody::new(state, window, cx));
+    window.open_dialog(cx, move |dialog, _, _| {
+        dialog
+            .title("Session rules")
+            .w(gpui::px(460.))
+            .child(body.clone())
+    });
 }
 
 #[cfg(test)]

@@ -517,6 +517,9 @@ impl Render for WindowRoot {
                     can_go_back: state.can_go_back(),
                     can_go_forward: state.can_go_forward(),
                     log_open: cx.global::<LogPaneOpen>().0,
+                    is_text_editing: false,
+                    can_save_file: false,
+                    detail_mode: Default::default(),
                 }
             })
             .or_else(|| {
@@ -526,6 +529,9 @@ impl Render for WindowRoot {
                         is_text: true,
                         word_wrap: state.is_word_wrap(),
                         show_thumbnails: state.is_show_thumbnail(),
+                        is_text_editing: state.is_editing(),
+                        can_save_file: state.can_save(),
+                        detail_mode: state.detail_mode(),
                         is_home: active_tab
                             .as_ref()
                             .is_some_and(TabEntity::is_home),

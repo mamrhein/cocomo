@@ -31,7 +31,7 @@ use gpui::{
 
 use crate::{
     log::{self, LogLevel},
-    menus::SaveSession,
+    menus::{SaveSession, SessionSettings},
     session_manager::GuiSessionManager,
     state::{AppState, FilterMode},
 };
@@ -332,14 +332,21 @@ pub fn toolbar_element(
         None => refresh_btn,
     };
 
-    // Rules opens the session-rules dialog (a later phase).
+    // Rules opens the session-rules dialog: folder rules for a folder
+    // tab, text-compare rules for a text tab. The global handler
+    // branches on the active tab.
+    let is_text_active =
+        session_manager.read(cx).active_text_session(cx).is_some();
     let rules_btn = Button::new("toolbar_rules")
         .icon(IconName::Gavel)
         .ghost()
         .small()
-        .disabled(true)
-        .tooltip("Session rules (coming soon)")
-        .accessibility_label("Session rules");
+        .disabled(no_folder && !is_text_active)
+        .tooltip("Session rules")
+        .accessibility_label("Session rules")
+        .on_click(|_, window, cx| {
+            window.dispatch_action(Box::new(SessionSettings), cx);
+        });
 
     Toolbar::new("main-toolbar")
         .child(

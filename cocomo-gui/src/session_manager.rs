@@ -303,17 +303,22 @@ impl GuiSessionManager {
     }
 
     /// Add a text diff tab for the given file endpoints and make it
-    /// active.
+    /// active. `parent` is the folder session the pair was selected in,
+    /// enabling "copy file and open next difference" from the diff tab.
     pub fn add_text_diff_tab(
         &mut self,
         left: Endpoint,
         right: Endpoint,
+        parent: Option<gpui::WeakEntity<crate::state::AppState>>,
         cx: &mut Context<Self>,
     ) {
+        let mgr = cx.entity().clone();
         let view = crate::text_diff::new_text_diff_view(
             left.clone(),
             right.clone(),
             None,
+            parent,
+            Some(mgr),
             cx,
         );
 
@@ -345,6 +350,69 @@ impl GuiSessionManager {
         self.open_sessions.push(session);
         self.active_index = self.open_sessions.len() - 1;
         cx.notify();
+    }
+
+    /// Add a text diff tab over two in-memory texts ("compare selection
+    /// to clipboard") and make it active.
+    pub fn add_text_diff_tab_from_texts(
+        &mut self,
+        left_text: &str,
+        right_text: &str,
+        title: gpui::SharedString,
+        cx: &mut Context<Self>,
+    ) {
+        let mgr = cx.entity().clone();
+        let view = crate::text_diff::new_text_diff_view_from_texts(
+            left_text,
+            right_text,
+            title,
+            Some(mgr),
+            cx,
+        );
+        let tab_entity = TabEntity::from_text_diff(view);
+        let session = OpenSession {
+            tab_id: self.next_tab_id,
+            config: SessionConfig {
+                name: "selection vs clipboard".to_string(),
+                session_type: SessionType::TextCompare,
+                left: ProviderRef {
+                    provider: Default::default(),
+                    path: "selection".into(),
+                },
+                right: ProviderRef {
+                    provider: Default::default(),
+                    path: "clipboard".into(),
+                },
+                center: None,
+                settings: SessionSettings::default(),
+            },
+            dirty: false,
+            tab_entity,
+        };
+        self.next_tab_id += 1;
+        self.open_sessions.push(session);
+        self.active_index = self.open_sessions.len() - 1;
+        cx.notify();
+    }
+
+    /// The active tab's text compare session, if it is one.
+    pub fn active_text_session(
+        &self,
+        cx: &gpui::App,
+    ) -> Option<gpui::Entity<crate::text_diff::TextDiffSession>> {
+        self.open_sessions
+            .get(self.active_index)
+            .and_then(|s| s.tab_entity.text_state(cx))
+    }
+
+    /// The active tab's folder compare session, if it is one.
+    pub fn active_folder_session(
+        &self,
+        cx: &gpui::App,
+    ) -> Option<gpui::Entity<crate::state::AppState>> {
+        self.open_sessions
+            .get(self.active_index)
+            .and_then(|s| s.tab_entity.folder_state(cx))
     }
 
     /// Open a directory compare in a new tab.
@@ -460,7 +528,7 @@ impl GuiSessionManager {
                     config.right.path.display()
                 )
             })?;
-            self.add_text_diff_tab(left, right, cx);
+            self.add_text_diff_tab(left, right, None, cx);
             return Ok(());
         }
         self.open_session_config(config, cx)
@@ -480,7 +548,7 @@ impl GuiSessionManager {
         match resolve_dropped_paths(kind, paths) {
             Ok((left, right)) => match kind {
                 SessionType::TextCompare => {
-                    self.add_text_diff_tab(left, right, cx);
+                    self.add_text_diff_tab(left, right, None, cx);
                 }
                 _ => {
                     let config = SessionConfig {

@@ -16,6 +16,7 @@
 mod chrome;
 mod cli;
 mod color;
+mod file_formats;
 mod folder_panes;
 mod fsops;
 mod home;
@@ -83,6 +84,7 @@ fn main() -> Result<()> {
         // they must exist before `set_app_menus`.
         cx.set_global(log::LogBuffer::default());
         cx.set_global(log::LogPaneOpen(true));
+        file_formats::FileFormatRegistry::init_global(cx);
 
         // Center the window on screen. The initial window size is a
         // physical platform default (not layout geometry), so it is a

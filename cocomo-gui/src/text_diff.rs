@@ -28,23 +28,28 @@ use chrono::{DateTime, Local, Utc};
 use cocomo_lib::{
     ColorOverrides, Endpoint, FsError, Grammar, Importance, LineEnding,
     LineInfo, NodeFileSystem, TextCompareSettings, TextDiff, TextDifference,
-    TextEncoding, compare_texts, format_size,
+    TextEncoding, WhitespaceMode, compare_texts, format_size,
 };
 use gpui::{
-    AnyElement, App, Bounds, Context, CursorStyle, DispatchPhase, Div,
+    Action, AnyElement, App, Bounds, Context, CursorStyle, DispatchPhase, Div,
     Element, ElementId, Entity, FocusHandle, GlobalElementId, Hitbox, Hsla,
-    InspectorElementId, IntoElement, KeyBinding, LayoutId, List,
-    ListAlignment, ListScrollEvent, ListState, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, PathBuilder, Pixels, Render, SharedString,
-    Style, Subscription, Window, actions,
+    InspectorElementId, IntoElement, KeyBinding, LayoutId, ListAlignment,
+    ListScrollEvent, ListState, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, PathBuilder, Pixels, Render, SharedString, Style,
+    Subscription, WeakEntity, Window, actions,
     assets::IconName,
     base::Disableable as _,
     component::{
         ActiveTheme, Sizable as _, Theme, WindowExt as _,
         button::{Button, ButtonVariants as _},
+        checkbox::Checkbox,
         h_flex,
-        input::{Input, InputEvent, InputState},
-        menu::{DropdownMenu as _, PopupMenuItem},
+        input::{
+            Editor, EditorState, Input, InputEvent, InputState,
+            RangeDecoration, RangeDecorationCollection, RangeDecorationStyle,
+            RopeExt,
+        },
+        menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenuItem},
         resizable::{h_resizable, resizable_panel},
         spinner::Spinner,
         status_bar::StatusBar,
@@ -63,6 +68,8 @@ use crate::{
         NextSection, PrevSection, ReloadCompare, SessionInfo, SessionReport,
         ShowThumbnails, ToggleWordWrap,
     },
+    session_manager::GuiSessionManager,
+    state::AppState,
     ui::{NextDifference, PrevDifference, SwapSides},
 };
 
@@ -70,7 +77,205 @@ use crate::{
 // Actions
 // ---------------------------------------------------------------------------
 
-actions!(text_compare, [NextLine, PrevLine]);
+actions!(
+    text_compare,
+    [
+        NextLine,
+        PrevLine,
+        ToggleTextEdit,
+        SelectSection,
+        DeleteLine,
+        InsertLineBefore,
+        InsertLineAfter,
+        ConvertTrimTrailing,
+        ConvertSpacesToTabs,
+        ConvertTabsToSpaces,
+        ConvertEndingsPc,
+        ConvertEndingsMac,
+        ConvertEndingsUnix,
+        CompareSelectionToClipboard,
+        AlignWithAnchor,
+        ClearAlignments,
+        IsolateSelection,
+        CopySectionRight,
+        CopySectionLeft,
+        CopyFileRightNext,
+        CopyFileLeftNext,
+    ]
+);
+
+/// Mark the clicked row's line on one side as the alignment anchor.
+#[derive(Action, Clone, Debug, PartialEq)]
+#[action(namespace = text_compare, no_json)]
+pub(crate) struct SetAlignAnchor {
+    /// The side whose line is marked.
+    pub(crate) side: Side,
+}
+
+/// Select which detail pane pair the view shows below the diff.
+#[derive(Action, Clone, Debug, PartialEq)]
+#[action(namespace = text_compare, no_json)]
+pub(crate) struct SetDetailMode {
+    /// The detail mode to switch to.
+    pub(crate) mode: DetailMode,
+}
+
+/// Which pair of detail panes is shown below the diff.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum DetailMode {
+    /// The selected line on each side, editable.
+    #[default]
+    Text,
+    /// A read-only hex dump of the selected line's bytes.
+    Hex,
+    /// The selected lines with a caret under the first differing char.
+    Alignment,
+}
+
+/// A whole-buffer conversion from the Convert File menu.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ConvertOp {
+    TrimTrailing,
+    SpacesToTabs,
+    TabsToSpaces,
+    EndingsPc,
+    EndingsMac,
+    EndingsUnix,
+}
+
+/// Split on CR, LF, and CRLF (unlike `str::lines`, a lone CR ends a
+/// line), without producing a trailing empty line.
+fn split_any_line(text: &str) -> Vec<&str> {
+    let mut lines = Vec::new();
+    let bytes = text.as_bytes();
+    let (mut start, mut i) = (0usize, 0usize);
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\r' | b'\n' => {
+                lines.push(&text[start..i]);
+                i += if bytes[i] == b'\r' && bytes.get(i + 1) == Some(&b'\n') {
+                    2
+                } else {
+                    1
+                };
+                start = i;
+            }
+            _ => i += 1,
+        }
+    }
+    if start < text.len() {
+        lines.push(&text[start..]);
+    }
+    lines
+}
+
+/// Rewrite line endings to one convention, preserving whether the text
+/// ends with a newline.
+fn normalize_endings(text: &str, ending: LineEnding) -> String {
+    let sep = match ending {
+        LineEnding::Crlf => "\r\n",
+        LineEnding::Cr => "\r",
+        LineEnding::Lf | LineEnding::Ignore => "\n",
+    };
+    let ends_nl = text.ends_with('\n') || text.ends_with('\r');
+    let mut out = split_any_line(text).join(sep);
+    if ends_nl {
+        out.push_str(sep);
+    }
+    out
+}
+
+/// Apply a Convert File operation to a whole buffer.
+fn convert_text(text: &str, op: ConvertOp) -> String {
+    match op {
+        ConvertOp::TrimTrailing => {
+            let ends_nl = text.ends_with('\n') || text.ends_with('\r');
+            let mut out = split_any_line(text)
+                .into_iter()
+                .map(str::trim_end)
+                .collect::<Vec<_>>()
+                .join("\n");
+            if ends_nl {
+                out.push('\n');
+            }
+            out
+        }
+        ConvertOp::SpacesToTabs => {
+            let ends_nl = text.ends_with('\n') || text.ends_with('\r');
+            let mut out = String::new();
+            for line in split_any_line(text) {
+                // Only leading indentation is converted, in groups of
+                // four, mirroring the editor's tab size.
+                let indent = line.len() - line.trim_start_matches(' ').len();
+                out.push_str(&"\t".repeat(indent / 4));
+                out.push_str(&" ".repeat(indent % 4));
+                out.push_str(&line[indent..]);
+                out.push('\n');
+            }
+            if !ends_nl && out.ends_with('\n') {
+                out.pop();
+            }
+            out
+        }
+        ConvertOp::TabsToSpaces => text.replace('\t', "    "),
+        ConvertOp::EndingsPc => normalize_endings(text, LineEnding::Crlf),
+        ConvertOp::EndingsMac => normalize_endings(text, LineEnding::Cr),
+        ConvertOp::EndingsUnix => normalize_endings(text, LineEnding::Lf),
+    }
+}
+
+/// Encode edited text for writing back to disk.
+fn encode_text(
+    text: &str,
+    ending: LineEnding,
+    encoding: TextEncoding,
+) -> Vec<u8> {
+    let text = normalize_endings(text, ending);
+    match encoding {
+        // Latin-1 is the byte-for-byte inverse of `decode_bytes`.
+        TextEncoding::Latin1 => text.chars().map(|c| c as u8).collect(),
+        _ => text.into_bytes(),
+    }
+}
+
+/// A read-only hex dump of one line's bytes, 16 per row.
+fn hex_dump(text: &str) -> String {
+    let bytes = text.as_bytes();
+    if bytes.is_empty() {
+        return "—".to_string();
+    }
+    let mut out = String::new();
+    for (row, chunk) in bytes.chunks(16).enumerate() {
+        let hex = chunk
+            .iter()
+            .map(|b| format!("{b:02X}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let ascii: String = chunk
+            .iter()
+            .map(|&b| {
+                if (0x20..0x7F).contains(&b) {
+                    b as char
+                } else {
+                    '.'
+                }
+            })
+            .collect();
+        out.push_str(&format!("{row:04X}  {hex:<47}  |{ascii}|\n"));
+    }
+    out.truncate(out.len() - 1);
+    out
+}
+
+/// The column of the first differing character on an alignment row.
+fn first_difference_caret(left: &str, right: &str) -> String {
+    let pos = left
+        .chars()
+        .zip(right.chars())
+        .take_while(|(l, r)| l == r)
+        .count();
+    format!("{}^", " ".repeat(pos))
+}
 
 // ---------------------------------------------------------------------------
 // Diff alignment model
@@ -184,6 +389,49 @@ fn push_context(
             minor: false,
         });
         *r += 1;
+    }
+}
+
+/// Force the given `(left, right)` line pairs onto shared rows.
+///
+/// Applied after [`align_rows`]; each override either merges a deleted
+/// row with an inserted row into one changed row, or swaps partners
+/// between two changed rows. Pairs that cannot be honored (already
+/// paired, or shapes the model cannot express) are left alone.
+fn apply_align_overrides(
+    rows: &mut Vec<DiffRow>,
+    overrides: &[(usize, usize)],
+) {
+    for &(l, r) in overrides {
+        let Some(li) = rows.iter().position(|row| row.left == Some(l)) else {
+            continue;
+        };
+        let Some(ri) = rows.iter().position(|row| row.right == Some(r)) else {
+            continue;
+        };
+        if li == ri {
+            continue;
+        }
+        let (lrow, rrow) = (rows[li], rows[ri]);
+        if lrow.status == RowStatus::Changed
+            && rrow.status == RowStatus::Changed
+        {
+            // Re-pair: the anchor pair wins, the displaced right line
+            // keeps the other row's left line.
+            rows[li].right = Some(r);
+            rows[ri].right = lrow.right;
+        } else if lrow.status == RowStatus::Deleted
+            && rrow.status == RowStatus::Inserted
+        {
+            let (first, second) = (li.min(ri), li.max(ri));
+            rows[first] = DiffRow {
+                left: Some(l),
+                right: Some(r),
+                status: RowStatus::Changed,
+                minor: false,
+            };
+            rows.remove(second);
+        }
     }
 }
 
@@ -750,14 +998,50 @@ pub struct TextDiffSession {
     show_thumbnail: bool,
     /// Per-session color overrides.
     overrides: ColorOverrides,
+    /// Left text editor, created when edit mode is first entered.
+    left_editor: Option<Entity<EditorState>>,
+    /// Right text editor, created when edit mode is first entered.
+    right_editor: Option<Entity<EditorState>>,
+    /// Subscriptions tracking the editors' change and focus events.
+    _editor_subs: Vec<Subscription>,
+    /// The left buffer has unsaved edits.
+    left_dirty: bool,
+    /// The right buffer has unsaved edits.
+    right_dirty: bool,
+    /// Whether the panes show editable editors instead of the diff list.
+    editing: bool,
+    /// The side whose editor last had focus (target of edit commands).
+    focus_side: Side,
+    /// Whether the editors still need re-seeding from the last load.
+    editors_stale: bool,
+    /// Rules the current diff was computed under.
+    compare_settings: TextCompareSettings,
+    /// Forced alignment pairs `(left line, right line)`, 1-based.
+    align_overrides: Vec<(usize, usize)>,
+    /// Line marked as the pending alignment anchor.
+    align_anchor: Option<(Side, usize)>,
+    /// Which detail pane pair is shown below the diff.
+    detail_mode: DetailMode,
+    /// Bumps whenever the row model changes, so the view can refresh
+    /// editor decorations.
+    model_rev: usize,
+    /// The parent folder session this diff was opened from, if any.
+    parent: Option<WeakEntity<AppState>>,
+    /// The session manager, for opening follow-up tabs.
+    manager: Option<Entity<GuiSessionManager>>,
 }
 
 impl TextDiffSession {
     /// Create a session for the given endpoints; loads on demand.
+    ///
+    /// `parent` and `manager` wire the session back to the folder view it
+    /// was opened from, enabling "copy file and open next difference".
     pub fn new(
         left: Endpoint,
         right: Endpoint,
         title: SharedString,
+        parent: Option<WeakEntity<AppState>>,
+        manager: Option<Entity<GuiSessionManager>>,
         cx: &mut Context<Self>,
     ) -> Self {
         Self {
@@ -792,7 +1076,46 @@ impl TextDiffSession {
             word_wrap: false,
             show_thumbnail: false,
             overrides: ColorOverrides::default(),
+            left_editor: None,
+            right_editor: None,
+            _editor_subs: Vec::new(),
+            left_dirty: false,
+            right_dirty: false,
+            editing: false,
+            focus_side: Side::Left,
+            editors_stale: false,
+            compare_settings: TextCompareSettings::new(),
+            align_overrides: Vec::new(),
+            align_anchor: None,
+            detail_mode: DetailMode::default(),
+            model_rev: 0,
+            parent,
+            manager,
         }
+    }
+
+    /// Build a session from in-memory texts, without any file I/O. Used by
+    /// tests and by "compare selection to clipboard".
+    pub(crate) fn from_texts(
+        left_text: &str,
+        right_text: &str,
+        title: SharedString,
+        manager: Option<Entity<GuiSessionManager>>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut session = Self::new(
+            Endpoint::local("selection"),
+            Endpoint::local("clipboard"),
+            title,
+            None,
+            manager,
+            cx,
+        );
+        session.left_raw = Some(left_text.as_bytes().to_vec());
+        session.right_raw = Some(right_text.as_bytes().to_vec());
+        session.load_ms = Some(0);
+        session.redecode_and_compare();
+        session
     }
 
     /// Build a session from in-memory texts, without any file I/O. Used by
@@ -807,6 +1130,8 @@ impl TextDiffSession {
             Endpoint::local("/left.txt"),
             Endpoint::local("/right.txt"),
             "test".into(),
+            None,
+            None,
             cx,
         );
         session.left_raw = Some(left_text.as_bytes().to_vec());
@@ -1023,6 +1348,13 @@ impl TextDiffSession {
                                     });
                                     session.load_ms = Some(ms);
                                     session.redecode_and_compare();
+                                    // A reload replaces the buffers, so the
+                                    // editors must re-seed and lose their
+                                    // dirty state; the view re-seeds them
+                                    // because `set_value` needs a window.
+                                    session.editors_stale = true;
+                                    session.left_dirty = false;
+                                    session.right_dirty = false;
                                 }
                                 Err(e) => {
                                     session.error =
@@ -1069,14 +1401,15 @@ impl TextDiffSession {
         self.diff = Some(compare_texts(
             &left_text,
             &right_text,
-            &TextCompareSettings::new(),
+            &self.compare_settings,
         ));
         self.rebuild_model();
     }
 
     /// Rebuild rows, sections, and the display list from the diff.
     fn rebuild_model(&mut self) {
-        let rows = self.diff.as_ref().map(align_rows).unwrap_or_default();
+        let mut rows = self.diff.as_ref().map(align_rows).unwrap_or_default();
+        apply_align_overrides(&mut rows, &self.align_overrides);
         let sections = diff_sections(&rows);
         let mut row_section = vec![usize::MAX; rows.len()];
         let mut is_section_start = vec![false; rows.len()];
@@ -1092,6 +1425,7 @@ impl TextDiffSession {
         self.sections = Arc::new(sections);
         self.row_section = Arc::new(row_section);
         self.is_section_start = Arc::new(is_section_start);
+        self.model_rev += 1;
         self.rebuild_display();
     }
 
@@ -1341,6 +1675,556 @@ impl TextDiffSession {
     pub fn right_history(&self) -> &[String] {
         &self.right_history
     }
+
+    // -- Editing, rules, and sync (phase 6) --------------------------------
+
+    /// Whether the panes show editable editors.
+    pub fn is_editing(&self) -> bool {
+        self.editing
+    }
+
+    /// Whether either buffer has unsaved edits.
+    pub fn is_dirty(&self) -> bool {
+        self.left_dirty || self.right_dirty
+    }
+
+    /// Whether a side can be saved (its content is loaded).
+    pub fn can_save(&self) -> bool {
+        self.left_raw.is_some() || self.right_raw.is_some()
+    }
+
+    /// The side whose editor last had focus.
+    pub fn focus_side(&self) -> Side {
+        self.focus_side
+    }
+
+    /// The session manager, when this session was opened from one.
+    pub fn manager(&self) -> Option<Entity<GuiSessionManager>> {
+        self.manager.clone()
+    }
+
+    /// Clear the stale-editor flag and the dirty marks after the view
+    /// has re-seeded both editors from the model.
+    pub fn mark_editors_seeded(&mut self) {
+        self.editors_stale = false;
+        self.left_dirty = false;
+        self.right_dirty = false;
+    }
+
+    /// The current detail mode.
+    pub fn detail_mode(&self) -> DetailMode {
+        self.detail_mode
+    }
+
+    /// Switch the detail panes.
+    pub fn set_detail_mode(
+        &mut self,
+        mode: DetailMode,
+        cx: &mut Context<Self>,
+    ) {
+        self.detail_mode = mode;
+        cx.notify();
+    }
+
+    /// Enter or leave edit mode.
+    pub fn toggle_editing(&mut self, cx: &mut Context<Self>) {
+        self.editing = !self.editing;
+        cx.notify();
+    }
+
+    /// The row-model revision, for refreshing editor decorations.
+    pub fn model_rev(&self) -> usize {
+        self.model_rev
+    }
+
+    /// Whether the editors still need re-seeding from the last load.
+    pub fn editors_stale(&self) -> bool {
+        self.editors_stale
+    }
+
+    /// The left editor, once edit mode has created one.
+    pub fn left_editor(&self) -> Option<&Entity<EditorState>> {
+        self.left_editor.as_ref()
+    }
+
+    /// The right editor, once edit mode has created one.
+    pub fn right_editor(&self) -> Option<&Entity<EditorState>> {
+        self.right_editor.as_ref()
+    }
+
+    /// The editor for one side.
+    pub fn editor(&self, side: Side) -> Option<&Entity<EditorState>> {
+        match side {
+            Side::Left => self.left_editor.as_ref(),
+            Side::Right => self.right_editor.as_ref(),
+        }
+    }
+
+    /// Take ownership of the view-created editors and start tracking
+    /// their change and focus events. The editors are flagged stale so
+    /// the view seeds their text on the next render.
+    pub fn attach_editors(
+        &mut self,
+        left: Entity<EditorState>,
+        right: Entity<EditorState>,
+        cx: &mut Context<Self>,
+    ) {
+        self._editor_subs.clear();
+        for (side, editor) in [(Side::Left, &left), (Side::Right, &right)] {
+            let sub =
+                cx.subscribe(editor, move |this, _, event, cx| match event {
+                    InputEvent::Change => this.mark_side_dirty(side, cx),
+                    InputEvent::Focus => this.focus_side = side,
+                    _ => {}
+                });
+            self._editor_subs.push(sub);
+        }
+        self.left_editor = Some(left);
+        self.right_editor = Some(right);
+        self.editors_stale = true;
+        cx.notify();
+    }
+
+    /// Record unsaved edits on one side and flag the tab dirty.
+    pub fn mark_side_dirty(&mut self, side: Side, cx: &mut Context<Self>) {
+        match side {
+            Side::Left => self.left_dirty = true,
+            Side::Right => self.right_dirty = true,
+        }
+        if let Some(manager) = self.manager.clone() {
+            manager.update(cx, |m, cx| m.mark_dirty(cx));
+        }
+        cx.notify();
+    }
+
+    /// The current text of one side: the editor buffer once it is
+    /// seeded, otherwise the decoded file bytes normalized to LF.
+    pub fn side_text(&self, side: Side, cx: &App) -> String {
+        if !self.editors_stale
+            && let Some(editor) = self.editor(side)
+        {
+            return editor.read(cx).value().to_string();
+        }
+        let (raw, encoding) = match side {
+            Side::Left => (&self.left_raw, self.left_encoding),
+            Side::Right => (&self.right_raw, self.right_encoding),
+        };
+        normalize_endings(
+            &decode_bytes(raw.as_deref().unwrap_or(&[]), encoding),
+            LineEnding::Lf,
+        )
+    }
+
+    /// Re-diff the current buffers without touching disk. Edits are
+    /// preserved; this is what "recompare" means once editing landed.
+    pub fn recompare(&mut self, cx: &mut Context<Self>) {
+        let left_text = self.side_text(Side::Left, cx);
+        let right_text = self.side_text(Side::Right, cx);
+        self.left_lines = Arc::new(split_lines(&left_text));
+        self.right_lines = Arc::new(split_lines(&right_text));
+        self.diff = Some(compare_texts(
+            &left_text,
+            &right_text,
+            &self.compare_settings,
+        ));
+        self.rebuild_model();
+        cx.notify();
+    }
+
+    /// Replace the session's compare rules and re-diff.
+    pub fn set_compare_settings(
+        &mut self,
+        settings: TextCompareSettings,
+        cx: &mut Context<Self>,
+    ) {
+        self.compare_settings = settings;
+        self.recompare(cx);
+    }
+
+    /// The current compare rules, for the rules dialog.
+    pub fn compare_settings(&self) -> &TextCompareSettings {
+        &self.compare_settings
+    }
+
+    /// The pending alignment anchor, if a line is marked.
+    pub fn align_anchor(&self) -> Option<(Side, usize)> {
+        self.align_anchor
+    }
+
+    /// Whether any alignment overrides are in effect.
+    pub fn has_align_overrides(&self) -> bool {
+        !self.align_overrides.is_empty()
+    }
+
+    /// Mark the clicked row's line on `side` as the alignment anchor.
+    pub fn set_align_anchor(&mut self, side: Side, cx: &mut Context<Self>) {
+        let Some(line) = self.selected_row().and_then(|row| match side {
+            Side::Left => row.left,
+            Side::Right => row.right,
+        }) else {
+            return;
+        };
+        self.align_anchor = Some((side, line));
+        log::push(
+            LogLevel::Info,
+            format!(
+                "Alignment anchor: {} line {line}",
+                if side == Side::Left { "left" } else { "right" }
+            ),
+            cx,
+        );
+        cx.notify();
+    }
+
+    /// Pair the marked anchor line with the selected row's line on the
+    /// opposite side, then re-diff honoring the override.
+    pub fn align_with_selected(&mut self, cx: &mut Context<Self>) {
+        let Some((anchor_side, anchor_line)) = self.align_anchor else {
+            return;
+        };
+        let Some(row) = self.selected_row().copied() else {
+            return;
+        };
+        let pair = match anchor_side {
+            Side::Left => row.right.map(|r| (anchor_line, r)),
+            Side::Right => row.left.map(|l| (l, anchor_line)),
+        };
+        let Some(pair) = pair else {
+            log::push(
+                LogLevel::Warning,
+                "The selected row has no line on the opposite side to align \
+                 with."
+                    .to_string(),
+                cx,
+            );
+            return;
+        };
+        if !self.align_overrides.contains(&pair) {
+            self.align_overrides.push(pair);
+        }
+        self.align_anchor = None;
+        self.recompare(cx);
+    }
+
+    /// Drop all alignment overrides and re-diff.
+    pub fn clear_alignments(&mut self, cx: &mut Context<Self>) {
+        if self.align_overrides.is_empty() && self.align_anchor.is_none() {
+            return;
+        }
+        self.align_overrides.clear();
+        self.align_anchor = None;
+        self.recompare(cx);
+    }
+
+    /// Collapse every section except the one containing the selection.
+    pub fn isolate_selected(&mut self, cx: &mut Context<Self>) {
+        let Some(keep) = self.selected_section() else {
+            return;
+        };
+        self.collapsed =
+            (0..self.sections.len()).filter(|s| *s != keep).collect();
+        self.rebuild_display();
+        cx.notify();
+    }
+
+    /// The section index of the selected row, if it is in one.
+    pub fn selected_section(&self) -> Option<usize> {
+        let d = self.selected?;
+        let DisplayRow::Line(r) = *self.display.get(d)? else {
+            return None;
+        };
+        let si = self.row_section.get(r).copied().unwrap_or(usize::MAX);
+        (si != usize::MAX).then_some(si)
+    }
+
+    /// The 1-based inclusive line range one side contributes to a
+    /// section, if it contributes any lines.
+    pub fn section_line_range(
+        &self,
+        section: usize,
+        side: Side,
+    ) -> Option<(usize, usize)> {
+        let sec = self.sections.get(section)?;
+        let (mut lo, mut hi) = (usize::MAX, 0usize);
+        for row in &self.rows[sec.start_row..sec.end_row] {
+            if let Some(n) = match side {
+                Side::Left => row.left,
+                Side::Right => row.right,
+            } {
+                lo = lo.min(n);
+                hi = hi.max(n);
+            }
+        }
+        (hi > 0).then(|| (lo, hi))
+    }
+
+    /// The right line just above a section — the insertion point when
+    /// the target side has no lines in the section (0 = before all).
+    pub fn section_insert_after(&self, section: usize, side: Side) -> usize {
+        let Some(sec) = self.sections.get(section) else {
+            return 0;
+        };
+        for row in self.rows[..sec.start_row].iter().rev() {
+            if let Some(n) = match side {
+                Side::Left => row.left,
+                Side::Right => row.right,
+            } {
+                return n;
+            }
+        }
+        0
+    }
+
+    /// The joined text one side contributes to a section, newline
+    /// terminated so it can replace target lines directly.
+    pub fn section_text(&self, section: usize, side: Side) -> String {
+        let Some((lo, hi)) = self.section_line_range(section, side) else {
+            return String::new();
+        };
+        let lines = match side {
+            Side::Left => &self.left_lines,
+            Side::Right => &self.right_lines,
+        };
+        let mut out = String::new();
+        for line in lines.iter().filter(|l| l.number >= lo && l.number <= hi) {
+            out.push_str(&line.content);
+            out.push('\n');
+        }
+        out
+    }
+
+    /// The selected row's line text on one side, for the detail panes.
+    pub fn selected_line_text(&self, side: Side) -> Option<String> {
+        let row = self.selected_row()?;
+        let n = match side {
+            Side::Left => row.left,
+            Side::Right => row.right,
+        }?;
+        let lines = match side {
+            Side::Left => &self.left_lines,
+            Side::Right => &self.right_lines,
+        };
+        lines.get(n - 1).map(|l| l.content.clone())
+    }
+
+    /// The selected row's line number on one side.
+    pub fn selected_line_number(&self, side: Side) -> Option<usize> {
+        let row = self.selected_row()?;
+        match side {
+            Side::Left => row.left,
+            Side::Right => row.right,
+        }
+    }
+
+    /// Save one side's buffer to its file, or prompt for a new path when
+    /// `save_as` is set. The outcome is logged; failures also notify.
+    pub fn save_side(
+        &mut self,
+        side: Side,
+        save_as: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let text = self.side_text(side, cx);
+        let (ending, encoding, endpoint) = match side {
+            Side::Left => (self.left_ending, self.left_encoding, &self.left),
+            Side::Right => {
+                (self.right_ending, self.right_encoding, &self.right)
+            }
+        };
+        let bytes = encode_text(&text, ending, encoding);
+        let path = endpoint.path().to_path_buf();
+        let needs_prompt = save_as
+            || path.as_os_str().is_empty()
+            || path == std::path::Path::new("selection")
+            || path == std::path::Path::new("clipboard");
+        let entity = cx.entity().clone();
+        if needs_prompt {
+            let dir = path
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .map(|p| p.to_path_buf())
+                .unwrap_or_default();
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "file.txt".to_string());
+            let receiver = cx.prompt_for_new_path(&dir, Some(&name));
+            cx.spawn(move |_, cx: &mut gpui::AsyncApp| {
+                let mut cx = cx.clone();
+                async move {
+                    let target = match receiver.await {
+                        Ok(Ok(Some(p))) => p,
+                        // The user cancelled the save dialog.
+                        Ok(Ok(None)) => return,
+                        Ok(Err(e)) => {
+                            cx.update(|cx| {
+                                log::push(
+                                    LogLevel::Error,
+                                    format!("Save failed: {e}"),
+                                    cx,
+                                );
+                            });
+                            return;
+                        }
+                        Err(_) => return,
+                    };
+                    Self::finish_save(
+                        entity,
+                        side,
+                        bytes,
+                        Some(target),
+                        &mut cx,
+                    )
+                    .await;
+                }
+            })
+            .detach();
+        } else {
+            cx.spawn(move |_, cx: &mut gpui::AsyncApp| {
+                let mut cx = cx.clone();
+                async move {
+                    Self::finish_save(entity, side, bytes, None, &mut cx)
+                        .await;
+                }
+            })
+            .detach();
+        }
+    }
+
+    /// Write the buffer (optionally to a new path) and settle the
+    /// session's dirty and metadata state.
+    async fn finish_save(
+        entity: Entity<TextDiffSession>,
+        side: Side,
+        bytes: Vec<u8>,
+        new_path: Option<std::path::PathBuf>,
+        cx: &mut gpui::AsyncApp,
+    ) {
+        let target = new_path.clone().unwrap_or_else(|| {
+            entity.read_with(cx, |s, _| match side {
+                Side::Left => s.left.path().to_path_buf(),
+                Side::Right => s.right.path().to_path_buf(),
+            })
+        });
+        let for_log = target.display().to_string();
+        let size = bytes.len() as u64;
+        let result = crate::runtime::spawn_on_tokio(async move {
+            fs_err::tokio::write(&target, &bytes)
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))
+        })
+        .await;
+        let _ = entity.update(cx, |session, cx| {
+            match result {
+                Ok(Ok(())) => {
+                    match side {
+                        Side::Left => session.left_dirty = false,
+                        Side::Right => session.right_dirty = false,
+                    }
+                    if let Some(path) = &new_path {
+                        let path_str = path.display().to_string();
+                        let updated = match side {
+                            Side::Left => session.left.with_path(&path_str),
+                            Side::Right => session.right.with_path(&path_str),
+                        };
+                        match side {
+                            Side::Left => session.left = updated,
+                            Side::Right => session.right = updated,
+                        }
+                    }
+                    let meta = FileMeta::from_parts(size, Utc::now());
+                    match side {
+                        Side::Left => session.left_meta = Some(meta),
+                        Side::Right => session.right_meta = Some(meta),
+                    }
+                    log::push(LogLevel::Info, format!("Saved: {for_log}"), cx);
+                }
+                Ok(Err(e)) => {
+                    log::push(
+                        LogLevel::Error,
+                        format!("Save failed: {e}"),
+                        cx,
+                    );
+                    crate::menus::notify_error(
+                        format!("Couldn't save {for_log}. {e}"),
+                        cx,
+                    );
+                }
+                Err(e) => {
+                    log::push(
+                        LogLevel::Error,
+                        format!("Save task panicked: {e}"),
+                        cx,
+                    );
+                }
+            }
+            cx.notify();
+        });
+    }
+
+    /// Copy this pair's file toward one side, advance the parent folder
+    /// session to its next difference, and open that pair in a new tab.
+    pub fn copy_file_and_open_next(
+        &mut self,
+        to: Side,
+        cx: &mut Context<Self>,
+    ) {
+        let (Some(parent), Some(manager)) =
+            (self.parent.clone(), self.manager.clone())
+        else {
+            log::push(
+                LogLevel::Warning,
+                "Copy file and open next needs a parent folder session."
+                    .to_string(),
+                cx,
+            );
+            return;
+        };
+        let (source, target) = match to {
+            Side::Right => (&self.left, &self.right),
+            Side::Left => (&self.right, &self.left),
+        };
+        let (src, dst) =
+            (source.path().to_path_buf(), target.path().to_path_buf());
+        let join = crate::runtime::spawn_on_tokio(async move {
+            fs_err::tokio::copy(&src, &dst)
+                .await
+                .map(|_| ())
+                .map_err(|e| anyhow::anyhow!("{e}"))
+        });
+        cx.spawn(move |_, cx: &mut gpui::AsyncApp| {
+            let mut cx = cx.clone();
+            async move {
+                let result = match join.await {
+                    Ok(r) => r,
+                    Err(e) => Err(anyhow::anyhow!("task panicked: {e}")),
+                };
+                if let Err(e) = result {
+                    cx.update(|cx| {
+                        log::push(
+                            LogLevel::Error,
+                            format!("Copy file failed: {e}"),
+                            cx,
+                        );
+                    });
+                    return;
+                }
+                // Advance the parent selection, then open the newly selected
+                // pair so the user lands on the next difference immediately.
+                let next = parent.update(&mut cx, |state, cx| {
+                    state.select_next_difference(cx);
+                    state.selected_endpoints()
+                });
+                let Ok(Some((left, right))) = next else {
+                    return;
+                };
+                let _ = manager.update(&mut cx, |m, cx| {
+                    m.add_text_diff_tab(left, right, Some(parent.clone()), cx)
+                });
+            }
+        })
+        .detach();
+    }
 }
 
 /// File-bar metadata line: modified · size · format · line endings.
@@ -1560,6 +2444,20 @@ pub struct TextDiffView {
     list_count: usize,
     /// Wrap mode the lists were last reset to.
     list_wrap: bool,
+    /// Difference fills for the left editor.
+    left_decs: Option<RangeDecorationCollection>,
+    /// Difference fills for the right editor.
+    right_decs: Option<RangeDecorationCollection>,
+    /// Model revision the decorations were last rebuilt for.
+    decoration_rev: usize,
+    /// Editable detail inputs, created on first Text-detail render.
+    detail_inputs: Option<(Entity<InputState>, Entity<InputState>)>,
+    /// The `(left, right)` line numbers the detail inputs show.
+    detail_seeded: Option<(Option<usize>, Option<usize>)>,
+    /// Subscriptions for the detail inputs' Enter commits.
+    _detail_subs: Vec<Subscription>,
+    /// A detail-line commit waiting for a render (needs a window).
+    pending_detail_commit: Option<(Side, usize, String)>,
 }
 
 impl TextDiffView {
@@ -1626,6 +2524,13 @@ impl TextDiffView {
             thumbnail_drag: Rc::new(Cell::new(false)),
             list_count: 0,
             list_wrap: false,
+            left_decs: None,
+            right_decs: None,
+            decoration_rev: usize::MAX,
+            detail_inputs: None,
+            detail_seeded: None,
+            _detail_subs: Vec::new(),
+            pending_detail_commit: None,
         }
     }
 
@@ -1739,7 +2644,16 @@ impl TextDiffView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.state.update(cx, |s, cx| s.load(cx));
+        // "Reload / recompare files": with unsaved buffer edits the
+        // re-diff runs on the buffers so the edits survive; otherwise the
+        // files are re-read from disk.
+        self.state.update(cx, |s, cx| {
+            if s.is_dirty() {
+                s.recompare(cx);
+            } else {
+                s.load(cx);
+            }
+        });
     }
 
     fn handle_swap_sides(
@@ -1766,6 +2680,286 @@ impl TextDiffView {
         if let Some(input) = &self.right_path_input {
             input.update(cx, |input, cx| input.set_value(right, window, cx));
         }
+    }
+
+    // -- Edit-mode handlers --------------------------------------------------
+
+    fn handle_toggle_editing(
+        &mut self,
+        _: &ToggleTextEdit,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.state.update(cx, |s, cx| s.toggle_editing(cx));
+    }
+
+    /// The focused side's editor, when edit mode has created one.
+    fn focused_editor(&self, cx: &App) -> Option<(Side, Entity<EditorState>)> {
+        let session = self.state.read(cx);
+        let side = session.focus_side();
+        session.editor(side).map(|ed| (side, ed.clone()))
+    }
+
+    fn handle_select_section(
+        &mut self,
+        _: &SelectSection,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((side, editor)) = self.focused_editor(cx) else {
+            return;
+        };
+        let range = self
+            .state
+            .read(cx)
+            .selected_section()
+            .and_then(|s| self.state.read(cx).section_line_range(s, side));
+        if let Some((lo, hi)) = range {
+            select_editor_lines(&editor, lo, hi, cx);
+        }
+    }
+
+    fn handle_delete_line(
+        &mut self,
+        _: &DeleteLine,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((side, editor)) = self.focused_editor(cx) else {
+            return;
+        };
+        let Some(line) = self.state.read(cx).selected_line_number(side) else {
+            return;
+        };
+        replace_editor_lines(&editor, line, line, "", window, cx);
+        self.after_editor_edit(side, cx);
+    }
+
+    fn handle_insert_line_before(
+        &mut self,
+        _: &InsertLineBefore,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.insert_blank_line(true, window, cx);
+    }
+
+    fn handle_insert_line_after(
+        &mut self,
+        _: &InsertLineAfter,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.insert_blank_line(false, window, cx);
+    }
+
+    fn insert_blank_line(
+        &mut self,
+        before: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((side, editor)) = self.focused_editor(cx) else {
+            return;
+        };
+        let Some(line) = self.state.read(cx).selected_line_number(side) else {
+            return;
+        };
+        let at = if before { line } else { line + 1 };
+        insert_at_line_start(&editor, at, "\n", window, cx);
+        self.after_editor_edit(side, cx);
+    }
+
+    /// Mark the edited side dirty and re-diff after an editor mutation.
+    fn after_editor_edit(&mut self, side: Side, cx: &mut Context<Self>) {
+        self.state.update(cx, |s, cx| {
+            s.mark_side_dirty(side, cx);
+            s.recompare(cx);
+        });
+    }
+
+    fn apply_convert(
+        &mut self,
+        op: ConvertOp,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((side, editor)) = self.focused_editor(cx) else {
+            log::push(
+                LogLevel::Warning,
+                "Convert file needs edit mode: toggle Edit first.".to_string(),
+                cx,
+            );
+            return;
+        };
+        let converted =
+            editor.update(cx, |ed, _| convert_text(&ed.value(), op));
+        editor.update(cx, |ed, cx| ed.replace_all(converted, window, cx));
+        self.after_editor_edit(side, cx);
+    }
+
+    fn handle_convert(
+        &mut self,
+        op: ConvertOp,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.apply_convert(op, window, cx);
+    }
+
+    fn handle_compare_selection(
+        &mut self,
+        _: &CompareSelectionToClipboard,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (side, selection, manager) = {
+            let session = self.state.read(cx);
+            let side = session.focus_side();
+            let mut selection = session
+                .editor(side)
+                .map(|ed| ed.read(cx).selected_value().to_string())
+                .unwrap_or_default();
+            if selection.is_empty() {
+                selection =
+                    session.selected_line_text(side).unwrap_or_default();
+            }
+            (side, selection, session.manager())
+        };
+        let Some(manager) = manager else {
+            log::push(
+                LogLevel::Warning,
+                "Compare selection to clipboard needs a session manager."
+                    .to_string(),
+                cx,
+            );
+            return;
+        };
+        let clipboard = cx
+            .read_from_clipboard()
+            .and_then(|item| item.text())
+            .unwrap_or_default();
+        let (left, right) = match side {
+            Side::Left => (selection, clipboard),
+            Side::Right => (clipboard, selection),
+        };
+        manager.update(cx, |m, cx| {
+            m.add_text_diff_tab_from_texts(
+                &left,
+                &right,
+                "selection vs clipboard".into(),
+                cx,
+            );
+        });
+    }
+
+    // -- Alignment and section handlers -------------------------------------
+
+    fn handle_set_align_anchor(
+        &mut self,
+        action: &SetAlignAnchor,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.state
+            .update(cx, |s, cx| s.set_align_anchor(action.side, cx));
+    }
+
+    fn handle_align_with(
+        &mut self,
+        _: &AlignWithAnchor,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.state.update(cx, |s, cx| s.align_with_selected(cx));
+    }
+
+    fn handle_clear_alignments(
+        &mut self,
+        _: &ClearAlignments,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.state.update(cx, |s, cx| s.clear_alignments(cx));
+    }
+
+    fn handle_isolate(
+        &mut self,
+        _: &IsolateSelection,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.state.update(cx, |s, cx| s.isolate_selected(cx));
+    }
+
+    /// Copy the selected section's lines toward one side, replacing the
+    /// target side's lines (or inserting where it has none), then
+    /// re-diff. Requires edit mode so the target buffer exists.
+    fn handle_copy_section(
+        &mut self,
+        to: Side,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (source_text, target_range, insert_after, editor) = {
+            let session = self.state.read(cx);
+            let Some(section) = session.selected_section() else {
+                return;
+            };
+            let from = if to == Side::Left {
+                Side::Right
+            } else {
+                Side::Left
+            };
+            (
+                session.section_text(section, from),
+                session.section_line_range(section, to),
+                session.section_insert_after(section, to),
+                session.editor(to).cloned(),
+            )
+        };
+        let Some(editor) = editor else {
+            log::push(
+                LogLevel::Warning,
+                "Copying sections needs edit mode: toggle Edit first."
+                    .to_string(),
+                cx,
+            );
+            return;
+        };
+        match target_range {
+            Some((lo, hi)) => {
+                replace_editor_lines(&editor, lo, hi, &source_text, window, cx)
+            }
+            None => insert_at_line_start(
+                &editor,
+                insert_after + 1,
+                &source_text,
+                window,
+                cx,
+            ),
+        }
+        self.after_editor_edit(to, cx);
+    }
+
+    fn handle_copy_file_next(
+        &mut self,
+        to: Side,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.state
+            .update(cx, |s, cx| s.copy_file_and_open_next(to, cx));
+    }
+
+    fn handle_set_detail_mode(
+        &mut self,
+        action: &SetDetailMode,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.state
+            .update(cx, |s, cx| s.set_detail_mode(action.mode, cx));
     }
 
     // -- Dialogs -----------------------------------------------------------
@@ -1850,6 +3044,122 @@ impl TextDiffView {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Editor mutation helpers
+// ---------------------------------------------------------------------------
+
+/// Byte range of 1-based inclusive lines `lo..=hi` in the editor's rope,
+/// spanning the trailing newline of `hi` when there is one.
+fn editor_line_byte_range(
+    editor: &Entity<EditorState>,
+    lo: usize,
+    hi_inclusive: usize,
+    cx: &App,
+) -> (usize, usize) {
+    editor.read_with(cx, |ed, _| {
+        let rope = ed.text();
+        let n = rope.lines_len();
+        let lo0 = lo.saturating_sub(1);
+        let b0 = if lo0 < n {
+            rope.line_start_offset(lo0)
+        } else {
+            rope.len()
+        };
+        let b1 = if hi_inclusive < n {
+            rope.line_start_offset(hi_inclusive)
+        } else {
+            rope.len()
+        };
+        (b0, b1.max(b0))
+    })
+}
+
+/// Replace 1-based inclusive lines `lo..=hi` with `text`, newlines
+/// included: the replaced range spans the trailing newline of `hi`.
+fn replace_editor_lines(
+    editor: &Entity<EditorState>,
+    lo: usize,
+    hi_inclusive: usize,
+    text: &str,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let (b0, b1) = editor_line_byte_range(editor, lo, hi_inclusive, cx);
+    editor.update(cx, |ed, cx| {
+        ed.set_selected_range(b0..b1, cx);
+        ed.replace(text, window, cx);
+    });
+}
+
+/// Insert `text` at the start of 1-based line `line` (or at the end of
+/// the buffer when the line does not exist).
+fn insert_at_line_start(
+    editor: &Entity<EditorState>,
+    line: usize,
+    text: &str,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let (b, _) =
+        editor_line_byte_range(editor, line, line.saturating_sub(1), cx);
+    editor.update(cx, |ed, cx| {
+        ed.set_selected_range(b..b, cx);
+        ed.replace(text, window, cx);
+    });
+}
+
+/// Select 1-based inclusive lines `lo..=hi` in the editor.
+fn select_editor_lines(
+    editor: &Entity<EditorState>,
+    lo: usize,
+    hi_inclusive: usize,
+    cx: &mut App,
+) {
+    let (b0, b1) = editor_line_byte_range(editor, lo, hi_inclusive, cx);
+    editor.update(cx, |ed, cx| ed.set_selected_range(b0..b1, cx));
+}
+
+/// Fill decorations over the difference lines of one side, computed
+/// against the model (which matches the editor text right after a
+/// recompare; the collection then tracks further edits).
+fn line_decorations(
+    lines: &[LineInfo],
+    rows: &[DiffRow],
+    side: Side,
+    important: Hsla,
+    minor: Hsla,
+) -> Vec<RangeDecoration> {
+    let mut minor_by_line: std::collections::HashMap<usize, bool> =
+        std::collections::HashMap::new();
+    for row in rows {
+        if !row.status.is_difference() {
+            continue;
+        }
+        if let Some(n) = match side {
+            Side::Left => row.left,
+            Side::Right => row.right,
+        } {
+            let entry = minor_by_line.entry(n).or_insert(true);
+            *entry &= row.minor;
+        }
+    }
+    let mut out = Vec::new();
+    let mut offset = 0usize;
+    for line in lines {
+        if let Some(&is_minor) = minor_by_line.get(&line.number) {
+            let mut color = if is_minor { minor } else { important };
+            color.a = 0.18;
+            out.push(
+                RangeDecoration::new(offset..offset + line.content.len())
+                    .with_style(RangeDecorationStyle::Fill)
+                    .with_color(color),
+            );
+        }
+        offset += line.content.len() + 1;
+    }
+    out
+}
+
 /// Prompt for a path and write the report; the outcome goes to the log.
 fn save_report(text: &str, dir: &std::path::Path, cx: &mut App) {
     let text = text.to_string();
@@ -1906,9 +3216,13 @@ impl TextDiffView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let (word_wrap, has_sections) = {
+        let (word_wrap, has_sections, editing) = {
             let session = self.state.read(cx);
-            (session.is_word_wrap(), session.section_count() > 0)
+            (
+                session.is_word_wrap(),
+                session.section_count() > 0,
+                session.is_editing(),
+            )
         };
 
         let wrap_btn = Button::new("text2_wrap")
@@ -1991,6 +3305,24 @@ impl TextDiffView {
                 })
         };
 
+        let edit_btn = {
+            let state = self.state.clone();
+            Button::new("text2_edit")
+                .icon(IconName::Pencil)
+                .ghost()
+                .small()
+                .toggled(editing)
+                .tooltip(if editing {
+                    "Leave edit mode (edits are kept)"
+                } else {
+                    "Edit the two files"
+                })
+                .accessibility_label("Toggle edit mode")
+                .on_click(move |_, _, cx| {
+                    state.update(cx, |s, cx| s.toggle_editing(cx));
+                })
+        };
+
         let reload_btn = {
             let state = self.state.clone();
             Button::new("text2_reload")
@@ -2020,6 +3352,11 @@ impl TextDiffView {
                 ToolbarGroup::new("text-view-toolbar-pair")
                     .label("Pair")
                     .child(swap_btn),
+            )
+            .child(
+                ToolbarGroup::new("text-view-toolbar-edit")
+                    .label("Edit")
+                    .child(edit_btn),
             )
             .child(
                 ToolbarGroup::new("text-view-toolbar-reload")
@@ -2072,6 +3409,74 @@ impl Render for TextDiffView {
             self._path_subs.push(sub);
             self.right_path_input = Some(input);
         }
+
+        // Apply a detail-line commit that arrived from an input
+        // subscription; the mutation needs this render's window.
+        if let Some((side, line, text)) = self.pending_detail_commit.take() {
+            let editor = self.state.read(cx).editor(side).cloned();
+            if let Some(editor) = editor {
+                replace_editor_lines(
+                    &editor,
+                    line,
+                    line,
+                    &format!("{text}\n"),
+                    window,
+                    cx,
+                );
+                self.after_editor_edit(side, cx);
+            }
+        }
+
+        // Edit mode swaps the diff lists for editable editors. They are
+        // created here (the session has no window) and attached to the
+        // session, which tracks their dirty and focus state.
+        let editing = self.state.read(cx).is_editing();
+        if editing && self.state.read(cx).left_editor().is_none() {
+            let left = cx.new(|cx| EditorState::new(window, cx));
+            let right = cx.new(|cx| EditorState::new(window, cx));
+            let left_decs = left.update(cx, |ed, cx| {
+                ed.create_range_decorations_collection(Vec::new(), cx)
+            });
+            let right_decs = right.update(cx, |ed, cx| {
+                ed.create_range_decorations_collection(Vec::new(), cx)
+            });
+            self.state
+                .update(cx, |s, cx| s.attach_editors(left, right, cx));
+            self.left_decs = Some(left_decs);
+            self.right_decs = Some(right_decs);
+            self.decoration_rev = usize::MAX;
+        }
+        // Re-seed the editors after a load; `set_value` clears undo
+        // history and emits no change event, matching a fresh file read.
+        if self.state.read(cx).editors_stale() {
+            let editors = {
+                let session = self.state.read(cx);
+                (
+                    session.left_editor().cloned(),
+                    session.right_editor().cloned(),
+                )
+            };
+            if let (Some(left), Some(right)) = editors {
+                let (left_text, right_text, wrap) = {
+                    let session = self.state.read(cx);
+                    (
+                        session.side_text(Side::Left, cx),
+                        session.side_text(Side::Right, cx),
+                        session.is_word_wrap(),
+                    )
+                };
+                left.update(cx, |ed, cx| {
+                    ed.set_value(left_text, window, cx);
+                    ed.set_soft_wrap(wrap, window, cx);
+                });
+                right.update(cx, |ed, cx| {
+                    ed.set_value(right_text, window, cx);
+                    ed.set_soft_wrap(wrap, window, cx);
+                });
+                self.state.update(cx, |s, _| s.mark_editors_seeded());
+                self.decoration_rev = usize::MAX;
+            }
+        }
         let left_input = self.left_path_input.clone().expect("just created");
         let right_input = self.right_path_input.clone().expect("just created");
 
@@ -2105,6 +3510,14 @@ impl Render for TextDiffView {
         let state_label = session.state_label();
         let load_label = session.load_label();
         let selected_row = session.selected_row().copied();
+        let detail_mode = session.detail_mode();
+        let model_rev = session.model_rev();
+        let menu_flags = RowMenuFlags {
+            anchor: session.align_anchor(),
+            has_overrides: session.has_align_overrides(),
+            can_copy_file_next: session.parent.is_some()
+                && session.manager.is_some(),
+        };
 
         // Seed the inputs once from the endpoints; later edits belong to
         // the user (swap re-syncs them through `sync_path_inputs`).
@@ -2147,6 +3560,36 @@ impl Render for TextDiffView {
         let border = theme.border;
         let danger = theme.danger;
 
+        // Refresh the editor difference fills whenever the model changed;
+        // the ranges track subsequent edits on their own.
+        if editing && model_rev != self.decoration_rev {
+            self.decoration_rev = model_rev;
+            if let Some(decs) = &self.left_decs {
+                decs.set(
+                    line_decorations(
+                        &left_lines,
+                        &rows,
+                        Side::Left,
+                        important,
+                        minor,
+                    ),
+                    cx,
+                );
+            }
+            if let Some(decs) = &self.right_decs {
+                decs.set(
+                    line_decorations(
+                        &right_lines,
+                        &rows,
+                        Side::Right,
+                        important,
+                        minor,
+                    ),
+                    cx,
+                );
+            }
+        }
+
         let left_el = list(self.left_list.clone(), {
             let rows = rows.clone();
             let display = display.clone();
@@ -2176,6 +3619,7 @@ impl Render for TextDiffView {
                     fg,
                     &mono,
                     &state,
+                    menu_flags,
                 )
             }
         })
@@ -2210,6 +3654,7 @@ impl Render for TextDiffView {
                     fg,
                     &mono,
                     &state,
+                    menu_flags,
                 )
             }
         })
@@ -2261,27 +3706,156 @@ impl Render for TextDiffView {
             })
         });
 
-        // Read-only detail panes: the selected row's line on each side.
-        let detail_line = |lines: &[LineInfo], n: Option<usize>| -> String {
+        // Detail panes below the diff: editable text, a hex dump, or an
+        // alignment caret, per the selected detail mode.
+        let selected_line = |lines: &[LineInfo], n: Option<usize>| -> String {
             n.and_then(|n| lines.get(n - 1))
                 .map(|l| l.content.clone())
                 .unwrap_or_default()
         };
-        let details = h_flex()
-            .flex_shrink_0()
-            .h(px(64.))
-            .border_t_1()
-            .border_color(border)
-            .bg(muted)
-            .child(detail_half(
-                detail_line(&left_lines, selected_row.and_then(|r| r.left)),
-                &mono,
-            ))
-            .child(div().w(px(1.)).bg(border))
-            .child(detail_half(
-                detail_line(&right_lines, selected_row.and_then(|r| r.right)),
-                &mono,
-            ));
+        let details = match detail_mode {
+            DetailMode::Text => {
+                if self.detail_inputs.is_none() {
+                    let l = cx.new(|cx| {
+                        InputState::new(window, cx)
+                            .placeholder("Left line — Enter commits")
+                    });
+                    let r = cx.new(|cx| {
+                        InputState::new(window, cx)
+                            .placeholder("Right line — Enter commits")
+                    });
+                    for (side, input) in [(Side::Left, &l), (Side::Right, &r)]
+                    {
+                        let sub = cx.subscribe(
+                            input,
+                            move |this, input, event, cx| {
+                                if matches!(
+                                    event,
+                                    InputEvent::PressEnter { .. }
+                                ) {
+                                    let value =
+                                        input.read(cx).value().to_string();
+                                    let line = this
+                                        .state
+                                        .read(cx)
+                                        .selected_line_number(side);
+                                    if let Some(line) = line {
+                                        this.pending_detail_commit =
+                                            Some((side, line, value));
+                                        cx.notify();
+                                    }
+                                }
+                            },
+                        );
+                        self._detail_subs.push(sub);
+                    }
+                    self.detail_inputs = Some((l, r));
+                    self.detail_seeded = None;
+                }
+                let (left_in, right_in) =
+                    self.detail_inputs.clone().expect("just created");
+                let key = (
+                    selected_row.and_then(|r| r.left),
+                    selected_row.and_then(|r| r.right),
+                );
+                if self.detail_seeded != Some(key) {
+                    self.detail_seeded = Some(key);
+                    let lt = selected_line(&left_lines, key.0);
+                    let rt = selected_line(&right_lines, key.1);
+                    left_in.update(cx, |i, cx| {
+                        i.set_value(lt, window, cx);
+                    });
+                    right_in.update(cx, |i, cx| {
+                        i.set_value(rt, window, cx);
+                    });
+                }
+                h_flex()
+                    .flex_shrink_0()
+                    .h(px(64.))
+                    .items_center()
+                    .border_t_1()
+                    .border_color(border)
+                    .bg(muted)
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .px_2()
+                            .child(Input::new(&left_in).small()),
+                    )
+                    .child(div().w(px(1.)).bg(border))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .px_2()
+                            .child(Input::new(&right_in).small()),
+                    )
+            }
+            DetailMode::Hex => h_flex()
+                .flex_shrink_0()
+                .h(px(64.))
+                .border_t_1()
+                .border_color(border)
+                .bg(muted)
+                .child(detail_half(
+                    hex_dump(&selected_line(
+                        &left_lines,
+                        selected_row.and_then(|r| r.left),
+                    )),
+                    &mono,
+                ))
+                .child(div().w(px(1.)).bg(border))
+                .child(detail_half(
+                    hex_dump(&selected_line(
+                        &right_lines,
+                        selected_row.and_then(|r| r.right),
+                    )),
+                    &mono,
+                )),
+            DetailMode::Alignment => {
+                let lt = selected_line(
+                    &left_lines,
+                    selected_row.and_then(|r| r.left),
+                );
+                let rt = selected_line(
+                    &right_lines,
+                    selected_row.and_then(|r| r.right),
+                );
+                let caret = first_difference_caret(&lt, &rt);
+                h_flex()
+                    .flex_shrink_0()
+                    .h(px(64.))
+                    .border_t_1()
+                    .border_color(border)
+                    .bg(muted)
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .px_2()
+                            .py_1()
+                            .overflow_hidden()
+                            .font_family(mono.clone())
+                            .text_xs()
+                            .child(lt.clone())
+                            .child(caret.clone()),
+                    )
+                    .child(div().w(px(1.)).bg(border))
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .px_2()
+                            .py_1()
+                            .overflow_hidden()
+                            .font_family(mono.clone())
+                            .text_xs()
+                            .child(rt)
+                            .child(caret),
+                    )
+            }
+        };
 
         let mut bar = StatusBar::new();
         bar = bar.left(
@@ -2312,6 +3886,22 @@ impl Render for TextDiffView {
         let status_bar = bar.right(right_status);
 
         let focus = self.state.read(cx).focus_handle();
+        // In edit mode each pane shows its editor instead of the diff
+        // list; the scroll-synced lists stay mounted behind it.
+        let left_body: AnyElement =
+            match (editing, self.state.read(cx).left_editor()) {
+                (true, Some(ed)) => {
+                    Editor::new(ed).appearance(false).into_any_element()
+                }
+                _ => left_el.into_any_element(),
+            };
+        let right_body: AnyElement =
+            match (editing, self.state.read(cx).right_editor()) {
+                (true, Some(ed)) => {
+                    Editor::new(ed).appearance(false).into_any_element()
+                }
+                _ => right_el.into_any_element(),
+            };
         div()
             .key_context("TextCompare")
             .track_focus(&focus)
@@ -2341,7 +3931,7 @@ impl Render for TextDiffView {
                                             left_enc,
                                             left_end,
                                             &left_hist,
-                                            left_el,
+                                            left_body,
                                             &theme,
                                             &self.state,
                                         ),
@@ -2354,7 +3944,7 @@ impl Render for TextDiffView {
                                             right_enc,
                                             right_end,
                                             &right_hist,
-                                            right_el,
+                                            right_body,
                                             &theme,
                                             &self.state,
                                         ),
@@ -2376,6 +3966,47 @@ impl Render for TextDiffView {
             .on_action(cx.listener(Self::handle_swap_sides))
             .on_action(cx.listener(Self::handle_report))
             .on_action(cx.listener(Self::handle_info))
+            .on_action(cx.listener(Self::handle_toggle_editing))
+            .on_action(cx.listener(Self::handle_select_section))
+            .on_action(cx.listener(Self::handle_delete_line))
+            .on_action(cx.listener(Self::handle_insert_line_before))
+            .on_action(cx.listener(Self::handle_insert_line_after))
+            .on_action(cx.listener(|this, _: &ConvertTrimTrailing, w, cx| {
+                this.handle_convert(ConvertOp::TrimTrailing, w, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ConvertSpacesToTabs, w, cx| {
+                this.handle_convert(ConvertOp::SpacesToTabs, w, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ConvertTabsToSpaces, w, cx| {
+                this.handle_convert(ConvertOp::TabsToSpaces, w, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ConvertEndingsPc, w, cx| {
+                this.handle_convert(ConvertOp::EndingsPc, w, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ConvertEndingsMac, w, cx| {
+                this.handle_convert(ConvertOp::EndingsMac, w, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ConvertEndingsUnix, w, cx| {
+                this.handle_convert(ConvertOp::EndingsUnix, w, cx);
+            }))
+            .on_action(cx.listener(Self::handle_compare_selection))
+            .on_action(cx.listener(Self::handle_set_align_anchor))
+            .on_action(cx.listener(Self::handle_align_with))
+            .on_action(cx.listener(Self::handle_clear_alignments))
+            .on_action(cx.listener(Self::handle_isolate))
+            .on_action(cx.listener(|this, _: &CopySectionRight, w, cx| {
+                this.handle_copy_section(Side::Right, w, cx);
+            }))
+            .on_action(cx.listener(|this, _: &CopySectionLeft, w, cx| {
+                this.handle_copy_section(Side::Left, w, cx);
+            }))
+            .on_action(cx.listener(|this, _: &CopyFileRightNext, w, cx| {
+                this.handle_copy_file_next(Side::Right, w, cx);
+            }))
+            .on_action(cx.listener(|this, _: &CopyFileLeftNext, w, cx| {
+                this.handle_copy_file_next(Side::Left, w, cx);
+            }))
+            .on_action(cx.listener(Self::handle_set_detail_mode))
     }
 }
 
@@ -2402,7 +4033,7 @@ fn render_pane(
     enc: &'static str,
     ending: &'static str,
     history: &[String],
-    list_el: List,
+    body: AnyElement,
     theme: &Theme,
     state: &Entity<TextDiffSession>,
 ) -> impl IntoElement {
@@ -2615,7 +4246,18 @@ fn render_pane(
                         .child(meta.to_string()),
                 ),
         )
-        .child(div().flex_1().min_h_0().overflow_hidden().child(list_el))
+        .child(div().flex_1().min_h_0().overflow_hidden().child(body))
+}
+
+/// Presence flags for the per-row context menu, snapshotted per frame.
+#[derive(Clone, Copy)]
+struct RowMenuFlags {
+    /// The pending alignment anchor, if a line is marked.
+    anchor: Option<(Side, usize)>,
+    /// Whether alignment overrides are in effect.
+    has_overrides: bool,
+    /// Whether "copy file and open next" can run (child session).
+    can_copy_file_next: bool,
 }
 
 /// Render one display row of one pane: the collapsed-section header or
@@ -2642,6 +4284,7 @@ fn render_diff_row(
     foreground: Hsla,
     mono: &SharedString,
     state: &Entity<TextDiffSession>,
+    menu_flags: RowMenuFlags,
 ) -> AnyElement {
     let side_key = if side == Side::Left { "l" } else { "r" };
     let Some(item) = display.get(d) else {
@@ -2775,6 +4418,61 @@ fn render_diff_row(
                         state.update(cx, |s, cx| s.select_display(d, cx));
                     }
                 })
+                // Right-click focuses the session so the menu's actions
+                // dispatch through the view's `TextCompare` key context.
+                .on_mouse_down(MouseButton::Right, {
+                    let state = state.clone();
+                    move |_, window, cx| {
+                        let focus = state.read(cx).focus_handle();
+                        window.focus(&focus, cx);
+                    }
+                })
+                .context_menu(move |menu, _, _| {
+                    let mut menu = menu;
+                    match menu_flags.anchor {
+                        Some((anchor_side, _)) => {
+                            if anchor_side != side {
+                                menu = menu.menu(
+                                    "Align with marked line",
+                                    Box::new(AlignWithAnchor),
+                                );
+                            }
+                        }
+                        None => {
+                            menu = menu.menu(
+                                "Mark line for alignment",
+                                Box::new(SetAlignAnchor { side }),
+                            );
+                        }
+                    }
+                    if menu_flags.has_overrides {
+                        menu = menu.menu(
+                            "Clear alignment overrides",
+                            Box::new(ClearAlignments),
+                        );
+                    }
+                    menu = menu
+                        .separator()
+                        .menu(
+                            "Copy section → right",
+                            Box::new(CopySectionRight),
+                        )
+                        .menu("Copy section ← left", Box::new(CopySectionLeft))
+                        .menu("Isolate section", Box::new(IsolateSelection));
+                    if menu_flags.can_copy_file_next {
+                        menu = menu
+                            .separator()
+                            .menu(
+                                "Copy file to right & open next",
+                                Box::new(CopyFileRightNext),
+                            )
+                            .menu(
+                                "Copy file to left & open next",
+                                Box::new(CopyFileLeftNext),
+                            );
+                    }
+                    menu
+                })
                 .into_any_element()
         }
     }
@@ -2789,13 +4487,31 @@ pub(crate) fn new_text_diff_view(
     left: Endpoint,
     right: Endpoint,
     grammar: Option<Grammar>,
+    parent: Option<WeakEntity<AppState>>,
+    manager: Option<Entity<GuiSessionManager>>,
     cx: &mut App,
 ) -> Entity<TextDiffView> {
     // Grammar-aware token classification arrives with the editing phase.
     let _ = grammar;
     let title = format!("{} vs {}", base_name(&left), base_name(&right));
-    let session =
-        cx.new(|cx| TextDiffSession::new(left, right, title.into(), cx));
+    let session = cx.new(|cx| {
+        TextDiffSession::new(left, right, title.into(), parent, manager, cx)
+    });
+    cx.new(|cx| TextDiffView::new(session, cx))
+}
+
+/// Create a text compare tab view over two in-memory texts ("compare
+/// selection to clipboard").
+pub(crate) fn new_text_diff_view_from_texts(
+    left_text: &str,
+    right_text: &str,
+    title: SharedString,
+    manager: Option<Entity<GuiSessionManager>>,
+    cx: &mut App,
+) -> Entity<TextDiffView> {
+    let session = cx.new(|cx| {
+        TextDiffSession::from_texts(left_text, right_text, title, manager, cx)
+    });
     cx.new(|cx| TextDiffView::new(session, cx))
 }
 
@@ -2806,6 +4522,137 @@ fn base_name(endpoint: &Endpoint) -> String {
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| endpoint.display())
+}
+
+// ---------------------------------------------------------------------------
+// Session rules dialog
+// ---------------------------------------------------------------------------
+
+/// Body of the text session's rules dialog. A `Render` entity so the
+/// checkboxes repaint as they are toggled (dialog content is otherwise
+/// built only once when the dialog opens).
+struct TextRulesBody {
+    session: Entity<TextDiffSession>,
+    ignore_case: bool,
+    ignore_whitespace: bool,
+    ignore_blank_lines: bool,
+    ignore_comments: bool,
+    ignore_numeric: bool,
+}
+
+impl TextRulesBody {
+    fn new(session: Entity<TextDiffSession>, cx: &mut Context<Self>) -> Self {
+        let settings = session.read(cx).compare_settings();
+        Self {
+            ignore_case: settings.ignore_case,
+            ignore_whitespace: !matches!(
+                settings.whitespace_mode,
+                WhitespaceMode::Sensitive
+            ),
+            ignore_blank_lines: settings.ignore_blank_lines,
+            ignore_comments: settings.ignore_comments,
+            ignore_numeric: settings.ignore_numeric_changes,
+            session,
+        }
+    }
+
+    /// Push the drafted rules into the session and re-diff.
+    fn apply(&mut self, cx: &mut Context<Self>) {
+        let settings = TextCompareSettings {
+            ignore_case: self.ignore_case,
+            whitespace_mode: if self.ignore_whitespace {
+                WhitespaceMode::Insensitive
+            } else {
+                WhitespaceMode::Sensitive
+            },
+            ignore_blank_lines: self.ignore_blank_lines,
+            ignore_comments: self.ignore_comments,
+            ignore_numeric_changes: self.ignore_numeric,
+            ..TextCompareSettings::new()
+        };
+        self.session
+            .update(cx, |s, cx| s.set_compare_settings(settings, cx));
+    }
+
+    fn toggle(
+        &mut self,
+        field: fn(&mut Self, bool),
+        checked: bool,
+        cx: &mut Context<Self>,
+    ) {
+        field(self, checked);
+        cx.notify();
+    }
+}
+
+impl Render for TextRulesBody {
+    fn render(
+        &mut self,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let row = |label: &'static str,
+                   checked: bool,
+                   handler: fn(&mut Self, bool)| {
+            Checkbox::new(label)
+                .label(label)
+                .checked(checked)
+                .on_change(cx.listener(move |this, checked, _, cx| {
+                    this.toggle(handler, *checked, cx);
+                }))
+        };
+        v_flex()
+            .w_full()
+            .gap_2()
+            .child(row("Ignore case", self.ignore_case, |this, v| {
+                this.ignore_case = v
+            }))
+            .child(row(
+                "Ignore whitespace",
+                self.ignore_whitespace,
+                |this, v| this.ignore_whitespace = v,
+            ))
+            .child(row(
+                "Ignore blank lines",
+                self.ignore_blank_lines,
+                |this, v| this.ignore_blank_lines = v,
+            ))
+            .child(row(
+                "Ignore comment lines",
+                self.ignore_comments,
+                |this, v| this.ignore_comments = v,
+            ))
+            .child(row(
+                "Treat numeric changes as equal",
+                self.ignore_numeric,
+                |this, v| this.ignore_numeric = v,
+            ))
+            .child(
+                h_flex().justify_end().child(
+                    Button::new("rules_apply")
+                        .label("Apply")
+                        .primary()
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.apply(cx);
+                        })),
+                ),
+            )
+    }
+}
+
+/// Open the rules dialog for a text compare session.
+pub(crate) fn open_text_rules_dialog(
+    session: Entity<TextDiffSession>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let body = cx.new(|cx| TextRulesBody::new(session, cx));
+    window.open_dialog(cx, move |dialog, _, _| {
+        dialog
+            .title("Session rules")
+            .w(px(420.))
+            .child(body.clone())
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -3169,7 +5016,7 @@ mod tests {
         // The left file holds UTF-8 `café`, the right the mojibake
         // `cafÃ©`. Under UTF-8 the lines differ; re-reading the left side
         // as Latin-1 turns its UTF-8 bytes into the same mojibake, making
-        // the sides equal.
+        // The sides equal.
         let session = cx.new(|cx| {
             TextDiffSession::for_test("caf\u{e9}\n", "caf\u{c3}\u{a9}\n", cx)
         });
@@ -3247,6 +5094,284 @@ mod tests {
             let s = session.read(cx);
             assert!(s.is_word_wrap());
             assert!(s.is_show_thumbnail());
+        });
+    }
+
+    #[test]
+    fn align_overrides_merge_and_swap_rows() {
+        // A deleted and an inserted row merge into one changed row.
+        let mut rows = vec![
+            DiffRow {
+                left: Some(1),
+                right: Some(1),
+                status: RowStatus::Same,
+                minor: false,
+            },
+            DiffRow {
+                left: Some(2),
+                right: None,
+                status: RowStatus::Deleted,
+                minor: false,
+            },
+            DiffRow {
+                left: None,
+                right: Some(2),
+                status: RowStatus::Inserted,
+                minor: false,
+            },
+        ];
+        apply_align_overrides(&mut rows, &[(2, 2)]);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[1].status, RowStatus::Changed);
+        assert_eq!((rows[1].left, rows[1].right), (Some(2), Some(2)));
+
+        // Two changed rows swap partners so the anchor pair shares a row.
+        let mut rows = vec![
+            DiffRow {
+                left: Some(1),
+                right: Some(2),
+                status: RowStatus::Changed,
+                minor: false,
+            },
+            DiffRow {
+                left: Some(2),
+                right: Some(1),
+                status: RowStatus::Changed,
+                minor: false,
+            },
+        ];
+        apply_align_overrides(&mut rows, &[(1, 1)]);
+        assert_eq!((rows[0].left, rows[0].right), (Some(1), Some(1)));
+        assert_eq!((rows[1].left, rows[1].right), (Some(2), Some(2)));
+
+        // An out-of-range override changes nothing.
+        let before = rows.clone();
+        apply_align_overrides(&mut rows, &[(9, 9)]);
+        assert_eq!(rows.len(), before.len());
+    }
+
+    #[gpui::test]
+    fn align_override_forces_a_changed_row(cx: &mut App) {
+        // The swapped `b`/`c` lines align as two changed rows; the
+        // override re-pairs left 2 with right 3.
+        let session = cx
+            .new(|cx| TextDiffSession::for_test("a\nb\nc\n", "a\nc\nb\n", cx));
+        session.update(cx, |s, cx| {
+            s.align_overrides.push((2, 3));
+            s.recompare(cx);
+            assert!(s.rows.iter().any(|r| r.left == Some(2)
+                && r.right == Some(3)
+                && r.status == RowStatus::Changed));
+            s.clear_alignments(cx);
+            assert!(!s.has_align_overrides());
+            // Back to the base alignment: the forced pair is gone.
+            assert!(
+                !s.rows
+                    .iter()
+                    .any(|r| r.left == Some(2) && r.right == Some(3))
+            );
+        });
+    }
+
+    #[test]
+    fn convert_ops_rewrite_the_buffer() {
+        assert_eq!(
+            convert_text("a  \nb\t\n", ConvertOp::TrimTrailing),
+            "a\nb\n"
+        );
+        assert_eq!(convert_text("    x\n", ConvertOp::SpacesToTabs), "\tx\n");
+        assert_eq!(convert_text("  y\n", ConvertOp::SpacesToTabs), "  y\n");
+        assert_eq!(convert_text("\tz\n", ConvertOp::TabsToSpaces), "    z\n");
+        assert_eq!(convert_text("a\nb", ConvertOp::EndingsPc), "a\r\nb");
+        assert_eq!(convert_text("a\r\nb\n", ConvertOp::EndingsMac), "a\rb\r");
+        assert_eq!(convert_text("a\rb", ConvertOp::EndingsUnix), "a\nb");
+    }
+
+    #[test]
+    fn encode_text_applies_ending_and_encoding() {
+        assert_eq!(
+            encode_text("a\nb\n", LineEnding::Crlf, TextEncoding::Utf8),
+            b"a\r\nb\r\n"
+        );
+        assert_eq!(
+            encode_text("a\r\nb", LineEnding::Lf, TextEncoding::Utf8),
+            b"a\nb"
+        );
+        assert_eq!(
+            encode_text("\u{e9}\n", LineEnding::Lf, TextEncoding::Latin1),
+            vec![0xE9, b'\n']
+        );
+    }
+
+    #[test]
+    fn hex_dump_and_alignment_caret() {
+        let dump = hex_dump("ab?");
+        assert!(dump.starts_with("0000  61 62 3F"), "got: {dump}");
+        assert!(dump.contains("|ab?|"));
+        assert_eq!(hex_dump(""), "—");
+        assert_eq!(first_difference_caret("abc", "abd"), "  ^");
+        assert_eq!(first_difference_caret("", ""), "^");
+    }
+
+    #[gpui::test]
+    fn isolate_and_section_helpers_use_the_selected_section(cx: &mut App) {
+        let session = cx.new(|cx| {
+            TextDiffSession::for_test("a\nb\nc\nd\ne\n", "a\nX\nc\nY\ne\n", cx)
+        });
+        session.update(cx, |s, cx| {
+            assert_eq!(s.section_count(), 2);
+            s.next_difference(cx);
+            let keep = s.selected_section().expect("row is in a section");
+            assert_eq!(s.section_line_range(keep, Side::Left), Some((2, 2)));
+            assert_eq!(s.section_text(keep, Side::Left), "b\n");
+            assert_eq!(s.section_text(keep, Side::Right), "X\n");
+            s.isolate_selected(cx);
+            assert_eq!(s.collapsed.len(), s.sections.len() - 1);
+            assert!(!s.collapsed.contains(&keep));
+        });
+    }
+
+    #[gpui::test]
+    fn from_texts_compares_without_io(cx: &mut App) {
+        let session = cx.new(|cx| {
+            TextDiffSession::from_texts(
+                "sel\n",
+                "clip\n",
+                "t".into(),
+                None,
+                cx,
+            )
+        });
+        assert_eq!(session.read(cx).info_stats().changes, 1);
+    }
+
+    /// Minimal renderable root for windows that only need a `Window`.
+    struct TestRoot;
+
+    impl gpui::Render for TestRoot {
+        fn render(
+            &mut self,
+            _: &mut Window,
+            _: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            div()
+        }
+    }
+
+    #[gpui::test]
+    fn recompare_uses_edited_buffers(cx: &mut TestAppContext) {
+        use gpui::{Bounds, WindowBounds, WindowOptions};
+
+        cx.update(gpui::init);
+        let session =
+            cx.new(|cx| TextDiffSession::for_test("a\nb\n", "a\nX\n", cx));
+        let (window, _root) = cx.update(|cx| {
+            gpui::open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(
+                        Bounds::maximized(None, cx),
+                    )),
+                    ..Default::default()
+                },
+                cx,
+                |_, cx| cx.new(|_| TestRoot),
+            )
+            .expect("failed to open the test window")
+        });
+        cx.update_window(window, |_, window, cx| {
+            let left = cx.new(|cx| EditorState::new(window, cx));
+            let right = cx.new(|cx| EditorState::new(window, cx));
+            left.update(cx, |ed, cx| {
+                ed.set_value("a\nX\n", window, cx);
+            });
+            right.update(cx, |ed, cx| {
+                ed.set_value("a\nX\n", window, cx);
+            });
+            session.update(cx, |s, cx| {
+                s.attach_editors(left, right, cx);
+                // Stand in for the view's render-time seeding.
+                s.mark_editors_seeded();
+                s.recompare(cx);
+            });
+        })
+        .expect("failed to attach the editors");
+        cx.update(|cx| {
+            let s = session.read(cx);
+            assert_eq!(s.info_stats().changes, 0);
+            assert_eq!(s.side_text(Side::Left, cx), "a\nX\n");
+            // `set_value` emits no change event, so nothing is dirty.
+            assert!(!s.is_dirty());
+            session.update(cx, |s, cx| {
+                s.mark_side_dirty(Side::Left, cx);
+                assert!(s.is_dirty());
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn edit_mode_actions_drive_the_buffers(cx: &mut TestAppContext) {
+        use gpui::{Bounds, WindowBounds, WindowOptions, test::TestWindowExt};
+
+        cx.update(gpui::init);
+        let session =
+            cx.new(|cx| TextDiffSession::for_test("a  \nb\n", "a\nb\n", cx));
+        let (window, view) = cx.update(|cx| {
+            gpui::open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(
+                        Bounds::maximized(None, cx),
+                    )),
+                    ..Default::default()
+                },
+                cx,
+                |_, cx| cx.new(|cx| TextDiffView::new(session.clone(), cx)),
+            )
+            .expect("failed to open the test window")
+        });
+
+        // Enter edit mode; the view creates and seeds the editors.
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            let focus = view.read(cx).focus_handle(cx);
+            focus.focus(window, cx);
+            window.dispatch_action(Box::new(ToggleTextEdit), cx);
+            window.render_frame(cx);
+        })
+        .expect("failed to toggle edit mode");
+        cx.update(|cx| {
+            let s = session.read(cx);
+            assert!(s.is_editing());
+            assert!(s.left_editor().is_some());
+            assert_eq!(s.side_text(Side::Left, cx), "a  \nb\n");
+        });
+
+        // Trim trailing whitespace on the focused (left) side; the
+        // re-diff runs on the buffers and the edit marks the tab dirty.
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.dispatch_action(Box::new(ConvertTrimTrailing), cx);
+        })
+        .expect("failed to convert the left buffer");
+        cx.update(|cx| {
+            let s = session.read(cx);
+            assert_eq!(s.side_text(Side::Left, cx), "a\nb\n");
+            assert_eq!(s.info_stats().changes, 0);
+            assert!(s.is_dirty());
+        });
+
+        // The detail-mode selector switches the detail panes.
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.dispatch_action(
+                Box::new(SetDetailMode {
+                    mode: DetailMode::Hex,
+                }),
+                cx,
+            );
+        })
+        .expect("failed to switch the detail mode");
+        cx.update(|cx| {
+            assert_eq!(session.read(cx).detail_mode(), DetailMode::Hex);
         });
     }
 }

@@ -1815,6 +1815,22 @@ impl AppState {
         self.load_comparison(cx);
     }
 
+    /// Replace the session's compare rules and re-run the comparison so
+    /// the panes reflect them (session rules dialog).
+    pub fn update_settings(
+        &mut self,
+        settings: SessionSettings,
+        cx: &mut Context<Self>,
+    ) {
+        self.settings = settings;
+        self.reload(cx);
+    }
+
+    /// The current session settings, for the rules dialog.
+    pub fn settings_mut(&mut self) -> &mut SessionSettings {
+        &mut self.settings
+    }
+
     // -----------------------------------------------------------------------
     // Row commands (touch, rename, exchange, folders, sync)
     // -----------------------------------------------------------------------

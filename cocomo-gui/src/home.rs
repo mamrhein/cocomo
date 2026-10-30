@@ -101,6 +101,7 @@ fn prompt_text_compare_pair(mgr: Entity<GuiSessionManager>, cx: &mut App) {
                     m.add_text_diff_tab(
                         Endpoint::local(left),
                         Endpoint::local(right),
+                        None,
                         cx,
                     );
                 });

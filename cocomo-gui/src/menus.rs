@@ -24,7 +24,12 @@ use gpui::{
         WindowExt as _,
         button::{Button, ButtonVariants as _},
         h_flex,
-        input::{Input, InputState},
+        input::{
+            Copy as TextCopy, Cut as TextCut, Delete as TextDelete,
+            DeleteToBeginningOfLine, DeleteToEndOfLine, Indent as TextIndent,
+            Input, InputState, Outdent as TextOutdent, Paste as TextPaste,
+            Redo as TextRedo, SelectAll as TextSelectAll, Undo as TextUndo,
+        },
         notification::Notification,
         v_flex,
     },
@@ -34,6 +39,13 @@ use gpui::{
 use crate::{
     log::{self, LogLevel, LogPaneOpen},
     session_manager::GuiSessionManager,
+    text_diff::{
+        CompareSelectionToClipboard, ConvertEndingsMac, ConvertEndingsPc,
+        ConvertEndingsUnix, ConvertSpacesToTabs, ConvertTabsToSpaces,
+        ConvertTrimTrailing, CopyFileLeftNext, CopyFileRightNext, DeleteLine,
+        DetailMode, InsertLineAfter, InsertLineBefore, SelectSection,
+        SetDetailMode,
+    },
     ui::{
         CopyToLeft, CopyToRight, DeleteLeftSide, DeleteRightSide, GoBack,
         GoForward, MoveToLeft, MoveToRight, NextDifference, PrevDifference,
@@ -86,6 +98,7 @@ actions!(
         Options,
         MoveTabToNewWindow,
         StopCompare,
+        FileFormats,
         About,
         Quit,
     ]
@@ -155,6 +168,14 @@ pub struct MenuState {
     /// Whether the active text compare shows its thumbnail strips
     /// (checkmark on the View toggle).
     pub show_thumbnails: bool,
+    /// Whether the active text compare is in edit mode (enables the
+    /// text-editing commands).
+    pub is_text_editing: bool,
+    /// Whether the active text compare has content to save.
+    pub can_save_file: bool,
+    /// Which detail panes the active text compare shows (checkmarks on
+    /// the View menu).
+    pub detail_mode: DetailMode,
 }
 
 impl MenuState {
@@ -176,6 +197,9 @@ impl MenuState {
             log_open: true,
             word_wrap: false,
             show_thumbnails: false,
+            is_text_editing: false,
+            can_save_file: false,
+            detail_mode: DetailMode::default(),
         }
     }
 }
@@ -196,7 +220,7 @@ fn build_app_menus(state: MenuState) -> Vec<Menu> {
             MenuItem::action("Save session as…", SaveSessionAs)
                 .disabled(is_home),
             MenuItem::action("Session settings…", SessionSettings)
-                .disabled(true),
+                .disabled(is_home),
             MenuItem::action("Clear session", ClearSession).disabled(true),
             MenuItem::separator(),
             MenuItem::action("Back", GoBack).disabled(off(state.can_go_back)),
@@ -231,8 +255,10 @@ fn build_app_menus(state: MenuState) -> Vec<Menu> {
                 ]),
             ),
             MenuItem::separator(),
-            MenuItem::action("Save file", SaveFile).disabled(true),
-            MenuItem::action("Save file as…", SaveFileAs).disabled(true),
+            MenuItem::action("Save file", SaveFile)
+                .disabled(!(state.is_text && state.can_save_file)),
+            MenuItem::action("Save file as…", SaveFileAs)
+                .disabled(!(state.is_text && state.can_save_file)),
             MenuItem::separator(),
             MenuItem::action("Close session", CloseSession),
             MenuItem::action("Close all sessions", CloseAllSessions),
@@ -242,6 +268,9 @@ fn build_app_menus(state: MenuState) -> Vec<Menu> {
     ];
 
     if !is_home {
+        // Text-editing commands act on the focused editor and are only
+        // meaningful while the text view is in edit mode.
+        let edit_off = !(state.is_text && state.is_text_editing);
         menus.extend([
             Menu::new("Edit").items([
                 MenuItem::action("Copy left path", CopyPathLeft)
@@ -249,8 +278,75 @@ fn build_app_menus(state: MenuState) -> Vec<Menu> {
                 MenuItem::action("Copy right path", CopyPathRight)
                     .disabled(no_folder),
                 MenuItem::separator(),
-                MenuItem::action("Select all", SelectAllEntries)
+                MenuItem::action("Select all entries", SelectAllEntries)
                     .disabled(no_folder),
+                MenuItem::separator(),
+                MenuItem::action("Undo", TextUndo).disabled(edit_off),
+                MenuItem::action("Redo", TextRedo).disabled(edit_off),
+                MenuItem::separator(),
+                MenuItem::action("Cut", TextCut).disabled(edit_off),
+                MenuItem::action("Copy", TextCopy).disabled(edit_off),
+                MenuItem::action("Paste", TextPaste).disabled(edit_off),
+                MenuItem::action("Delete", TextDelete).disabled(edit_off),
+                MenuItem::separator(),
+                MenuItem::action("Select all text", TextSelectAll)
+                    .disabled(edit_off),
+                MenuItem::action("Select section", SelectSection)
+                    .disabled(edit_off),
+                MenuItem::separator(),
+                MenuItem::action("Delete line", DeleteLine).disabled(edit_off),
+                MenuItem::action("Delete to line end", DeleteToEndOfLine)
+                    .disabled(edit_off),
+                MenuItem::action(
+                    "Delete to line start",
+                    DeleteToBeginningOfLine,
+                )
+                .disabled(edit_off),
+                MenuItem::action("Insert line before", InsertLineBefore)
+                    .disabled(edit_off),
+                MenuItem::action("Insert line after", InsertLineAfter)
+                    .disabled(edit_off),
+                MenuItem::action("Indent", TextIndent).disabled(edit_off),
+                MenuItem::action("Outdent", TextOutdent).disabled(edit_off),
+                MenuItem::separator(),
+                MenuItem::submenu(
+                    Menu::new("Convert file").items([
+                        MenuItem::action(
+                            "Trim trailing whitespace",
+                            ConvertTrimTrailing,
+                        )
+                        .disabled(edit_off),
+                        MenuItem::action(
+                            "Spaces to tabs",
+                            ConvertSpacesToTabs,
+                        )
+                        .disabled(edit_off),
+                        MenuItem::action(
+                            "Tabs to spaces",
+                            ConvertTabsToSpaces,
+                        )
+                        .disabled(edit_off),
+                        MenuItem::separator(),
+                        MenuItem::action("Line endings: PC", ConvertEndingsPc)
+                            .disabled(edit_off),
+                        MenuItem::action(
+                            "Line endings: Mac",
+                            ConvertEndingsMac,
+                        )
+                        .disabled(edit_off),
+                        MenuItem::action(
+                            "Line endings: Unix",
+                            ConvertEndingsUnix,
+                        )
+                        .disabled(edit_off),
+                    ]),
+                ),
+                MenuItem::separator(),
+                MenuItem::action(
+                    "Compare selection to clipboard",
+                    CompareSelectionToClipboard,
+                )
+                .disabled(!state.is_text),
             ]),
             Menu::new("Actions").items([
                 // Each reconcile command is enabled only when the
@@ -271,6 +367,19 @@ fn build_app_menus(state: MenuState) -> Vec<Menu> {
                     .disabled(off(state.can_delete_right)),
                 MenuItem::action("Delete from left", DeleteLeftSide)
                     .disabled(off(state.can_delete_left)),
+                MenuItem::separator(),
+                // Text-sync commands: copy this pair's file and step the
+                // parent folder session to its next difference.
+                MenuItem::action(
+                    "Copy file to right and open next",
+                    CopyFileRightNext,
+                )
+                .disabled(!state.is_text),
+                MenuItem::action(
+                    "Copy file to left and open next",
+                    CopyFileLeftNext,
+                )
+                .disabled(!state.is_text),
             ]),
             Menu::new("Search").items([
                 MenuItem::action("Next difference", NextDifference)
@@ -298,7 +407,32 @@ fn build_app_menus(state: MenuState) -> Vec<Menu> {
                 .disabled(!state.is_text)
                 .checked(state.word_wrap),
             MenuItem::separator(),
-            MenuItem::action("Show details", ShowDetails).disabled(true),
+            // Detail pane modes are text-compare-only; the focused text
+            // view handles the actions.
+            MenuItem::action(
+                "Text details",
+                SetDetailMode {
+                    mode: DetailMode::Text,
+                },
+            )
+            .disabled(!state.is_text)
+            .checked(state.detail_mode == DetailMode::Text),
+            MenuItem::action(
+                "Hex details",
+                SetDetailMode {
+                    mode: DetailMode::Hex,
+                },
+            )
+            .disabled(!state.is_text)
+            .checked(state.detail_mode == DetailMode::Hex),
+            MenuItem::action(
+                "Alignment details",
+                SetDetailMode {
+                    mode: DetailMode::Alignment,
+                },
+            )
+            .disabled(!state.is_text)
+            .checked(state.detail_mode == DetailMode::Alignment),
             MenuItem::action("Show thumbnails", ShowThumbnails)
                 .disabled(!state.is_text)
                 .checked(state.show_thumbnails),
@@ -311,8 +445,10 @@ fn build_app_menus(state: MenuState) -> Vec<Menu> {
             MenuItem::action("Log pane", ToggleLogPane)
                 .checked(state.log_open),
         ]),
-        Menu::new("Tools")
-            .items([MenuItem::action("Options…", Options).disabled(true)]),
+        Menu::new("Tools").items([
+            MenuItem::action("Options…", Options).disabled(true),
+            MenuItem::action("File formats…", FileFormats),
+        ]),
         Menu::new("Help").items([MenuItem::action("About cocomo", About)]),
     ]);
     menus
@@ -571,6 +707,56 @@ pub fn register_menu_handlers(
     // global handler only records dispatches that reached no view.
     cx.on_action(move |_action: &ReloadCompare, cx: &mut App| {
         log::push(LogLevel::Info, "Reload comparison dispatched", cx);
+    });
+
+    // File menu — save the focused side's edited buffer.
+    let mgr_save_file = session_manager.clone();
+    cx.on_action(move |_action: &SaveFile, cx: &mut App| {
+        let Some(session) = mgr_save_file.read(cx).active_text_session(cx)
+        else {
+            return;
+        };
+        let side = session.read(cx).focus_side();
+        session.update(cx, |s, cx| s.save_side(side, false, cx));
+    });
+
+    // File menu — save with an explicit target path.
+    let mgr_save_file_as = session_manager.clone();
+    cx.on_action(move |_action: &SaveFileAs, cx: &mut App| {
+        let Some(session) = mgr_save_file_as.read(cx).active_text_session(cx)
+        else {
+            return;
+        };
+        let side = session.read(cx).focus_side();
+        session.update(cx, |s, cx| s.save_side(side, true, cx));
+    });
+
+    // Session menu and toolbar Rules button — the session-rules dialog,
+    // branched on the active tab type.
+    let mgr_rules = session_manager.clone();
+    cx.on_action(move |_action: &SessionSettings, cx: &mut App| {
+        let Some(window) = cx.active_window() else {
+            return;
+        };
+        let mgr = mgr_rules.clone();
+        let _ = window.update(cx, |_, window, cx| {
+            if let Some(session) = mgr.read(cx).active_text_session(cx) {
+                crate::text_diff::open_text_rules_dialog(session, window, cx);
+            } else if let Some(state) = mgr.read(cx).active_folder_session(cx)
+            {
+                crate::ui::open_folder_rules_dialog(state, window, cx);
+            }
+        });
+    });
+
+    // Tools menu — the file-format registry dialog.
+    cx.on_action(move |_action: &FileFormats, cx: &mut App| {
+        let Some(window) = cx.active_window() else {
+            return;
+        };
+        let _ = window.update(cx, |_, window, cx| {
+            crate::file_formats::open_file_formats_dialog(window, cx);
+        });
     });
 
     // Help menu — about: a real modal naming the product and its version.
