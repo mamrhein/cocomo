@@ -80,7 +80,8 @@ pub(super) fn dir_rows(rows: &[DirRow], theme: &CocomoTheme) -> Vec<CellRow> {
                         format_date(&l.modified)
                     )
                 })
-                .unwrap_or_else(|| "-             ".to_string());
+                // The absent side of an orphan entry stays blank.
+                .unwrap_or_default();
 
             let right_meta = entry
                 .right
@@ -92,7 +93,7 @@ pub(super) fn dir_rows(rows: &[DirRow], theme: &CocomoTheme) -> Vec<CellRow> {
                         format_date(&r.modified)
                     )
                 })
-                .unwrap_or_else(|| "-             ".to_string());
+                .unwrap_or_default();
 
             // Directories carry a `/` suffix, as in the CLI tree output.
             let display_name = if row.is_dir {
