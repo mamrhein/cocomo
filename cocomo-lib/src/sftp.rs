@@ -1313,7 +1313,14 @@ impl WritableFileSystem for SftpFs {
     ) -> Result<()> {
         let node = self.get_node(id.as_node_id())?;
         // Delegate to path-based write.
-        self.write(node.path(), data).await
+        self.write(node.path(), data).await?;
+        // Re-stat and refresh the cached node so subsequent scans observe
+        // the written size and modification time.
+        let meta = self.lstat_path(node.path()).await?;
+        if let Some(arc) = self.nodes.write().get_mut(id.get()) {
+            Arc::make_mut(arc).set_metadata(meta);
+        }
+        Ok(())
     }
 
     async fn flush_node(&self, _id: FileId<Self::Nid>) -> Result<()> {

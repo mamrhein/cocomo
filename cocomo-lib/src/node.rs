@@ -309,6 +309,15 @@ impl Node {
         self.path = path;
     }
 
+    /// Update the node metadata from a fresh stat of the underlying entry.
+    ///
+    /// The cached content hash describes the pre-write content, so it is
+    /// dropped together with the stale metadata.
+    pub(crate) fn set_metadata(&mut self, metadata: Metadata) {
+        self.metadata = metadata;
+        self.cached_hash = None;
+    }
+
     /// Set the child names for a directory node. Does nothing if this is not
     /// a directory.
     pub(crate) fn set_children(&mut self, children: Vec<String>) {

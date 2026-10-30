@@ -27,6 +27,7 @@ use std::path::Path;
 #[allow(unused_imports)]
 use std::sync::Arc;
 
+use bytes::BytesMut;
 use futures::future::BoxFuture;
 
 use crate::{DirComparison, DirEntryStatus, FsError, FsOperation};
@@ -461,6 +462,11 @@ where
     S: crate::fs::WritableFileSystem<Nid = u64>,
     D: crate::fs::WritableFileSystem<Nid = u64>,
 {
+    // `write_node` replaces the destination file's whole content on every
+    // provider, so the chunks must be collected before a single write:
+    // writing each chunk as it arrives would leave only the last chunk on
+    // the destination.
+    let mut content = BytesMut::new();
     let mut stream = src_fs.read_stream_node(src_file_id, None).await?;
     use futures::StreamExt;
     while let Some(chunk) = stream.next().await {
@@ -469,10 +475,10 @@ where
             path: src_path.to_path_buf(),
             message: format!("stream error: {e}"),
         })?;
-        dst_fs.write_node(dst_file_id, chunk).await?;
+        content.extend_from_slice(&chunk);
     }
 
-    Ok(())
+    dst_fs.write_node(dst_file_id, content.freeze()).await
 }
 
 /// Copy a file or directory from source to destination.
@@ -1048,6 +1054,47 @@ mod tests {
         );
         // Verify the file was copied.
         assert!(right.join("left_only.txt").exists());
+
+        fs_err::remove_dir_all(left.parent().unwrap()).ok();
+    }
+
+    #[tokio::test]
+    async fn execute_copy_right_beyond_one_chunk() {
+        let (left, right) = make_test_dirs();
+        let fs = LocalFs::new("test");
+
+        // Content larger than the stream chunk size, so the copy streams
+        // several chunks into the destination.
+        let content = vec![0xA5u8; 100 * 1024];
+        fs_err::write(left.join("big.bin"), &content).unwrap();
+
+        let items = vec![TransferItem::new(
+            TransferAction::CopyRight,
+            "big.bin".to_string(),
+            false,
+            left.join("big.bin").to_string_lossy().into_owned(),
+        )];
+
+        let result =
+            execute_transfers(&items, &left, &right, FsPair::shared(&fs))
+                .await;
+
+        assert!(
+            result.is_ok(),
+            "transfer should succeed: {:?}",
+            result.errors
+        );
+        // The destination must hold the full source content, not just the
+        // last chunk.
+        assert_eq!(fs_err::read(right.join("big.bin")).unwrap(), content);
+
+        // The cached node metadata the comparison displays must show the
+        // copied size, not the zero bytes of the freshly created file.
+        let right_id = fs.resolve_path(&right.join("big.bin")).await.unwrap();
+        assert_eq!(
+            fs.node_metadata(right_id).unwrap().size,
+            content.len() as u64
+        );
 
         fs_err::remove_dir_all(left.parent().unwrap()).ok();
     }
