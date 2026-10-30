@@ -306,10 +306,10 @@ fn tree_expands_navigates_and_collapses_in_place() {
     // Collapsed by default: only the top-level rows are visible.
     assert_eq!(session.visible_rows().len(), 2);
 
-    // `+` expands the directory under the cursor in place.
+    // The right cursor key expands the directory under the cursor.
     session.ui.table_state.select(Some(0));
     assert_eq!(
-        press(&mut session, KeyCode::Char('+')),
+        press(&mut session, KeyCode::Right),
         Some(SessionAction::None)
     );
     assert_eq!(session.visible_rows().len(), 4);

@@ -194,6 +194,16 @@ pub const MENUS: &[MenuDef] = &[
                 requires_dir: true,
             },
             MenuItemDef {
+                label: "expand all",
+                cmd: Cmd::ExpandAllDirs,
+                requires_dir: true,
+            },
+            MenuItemDef {
+                label: "collapse all",
+                cmd: Cmd::CollapseAllDirs,
+                requires_dir: true,
+            },
+            MenuItemDef {
                 label: "settings",
                 cmd: Cmd::OpenSettings,
                 requires_dir: true,
@@ -351,6 +361,25 @@ mod tests {
             assert!(
                 sync.items.iter().any(|i| i.cmd == Cmd::SetSyncOp(op)),
                 "Sync menu misses the operation {op:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn view_menu_lists_the_tree_commands() {
+        let view = MENUS
+            .iter()
+            .find(|m| m.title == "View")
+            .expect("no View menu");
+        for cmd in [
+            Cmd::ExpandDir,
+            Cmd::CollapseDir,
+            Cmd::ExpandAllDirs,
+            Cmd::CollapseAllDirs,
+        ] {
+            assert!(
+                view.items.iter().any(|i| i.cmd == cmd),
+                "View menu misses the {cmd:?} item",
             );
         }
     }

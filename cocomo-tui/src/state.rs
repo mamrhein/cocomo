@@ -661,6 +661,11 @@ pub struct DirRow<'a> {
     pub is_dir: bool,
     /// Whether the directory row is currently expanded.
     pub expanded: bool,
+    /// The row's tree indent: the accumulated continuation prefixes of its
+    /// ancestors (`│  ` / `   `) plus the row's own `├─ ` / `└─ `
+    /// indicator, empty at the top level. This mirrors the indicators
+    /// rendered by `cocomo-cli`'s tree output.
+    pub tree_prefix: String,
 }
 
 /// Text diff state: the diff result plus the file-content cache.
@@ -826,6 +831,28 @@ impl SessionView {
         }
     }
 
+    /// Set a fresh directory comparison, keeping the selection on the entry
+    /// it currently points at.
+    ///
+    /// Used after a transfer: the entry under the cursor usually still
+    /// exists (its status merely changed), so the user keeps their place in
+    /// the tree. Only when the entry is gone — removed by the transfer or
+    /// hidden by the display filters — does the selection fall back to the
+    /// first row, matching [`SessionView::set_comparison`]. The drag
+    /// selection anchor is dropped either way.
+    pub fn set_comparison_keeping_selection(
+        &mut self,
+        comparison: DirComparison,
+    ) {
+        // Capture the path before the assignment drops the entries the
+        // selected row borrows from.
+        let selected = self.selected_row().map(|row| row.rel_path);
+        self.set_comparison(Some(comparison));
+        let index =
+            selected.as_deref().and_then(|path| self.row_index_of(path));
+        self.set_cursor(Some(index.unwrap_or(0)));
+    }
+
     /// Record the outcome of a sync run and reset the selection.
     ///
     /// Single owner of the `dir.sync` mutation: bumps the revision counter
@@ -894,32 +921,52 @@ impl SessionView {
             return Vec::new();
         };
         let mut rows = Vec::new();
-        self.collect_rows(&comparison.entries, "", 0, &mut rows);
+        self.collect_rows(&comparison.entries, "", "", 0, &mut rows);
         rows
     }
 
     /// Recursively append the visible rows of one comparison level.
     ///
     /// The filters apply at every depth; a directory hidden by the name
-    /// filter hides its whole subtree with it.
+    /// filter hides its whole subtree with it. The tree indicators are
+    /// computed after filtering, so `└─` always marks the last *visible*
+    /// sibling, exactly as in `cocomo-cli`'s tree rendering.
+    ///
+    /// `path_prefix` builds the rows' `/`-separated relative paths,
+    /// `display_prefix` the accumulated box-drawing continuations
+    /// (`│  ` / `   `).
     fn collect_rows<'a>(
         &self,
         entries: &'a [DirEntry],
-        prefix: &str,
+        path_prefix: &str,
+        display_prefix: &str,
         depth: usize,
         rows: &mut Vec<DirRow<'a>>,
     ) {
         let Some(dir) = self.dir() else {
             return;
         };
-        for entry in entries {
-            if !self.entry_visible(dir, entry) {
-                continue;
-            }
-            let rel_path = if prefix.is_empty() {
+        let visible: Vec<&DirEntry> = entries
+            .iter()
+            .filter(|e| self.entry_visible(dir, e))
+            .collect();
+        let count = visible.len();
+        for (i, entry) in visible.into_iter().enumerate() {
+            // Box-drawing indicator and continuation, as in `cocomo-cli`:
+            // the top-most level is flush left, deeper levels carry a
+            // 3-character connector. Directories are marked with a `/`
+            // suffix in the view model's consumer, not here.
+            let (indicator, continuation) = if depth == 0 {
+                ("", "")
+            } else if i == count - 1 {
+                ("\u{2514}\u{2500} ", "   ") // └─
+            } else {
+                ("\u{251c}\u{2500} ", "\u{2502}  ") // ├─ and │
+            };
+            let rel_path = if path_prefix.is_empty() {
                 entry.name.clone()
             } else {
-                format!("{prefix}/{}", entry.name)
+                format!("{path_prefix}/{}", entry.name)
             };
             let is_dir = entry.left.as_ref().is_some_and(|l| l.is_dir)
                 || entry.right.as_ref().is_some_and(|r| r.is_dir);
@@ -930,9 +977,16 @@ impl SessionView {
                 depth,
                 is_dir,
                 expanded,
+                tree_prefix: format!("{display_prefix}{indicator}"),
             });
             if expanded && let Some(sub) = entry.sub_entries.as_deref() {
-                self.collect_rows(&sub.entries, &rel_path, depth + 1, rows);
+                self.collect_rows(
+                    &sub.entries,
+                    &rel_path,
+                    &format!("{display_prefix}{continuation}"),
+                    depth + 1,
+                    rows,
+                );
             }
         }
     }
@@ -969,6 +1023,65 @@ impl SessionView {
         self.visible_rows()
             .iter()
             .position(|row| row.rel_path == rel_path)
+    }
+
+    /// Expand every directory in the tree, recursively (View menu "expand
+    /// all").
+    ///
+    /// The name and display filters are not consulted here; a directory
+    /// hidden by a filter is still marked expanded and simply stays
+    /// invisible until the filter changes.
+    pub fn expand_all_dirs(&mut self) {
+        let Some(dir) = self.dir_mut() else {
+            return;
+        };
+        let Some(comparison) = &dir.comparison else {
+            return;
+        };
+        let mut paths = Vec::new();
+        Self::collect_dir_paths(&comparison.entries, "", &mut paths);
+        let before = dir.expanded.len();
+        dir.expanded.extend(paths);
+        if dir.expanded.len() != before {
+            dir.tree_revision += 1;
+        }
+    }
+
+    /// Collapse every expanded directory (View menu "collapse all").
+    pub fn collapse_all_dirs(&mut self) {
+        let Some(dir) = self.dir_mut() else {
+            return;
+        };
+        if !dir.expanded.is_empty() {
+            dir.expanded.clear();
+            dir.tree_revision += 1;
+        }
+    }
+
+    /// Collect the `/`-separated relative paths of every directory in
+    /// `entries` (and its subtrees) into `paths`. `prefix` is the parent's
+    /// relative path (empty at the root).
+    fn collect_dir_paths(
+        entries: &[DirEntry],
+        prefix: &str,
+        paths: &mut Vec<String>,
+    ) {
+        for entry in entries {
+            let is_dir = entry.left.as_ref().is_some_and(|l| l.is_dir)
+                || entry.right.as_ref().is_some_and(|r| r.is_dir);
+            if !is_dir {
+                continue;
+            }
+            let rel_path = if prefix.is_empty() {
+                entry.name.clone()
+            } else {
+                format!("{prefix}/{}", entry.name)
+            };
+            paths.push(rel_path.clone());
+            if let Some(sub) = entry.sub_entries.as_deref() {
+                Self::collect_dir_paths(&sub.entries, &rel_path, paths);
+            }
+        }
     }
 
     /// Resolve the transfer target for the current selection.
@@ -1355,6 +1468,23 @@ mod tests {
         }
     }
 
+    /// A nested tree for tree tests: dir `a` contains dir `a1` (with
+    /// `deep.txt`) and `b.txt`; at the top level there is also `top2.txt`.
+    fn nested_tree() -> Vec<DirEntry> {
+        let a1 = dir_entry(
+            "a1",
+            DirEntryStatus::Different,
+            Some(comparison(&[("deep.txt", DirEntryStatus::Same)])),
+        );
+        let mut a_sub = comparison(&[("b.txt", DirEntryStatus::Same)]);
+        a_sub.entries.insert(0, a1);
+        let mut entries =
+            vec![dir_entry("a", DirEntryStatus::Different, Some(a_sub))];
+        entries
+            .extend(comparison(&[("top2.txt", DirEntryStatus::Same)]).entries);
+        entries
+    }
+
     #[test]
     fn set_comparison_resets_selection() {
         let mut session = dir_session();
@@ -1371,6 +1501,70 @@ mod tests {
         session.set_comparison(None);
         assert!(session.dir().unwrap().comparison.is_none());
         assert_eq!(session.ui.table_state.selected(), Some(0));
+    }
+
+    #[test]
+    fn set_comparison_keeping_selection_stays_on_the_entry() {
+        let mut session = dir_session();
+        session.set_comparison(Some(comparison(&[
+            ("a", DirEntryStatus::LeftOnly),
+            ("b", DirEntryStatus::Different),
+            ("c", DirEntryStatus::RightOnly),
+        ])));
+        session.set_cursor(Some(1));
+
+        // After the transfer the entry is still there, only its status
+        // changed, so the selection follows it instead of jumping to row 0.
+        session.set_comparison_keeping_selection(comparison(&[
+            ("a", DirEntryStatus::LeftOnly),
+            ("b", DirEntryStatus::Same),
+            ("c", DirEntryStatus::RightOnly),
+        ]));
+        assert_eq!(session.ui.table_state.selected(), Some(1));
+        assert_eq!(session.selected_row().unwrap().entry.name, "b");
+    }
+
+    #[test]
+    fn set_comparison_keeping_selection_tracks_a_moved_row() {
+        let mut session = dir_session();
+        session.set_comparison(Some(comparison(&[
+            ("a", DirEntryStatus::LeftOnly),
+            ("b", DirEntryStatus::Different),
+            ("c", DirEntryStatus::RightOnly),
+        ])));
+        session.set_cursor(Some(2));
+
+        // The entry above the selection disappears from the view (here by
+        // being filtered out), shifting the selected entry up one row.
+        session.dir_mut().unwrap().display.show_same = false;
+        session.set_comparison_keeping_selection(comparison(&[
+            ("a", DirEntryStatus::Same),
+            ("b", DirEntryStatus::Different),
+            ("c", DirEntryStatus::RightOnly),
+        ]));
+        assert_eq!(session.ui.table_state.selected(), Some(1));
+        assert_eq!(session.selected_row().unwrap().entry.name, "c");
+    }
+
+    #[test]
+    fn set_comparison_keeping_selection_falls_back_when_entry_is_gone() {
+        let mut session = dir_session();
+        session.set_comparison(Some(comparison(&[
+            ("a", DirEntryStatus::Different),
+            ("b", DirEntryStatus::LeftOnly),
+        ])));
+        session.set_cursor(Some(1));
+        session.ui.selection_anchor = Some(0);
+
+        // A deleted (or filtered-out) entry leaves nothing to keep: the
+        // selection falls back to the first row and the stale drag anchor
+        // is dropped.
+        session.set_comparison_keeping_selection(comparison(&[
+            ("a", DirEntryStatus::Different),
+            ("c", DirEntryStatus::RightOnly),
+        ]));
+        assert_eq!(session.ui.table_state.selected(), Some(0));
+        assert_eq!(session.ui.selection_anchor, None);
     }
 
     #[test]
@@ -1469,10 +1663,75 @@ mod tests {
         let rows = session.visible_rows();
         assert_eq!(rows.len(), 2);
         assert!(rows[0].expanded);
+        assert_eq!(rows[0].tree_prefix, "");
         assert_eq!(rows[1].entry.name, "child.txt");
         assert_eq!(rows[1].depth, 1);
         assert_eq!(rows[1].rel_path, "sub/child.txt");
         assert!(!rows[1].is_dir);
+        // The only child is the last visible sibling.
+        assert_eq!(rows[1].tree_prefix, "\u{2514}\u{2500} ");
+    }
+
+    #[test]
+    fn tree_prefixes_match_the_cli_indicators() {
+        let mut session = dir_session();
+        session.set_comparison(Some(DirComparison {
+            entries: nested_tree(),
+            ..Default::default()
+        }));
+        session.dir_mut().unwrap().expanded.insert("a".into());
+        session.dir_mut().unwrap().expanded.insert("a/a1".into());
+
+        let rows = session.visible_rows();
+        let got: Vec<(&str, &str)> = rows
+            .iter()
+            .map(|r| (r.entry.name.as_str(), r.tree_prefix.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                // The top-most level is flush left, without any indicator.
+                ("a", ""),
+                // Not the last child of `a`.
+                ("a1", "\u{251c}\u{2500} "),
+                // Last child of `a1`; `a1` is not last, so the `│`
+                // continuation carries over.
+                ("deep.txt", "\u{2502}  \u{2514}\u{2500} "),
+                // Last child of `a`.
+                ("b.txt", "\u{2514}\u{2500} "),
+                // Last top-level entry: again no indicator.
+                ("top2.txt", ""),
+            ]
+        );
+    }
+
+    #[test]
+    fn expand_and_collapse_all_toggle_every_subtree_recursively() {
+        let mut session = dir_session();
+        session.set_comparison(Some(DirComparison {
+            entries: nested_tree(),
+            ..Default::default()
+        }));
+        assert_eq!(session.visible_rows().len(), 2);
+
+        session.expand_all_dirs();
+        let dir = session.dir().unwrap();
+        assert!(dir.expanded.contains("a"));
+        assert!(dir.expanded.contains("a/a1"));
+        let rows = session.visible_rows();
+        assert_eq!(rows.len(), 5);
+        // Every directory row reports itself as expanded.
+        assert!(rows.iter().all(|r| !r.is_dir || r.expanded));
+
+        // Expanding again is a no-op: the revision stays put.
+        let revision = session.dir().unwrap().tree_revision;
+        session.expand_all_dirs();
+        assert_eq!(session.dir().unwrap().tree_revision, revision);
+
+        session.collapse_all_dirs();
+        assert!(session.dir().unwrap().expanded.is_empty());
+        assert_eq!(session.visible_rows().len(), 2);
+        assert!(session.dir().unwrap().tree_revision > revision);
     }
 
     #[test]
