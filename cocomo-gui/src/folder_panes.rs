@@ -20,9 +20,9 @@ use std::ops::Range;
 
 use cocomo_lib::{DirEntry, DirEntryStatus, Endpoint};
 use gpui::{
-    AnyElement, App, ClickEvent, ElementId, Entity, FocusHandle, FontWeight,
-    Hsla, MouseButton, SharedString, TestSupportExt as _,
-    UniformListScrollHandle, Window,
+    AnyElement, App, ClickEvent, ElementId, Entity, ExternalPaths,
+    FocusHandle, FontWeight, Hsla, MouseButton, SharedString,
+    TestSupportExt as _, UniformListScrollHandle, Window,
     component::{
         ActiveTheme, Sizable as _, Theme,
         button::{Button, ButtonVariants as _},
@@ -40,6 +40,7 @@ use gpui::{
 
 use crate::{
     color::{self, Side},
+    log::{self, LogLevel},
     state::{AppState, SortKey, TreeRow, entry_endpoints},
     ui::{
         CompareContentsHash, CompareContentsMeta, CopyFilename, CopyToFolder,
@@ -94,6 +95,39 @@ pub(crate) fn render_folder_panes(
         .into_any_element()
 }
 
+/// Point `side` at the first dropped path, when it is a directory.
+///
+/// A drop that cannot be honored says why in the log and as a notification;
+/// silently ignoring a dropped item reads as a broken drop target.
+fn accept_pane_drop(
+    side: Side,
+    state: &Entity<AppState>,
+    paths: &ExternalPaths,
+    cx: &mut App,
+) {
+    let Some(path) = paths.paths().first() else {
+        return;
+    };
+    match fs_err::metadata(path) {
+        Ok(metadata) if metadata.is_dir() => {}
+        Ok(_) => {
+            let message = format!("{} is not a directory.", path.display());
+            log::push(LogLevel::Error, message.clone(), cx);
+            crate::menus::notify_error(message, cx);
+            return;
+        }
+        Err(e) => {
+            let message = format!("Couldn't read {}: {e}", path.display());
+            log::push(LogLevel::Error, message.clone(), cx);
+            crate::menus::notify_error(message, cx);
+            return;
+        }
+    }
+    state.update(cx, |state, cx| {
+        state.set_side_path(side, &path.to_string_lossy(), cx);
+    });
+}
+
 /// One pane: path bar, column headers, and the tree list.
 fn render_pane(
     side: Side,
@@ -111,10 +145,23 @@ fn render_pane(
     let headers = render_pane_headers(side, state, theme, cx);
     let list = render_pane_list(side, state, env, entry_count, theme);
 
+    let side_key = if side == Side::Left { "left" } else { "right" };
+    let primary = theme.primary;
+    let drop_state = state.clone();
+
     v_flex()
+        .id(ElementId::Name(format!("folder-pane-{side_key}").into()))
         .size_full()
         .min_w_0()
         .bg(theme.background)
+        // Dropping a folder onto a pane repoints that side, the
+        // pointer-first equivalent of editing its path bar.
+        .drag_over::<ExternalPaths>(move |style, _, _, _| {
+            style.border_color(primary)
+        })
+        .on_drop::<ExternalPaths>(move |paths, _, cx| {
+            accept_pane_drop(side, &drop_state, paths, cx);
+        })
         .child(bar)
         .child(headers)
         .child(
@@ -374,6 +421,12 @@ fn render_pane_list(
         move |range: Range<usize>, _: &mut Window, app: &mut App| {
             let mut items = Vec::with_capacity(range.len());
             if let Some(state_entity) = state_weak.upgrade() {
+                // Resolve the global color overrides once per batch, not
+                // once per row.
+                let overrides = color::merge_overrides(
+                    &state_entity.read(app).settings().color_overrides,
+                    app,
+                );
                 let app_state = state_entity.read(app);
                 for i in range {
                     let (Some(row), Some(entry)) =
@@ -381,7 +434,9 @@ fn render_pane_list(
                     else {
                         continue;
                     };
-                    let data = PaneRow::new(i, side, row, entry, app_state);
+                    let data = PaneRow::new(
+                        i, side, row, entry, app_state, &overrides,
+                    );
                     items.push(
                         data.render_row(
                             &theme,
@@ -438,6 +493,7 @@ impl PaneRow {
         row: &TreeRow,
         entry: &DirEntry,
         state: &AppState,
+        overrides: &cocomo_lib::ColorOverrides,
     ) -> Self {
         let side_info = match side {
             Side::Left => entry.left.as_ref(),
@@ -461,7 +517,7 @@ impl PaneRow {
             modified: side_info
                 .map(|s| SharedString::from(s.modified.clone())),
             role: color::side_role(entry, side, state.is_ignored(&entry.name)),
-            overrides: state.settings().color_overrides.clone(),
+            overrides: overrides.clone(),
             gutter: color::gutter_icon(entry, state.is_ignored(&entry.name)),
             has_left: entry.left.is_some(),
             has_right: entry.right.is_some(),
@@ -821,6 +877,7 @@ mod tests {
                 &TreeRow::new_for_test(0, entry.name.as_str()),
                 entry,
                 read,
+                &cocomo_lib::ColorOverrides::default(),
             )
         })
     }

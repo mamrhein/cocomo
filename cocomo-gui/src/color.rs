@@ -20,7 +20,7 @@
 
 use chrono::{DateTime, FixedOffset};
 use cocomo_lib::{ColorOverrides, DirEntry, DirEntryStatus};
-use gpui::{Hsla, Rgba};
+use gpui::{App, Hsla, Rgba};
 
 use crate::state::status_category;
 
@@ -77,6 +77,27 @@ impl ColorRole {
             Self::Orphan => theme.info,
             Self::OtherSide | Self::Neutral => theme.muted_foreground,
         }
+    }
+}
+
+/// Merge a session's color overrides over the global ones.
+///
+/// The session is the more specific scope, so its colors win; a role the
+/// session leaves unset inherits the user's global choice from the Options
+/// dialog, and only then falls back to the theme (spec section 7.1).
+pub fn merge_overrides(session: &ColorOverrides, cx: &App) -> ColorOverrides {
+    let global = &cx.global::<crate::options::AppOptions>().colors;
+    ColorOverrides {
+        important: session
+            .important
+            .clone()
+            .or_else(|| global.important.clone()),
+        minor: session.minor.clone().or_else(|| global.minor.clone()),
+        orphan: session.orphan.clone().or_else(|| global.orphan.clone()),
+        other_side: session
+            .other_side
+            .clone()
+            .or_else(|| global.other_side.clone()),
     }
 }
 

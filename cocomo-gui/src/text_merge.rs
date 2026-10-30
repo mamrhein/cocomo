@@ -31,8 +31,8 @@ use cocomo_lib::{
 };
 use gpui::{
     Action, AnyElement, App, Context, ElementId, Entity, FocusHandle, Hsla,
-    IntoElement, KeyBinding, ListAlignment, ListState, MouseButton, Pixels,
-    Render, SharedString, Subscription, Window, actions,
+    IntoElement, ListAlignment, ListState, MouseButton, Pixels, Render,
+    SharedString, Subscription, Window, actions,
     assets::IconName,
     base::Disableable as _,
     component::{
@@ -174,6 +174,16 @@ pub struct MergeSession {
     model_rev: usize,
     /// The session manager, for marking the tab dirty.
     manager: Option<Entity<GuiSessionManager>>,
+}
+
+impl MergeSession {
+    /// Re-point this session at a new owning manager.
+    ///
+    /// Called when the tab moves to another window; dirty marks must go to
+    /// the window the tab now lives in.
+    pub fn set_manager(&mut self, manager: Entity<GuiSessionManager>) {
+        self.manager = Some(manager);
+    }
 }
 
 impl MergeSession {
@@ -1039,14 +1049,8 @@ impl MergeView {
     pub fn new(state: Entity<MergeSession>, cx: &mut Context<Self>) -> Self {
         // Section stepping and conflict walking are scoped to the merge
         // view's key context so they never shadow the other views' bindings.
-        cx.bind_keys([
-            KeyBinding::new("j", NextMergeSection, Some("TextMerge")),
-            KeyBinding::new("k", PrevMergeSection, Some("TextMerge")),
-            KeyBinding::new("down", NextMergeSection, Some("TextMerge")),
-            KeyBinding::new("up", PrevMergeSection, Some("TextMerge")),
-            KeyBinding::new("cmd-shift-]", NextConflict, Some("TextMerge")),
-            KeyBinding::new("cmd-shift-[", PrevConflict, Some("TextMerge")),
-        ]);
+        // They are registered centrally by `crate::commands::view_bindings`
+        // so a keymap rebuild can restore them.
 
         let _state_sub = cx.observe(&state, |_, _, cx| cx.notify());
         state.update(cx, |session, cx| session.ensure_loaded(cx));

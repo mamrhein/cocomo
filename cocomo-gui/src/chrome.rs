@@ -15,7 +15,8 @@
 //! rendered by the active tab (see `crate::tabview::TabEntity::view_toolbar`).
 
 use gpui::{
-    AnyElement, App, ElementId, Entity, IntoElement, Window,
+    AnyElement, App, Context, ElementId, Entity, IntoElement, Render,
+    SharedString, Window,
     assets::IconName,
     base::{Disableable as _, Selectable as _},
     component::{
@@ -30,41 +31,84 @@ use gpui::{
 };
 
 use crate::{
-    log::{self, LogLevel},
+    commands, log,
+    log::LogLevel,
     menus::{SaveSession, SessionSettings},
     session_manager::GuiSessionManager,
     state::{AppState, FilterMode},
+    tabview::TabEntity,
+    windows,
 };
+
 // ---------------------------------------------------------------------------
 // Tab bar
 // ---------------------------------------------------------------------------
 
+/// Payload of an in-progress tab drag, carrying the dragged tab's id.
+#[derive(Clone)]
+struct TabDrag {
+    tab_id: usize,
+}
+
+/// The floating chip shown next to the cursor while a tab is dragged.
+struct TabDragLabel {
+    label: SharedString,
+}
+
+impl Render for TabDragLabel {
+    fn render(
+        &mut self,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let theme = cx.theme();
+        div()
+            .px_2()
+            .py_1()
+            .rounded_md()
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.muted)
+            .text_color(theme.foreground)
+            .text_sm()
+            .child(self.label.clone())
+    }
+}
+
 /// Build the session tab bar element using `gpui-component`'s [`TabBar`].
 ///
-/// Each tab shows the session name with a close button and carries a
-/// context menu (move, save, close, close all). A "+" button is appended
-/// as a suffix for creating new tabs. Tab activation is handled via the
-/// `TabBar`'s `on_click` callback.
+/// Each tab shows the session name (with a dot while the session is
+/// dirty), a close button, and a context menu (move to new window, save,
+/// close, close all). Dragging a tab onto another tab reorders the list.
+/// A "+" button is appended as a suffix for creating new tabs. Tab
+/// activation is handled via the `TabBar`'s `on_click` callback.
 pub fn tab_bar_element(
     session_manager: Entity<GuiSessionManager>,
     cx: &App,
 ) -> AnyElement {
-    let (active_index, tab_ids) = {
+    let (active_index, tabs) = {
         let mgr = session_manager.read(cx);
         (mgr.active_index(), mgr.open_tab_ids())
     };
+    // Home is a launcher, not a session; moving it to its own window would
+    // only produce a duplicate start screen.
+    let home_index = {
+        let mgr = session_manager.read(cx);
+        mgr.tab_entities().iter().position(TabEntity::is_home)
+    };
 
     let mgr_activate = session_manager.clone();
+    let drop_primary = cx.theme().primary;
     let on_click = move |index: &usize, _window: &mut Window, cx: &mut App| {
         mgr_activate.update(cx, |m, cx| {
             m.activate_session(*index, cx);
         });
     };
 
-    let tabs: Vec<Tab> = tab_ids
+    let tab_elements: Vec<Tab> = tabs
         .iter()
         .enumerate()
-        .map(|(i, (_id, name))| {
+        .map(|(i, (tab_id, name, dirty))| {
             let mgr_close = session_manager.clone();
             // Icon-only control: needs an accessible name and a tooltip
             // that clarifies the scope (closes the tab, not the window).
@@ -85,18 +129,59 @@ pub fn tab_bar_element(
             // The context menu covers the tab's label area; the close
             // button stays outside it so either affordance works.
             let mgr_menu = session_manager.clone();
+            let mgr_move = session_manager.clone();
+            let mgr_drop = session_manager.clone();
+            let drag_label: SharedString = name.clone().into();
+            let dragged = TabDrag { tab_id: *tab_id };
+            let is_home = home_index == Some(i);
+            let label_text = if *dirty {
+                format!("{name} •")
+            } else {
+                name.clone()
+            };
             let label_area = div()
                 .id(ElementId::Name(format!("tab-ctx-{i}").into()))
                 .flex_1()
                 .min_w_0()
                 .truncate()
-                .child(name.clone())
-                .context_menu(move |menu, _, _| {
+                .child(label_text)
+                // Dragging a tab onto another tab reorders this window's
+                // tabs. Moving a tab to a *different* window goes through
+                // the context menu: GPUI delivers an internal drag's
+                // mouse-up to the window that started it, so a cross-window
+                // drop would never arrive.
+                .on_drag(dragged, move |drag, _, window, cx| {
+                    let _ = (drag, window);
+                    cx.new(|_| TabDragLabel {
+                        label: drag_label.clone(),
+                    })
+                })
+                .drag_over::<TabDrag>(move |style, _, _, _| {
+                    style.text_color(drop_primary)
+                })
+                .on_drop::<TabDrag>(move |drag, _, cx| {
+                    mgr_drop.update(cx, |m, cx| {
+                        let Some(from) = m.session_index(drag.tab_id) else {
+                            return;
+                        };
+                        m.move_session(from, i, cx);
+                    });
+                })
+                .context_menu(move |menu, _, _cx| {
                     let mgr = mgr_menu.clone();
                     let mgr_close_all = mgr.clone();
+                    let mgr_move_item = mgr_move.clone();
+                    let is_home_here = is_home;
                     menu.item(
                         PopupMenuItem::new("Move tab to new window")
-                            .disabled(true),
+                            .disabled(is_home_here)
+                            .on_click(move |_, _, cx| {
+                                windows::move_tab_to_new_window(
+                                    &mgr_move_item,
+                                    i,
+                                    cx,
+                                );
+                            }),
                     )
                     .item(
                         // The save command acts on the active session;
@@ -152,7 +237,7 @@ pub fn tab_bar_element(
     TabBar::new("session-tabs")
         .selected_index(active_index)
         .on_click(on_click)
-        .children(tabs)
+        .children(tab_elements)
         .suffix(new_btn)
         .into_any_element()
 }
@@ -236,7 +321,7 @@ pub fn toolbar_element(
     // Sessions: pick a saved session to open it in a new tab. The
     // dedicated dropdown button keeps the trigger visibly pressed while
     // the popup is open.
-    let saved = session_manager.read(cx).recent_sessions().to_vec();
+    let saved = session_manager.read(cx).recent_sessions(cx).to_vec();
     let mgr_sessions = session_manager.clone();
     let sessions_btn = DropdownButton::new("toolbar_sessions")
         .button(
@@ -348,26 +433,37 @@ pub fn toolbar_element(
             window.dispatch_action(Box::new(SessionSettings), cx);
         });
 
+    // Toolbar personalization (spec section 7.2): the command registry
+    // decides which of these controls exist at all.
+    let mut nav_group = ToolbarGroup::new("toolbar-nav").label("Navigation");
+    if commands::is_visible("toolbar.home", cx) {
+        nav_group = nav_group.child(home_btn);
+    }
+    if commands::is_visible("toolbar.sessions", cx) {
+        nav_group = nav_group.content(sessions_btn);
+    }
+
+    let mut display_group =
+        ToolbarGroup::new("toolbar-display").label("Display filters");
+    if commands::is_visible("toolbar.filters", cx) {
+        display_group = display_group
+            .child(all_btn)
+            .child(diffs_btn)
+            .child(same_btn)
+            .child(minor_btn);
+    }
+
+    let mut ops_group = ToolbarGroup::new("toolbar-ops").label("Operations");
+    if commands::is_visible("toolbar.refresh", cx) {
+        ops_group = ops_group.child(refresh_btn);
+    }
+    if commands::is_visible("toolbar.rules", cx) {
+        ops_group = ops_group.child(rules_btn);
+    }
+
     Toolbar::new("main-toolbar")
-        .child(
-            ToolbarGroup::new("toolbar-nav")
-                .label("Navigation")
-                .child(home_btn)
-                .content(sessions_btn),
-        )
-        .child(
-            ToolbarGroup::new("toolbar-display")
-                .label("Display filters")
-                .child(all_btn)
-                .child(diffs_btn)
-                .child(same_btn)
-                .child(minor_btn),
-        )
-        .child(
-            ToolbarGroup::new("toolbar-ops")
-                .label("Operations")
-                .child(refresh_btn)
-                .child(rules_btn),
-        )
+        .child(nav_group)
+        .child(display_group)
+        .child(ops_group)
         .into_any_element()
 }

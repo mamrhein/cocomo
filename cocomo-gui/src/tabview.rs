@@ -151,6 +151,19 @@ impl TabEntity {
     pub fn is_home(&self) -> bool {
         self.inner.is_home()
     }
+
+    /// Re-point the tab's views at a new owning manager.
+    ///
+    /// Called when a tab moves between windows: the views use the manager
+    /// to open follow-up tabs and to mark the tab dirty, so a moved tab
+    /// must talk to the window it now lives in.
+    pub fn set_manager(
+        &self,
+        manager: Entity<GuiSessionManager>,
+        cx: &mut App,
+    ) {
+        self.inner.set_manager(manager, cx);
+    }
 }
 
 /// Inner trait for type-erased tab entities.
@@ -172,6 +185,8 @@ trait TabEntityInner: Any + Send + Sync {
     fn window_title(&self, cx: &App) -> SharedString;
     fn is_home(&self) -> bool {
         false
+    }
+    fn set_manager(&self, _manager: Entity<GuiSessionManager>, _cx: &mut App) {
     }
     fn clone_inner(&self) -> Box<dyn TabEntityInner>;
 }
@@ -225,6 +240,11 @@ impl TabEntityInner for FolderTabEntity {
         .into()
     }
 
+    fn set_manager(&self, manager: Entity<GuiSessionManager>, cx: &mut App) {
+        self.0
+            .update(cx, |view, _| view.set_session_manager(manager));
+    }
+
     fn clone_inner(&self) -> Box<dyn TabEntityInner> {
         Box::new(FolderTabEntity(self.0.clone()))
     }
@@ -263,6 +283,11 @@ impl TabEntityInner for TextDiffTabEntity {
 
     fn window_title(&self, cx: &App) -> SharedString {
         format!("Cocomo — Text Compare — {}", self.0.read(cx).title(cx)).into()
+    }
+
+    fn set_manager(&self, manager: Entity<GuiSessionManager>, cx: &mut App) {
+        let session = self.0.read(cx).text_state();
+        session.update(cx, |session, _| session.set_manager(manager));
     }
 
     fn clone_inner(&self) -> Box<dyn TabEntityInner> {
@@ -305,6 +330,11 @@ impl TabEntityInner for MergeTabEntity {
 
     fn window_title(&self, cx: &App) -> SharedString {
         format!("Cocomo — Text Merge — {}", self.0.read(cx).title(cx)).into()
+    }
+
+    fn set_manager(&self, manager: Entity<GuiSessionManager>, cx: &mut App) {
+        let session = self.0.read(cx).merge_state();
+        session.update(cx, |session, _| session.set_manager(manager));
     }
 
     fn clone_inner(&self) -> Box<dyn TabEntityInner> {
@@ -366,6 +396,9 @@ pub struct WindowRoot {
     /// Observers of the log globals, so log lines and pane toggles
     /// re-render the log pane.
     _log_subscriptions: Vec<Subscription>,
+    /// Observer of the shared saved-session store, so the Sessions
+    /// dropdown reflects saves and deletes made from any window.
+    _store_subscription: Subscription,
 }
 
 impl WindowRoot {
@@ -397,12 +430,18 @@ impl WindowRoot {
             cx.observe_global::<LogPaneOpen>(|_, cx| cx.notify()),
         ];
 
+        // The saved-session list is shared across windows; observing it
+        // keeps this window's toolbar current when another window saves.
+        let store = crate::session_manager::shared_store(cx);
+        let _store_subscription = cx.observe(&store, |_, _, cx| cx.notify());
+
         Self {
             session_manager,
             nav_stack_state: cx.new(|_| NavStackState::new()),
             last_active_index: 0,
             last_menu_state: None,
             _log_subscriptions,
+            _store_subscription,
         }
     }
 

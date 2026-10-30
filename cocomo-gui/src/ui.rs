@@ -247,6 +247,14 @@ impl FolderCompareView {
         self.state.clone()
     }
 
+    /// Re-point this view at a new owning manager.
+    ///
+    /// Called when the tab moves to another window; follow-up tabs and
+    /// dirty marks must go to the window the view now lives in.
+    pub fn set_session_manager(&mut self, manager: Entity<GuiSessionManager>) {
+        self.session_manager = manager;
+    }
+
     /// Render toolbar row 2 for this folder tab: pair controls, the
     /// name-filter combo with history, the filter-editor trigger,
     /// section navigation, and reload.
@@ -2176,7 +2184,7 @@ mod tests {
     use gpui::{ElementId, TestAppContext};
 
     use super::*;
-    use crate::state::SortKey;
+    use crate::{session_manager::SavedSessionStore, state::SortKey};
 
     fn entry_info(path: &str, is_dir: bool) -> EntryInfo {
         EntryInfo {
@@ -2276,7 +2284,11 @@ mod tests {
         use cocomo_lib::DirComparison;
         use gpui::{Bounds, WindowBounds, WindowOptions, test::TestWindowExt};
 
-        cx.update(gpui::init);
+        cx.update(|cx| {
+            gpui::init(cx);
+            // The view reads the options global when it renders.
+            cx.set_global(crate::options::AppOptions::default());
+        });
 
         let state = cx.new(|cx| {
             let mut state = AppState::new(
@@ -2303,11 +2315,12 @@ mod tests {
             });
             state
         });
-        let manager = cx.new(|_| {
-            GuiSessionManager::new(std::path::PathBuf::from(
+        let store = cx.new(|_| {
+            SavedSessionStore::new(std::path::PathBuf::from(
                 "/tmp/cocomo-ui-tests",
             ))
         });
+        let manager = cx.new(|_| GuiSessionManager::new(store));
 
         let (window, _view) = cx.update(|cx| {
             gpui::open_window(
@@ -2375,7 +2388,11 @@ mod tests {
         use cocomo_lib::{DirComparison, DirEntryStatus};
         use gpui::{Bounds, WindowBounds, WindowOptions, test::TestWindowExt};
 
-        cx.update(gpui::init);
+        cx.update(|cx| {
+            gpui::init(cx);
+            // The view reads the options global when it renders.
+            cx.set_global(crate::options::AppOptions::default());
+        });
 
         let same = |name: &str| DirEntry {
             name: name.to_string(),
@@ -2409,11 +2426,12 @@ mod tests {
             });
             state
         });
-        let manager = cx.new(|_| {
-            GuiSessionManager::new(std::path::PathBuf::from(
+        let store = cx.new(|_| {
+            SavedSessionStore::new(std::path::PathBuf::from(
                 "/tmp/cocomo-ui-tests",
             ))
         });
+        let manager = cx.new(|_| GuiSessionManager::new(store));
 
         let (window, view) = cx.update(|cx| {
             gpui::open_window(

@@ -391,13 +391,12 @@ impl HomeView {
             .map(|input| input.read(cx).value().trim().to_lowercase())
             .unwrap_or_default();
         let mgr = self.session_manager.read(cx);
-        mgr.recent_sessions()
-            .iter()
+        mgr.recent_sessions(cx)
+            .into_iter()
             .filter(|saved| {
                 query.is_empty()
                     || saved.config().name.to_lowercase().contains(&query)
             })
-            .cloned()
             .collect()
     }
 
@@ -687,11 +686,11 @@ impl Render for HomeView {
             let mgr = self.session_manager.read(cx);
             (
                 if query_empty {
-                    mgr.history().to_vec()
+                    mgr.history(cx)
                 } else {
                     Vec::new()
                 },
-                mgr.default_session_name().map(str::to_owned),
+                mgr.default_session_name(cx),
             )
         };
 

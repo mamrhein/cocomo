@@ -15,7 +15,7 @@
 //! phases are present but disabled, so the menu never promises an action
 //! that does nothing.
 
-use std::cell::Cell;
+use std::{cell::Cell, collections::HashSet};
 
 use gpui::{
     App, AppContext as _, AsyncApp, BorrowAppContext as _, Entity,
@@ -67,6 +67,8 @@ actions!(
         SaveSessionAs,
         CloseSession,
         CloseAllSessions,
+        SaveWorkspace,
+        RestoreWorkspace,
         ReloadCompare,
         CopyPathLeft,
         CopyPathRight,
@@ -99,7 +101,6 @@ actions!(
         LayoutSideBySide,
         LayoutOverUnder,
         Options,
-        MoveTabToNewWindow,
         StopCompare,
         FileFormats,
         About,
@@ -221,8 +222,39 @@ impl MenuState {
     }
 }
 
+/// Include a menu item unless the user hid its command in the Options
+/// dialog (spec section 7.2).
+fn show(
+    hidden: &HashSet<&'static str>,
+    id: &'static str,
+    item: impl FnOnce() -> MenuItem,
+) -> Option<MenuItem> {
+    (!hidden.contains(id)).then(item)
+}
+
+/// Flatten the optional items of one menu into the order they appear in.
+fn items<const N: usize>(entries: [Option<MenuItem>; N]) -> Vec<MenuItem> {
+    entries.into_iter().flatten().collect()
+}
+
+/// The ids of every command the user has hidden.
+fn hidden_command_ids(cx: &App) -> HashSet<&'static str> {
+    let opts = cx.global::<crate::options::AppOptions>();
+    crate::commands::all_commands()
+        .into_iter()
+        .filter(|spec| !opts.command_visible(spec.id))
+        .map(|spec| spec.id)
+        .collect()
+}
+
 /// Build the full application menu bar from the current snapshot.
-fn build_app_menus(state: MenuState) -> Vec<Menu> {
+///
+/// `hidden` holds the command ids the user turned off; their items are
+/// left out entirely rather than disabled, which is what "hide" means.
+fn build_app_menus(
+    state: MenuState,
+    hidden: &HashSet<&'static str>,
+) -> Vec<Menu> {
     let no_folder = !state.is_folder;
     let off = |allowed: bool| no_folder || !allowed;
     // While Home is active there is no session to save or reload, and the
@@ -232,42 +264,75 @@ fn build_app_menus(state: MenuState) -> Vec<Menu> {
     let is_home = state.is_home;
 
     let mut menus = vec![
-        Menu::new("Session").items([
-            MenuItem::action("Save session", SaveSession).disabled(is_home),
-            MenuItem::action("Save session as…", SaveSessionAs)
-                .disabled(is_home),
-            MenuItem::action("Session settings…", SessionSettings)
-                .disabled(is_home),
-            MenuItem::action("Clear session", ClearSession).disabled(true),
-            MenuItem::separator(),
-            MenuItem::action("Back", GoBack).disabled(off(state.can_go_back)),
-            MenuItem::action("Forward", GoForward)
-                .disabled(off(state.can_go_forward)),
-            MenuItem::separator(),
-            MenuItem::action("Swap sides", SwapSides)
-                .disabled(!(state.is_folder || state.is_text)),
-            MenuItem::action("Reload / recompare files", ReloadCompare)
-                .disabled(is_home),
-            MenuItem::action("Stop comparison", StopCompare)
-                .disabled(no_folder || !state.loading),
-            MenuItem::separator(),
-            MenuItem::action("Report…", SessionReport)
-                .disabled(!state.is_text),
-            MenuItem::action("Info…", SessionInfo).disabled(!state.is_text),
-            MenuItem::separator(),
+        Menu::new("Session").items(items([
+            show(hidden, "session.save", || {
+                MenuItem::action("Save session", SaveSession).disabled(is_home)
+            }),
+            show(hidden, "session.save_as", || {
+                MenuItem::action("Save session as…", SaveSessionAs)
+                    .disabled(is_home)
+            }),
+            show(hidden, "session.settings", || {
+                MenuItem::action("Session settings…", SessionSettings)
+                    .disabled(is_home)
+            }),
+            Some(
+                MenuItem::action("Clear session", ClearSession).disabled(true),
+            ),
+            Some(MenuItem::separator()),
+            Some(
+                MenuItem::action("Back", GoBack)
+                    .disabled(off(state.can_go_back)),
+            ),
+            Some(
+                MenuItem::action("Forward", GoForward)
+                    .disabled(off(state.can_go_forward)),
+            ),
+            Some(MenuItem::separator()),
+            Some(
+                MenuItem::action("Swap sides", SwapSides)
+                    .disabled(!(state.is_folder || state.is_text)),
+            ),
+            show(hidden, "session.reload", || {
+                MenuItem::action("Reload / recompare files", ReloadCompare)
+                    .disabled(is_home)
+            }),
+            Some(
+                MenuItem::action("Stop comparison", StopCompare)
+                    .disabled(no_folder || !state.loading),
+            ),
+            Some(MenuItem::separator()),
+            Some(
+                MenuItem::action("Report…", SessionReport)
+                    .disabled(!state.is_text),
+            ),
+            Some(
+                MenuItem::action("Info…", SessionInfo)
+                    .disabled(!state.is_text),
+            ),
+            Some(MenuItem::separator()),
             // Merging needs a text compare tab to seed left and right;
             // the ancestor stays empty until three-file merges arrive from
             // the Home card or a folder merge.
-            MenuItem::action("Merge files…", MergeFiles)
-                .disabled(!state.is_text),
-        ]),
-        Menu::new("File").items([
-            MenuItem::action("New compare…", NewCompare),
-            MenuItem::action("Open session…", OpenSession),
-            MenuItem::separator(),
-            MenuItem::action("Open file…", OpenFile).disabled(true),
-            MenuItem::action("Open clipboard", OpenClipboard).disabled(true),
-            MenuItem::submenu(
+            show(hidden, "session.merge", || {
+                MenuItem::action("Merge files…", MergeFiles)
+                    .disabled(!state.is_text)
+            }),
+        ])),
+        Menu::new("File").items(items([
+            show(hidden, "file.new_compare", || {
+                MenuItem::action("New compare…", NewCompare)
+            }),
+            show(hidden, "file.open_session", || {
+                MenuItem::action("Open session…", OpenSession)
+            }),
+            Some(MenuItem::separator()),
+            Some(MenuItem::action("Open file…", OpenFile).disabled(true)),
+            Some(
+                MenuItem::action("Open clipboard", OpenClipboard)
+                    .disabled(true),
+            ),
+            Some(MenuItem::submenu(
                 Menu::new("Open with").items([
                     MenuItem::action("Associated app", OpenWithAssociatedApp)
                         .disabled(true),
@@ -276,18 +341,33 @@ fn build_app_menus(state: MenuState) -> Vec<Menu> {
                     MenuItem::action("Text patch", OpenWithTextPatch)
                         .disabled(true),
                 ]),
-            ),
-            MenuItem::separator(),
-            MenuItem::action("Save file", SaveFile)
-                .disabled(!(state.is_text && state.can_save_file)),
-            MenuItem::action("Save file as…", SaveFileAs)
-                .disabled(!(state.is_text && state.can_save_file)),
-            MenuItem::separator(),
-            MenuItem::action("Close session", CloseSession),
-            MenuItem::action("Close all sessions", CloseAllSessions),
-            MenuItem::separator(),
-            MenuItem::action("Quit", Quit),
-        ]),
+            )),
+            Some(MenuItem::separator()),
+            show(hidden, "file.save_file", || {
+                MenuItem::action("Save file", SaveFile)
+                    .disabled(!(state.is_text && state.can_save_file))
+            }),
+            show(hidden, "file.save_file_as", || {
+                MenuItem::action("Save file as…", SaveFileAs)
+                    .disabled(!(state.is_text && state.can_save_file))
+            }),
+            Some(MenuItem::separator()),
+            show(hidden, "file.close_session", || {
+                MenuItem::action("Close session", CloseSession)
+            }),
+            Some(MenuItem::action("Close all sessions", CloseAllSessions)),
+            Some(MenuItem::separator()),
+            // Workspace commands act on the whole run, not the active tab,
+            // so they stay available from every view.
+            show(hidden, "file.save_workspace", || {
+                MenuItem::action("Save workspace", SaveWorkspace)
+            }),
+            show(hidden, "file.restore_workspace", || {
+                MenuItem::action("Restore workspace", RestoreWorkspace)
+            }),
+            Some(MenuItem::separator()),
+            Some(MenuItem::action("Quit", Quit)),
+        ])),
     ];
 
     if !is_home {
@@ -371,129 +451,198 @@ fn build_app_menus(state: MenuState) -> Vec<Menu> {
                 )
                 .disabled(!state.is_text),
             ]),
-            Menu::new("Actions").items([
+            Menu::new("Actions").items(items([
                 // Each reconcile command is enabled only when the
                 // selected entry's shape allows it; enabling otherwise
                 // would promise a no-op. Overwriting copies, moves, and
                 // deletes confirm in the handler before running.
-                MenuItem::action("Copy to right", CopyToRight)
-                    .disabled(off(state.can_copy_right)),
-                MenuItem::action("Copy to left", CopyToLeft)
-                    .disabled(off(state.can_copy_left)),
-                MenuItem::separator(),
-                MenuItem::action("Move to right", MoveToRight)
-                    .disabled(off(state.can_move_right)),
-                MenuItem::action("Move to left", MoveToLeft)
-                    .disabled(off(state.can_move_left)),
-                MenuItem::separator(),
-                MenuItem::action("Delete from right", DeleteRightSide)
-                    .disabled(off(state.can_delete_right)),
-                MenuItem::action("Delete from left", DeleteLeftSide)
-                    .disabled(off(state.can_delete_left)),
-                MenuItem::separator(),
+                show(hidden, "actions.copy_right", || {
+                    MenuItem::action("Copy to right", CopyToRight)
+                        .disabled(off(state.can_copy_right))
+                }),
+                show(hidden, "actions.copy_left", || {
+                    MenuItem::action("Copy to left", CopyToLeft)
+                        .disabled(off(state.can_copy_left))
+                }),
+                Some(MenuItem::separator()),
+                show(hidden, "actions.move_right", || {
+                    MenuItem::action("Move to right", MoveToRight)
+                        .disabled(off(state.can_move_right))
+                }),
+                show(hidden, "actions.move_left", || {
+                    MenuItem::action("Move to left", MoveToLeft)
+                        .disabled(off(state.can_move_left))
+                }),
+                Some(MenuItem::separator()),
+                show(hidden, "actions.delete_right", || {
+                    MenuItem::action("Delete from right", DeleteRightSide)
+                        .disabled(off(state.can_delete_right))
+                }),
+                show(hidden, "actions.delete_left", || {
+                    MenuItem::action("Delete from left", DeleteLeftSide)
+                        .disabled(off(state.can_delete_left))
+                }),
+                Some(MenuItem::separator()),
                 // Text-sync commands: copy this pair's file and step the
                 // parent folder session to its next difference.
-                MenuItem::action(
-                    "Copy file to right and open next",
-                    CopyFileRightNext,
-                )
-                .disabled(!state.is_text),
-                MenuItem::action(
-                    "Copy file to left and open next",
-                    CopyFileLeftNext,
-                )
-                .disabled(!state.is_text),
-                MenuItem::separator(),
+                Some(
+                    MenuItem::action(
+                        "Copy file to right and open next",
+                        CopyFileRightNext,
+                    )
+                    .disabled(!state.is_text),
+                ),
+                Some(
+                    MenuItem::action(
+                        "Copy file to left and open next",
+                        CopyFileLeftNext,
+                    )
+                    .disabled(!state.is_text),
+                ),
+                Some(MenuItem::separator()),
                 // Merge commands act on the focused merge view's selected
                 // section; the ancestor command needs a three-way merge.
-                MenuItem::action("Take left", TakeLeft)
-                    .disabled(!(state.is_merge && state.merge_can_take)),
-                MenuItem::action("Take right", TakeRight)
-                    .disabled(!(state.is_merge && state.merge_can_take)),
-                MenuItem::action("Take ancestor", TakeAncestor).disabled(
-                    !(state.is_merge
-                        && state.merge_can_take
-                        && state.merge_has_ancestor),
+                Some(
+                    MenuItem::action("Take left", TakeLeft)
+                        .disabled(!(state.is_merge && state.merge_can_take)),
                 ),
-                MenuItem::separator(),
-                MenuItem::action("Save merge output…", SaveMergeOutput)
-                    .disabled(!state.is_merge),
-            ]),
-            Menu::new("Search").items([
-                MenuItem::action("Next difference", NextDifference)
-                    .disabled(!(state.is_folder || state.is_text)),
-                MenuItem::action("Previous difference", PrevDifference)
-                    .disabled(!(state.is_folder || state.is_text)),
-                MenuItem::separator(),
-                MenuItem::action("Next difference section", NextSection)
+                Some(
+                    MenuItem::action("Take right", TakeRight)
+                        .disabled(!(state.is_merge && state.merge_can_take)),
+                ),
+                Some(
+                    MenuItem::action("Take ancestor", TakeAncestor).disabled(
+                        !(state.is_merge
+                            && state.merge_can_take
+                            && state.merge_has_ancestor),
+                    ),
+                ),
+                Some(MenuItem::separator()),
+                Some(
+                    MenuItem::action("Save merge output…", SaveMergeOutput)
+                        .disabled(!state.is_merge),
+                ),
+            ])),
+            Menu::new("Search").items(items([
+                show(hidden, "search.next_difference", || {
+                    MenuItem::action("Next difference", NextDifference)
+                        .disabled(!(state.is_folder || state.is_text))
+                }),
+                show(hidden, "search.prev_difference", || {
+                    MenuItem::action("Previous difference", PrevDifference)
+                        .disabled(!(state.is_folder || state.is_text))
+                }),
+                Some(MenuItem::separator()),
+                Some(
+                    MenuItem::action("Next difference section", NextSection)
+                        .disabled(!state.is_text),
+                ),
+                Some(
+                    MenuItem::action(
+                        "Previous difference section",
+                        PrevSection,
+                    )
                     .disabled(!state.is_text),
-                MenuItem::action("Previous difference section", PrevSection)
-                    .disabled(!state.is_text),
-                MenuItem::separator(),
-                MenuItem::action("Find filename…", FindFilename)
-                    .disabled(true),
-                MenuItem::action("Replace…", ReplaceText).disabled(true),
-            ]),
+                ),
+                Some(MenuItem::separator()),
+                Some(
+                    MenuItem::action("Find filename…", FindFilename)
+                        .disabled(true),
+                ),
+                Some(MenuItem::action("Replace…", ReplaceText).disabled(true)),
+            ])),
         ]);
     }
 
     menus.extend([
-        Menu::new("View").items([
+        Menu::new("View").items(items([
             // Word wrap and thumbnails are text-view-only; the focused
             // text or merge view handles the actions.
-            MenuItem::action("Word wrap", ToggleWordWrap)
-                .disabled(!(state.is_text || state.is_merge))
-                .checked(state.word_wrap),
-            MenuItem::action("Show ancestor pane", ToggleMergeAncestor)
-                .disabled(!state.is_merge)
-                .checked(state.show_ancestor),
-            MenuItem::separator(),
+            show(hidden, "view.word_wrap", || {
+                MenuItem::action("Word wrap", ToggleWordWrap)
+                    .disabled(!(state.is_text || state.is_merge))
+                    .checked(state.word_wrap)
+            }),
+            Some(
+                MenuItem::action("Show ancestor pane", ToggleMergeAncestor)
+                    .disabled(!state.is_merge)
+                    .checked(state.show_ancestor),
+            ),
+            Some(MenuItem::separator()),
             // Detail pane modes are text-compare-only; the focused text
             // view handles the actions.
-            MenuItem::action(
-                "Text details",
-                SetDetailMode {
-                    mode: DetailMode::Text,
-                },
-            )
-            .disabled(!state.is_text)
-            .checked(state.detail_mode == DetailMode::Text),
-            MenuItem::action(
-                "Hex details",
-                SetDetailMode {
-                    mode: DetailMode::Hex,
-                },
-            )
-            .disabled(!state.is_text)
-            .checked(state.detail_mode == DetailMode::Hex),
-            MenuItem::action(
-                "Alignment details",
-                SetDetailMode {
-                    mode: DetailMode::Alignment,
-                },
-            )
-            .disabled(!state.is_text)
-            .checked(state.detail_mode == DetailMode::Alignment),
-            MenuItem::action("Show thumbnails", ShowThumbnails)
+            Some(
+                MenuItem::action(
+                    "Text details",
+                    SetDetailMode {
+                        mode: DetailMode::Text,
+                    },
+                )
                 .disabled(!state.is_text)
-                .checked(state.show_thumbnails),
-            MenuItem::action("Show panels", ShowPanels).disabled(true),
-            MenuItem::action("Side-by-side layout", LayoutSideBySide)
-                .disabled(true),
-            MenuItem::action("Over/under layout", LayoutOverUnder)
-                .disabled(true),
-            MenuItem::separator(),
-            MenuItem::action("Log pane", ToggleLogPane)
-                .checked(state.log_open),
-        ]),
-        Menu::new("Tools").items([
-            MenuItem::action("Options…", Options).disabled(true),
-            MenuItem::action("File formats…", FileFormats),
-        ]),
-        Menu::new("Help").items([MenuItem::action("About cocomo", About)]),
+                .checked(state.detail_mode == DetailMode::Text),
+            ),
+            Some(
+                MenuItem::action(
+                    "Hex details",
+                    SetDetailMode {
+                        mode: DetailMode::Hex,
+                    },
+                )
+                .disabled(!state.is_text)
+                .checked(state.detail_mode == DetailMode::Hex),
+            ),
+            Some(
+                MenuItem::action(
+                    "Alignment details",
+                    SetDetailMode {
+                        mode: DetailMode::Alignment,
+                    },
+                )
+                .disabled(!state.is_text)
+                .checked(state.detail_mode == DetailMode::Alignment),
+            ),
+            show(hidden, "view.thumbnails", || {
+                MenuItem::action("Show thumbnails", ShowThumbnails)
+                    .disabled(!state.is_text)
+                    .checked(state.show_thumbnails)
+            }),
+            Some(MenuItem::action("Show panels", ShowPanels).disabled(true)),
+            Some(
+                MenuItem::action("Side-by-side layout", LayoutSideBySide)
+                    .disabled(true),
+            ),
+            Some(
+                MenuItem::action("Over/under layout", LayoutOverUnder)
+                    .disabled(true),
+            ),
+            Some(MenuItem::separator()),
+            show(hidden, "view.log_pane", || {
+                MenuItem::action("Log pane", ToggleLogPane)
+                    .checked(state.log_open)
+            }),
+        ])),
+        Menu::new("Tools").items(items([
+            show(hidden, "tools.options", || {
+                MenuItem::action("Options…", Options)
+            }),
+            show(hidden, "tools.file_formats", || {
+                MenuItem::action("File formats…", FileFormats)
+            }),
+        ])),
+        Menu::new("Help").items(items([show(hidden, "help.about", || {
+            MenuItem::action("About cocomo", About)
+        })])),
     ]);
     menus
 }
+
+/// The menu state the bar was last built from, so a global change (a
+/// hidden command, a new binding) can rebuild it without waiting for a
+/// window to re-render.
+#[derive(Clone, Copy)]
+struct LastMenuState(MenuState);
+
+impl gpui::Global for LastMenuState {}
 
 /// Build and set the application menus with no folder tab active.
 pub fn set_app_menus(cx: &mut App) {
@@ -502,35 +651,47 @@ pub fn set_app_menus(cx: &mut App) {
         log_open,
         ..MenuState::empty()
     };
-    cx.set_menus(build_app_menus(state));
+    refresh_view_menus(state, cx);
 }
 
 /// Rebuild the menu bar so enabled states and checkmarks reflect the
 /// active tab. Called by the window root whenever the snapshot changes.
 pub fn refresh_view_menus(state: MenuState, cx: &mut App) {
-    cx.set_menus(build_app_menus(state));
+    let hidden = hidden_command_ids(cx);
+    cx.set_menus(build_app_menus(state, &hidden));
+    cx.set_global(LastMenuState(state));
+}
+
+/// Rebuild the menu bar from the last snapshot, e.g. after the user hid a
+/// command in the Options dialog.
+pub fn rebuild_menus(cx: &mut App) {
+    let state = cx
+        .try_global::<LastMenuState>()
+        .map(|last| last.0)
+        .unwrap_or_else(MenuState::empty);
+    refresh_view_menus(state, cx);
 }
 
 // ---------------------------------------------------------------------------
 // Global action handlers
 // ---------------------------------------------------------------------------
 
-/// Register all global menu action handlers with the app.
-pub fn register_menu_handlers(
-    session_manager: Entity<GuiSessionManager>,
-    cx: &mut App,
-) {
-    // Clone session_manager for each closure that needs it.
-    let mgr_new = session_manager.clone();
-    let mgr_open = session_manager.clone();
-    let mgr_save = session_manager.clone();
-    let mgr_save_as = session_manager.clone();
-    let mgr_close = session_manager.clone();
-    let mgr_close_all = session_manager.clone();
+/// The session manager of the window the command should act on.
+///
+/// Resolved per dispatch: with one manager per window, a handler that
+/// captured a manager at startup would keep acting on the first window.
+fn active_manager(cx: &App) -> Option<Entity<GuiSessionManager>> {
+    crate::windows::active_manager(cx)
+}
 
+/// Register all global menu action handlers with the app.
+pub fn register_menu_handlers(cx: &mut App) {
     // File menu — new compare.
     cx.on_action(move |_action: &NewCompare, cx: &mut App| {
-        mgr_new.update(cx, |mgr, cx| {
+        let Some(mgr) = active_manager(cx) else {
+            return;
+        };
+        mgr.update(cx, |mgr, cx| {
             mgr.add_new_folder_tab(cx);
         });
     });
@@ -538,7 +699,9 @@ pub fn register_menu_handlers(
     // File menu — open session through the native file dialog, then load
     // the picked `.bcs` file and open it as a folder tab.
     cx.on_action(move |_action: &OpenSession, cx: &mut App| {
-        let mgr = mgr_open.clone();
+        let Some(mgr) = active_manager(cx) else {
+            return;
+        };
         let receiver = cx.prompt_for_paths(PathPromptOptions {
             files: true,
             directories: false,
@@ -594,7 +757,9 @@ pub fn register_menu_handlers(
     // succeeded, so the close prompt only appears for genuinely unsaved
     // work.
     cx.on_action(move |_action: &SaveSession, cx: &mut App| {
-        let mgr = mgr_save.clone();
+        let Some(mgr) = active_manager(cx) else {
+            return;
+        };
         let weak = mgr.downgrade();
         let name = mgr
             .read(cx)
@@ -634,7 +799,9 @@ pub fn register_menu_handlers(
 
     // Session menu — save as: ask for a name, then persist under it.
     cx.on_action(move |_action: &SaveSessionAs, cx: &mut App| {
-        let mgr = mgr_save_as.clone();
+        let Some(mgr) = active_manager(cx) else {
+            return;
+        };
         let Some(window) = cx.active_window() else {
             return;
         };
@@ -700,7 +867,9 @@ pub fn register_menu_handlers(
     // Session/File menu — close the active session, prompting first when
     // it has unsaved changes.
     cx.on_action(move |_action: &CloseSession, cx: &mut App| {
-        let mgr = mgr_close.clone();
+        let Some(mgr) = active_manager(cx) else {
+            return;
+        };
         let Some(window) = cx.active_window() else {
             return;
         };
@@ -712,18 +881,39 @@ pub fn register_menu_handlers(
         });
     });
 
-    // File menu — close all sessions.
+    // File menu — close all sessions of the active window.
     cx.on_action(move |_action: &CloseAllSessions, cx: &mut App| {
-        mgr_close_all.update(cx, |mgr, cx| {
+        let Some(mgr) = active_manager(cx) else {
+            return;
+        };
+        mgr.update(cx, |mgr, cx| {
             while !mgr.is_empty() {
                 mgr.close_session(0, cx);
             }
         });
     });
 
-    // File menu — quit.
+    // File menu — save the workspace of every open window.
+    cx.on_action(move |_action: &SaveWorkspace, cx: &mut App| {
+        crate::windows::save_workspace_now(cx);
+        log::push(LogLevel::Info, "Workspace saved".to_string(), cx);
+    });
+
+    // File menu — replace the open windows with the saved workspace.
+    cx.on_action(move |_action: &RestoreWorkspace, cx: &mut App| {
+        let restored = crate::windows::restore_saved_workspace(cx);
+        if restored == 0 {
+            log::push(
+                LogLevel::Warning,
+                "No saved workspace to restore".to_string(),
+                cx,
+            );
+        }
+    });
+
+    // File menu — quit, persisting the workspace first.
     cx.on_action(move |_action: &Quit, cx: &mut App| {
-        cx.quit();
+        crate::windows::quit_application(cx);
     });
 
     // Edit menu — copy paths are handled by the focused folder view, which
@@ -751,10 +941,11 @@ pub fn register_menu_handlers(
     });
 
     // File menu — save the focused side's edited buffer.
-    let mgr_save_file = session_manager.clone();
     cx.on_action(move |_action: &SaveFile, cx: &mut App| {
-        let Some(session) = mgr_save_file.read(cx).active_text_session(cx)
-        else {
+        let Some(mgr) = active_manager(cx) else {
+            return;
+        };
+        let Some(session) = mgr.read(cx).active_text_session(cx) else {
             return;
         };
         let side = session.read(cx).focus_side();
@@ -762,10 +953,11 @@ pub fn register_menu_handlers(
     });
 
     // File menu — save with an explicit target path.
-    let mgr_save_file_as = session_manager.clone();
     cx.on_action(move |_action: &SaveFileAs, cx: &mut App| {
-        let Some(session) = mgr_save_file_as.read(cx).active_text_session(cx)
-        else {
+        let Some(mgr) = active_manager(cx) else {
+            return;
+        };
+        let Some(session) = mgr.read(cx).active_text_session(cx) else {
             return;
         };
         let side = session.read(cx).focus_side();
@@ -774,28 +966,31 @@ pub fn register_menu_handlers(
 
     // Session menu — merge the active text compare's pair in a new merge
     // tab (two-way: no ancestor is known from a plain comparison).
-    let mgr_merge = session_manager.clone();
     cx.on_action(move |_action: &MergeFiles, cx: &mut App| {
-        let Some(session) = mgr_merge.read(cx).active_text_session(cx) else {
+        let Some(mgr) = active_manager(cx) else {
+            return;
+        };
+        let Some(session) = mgr.read(cx).active_text_session(cx) else {
             return;
         };
         let (left, right) = {
             let session = session.read(cx);
             (session.left_endpoint(), session.right_endpoint())
         };
-        mgr_merge.update(cx, |m, cx| {
+        mgr.update(cx, |m, cx| {
             m.add_text_merge_tab(left, right, None, cx);
         });
     });
 
     // Session menu and toolbar Rules button — the session-rules dialog,
     // branched on the active tab type.
-    let mgr_rules = session_manager.clone();
     cx.on_action(move |_action: &SessionSettings, cx: &mut App| {
+        let Some(mgr) = active_manager(cx) else {
+            return;
+        };
         let Some(window) = cx.active_window() else {
             return;
         };
-        let mgr = mgr_rules.clone();
         let _ = window.update(cx, |_, window, cx| {
             if let Some(session) = mgr.read(cx).active_text_session(cx) {
                 crate::text_diff::open_text_rules_dialog(session, window, cx);
@@ -803,6 +998,16 @@ pub fn register_menu_handlers(
             {
                 crate::ui::open_folder_rules_dialog(state, window, cx);
             }
+        });
+    });
+
+    // Tools menu — the application-options dialog.
+    cx.on_action(move |_action: &Options, cx: &mut App| {
+        let Some(window) = cx.active_window() else {
+            return;
+        };
+        let _ = window.update(cx, |_, window, cx| {
+            crate::options::open_options_dialog(window, cx);
         });
     });
 

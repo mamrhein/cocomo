@@ -32,8 +32,8 @@ use cocomo_lib::{
 };
 use gpui::{
     Action, AnyElement, App, Bounds, Context, CursorStyle, DispatchPhase, Div,
-    Element, ElementId, Entity, FocusHandle, GlobalElementId, Hitbox, Hsla,
-    InspectorElementId, IntoElement, KeyBinding, LayoutId, ListAlignment,
+    Element, ElementId, Entity, ExternalPaths, FocusHandle, GlobalElementId,
+    Hitbox, Hsla, InspectorElementId, IntoElement, LayoutId, ListAlignment,
     ListScrollEvent, ListState, MouseButton, MouseDownEvent, MouseMoveEvent,
     MouseUpEvent, PathBuilder, Pixels, Render, SharedString, Style,
     Subscription, WeakEntity, Window, actions,
@@ -1713,6 +1713,14 @@ impl TextDiffSession {
         self.manager.clone()
     }
 
+    /// Re-point this session at a new owning manager.
+    ///
+    /// Called when the tab moves to another window: follow-up tabs and
+    /// dirty marks must go to the window the tab now lives in.
+    pub fn set_manager(&mut self, manager: Entity<GuiSessionManager>) {
+        self.manager = Some(manager);
+    }
+
     /// Clear the stale-editor flag and the dirty marks after the view
     /// has re-seeded both editors from the model.
     pub fn mark_editors_seeded(&mut self) {
@@ -2478,14 +2486,8 @@ impl TextDiffView {
     ) -> Self {
         // Line stepping and section walking are scoped to the text view's
         // key context so they never shadow the folder view's plain j/k.
-        cx.bind_keys([
-            KeyBinding::new("j", NextLine, Some("TextCompare")),
-            KeyBinding::new("k", PrevLine, Some("TextCompare")),
-            KeyBinding::new("down", NextLine, Some("TextCompare")),
-            KeyBinding::new("up", PrevLine, Some("TextCompare")),
-            KeyBinding::new("cmd-shift-]", NextSection, Some("TextCompare")),
-            KeyBinding::new("cmd-shift-[", PrevSection, Some("TextCompare")),
-        ]);
+        // They are registered centrally by `crate::commands::view_bindings`
+        // so a keymap rebuild can restore them.
 
         let left_list = ListState::new(0, ListAlignment::Top, px(100.));
         let right_list = ListState::new(0, ListAlignment::Top, px(100.));
@@ -3514,7 +3516,7 @@ impl Render for TextDiffView {
         let right_end = session.right_ending_label();
         let left_hist = session.left_history().to_vec();
         let right_hist = session.right_history().to_vec();
-        let overrides = session.overrides.clone();
+        let overrides = crate::color::merge_overrides(&session.overrides, cx);
         let section_count = session.sections.len();
         let alignment = session.alignment_label();
         let state_label = session.state_label();
@@ -4036,6 +4038,40 @@ fn detail_half(text: String, mono: &SharedString) -> Div {
 /// One text pane: file bar (history, path input, encoding, line
 /// endings, metadata) above the diff list.
 #[allow(clippy::too_many_arguments)]
+/// Point `side` at the first dropped path, when it is a file.
+///
+/// A drop that cannot be honored explains itself in the log and as a
+/// notification, so a rejected drop never looks like a dead target.
+fn accept_text_pane_drop(
+    side: Side,
+    state: &Entity<TextDiffSession>,
+    paths: &ExternalPaths,
+    cx: &mut App,
+) {
+    let Some(path) = paths.paths().first() else {
+        return;
+    };
+    match fs_err::metadata(path) {
+        Ok(metadata) if metadata.is_file() => {}
+        Ok(_) => {
+            let message = format!("{} is not a file.", path.display());
+            log::push(LogLevel::Error, message.clone(), cx);
+            crate::menus::notify_error(message, cx);
+            return;
+        }
+        Err(e) => {
+            let message = format!("Couldn't read {}: {e}", path.display());
+            log::push(LogLevel::Error, message.clone(), cx);
+            crate::menus::notify_error(message, cx);
+            return;
+        }
+    }
+    state.update(cx, |session, cx| {
+        session.set_side_path(side, &path.to_string_lossy(), cx);
+    });
+}
+
+#[allow(clippy::too_many_arguments)]
 fn render_pane(
     side: Side,
     input: &Entity<InputState>,
@@ -4049,9 +4085,20 @@ fn render_pane(
 ) -> impl IntoElement {
     let side_key = if side == Side::Left { "l" } else { "r" };
     let history = history.to_vec();
+    let drop_state = state.clone();
+    let primary = theme.primary;
     v_flex()
+        .id(ElementId::Name(format!("text-pane-{side_key}").into()))
         .size_full()
         .min_h_0()
+        // Dropping a file onto a pane repoints that side, matching the
+        // folder view's drop targets.
+        .drag_over::<ExternalPaths>(move |style, _, _, _| {
+            style.border_color(primary)
+        })
+        .on_drop::<ExternalPaths>(move |paths, _, cx| {
+            accept_text_pane_drop(side, &drop_state, paths, cx);
+        })
         .child(
             v_flex()
                 .flex_shrink_0()
@@ -5053,7 +5100,11 @@ mod tests {
             ui::NextDifference,
         };
 
-        cx.update(gpui::init);
+        cx.update(|cx| {
+            gpui::init(cx);
+            // The view reads the options global when it renders.
+            cx.set_global(crate::options::AppOptions::default());
+        });
 
         let session = cx
             .new(|cx| TextDiffSession::for_test("a\nb\nc\n", "a\nX\nc\n", cx));
@@ -5272,7 +5323,11 @@ mod tests {
     fn recompare_uses_edited_buffers(cx: &mut TestAppContext) {
         use gpui::{Bounds, WindowBounds, WindowOptions};
 
-        cx.update(gpui::init);
+        cx.update(|cx| {
+            gpui::init(cx);
+            // The view reads the options global when it renders.
+            cx.set_global(crate::options::AppOptions::default());
+        });
         let session =
             cx.new(|cx| TextDiffSession::for_test("a\nb\n", "a\nX\n", cx));
         let (window, _root) = cx.update(|cx| {
@@ -5322,7 +5377,11 @@ mod tests {
     fn edit_mode_actions_drive_the_buffers(cx: &mut TestAppContext) {
         use gpui::{Bounds, WindowBounds, WindowOptions, test::TestWindowExt};
 
-        cx.update(gpui::init);
+        cx.update(|cx| {
+            gpui::init(cx);
+            // The view reads the options global when it renders.
+            cx.set_global(crate::options::AppOptions::default());
+        });
         let session =
             cx.new(|cx| TextDiffSession::for_test("a  \nb\n", "a\nb\n", cx));
         let (window, view) = cx.update(|cx| {
