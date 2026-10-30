@@ -661,6 +661,11 @@ pub struct DirRow<'a> {
     pub is_dir: bool,
     /// Whether the directory row is currently expanded.
     pub expanded: bool,
+    /// The row's tree indent: the accumulated continuation prefixes of its
+    /// ancestors (`│  ` / `   `) plus the row's own `├─ ` / `└─ `
+    /// indicator, empty at the top level. This mirrors the indicators
+    /// rendered by `cocomo-cli`'s tree output.
+    pub tree_prefix: String,
 }
 
 /// Text diff state: the diff result plus the file-content cache.
@@ -916,32 +921,52 @@ impl SessionView {
             return Vec::new();
         };
         let mut rows = Vec::new();
-        self.collect_rows(&comparison.entries, "", 0, &mut rows);
+        self.collect_rows(&comparison.entries, "", "", 0, &mut rows);
         rows
     }
 
     /// Recursively append the visible rows of one comparison level.
     ///
     /// The filters apply at every depth; a directory hidden by the name
-    /// filter hides its whole subtree with it.
+    /// filter hides its whole subtree with it. The tree indicators are
+    /// computed after filtering, so `└─` always marks the last *visible*
+    /// sibling, exactly as in `cocomo-cli`'s tree rendering.
+    ///
+    /// `path_prefix` builds the rows' `/`-separated relative paths,
+    /// `display_prefix` the accumulated box-drawing continuations
+    /// (`│  ` / `   `).
     fn collect_rows<'a>(
         &self,
         entries: &'a [DirEntry],
-        prefix: &str,
+        path_prefix: &str,
+        display_prefix: &str,
         depth: usize,
         rows: &mut Vec<DirRow<'a>>,
     ) {
         let Some(dir) = self.dir() else {
             return;
         };
-        for entry in entries {
-            if !self.entry_visible(dir, entry) {
-                continue;
-            }
-            let rel_path = if prefix.is_empty() {
+        let visible: Vec<&DirEntry> = entries
+            .iter()
+            .filter(|e| self.entry_visible(dir, e))
+            .collect();
+        let count = visible.len();
+        for (i, entry) in visible.into_iter().enumerate() {
+            // Box-drawing indicator and continuation, as in `cocomo-cli`:
+            // the top-most level is flush left, deeper levels carry a
+            // 3-character connector. Directories are marked with a `/`
+            // suffix in the view model's consumer, not here.
+            let (indicator, continuation) = if depth == 0 {
+                ("", "")
+            } else if i == count - 1 {
+                ("\u{2514}\u{2500} ", "   ") // └─
+            } else {
+                ("\u{251c}\u{2500} ", "\u{2502}  ") // ├─ and │
+            };
+            let rel_path = if path_prefix.is_empty() {
                 entry.name.clone()
             } else {
-                format!("{prefix}/{}", entry.name)
+                format!("{path_prefix}/{}", entry.name)
             };
             let is_dir = entry.left.as_ref().is_some_and(|l| l.is_dir)
                 || entry.right.as_ref().is_some_and(|r| r.is_dir);
@@ -952,9 +977,16 @@ impl SessionView {
                 depth,
                 is_dir,
                 expanded,
+                tree_prefix: format!("{display_prefix}{indicator}"),
             });
             if expanded && let Some(sub) = entry.sub_entries.as_deref() {
-                self.collect_rows(&sub.entries, &rel_path, depth + 1, rows);
+                self.collect_rows(
+                    &sub.entries,
+                    &rel_path,
+                    &format!("{display_prefix}{continuation}"),
+                    depth + 1,
+                    rows,
+                );
             }
         }
     }
@@ -1555,10 +1587,57 @@ mod tests {
         let rows = session.visible_rows();
         assert_eq!(rows.len(), 2);
         assert!(rows[0].expanded);
+        assert_eq!(rows[0].tree_prefix, "");
         assert_eq!(rows[1].entry.name, "child.txt");
         assert_eq!(rows[1].depth, 1);
         assert_eq!(rows[1].rel_path, "sub/child.txt");
         assert!(!rows[1].is_dir);
+        // The only child is the last visible sibling.
+        assert_eq!(rows[1].tree_prefix, "\u{2514}\u{2500} ");
+    }
+
+    #[test]
+    fn tree_prefixes_match_the_cli_indicators() {
+        let mut session = dir_session();
+        let a1 = dir_entry(
+            "a1",
+            DirEntryStatus::Different,
+            Some(comparison(&[("deep.txt", DirEntryStatus::Same)])),
+        );
+        let mut a_sub = comparison(&[("b.txt", DirEntryStatus::Same)]);
+        a_sub.entries.insert(0, a1);
+        let mut entries =
+            vec![dir_entry("a", DirEntryStatus::Different, Some(a_sub))];
+        entries
+            .extend(comparison(&[("top2.txt", DirEntryStatus::Same)]).entries);
+        session.set_comparison(Some(DirComparison {
+            entries,
+            ..Default::default()
+        }));
+        session.dir_mut().unwrap().expanded.insert("a".into());
+        session.dir_mut().unwrap().expanded.insert("a/a1".into());
+
+        let rows = session.visible_rows();
+        let got: Vec<(&str, &str)> = rows
+            .iter()
+            .map(|r| (r.entry.name.as_str(), r.tree_prefix.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                // The top-most level is flush left, without any indicator.
+                ("a", ""),
+                // Not the last child of `a`.
+                ("a1", "\u{251c}\u{2500} "),
+                // Last child of `a1`; `a1` is not last, so the `│`
+                // continuation carries over.
+                ("deep.txt", "\u{2502}  \u{2514}\u{2500} "),
+                // Last child of `a`.
+                ("b.txt", "\u{2514}\u{2500} "),
+                // Last top-level entry: again no indicator.
+                ("top2.txt", ""),
+            ]
+        );
     }
 
     #[test]

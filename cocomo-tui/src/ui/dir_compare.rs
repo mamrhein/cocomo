@@ -39,15 +39,15 @@ use crate::{
 /// Directory comparison view using ratatui-kit's `Table` component.
 ///
 /// Subscribes to the global [`APP_STATE`] atom for reactive reads and
-/// registers an event handler that delegates to the controller
+/// and registers an event handler that delegates to the controller
 /// (`dispatch_dir_key`); all state mutations go through controller
-/// functions. The table renders the comparison as an expandable tree:
-/// directory rows carry `+`/`-` indicators, `+`/`-` expand or collapse
-/// the selected directory in place, and `Enter` opens a new tab rooted at
-/// the selection. The table rows are memoized view models ([`CellRow`])
-/// that are rebuilt only when the comparison revision, the tree revision,
-/// the display filters, or the name filter changes. All text entry (save
-/// name and search) uses `SearchInput`, which owns its exclusive input
+/// functions. The table renders the comparison as an expandable tree with
+/// the same box-drawing indicators as `cocomo-cli`'s tree output; `+`/`-`
+/// expand or collapse the selected directory in place, and `Enter` opens a
+/// new tab rooted at the selection. The table rows are memoized view models
+/// ([`CellRow`]) that are rebuilt only when the comparison revision, the tree
+/// revision, the display filters, or the name filter changes. All text entry
+/// (save name and search) uses `SearchInput`, which owns its exclusive input
 /// layer; the filter panel, session browser, settings, and report live in
 /// modal components in the App shell.
 #[component]
@@ -328,7 +328,7 @@ pub(super) fn DirCompareView(
                     selection_range: selection_range,
                     title: compare_title,
                     columns: vec![
-                        TableColumn::new("T Name", Constraint::Fill(1)),
+                        TableColumn::new("Name", Constraint::Fill(1)),
                         TableColumn::new(
                             format!("{:>6} {:^17}", "Size", "Modified"),
                             Constraint::Length(24),

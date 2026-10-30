@@ -60,9 +60,9 @@ pub(super) fn cell_row_renderer() -> RenderTableRow<CellRow> {
 
 /// Build the directory-comparison rows from the visible tree rows.
 ///
-/// The name cell carries the tree indent and the `+`/`-` toggle indicator;
-/// file rows use a same-width blank so all names start at the same column
-/// within a level.
+/// The name cell carries the box-drawing tree prefix computed by
+/// [`crate::state::DirRow::tree_prefix`] (the same indicators as
+/// `cocomo-cli`'s tree output); directories are marked with a `/` suffix.
 pub(super) fn dir_rows(rows: &[DirRow], theme: &CocomoTheme) -> Vec<CellRow> {
     rows.iter()
         .enumerate()
@@ -94,17 +94,20 @@ pub(super) fn dir_rows(rows: &[DirRow], theme: &CocomoTheme) -> Vec<CellRow> {
                 })
                 .unwrap_or_else(|| "-             ".to_string());
 
-            let toggle = match (row.is_dir, row.expanded) {
-                (true, true) => "-",
-                (true, false) => "+",
-                (false, _) => " ",
+            // Directories carry a `/` suffix, as in the CLI tree output.
+            let display_name = if row.is_dir {
+                format!("{}/", entry.name)
+            } else {
+                entry.name.clone()
             };
-            let indent = "  ".repeat(row.depth);
 
             CellRow {
                 index,
                 cells: Arc::from(vec![
-                    TableCell::new(format!("{indent}{toggle} {}", entry.name)),
+                    TableCell::new(format!(
+                        "{}{}",
+                        row.tree_prefix, display_name
+                    )),
                     TableCell::new(left_meta),
                     TableCell::new(entry.status.symbol()).style(status_style),
                     TableCell::new(right_meta),
@@ -278,7 +281,73 @@ fn importance_for_line(line: &LineInfo) -> Importance {
 
 #[cfg(test)]
 mod tests {
+    use cocomo_lib::{DirEntry, DirEntryStatus, EntryInfo};
+
     use super::*;
+
+    fn file_entry(name: &str) -> DirEntry {
+        DirEntry {
+            name: name.to_string(),
+            status: DirEntryStatus::Same,
+            left: None,
+            right: None,
+            center: None,
+            sub_entries: None,
+            name_conflict: false,
+        }
+    }
+
+    fn dir_entry(name: &str) -> DirEntry {
+        let info = || EntryInfo {
+            name: name.to_string(),
+            path: name.to_string(),
+            is_dir: true,
+            ..Default::default()
+        };
+        DirEntry {
+            left: Some(info()),
+            right: Some(info()),
+            ..file_entry(name)
+        }
+    }
+
+    fn name_cell(row: &CellRow) -> String {
+        let cells = row.cells();
+        cells[0]
+            .line
+            .spans
+            .first()
+            .map(|s| s.content.to_string())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn dir_rows_render_cli_style_names() {
+        let entries = [dir_entry("sub"), file_entry("x.txt")];
+        let rows = vec![
+            DirRow {
+                entry: &entries[0],
+                rel_path: "sub".into(),
+                depth: 0,
+                is_dir: true,
+                expanded: true,
+                tree_prefix: String::new(),
+            },
+            DirRow {
+                entry: &entries[1],
+                rel_path: "sub/x.txt".into(),
+                depth: 1,
+                is_dir: false,
+                expanded: false,
+                tree_prefix: "\u{2514}\u{2500} ".into(),
+            },
+        ];
+        let cell_rows = dir_rows(&rows, &CocomoTheme::default());
+        // Directories carry the `/` suffix; the tree prefix passes through
+        // unchanged; plain files carry neither.
+        assert_eq!(name_cell(&cell_rows[0]), "sub/");
+        assert_eq!(name_cell(&cell_rows[1]), "\u{2514}\u{2500} x.txt");
+    }
 
     fn lines(contents: &[&str]) -> Vec<LineInfo> {
         contents
