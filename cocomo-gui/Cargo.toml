@@ -28,6 +28,7 @@ dirs = "7"
 fs-err = { version = "3", features = ["tokio"] }
 gpui = { package = "gpui-kit", version = "0.8" }
 log = "0.4"
+rust-embed = { version = "8.13", features = ["include-exclude"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }

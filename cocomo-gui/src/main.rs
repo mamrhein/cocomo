@@ -13,6 +13,7 @@
 //! indicators, and directory tree browsing. Built on gpui for GPU-accelerated
 //! rendering.
 
+mod assets;
 mod chrome;
 mod cli;
 mod color;
@@ -83,65 +84,67 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     let startup = rt.block_on(cli.startup())?;
 
-    create_application().run(move |cx: &mut App| {
-        gpui::init(cx);
+    create_application().with_assets(assets::AppAssets).run(
+        move |cx: &mut App| {
+            gpui::init(cx);
 
-        // Snapshot the component layer's bindings before this application
-        // adds any, so a keymap rebuild can restore them.
-        commands::capture_framework_bindings(cx);
+            // Snapshot the component layer's bindings before this application
+            // adds any, so a keymap rebuild can restore them.
+            commands::capture_framework_bindings(cx);
 
-        // Quit the application when the last window is closed. Without
-        // this, the default quit mode on macOS is `Explicit`, keeping the
-        // process alive (with no window) after the user closes the window.
-        cx.set_quit_mode(QuitMode::LastWindowClosed);
+            // Quit the application when the last window is closed. Without
+            // this, the default quit mode on macOS is `Explicit`, keeping the
+            // process alive (with no window) after the user closes the window.
+            cx.set_quit_mode(QuitMode::LastWindowClosed);
 
-        // The log pane starts open; the menu bar reads both globals, so
-        // they must exist before `set_app_menus`.
-        cx.set_global(log::LogBuffer::default());
-        cx.set_global(log::LogPaneOpen(true));
-        file_formats::FileFormatRegistry::init_global(cx);
-        options::init_global(cx);
-        windows::WindowRegistry::init_global(cx);
+            // The log pane starts open; the menu bar reads both globals, so
+            // they must exist before `set_app_menus`.
+            cx.set_global(log::LogBuffer::default());
+            cx.set_global(log::LogPaneOpen(true));
+            file_formats::FileFormatRegistry::init_global(cx);
+            options::init_global(cx);
+            windows::WindowRegistry::init_global(cx);
 
-        // Record that a run is live and learn whether the last one ended
-        // cleanly. The check happens inside `mark_running`, before the
-        // marker is written, so a fresh launch never mistakes its own
-        // marker for a crash.
-        let crashed = workspace::mark_running();
+            // Record that a run is live and learn whether the last one ended
+            // cleanly. The check happens inside `mark_running`, before the
+            // marker is written, so a fresh launch never mistakes its own
+            // marker for a crash.
+            let crashed = workspace::mark_running();
 
-        // Register global menu action handlers, then build the keymap from
-        // the registry so the user's binding overrides apply from the
-        // first frame.
-        register_menu_handlers(cx);
-        commands::rebuild_keymap(cx);
+            // Register global menu action handlers, then build the keymap from
+            // the registry so the user's binding overrides apply from the
+            // first frame.
+            register_menu_handlers(cx);
+            commands::rebuild_keymap(cx);
 
-        // Set up the application menu bar.
-        set_app_menus(cx);
+            // Set up the application menu bar.
+            set_app_menus(cx);
 
-        // Track window lifetimes: a closed window leaves the registry,
-        // triggers an auto-save, and ends the run's marker when it was the
-        // last window.
-        cx.on_window_closed(|cx, id| on_window_closed(id, cx))
+            // Track window lifetimes: a closed window leaves the registry,
+            // triggers an auto-save, and ends the run's marker when it was the
+            // last window.
+            cx.on_window_closed(|cx, id| on_window_closed(id, cx))
+                .detach();
+
+            // Periodic auto-save of the workspace and of dirty sessions.
+            cx.spawn(|cx: &mut AsyncApp| {
+                // Clone before the async block: an `async move` over the
+                // borrowed `&mut AsyncApp` would capture its lifetime.
+                let cx = cx.clone();
+                async move {
+                    let executor = cx.background_executor().clone();
+                    loop {
+                        executor.timer(AUTO_SAVE_INTERVAL).await;
+                        cx.update(windows::auto_save);
+                    }
+                }
+            })
             .detach();
 
-        // Periodic auto-save of the workspace and of dirty sessions.
-        cx.spawn(|cx: &mut AsyncApp| {
-            // Clone before the async block: an `async move` over the
-            // borrowed `&mut AsyncApp` would capture its lifetime.
-            let cx = cx.clone();
-            async move {
-                let executor = cx.background_executor().clone();
-                loop {
-                    executor.timer(AUTO_SAVE_INTERVAL).await;
-                    cx.update(windows::auto_save);
-                }
-            }
-        })
-        .detach();
-
-        open_initial_windows(startup, crashed, cx);
-        cx.activate(true);
-    });
+            open_initial_windows(startup, crashed, cx);
+            cx.activate(true);
+        },
+    );
 
     Ok(())
 }

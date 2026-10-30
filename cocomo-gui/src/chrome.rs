@@ -15,19 +15,21 @@
 //! rendered by the active tab (see `crate::tabview::TabEntity::view_toolbar`).
 
 use gpui::{
-    AnyElement, App, Context, ElementId, Entity, IntoElement, Render,
+    AnyElement, App, Context, ElementId, Entity, IntoElement, Pixels, Render,
     SharedString, Window,
     assets::IconName,
     base::{Disableable as _, Selectable as _},
     component::{
-        ActiveTheme, Sizable as _, Theme,
+        ActiveTheme, Icon, Sizable as _,
         button::{Button, ButtonVariants as _, DropdownButton},
+        h_flex,
         menu::{ContextMenuExt as _, PopupMenuItem},
         tab::{Tab, TabBar},
         toolbar::{Toolbar, ToolbarGroup},
     },
-    div,
+    div, img,
     prelude::*,
+    px,
 };
 
 use crate::{
@@ -35,7 +37,7 @@ use crate::{
     log::LogLevel,
     menus::{SaveSession, SessionSettings},
     session_manager::GuiSessionManager,
-    state::{AppState, FilterMode},
+    state::{AppState, FilterPreset},
     tabview::TabEntity,
     windows,
 };
@@ -246,50 +248,27 @@ pub fn tab_bar_element(
 // Toolbar row 1 (shared)
 // ---------------------------------------------------------------------------
 
-/// One button of the exclusive display-filter toggle group.
+/// Preview glyph for one display-filter preset, at a fixed icon size.
 ///
-/// The group is disabled while no folder tab is active; the "Diffs"
-/// button additionally takes the theme's danger color while selected, as
-/// the spec asks for a red difference state. Selection stays visible on
-/// its own, so color is never the only cue.
-#[allow(clippy::too_many_arguments)]
-fn filter_toggle(
-    id: &'static str,
-    icon: IconName,
-    tooltip: &'static str,
-    mode: FilterMode,
-    current: Option<FilterMode>,
-    danger_when_selected: bool,
-    theme: &Theme,
-    state: Option<Entity<AppState>>,
-) -> Button {
-    let button = Button::new(id)
-        .icon(icon)
-        .ghost()
-        .small()
-        .selected(current == Some(mode))
-        .disabled(state.is_none())
-        .tooltip(tooltip)
-        .accessibility_label(tooltip);
-    let button = if current == Some(mode) && danger_when_selected {
-        button.text_color(theme.danger)
-    } else {
-        button
-    };
-    match state {
-        Some(state) => button.on_click(move |_, _, cx| {
-            state.update(cx, |state, cx| {
-                state.set_filter_mode(mode, cx);
-            });
-        }),
-        None => button,
+/// The preset icons encode state in color (red newer, gray older, blue
+/// orphan, hollow identical), so they render through `img` to keep the
+/// palette; the tinted `Icon` path would collapse mirrored presets into
+/// the same silhouette. [`FilterPreset::All`] has no custom glyph and
+/// uses the Lucide eye.
+fn preset_icon(preset: FilterPreset, size: Pixels) -> AnyElement {
+    match preset.icon_path() {
+        Some(path) => img(SharedString::from(path))
+            .size(size)
+            .flex_shrink_0()
+            .into_any_element(),
+        None => Icon::new(IconName::Eye).with_size(size).into_any_element(),
     }
 }
 
 /// Build toolbar row 1 using `gpui-component`'s [`Toolbar`].
 ///
 /// Row 1 is shared across all views: Home, the Sessions dropdown, the
-/// exclusive display-filter toggle group, Refresh, and Rules. Controls
+/// display-filter preset dropdown, Refresh, and Rules. Controls
 /// whose operations arrive in later phases render disabled with a
 /// tooltip that names the wait. `active_state` is the active folder
 /// tab's state, or `None` for text-diff tabs and an empty window.
@@ -298,10 +277,6 @@ pub fn toolbar_element(
     session_manager: Entity<GuiSessionManager>,
     cx: &App,
 ) -> AnyElement {
-    let theme = cx.theme();
-    let current_mode = active_state
-        .as_ref()
-        .map(|state| state.read(cx).filter_mode());
     let no_folder = active_state.is_none();
 
     // Home: activate the Home tab, opening one when none exists yet.
@@ -360,45 +335,62 @@ pub fn toolbar_element(
             menu
         });
 
-    let all_btn = filter_toggle(
-        "toolbar_filter_all",
-        IconName::Eye,
-        "Show all entries",
-        FilterMode::All,
-        current_mode,
-        false,
-        theme,
-        active_state.clone(),
-    );
-    let diffs_btn = filter_toggle(
-        "toolbar_filter_diffs",
-        IconName::Diff,
-        "Show differences only",
-        FilterMode::Diffs,
-        current_mode,
-        true,
-        theme,
-        active_state.clone(),
-    );
-    let same_btn = filter_toggle(
-        "toolbar_filter_same",
-        IconName::Equal,
-        "Show identical entries only",
-        FilterMode::Same,
-        current_mode,
-        false,
-        theme,
-        active_state.clone(),
-    );
-    // Minor differences (e.g. whitespace-only) are a text-comparison
-    // concept; the button is a placeholder until that lands.
-    let minor_btn = Button::new("toolbar_filter_minor")
-        .icon(IconName::Gauge)
-        .ghost()
-        .small()
-        .disabled(true)
-        .tooltip("Minor differences (coming soon)")
-        .accessibility_label("Minor differences");
+    // Display filter presets: the eleven preset glyphs plus "All" do not
+    // fit an exclusive toggle group, so one dropdown carries the choice
+    // (same trigger pattern as "Sessions"). A custom combination —
+    // reachable through the category toggles — shows a neutral funnel.
+    let current_preset = active_state
+        .as_ref()
+        .and_then(|state| state.read(cx).filter_preset());
+    let trigger_icon = match current_preset {
+        Some(preset) => preset_icon(preset, px(14.)),
+        None => Icon::new(IconName::Funnel).small().into_any_element(),
+    };
+    let trigger_label: SharedString = current_preset
+        .map(FilterPreset::label)
+        .unwrap_or("Custom filter")
+        .into();
+    let menu_state = active_state.clone();
+    let preset_btn = DropdownButton::new("toolbar_filter_preset")
+        .button(
+            Button::new("toolbar_filter_preset_btn")
+                .ghost()
+                .small()
+                .child(
+                    h_flex()
+                        .items_center()
+                        .gap_2()
+                        .child(trigger_icon)
+                        .child(trigger_label),
+                )
+                .accessibility_label("Display filter preset"),
+        )
+        .menu_accessibility_label("Display filter presets")
+        .disabled(no_folder)
+        .dropdown_menu(move |menu, _, _| {
+            let mut menu = menu;
+            for preset in FilterPreset::ALL {
+                let state = menu_state.clone();
+                menu = menu.item(
+                    PopupMenuItem::element(move |_, _| {
+                        h_flex()
+                            .items_center()
+                            .gap_2()
+                            .child(preset_icon(preset, px(14.)))
+                            .child(preset.label())
+                    })
+                    .checked(current_preset == Some(preset))
+                    .on_click(move |_, _, cx| {
+                        if let Some(state) = &state {
+                            state.update(cx, |state, cx| {
+                                state.set_filter_preset(preset, cx);
+                            });
+                        }
+                    }),
+                );
+            }
+            menu
+        });
 
     // Refresh re-reads and re-compares the active session.
     let refresh_btn = Button::new("toolbar_refresh")
@@ -446,11 +438,7 @@ pub fn toolbar_element(
     let mut display_group =
         ToolbarGroup::new("toolbar-display").label("Display filters");
     if commands::is_visible("toolbar.filters", cx) {
-        display_group = display_group
-            .child(all_btn)
-            .child(diffs_btn)
-            .child(same_btn)
-            .child(minor_btn);
+        display_group = display_group.content(preset_btn);
     }
 
     let mut ops_group = ToolbarGroup::new("toolbar-ops").label("Operations");

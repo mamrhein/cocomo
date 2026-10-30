@@ -1,14 +1,11 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
-  <style>
-    svg { --same: "white"; --newer: "red"; --older: "grey"; }
-  </style>
-  <!-- Left column: newer circles -->
-  <circle cx="160" cy="112" r="64" style="fill: var(--newer)"/>
-  <circle cx="160" cy="256" r="64" style="fill: var(--older)"/>
-  <circle cx="160" cy="400" r="64" style="fill: var(--same)"/>
-  <!-- Right column: older circles -->
-  <circle cx="352" cy="112" r="64" style="fill: var(--older)"/>
-  <circle cx="352" cy="256" r="64" style="fill: var(--newer)"/>
-  <circle cx="352" cy="400" r="64" style="fill: var(--same)"/>
+  <!-- Left column: newer, older and identical circles -->
+  <circle cx="160" cy="112" r="64" fill="#e5484d"/>
+  <circle cx="160" cy="256" r="64" fill="#9b9b9b"/>
+  <circle cx="160" cy="400" r="56" fill="none" stroke="#9b9b9b" stroke-width="16"/>
+  <!-- Right column: mirrored pair -->
+  <circle cx="352" cy="112" r="64" fill="#9b9b9b"/>
+  <circle cx="352" cy="256" r="64" fill="#e5484d"/>
+  <circle cx="352" cy="400" r="56" fill="none" stroke="#9b9b9b" stroke-width="16"/>
 </svg>
