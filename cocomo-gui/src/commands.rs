@@ -24,9 +24,7 @@
 
 use std::any::TypeId;
 
-use gpui::{
-    Action, App, DummyKeyboardMapper, InvalidKeystrokeError, KeyBinding,
-};
+use gpui::{Action, App, InvalidKeystrokeError, KeyBinding};
 
 use crate::{
     home,
@@ -368,19 +366,13 @@ pub fn base_bindings() -> Vec<KeyBinding> {
 pub fn parse_binding(
     spec: &CommandSpec,
     keystrokes: &str,
+    cx: &App,
 ) -> std::result::Result<KeyBinding, String> {
     let action = spec
         .action
         .ok_or_else(|| "This command has no key binding.".to_string())?;
-    KeyBinding::load(
-        keystrokes.trim(),
-        action(),
-        None,
-        false,
-        None,
-        &DummyKeyboardMapper,
-    )
-    .map_err(|err: InvalidKeystrokeError| err.to_string())
+    KeyBinding::load(keystrokes.trim(), action(), None, false, None, cx)
+        .map_err(|err: InvalidKeystrokeError| err.to_string())
 }
 
 /// Whether the command should appear in the menus and toolbar.
@@ -429,7 +421,7 @@ pub fn rebuild_keymap(cx: &mut App) {
             cleared.push(action().type_id());
             continue;
         }
-        let Ok(binding) = parse_binding(spec, keystrokes) else {
+        let Ok(binding) = parse_binding(spec, keystrokes, cx) else {
             // An unparseable override is ignored; the default stays.
             continue;
         };
@@ -464,8 +456,8 @@ mod tests {
         assert_eq!(ids.len(), count, "duplicate command id");
     }
 
-    #[test]
-    fn every_default_binding_parses() {
+    #[gpui::test]
+    fn every_default_binding_parses(cx: &mut App) {
         for spec in all_commands() {
             if let Some(keystrokes) = spec.default_binding {
                 assert!(
@@ -474,7 +466,7 @@ mod tests {
                     spec.id
                 );
                 assert!(
-                    parse_binding(&spec, keystrokes).is_ok(),
+                    parse_binding(&spec, keystrokes, cx).is_ok(),
                     "{} has an unparseable default binding",
                     spec.id
                 );
@@ -482,12 +474,12 @@ mod tests {
         }
     }
 
-    #[test]
-    fn an_unparseable_override_is_rejected_not_panicking() {
+    #[gpui::test]
+    fn an_unparseable_override_is_rejected_not_panicking(cx: &mut App) {
         let spec = find_command("session.save").unwrap();
         // A trailing dash is the literal `-` key; only a dangling modifier
         // chain like this fails to parse.
-        assert!(parse_binding(&spec, "cmd-a-b").is_err());
+        assert!(parse_binding(&spec, "cmd-a-b", cx).is_err());
     }
 
     #[test]

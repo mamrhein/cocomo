@@ -566,7 +566,7 @@ fn apply_options(draft: Entity<OptionsDraft>, cx: &mut App) {
                     .binding = Some(String::new());
                 continue;
             }
-            if let Err(message) = commands::parse_binding(&spec, &value) {
+            if let Err(message) = commands::parse_binding(&spec, &value, cx) {
                 set_message(&draft, message, cx);
                 return;
             }
