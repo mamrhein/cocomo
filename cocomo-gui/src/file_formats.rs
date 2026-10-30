@@ -147,7 +147,7 @@ impl FileFormatRegistry {
             return FileViewKind::Text;
         };
         for format in cx.global::<GlobalFileFormats>().0.formats.iter() {
-            if format.extensions.iter().any(|e| *e == ext) {
+            if format.extensions.contains(&ext) {
                 return format.view;
             }
         }

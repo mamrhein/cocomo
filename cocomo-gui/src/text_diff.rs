@@ -1965,7 +1965,7 @@ impl TextDiffSession {
                 hi = hi.max(n);
             }
         }
-        (hi > 0).then(|| (lo, hi))
+        (hi > 0).then_some((lo, hi))
     }
 
     /// The right line just above a section — the insertion point when
@@ -2124,7 +2124,7 @@ impl TextDiffSession {
                 .map_err(|e| anyhow::anyhow!("{e}"))
         })
         .await;
-        let _ = entity.update(cx, |session, cx| {
+        entity.update(cx, |session, cx| {
             match result {
                 Ok(Ok(())) => {
                     match side {
@@ -2228,7 +2228,7 @@ impl TextDiffSession {
                 let Ok(Some((left, right))) = next else {
                     return;
                 };
-                let _ = manager.update(&mut cx, |m, cx| {
+                manager.update(&mut cx, |m, cx| {
                     m.add_text_diff_tab(left, right, Some(parent.clone()), cx)
                 });
             }
