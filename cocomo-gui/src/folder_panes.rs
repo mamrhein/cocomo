@@ -13,15 +13,17 @@
 //! pane separated by a splitter, each with its own editable path bar and
 //! a history dropdown. Both panes render the *same* [`TreeRow`] list from
 //! [`AppState`], so mirrored rows align by construction; the left pane's
-//! rows additionally carry the gutter cell with the connector line and
-//! the coarse status icon of spec section 4.2.
+//! rows additionally carry the status column with the connector line and
+//! the coarse status symbol of spec section 4.2, and nested rows are
+//! indented with vertical tree guides in place of the CLI's `├─`/`└─`
+//! prefixes.
 
 use std::ops::Range;
 
 use cocomo_lib::{DirEntry, DirEntryStatus, Endpoint};
 use gpui::{
     AnyElement, App, ClickEvent, ElementId, Entity, ExternalPaths,
-    FocusHandle, FontWeight, Hsla, MouseButton, SharedString,
+    FocusHandle, FontWeight, Hsla, MouseButton, Pixels, SharedString,
     TestSupportExt as _, UniformListScrollHandle, Window,
     component::{
         ActiveTheme, Sizable as _, Theme,
@@ -35,7 +37,7 @@ use gpui::{
     },
     div,
     prelude::*,
-    px, uniform_list,
+    rems, uniform_list,
 };
 
 use crate::{
@@ -317,7 +319,7 @@ fn sort_header_cell(
     };
     let is_active = sort_key == key;
     let state = state.clone();
-    header_lane(side, label, align_end)
+    header_lane(label, align_end)
         .id((ElementId::from("sort_header"), format!("{side:?}:{label}")))
         .when(align_end, |this| this.justify_end())
         .text_color(if is_active {
@@ -344,20 +346,16 @@ fn sort_header_cell(
 }
 
 /// Header lane matching the row lanes of a pane.
-fn header_lane(side: Side, label: &'static str, align_end: bool) -> gpui::Div {
+///
+/// The lanes are the very builders the rows use, so a header label and its
+/// column values share the same alignment spine by construction.
+fn header_lane(label: &'static str, align_end: bool) -> gpui::Div {
     let lane = match label {
         "Name" => name_lane(),
         "Size" => size_lane(),
         _ => date_lane(),
     };
-    let lane = if align_end { lane.justify_end() } else { lane };
-    // The left pane's rows end with the gutter cell; reserve the same
-    // width in its header so the mirrored columns stay aligned.
-    if side == Side::Left && label == "Modified" {
-        lane.child(div().w_10().flex_shrink_0())
-    } else {
-        lane
-    }
+    if align_end { lane.justify_end() } else { lane }
 }
 
 /// Name lane: chevron, type icon, and the entry name.
@@ -389,7 +387,8 @@ fn date_lane() -> gpui::Div {
         .text_xs()
 }
 
-/// The gutter lane between the panes: connector lines and status icons.
+/// The status column closing the left pane's rows: a connector line for
+/// matched entries and the coarse status symbol in its own sub-column.
 fn gutter_lane() -> gpui::Div {
     div()
         .w_10()
@@ -418,7 +417,7 @@ fn render_pane_list(
             SharedString::from(format!("{side:?}")),
         ),
         entry_count,
-        move |range: Range<usize>, _: &mut Window, app: &mut App| {
+        move |range: Range<usize>, window: &mut Window, app: &mut App| {
             let mut items = Vec::with_capacity(range.len());
             if let Some(state_entity) = state_weak.upgrade() {
                 // Resolve the global color overrides once per batch, not
@@ -440,6 +439,7 @@ fn render_pane_list(
                     items.push(
                         data.render_row(
                             &theme,
+                            window.rem_size(),
                             state_entity.clone(),
                             focus_handle.clone(),
                         )
@@ -464,7 +464,12 @@ fn render_pane_list(
 pub(crate) struct PaneRow {
     index: usize,
     side: Side,
-    depth: usize,
+    /// Whether this side actually has an entry for the row. An orphan's
+    /// empty side renders blank lanes to keep the panes mirrored.
+    present: bool,
+    /// One flag per indent slot (levels `0..=depth`): whether a vertical
+    /// tree guide is drawn there.
+    guides: Vec<bool>,
     path: SharedString,
     name: SharedString,
     status: DirEntryStatus,
@@ -504,7 +509,8 @@ impl PaneRow {
         Self {
             index,
             side,
-            depth: row.depth(),
+            present: side_info.is_some(),
+            guides: tree_guides(state, index, row.depth()),
             path: SharedString::from(row.path().to_string()),
             name: SharedString::from(entry.name.clone()),
             status: entry.status,
@@ -550,6 +556,7 @@ impl PaneRow {
     fn render_row(
         self,
         theme: &Theme,
+        rem_size: Pixels,
         state: Entity<AppState>,
         focus_handle: FocusHandle,
     ) -> impl IntoElement {
@@ -557,7 +564,9 @@ impl PaneRow {
         let PaneRow {
             index,
             side,
-            depth,
+            present,
+            guides,
+            path,
             name,
             is_dir,
             expanded,
@@ -573,7 +582,7 @@ impl PaneRow {
         let row_color: Hsla = role.resolve(theme, &overrides);
         let row_id = (
             ElementId::from("pane_row"),
-            SharedString::from(format!("{}/{}", side_key(side), name)),
+            SharedString::from(format!("{}/{}", side_key(side), path)),
         );
         let open_data = data.clone();
         let expand_data = data.clone();
@@ -583,10 +592,12 @@ impl PaneRow {
         div()
             .id(row_id)
             .flex()
-            .items_center()
+            // Lanes stretch so the tree guides can span the full row
+            // height and connect across rows; each lane carries the
+            // vertical padding instead.
+            .items_stretch()
             .gap_1()
             .px_2()
-            .py_0p5()
             .text_color(row_color)
             .when(is_selected, |this| this.bg(theme.list_active))
             .hover(|this| {
@@ -633,55 +644,84 @@ impl PaneRow {
             .context_menu(move |menu, window, cx| {
                 build_row_menu(&data, menu, window, cx)
             })
-            // Name lane: tree indent, expansion chevron, type icon.
+            // Tree indent guides: one full-height slot per level, with a
+            // vertical line wherever that level continues below this row.
+            .when(present && !guides.is_empty(), |this| {
+                this.child(
+                    div().flex_shrink_0().flex().items_stretch().children(
+                        guides.iter().map(|active| {
+                            div()
+                                .w(rems(INDENT_REMS) * rem_size)
+                                .flex_shrink_0()
+                                .flex()
+                                .justify_center()
+                                .when(*active, |slot| {
+                                    slot.child(
+                                        div().w_px().h_full().bg(theme.border),
+                                    )
+                                })
+                        }),
+                    ),
+                )
+            })
+            // Name lane: expansion chevron, type icon, and the entry name.
+            // An orphan's empty side stays blank; its row only keeps the
+            // mirrored panes aligned.
             .child(
                 name_lane()
                     .overflow_hidden()
                     .whitespace_nowrap()
-                    .child(
-                        div()
-                            .flex_shrink_0()
-                            .w(px(depth as f32 * INDENT_REMS)),
-                    )
-                    .child(
-                        div()
-                            .flex_shrink_0()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child(if is_dir {
-                                if expanded {
-                                    gpui::assets::IconName::ChevronDown
+                    .py_0p5()
+                    .when(present, |this| {
+                        this.child(
+                            div()
+                                .flex_shrink_0()
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child(if is_dir {
+                                    if expanded {
+                                        gpui::assets::IconName::ChevronDown
+                                    } else {
+                                        gpui::assets::IconName::ChevronRight
+                                    }
                                 } else {
-                                    gpui::assets::IconName::ChevronRight
-                                }
-                            } else {
-                                gpui::assets::IconName::File
-                            }),
-                    )
-                    .child(div().truncate().child(name)),
+                                    gpui::assets::IconName::File
+                                }),
+                        )
+                        .child(div().truncate().child(name))
+                    })
+                    // The blank side of an orphan still needs a text line
+                    // box: the virtual list assumes one uniform row height.
+                    .when(!present, |this| this.child(" ")),
             )
             .child(
-                size_lane().child(size.map(format_size).unwrap_or_default()),
+                size_lane()
+                    .py_0p5()
+                    .child(size.map(format_size).unwrap_or_default()),
             )
             .child(
-                date_lane().child(
+                date_lane().py_0p5().child(
                     modified
                         .as_deref()
                         .map(crate::ui::format_modified)
                         .unwrap_or_default(),
                 ),
             )
-            // The left pane's rows end with the gutter cell: a connector
-            // line for matched rows and the coarse status icon.
+            // The left pane's rows end with the status column: a connector
+            // line for matched rows and the coarse status symbol in its own
+            // sub-column.
             .when(side == Side::Left, |this| {
                 this.child(
                     gutter_lane()
+                        .py_0p5()
                         .when(!matches!(gutter, "|"), |this| {
                             this.child(div().flex_1().h_px().bg(theme.border))
                         })
                         .child(
                             div()
+                                .w_4()
                                 .flex_shrink_0()
+                                .text_center()
                                 .font_weight(FontWeight(700.))
                                 .text_color(theme.muted_foreground)
                                 .child(gutter),
@@ -689,6 +729,33 @@ impl PaneRow {
                 )
             })
     }
+}
+
+/// Which indent slots of the row at `index` carry a vertical tree guide.
+///
+/// A guide at level `l` (0-based, `0..=depth`) stays active while the
+/// ancestor at that level still has a sibling below the current row — the
+/// GUI equivalent of the CLI's `│` continuation. Because rows are in
+/// depth-first order, the first following row with `depth <= l` decides:
+/// equal depth means a sibling follows, shallower means the subtree ended.
+fn tree_guides(state: &AppState, index: usize, depth: usize) -> Vec<bool> {
+    let mut guides = vec![false; depth + 1];
+    let mut open: Vec<usize> = (0..=depth).collect();
+    let mut next = index + 1;
+    while !open.is_empty() {
+        let Some(row) = state.row_at(next) else { break };
+        let depth = row.depth();
+        open.retain(|&level| {
+            if depth <= level {
+                guides[level] = depth == level;
+                false
+            } else {
+                true
+            }
+        });
+        next += 1;
+    }
+    guides
 }
 
 /// Stable id part distinguishing the two panes' rows.
@@ -979,5 +1046,86 @@ mod tests {
             entry("a.txt", DirEntryStatus::Different, Some(left), Some(right));
         assert_eq!(row(Side::Left, &entry, cx).size, Some(10));
         assert_eq!(row(Side::Right, &entry, cx).size, Some(20));
+    }
+
+    #[gpui::test]
+    fn pane_row_is_absent_on_an_orphans_empty_side(cx: &mut TestAppContext) {
+        let entry = entry(
+            "orphan.txt",
+            DirEntryStatus::LeftOnly,
+            Some(info("orphan.txt", false)),
+            None,
+        );
+        assert!(row(Side::Left, &entry, cx).present);
+        assert!(!row(Side::Right, &entry, cx).present);
+    }
+
+    #[gpui::test]
+    fn tree_guides_continue_while_a_level_has_more_siblings(
+        cx: &mut TestAppContext,
+    ) {
+        // Visible tree after expanding `a`:
+        //   a
+        //     a1
+        //     a2
+        //   b
+        let sub = DirComparison {
+            entries: vec![
+                entry(
+                    "a1",
+                    DirEntryStatus::Same,
+                    Some(info("a/a1", false)),
+                    Some(info("a/a1", false)),
+                ),
+                entry(
+                    "a2",
+                    DirEntryStatus::Same,
+                    Some(info("a/a2", false)),
+                    Some(info("a/a2", false)),
+                ),
+            ],
+            counts: Default::default(),
+            errors: Vec::new(),
+        };
+        let mut a = entry(
+            "a",
+            DirEntryStatus::Same,
+            Some(info("a", true)),
+            Some(info("a", true)),
+        );
+        a.sub_entries = Some(std::sync::Arc::new(sub));
+        let b = entry(
+            "b",
+            DirEntryStatus::Same,
+            Some(info("b", false)),
+            Some(info("b", false)),
+        );
+        let state = cx.new(|cx| {
+            let mut state = AppState::new(
+                Endpoint::local("/left"),
+                Endpoint::local("/right"),
+                "test".into(),
+                cx,
+            );
+            state.set_comparison_for_test(DirComparison {
+                entries: vec![a, b],
+                counts: Default::default(),
+                errors: Vec::new(),
+            });
+            state
+        });
+        state.update(cx, |state, cx| state.toggle_expanded("a", cx));
+        cx.update(|cx| {
+            let read = state.read(cx);
+            assert_eq!(read.entry_count(), 4);
+            // `a` connects down to `b`, and `a1` to `a2`.
+            assert_eq!(tree_guides(read, 0, 0), vec![true]);
+            assert_eq!(tree_guides(read, 1, 1), vec![true, true]);
+            // `a2` is the last child: its own slot ends, but the `a`-to-`b`
+            // continuation still runs through the row.
+            assert_eq!(tree_guides(read, 2, 1), vec![true, false]);
+            // `b` is the last root entry: no guide below it.
+            assert_eq!(tree_guides(read, 3, 0), vec![false]);
+        });
     }
 }
