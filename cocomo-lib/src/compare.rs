@@ -448,8 +448,8 @@ where
 /// nesting level is compared exactly once. A directory that exists on only
 /// one side is descended into as well, merging its children against an
 /// empty list so that the entire orphan subtree appears in the comparison.
-/// Directory entries whose subtree contains differences get their
-/// placeholder `Same` status refined to `Different`.
+/// Directory entries whose subtree contains differences or orphan entries
+/// get their placeholder `Same` status refined to `Different`.
 ///
 /// A file is never compared against a directory: when one side has a file
 /// and the other a directory under the same name, both halves are
@@ -558,12 +558,15 @@ where
                     )
                     .await?;
 
-                    let has_diff = sub.different_count() > 0;
+                    // The subtree counts as different when it contains
+                    // content differences or orphan entries.
+                    let has_changes =
+                        sub.different_count() > 0 || sub.orphan_count() > 0;
                     entry.sub_entries = Some(Arc::new(sub));
                     // Only refine the `Same` placeholder of a shared
                     // directory; an orphan directory keeps its
                     // left/right-only status regardless of its contents.
-                    if has_diff && entry.status == DirEntryStatus::Same {
+                    if has_changes && entry.status == DirEntryStatus::Same {
                         entry.status = DirEntryStatus::Different;
                     }
                 }
@@ -1067,6 +1070,79 @@ mod tests {
         check_orphan_subtrees(&result);
 
         fs_err::remove_dir_all(left.parent().unwrap()).ok();
+    }
+
+    /// A paired directory whose subtree contains only orphan changes is
+    /// flagged `Different`, the refinement propagates through every parent
+    /// level, and a fully identical directory pair stays `Same`.
+    #[tokio::test]
+    async fn node_compare_flags_dirs_containing_orphans() {
+        let base = env::temp_dir()
+            .join(format!("cocomo_orphan_flag_{}", std::process::id()));
+        let _ = fs_err::remove_dir_all(&base);
+
+        let left = base.join("left");
+        let right = base.join("right");
+
+        // Paired dir whose only difference is a new left-only file.
+        fs_err::create_dir_all(left.join("shared")).unwrap();
+        fs_err::create_dir_all(right.join("shared")).unwrap();
+        fs_err::write(left.join("shared/same.txt"), "same").unwrap();
+        fs_err::write(right.join("shared/same.txt"), "same").unwrap();
+        fs_err::write(left.join("shared/new.txt"), "new").unwrap();
+
+        // Orphan three levels down: every parent must be flagged.
+        fs_err::create_dir_all(left.join("nest/a/b")).unwrap();
+        fs_err::create_dir_all(right.join("nest/a/b")).unwrap();
+        fs_err::write(left.join("nest/a/b/deep-new.txt"), "d").unwrap();
+
+        // Fully identical paired dir stays `Same`.
+        fs_err::create_dir_all(left.join("equal")).unwrap();
+        fs_err::create_dir_all(right.join("equal")).unwrap();
+        fs_err::write(left.join("equal/e.txt"), "e").unwrap();
+        fs_err::write(right.join("equal/e.txt"), "e").unwrap();
+
+        let fs = LocalFs::new("test");
+        let config = CompareConfig::full();
+
+        let result =
+            compare_directories_node(&fs, &left, &right, &config, None)
+                .await
+                .unwrap();
+
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+        assert_eq!(
+            status_of(&result, "shared"),
+            Some(DirEntryStatus::Different),
+            "dir with an orphan-only change should be flagged"
+        );
+        assert_eq!(
+            status_of(&result, "shared/same.txt"),
+            Some(DirEntryStatus::Same)
+        );
+        assert_eq!(
+            status_of(&result, "shared/new.txt"),
+            Some(DirEntryStatus::LeftOnly)
+        );
+        for path in ["nest", "nest/a", "nest/a/b"] {
+            assert_eq!(
+                status_of(&result, path),
+                Some(DirEntryStatus::Different),
+                "`{path}` should carry the orphan refinement"
+            );
+        }
+        assert_eq!(
+            status_of(&result, "equal"),
+            Some(DirEntryStatus::Same),
+            "untouched dir must stay same"
+        );
+        assert_eq!(
+            status_of(&result, "equal/e.txt"),
+            Some(DirEntryStatus::Same)
+        );
+
+        fs_err::remove_dir_all(&base).ok();
     }
 
     // -----------------------------------------------------------------------

@@ -19,14 +19,17 @@
 //! # Design
 //!
 //! Transfers operate on a per-entry basis. Each [`TransferItem`] carries the
-//! source node (if any), destination node (if any), and the action to perform.
-//! The executor walks the batch sequentially, reporting progress and errors.
-//! Non-fatal errors are collected rather than aborting the entire batch.
+//! entry's path relative to the compared side roots, and the action to
+//! perform. The executor walks the batch sequentially, reporting progress
+//! and errors. Non-fatal errors are collected rather than aborting the
+//! entire batch. A nested entry transfers to the same relative path on the
+//! target side; missing target-side directories are created on demand.
 
 use std::path::Path;
 #[allow(unused_imports)]
 use std::sync::Arc;
 
+use bytes::BytesMut;
 use futures::future::BoxFuture;
 
 use crate::{DirComparison, DirEntryStatus, FsError, FsOperation};
@@ -97,7 +100,11 @@ pub struct TransferItem {
     pub name: String,
     /// Whether this entry is a directory.
     pub is_dir: bool,
-    /// Relative path within the sync root.
+    /// Entry path relative to the compared side roots (`/`-separated).
+    ///
+    /// The executor addresses both sides by this path, so a nested entry
+    /// lands at the same relative path on the target side. When empty, the
+    /// executor falls back to [`Self::name`].
     pub rel_path: String,
 }
 
@@ -309,6 +316,11 @@ where
 }
 
 /// Execute a single transfer item against the provider pair.
+///
+/// The entry is addressed by its path relative to the side roots (see
+/// [`item_rel`]), so a nested selection like `def/ghi/b.txt` transfers from
+/// `<left_root>/def/ghi/b.txt` to `<right_root>/def/ghi/b.txt`, creating the
+/// target-side nesting if needed.
 async fn execute_single_transfer<L, R>(
     item: &TransferItem,
     left_path: &Path,
@@ -319,6 +331,7 @@ where
     L: crate::fs::WritableFileSystem<Nid = u64>,
     R: crate::fs::WritableFileSystem<Nid = u64>,
 {
+    let rel = item_rel(item);
     match pair {
         // One provider instance addresses both sides, so node IDs
         // resolved on one side are valid on the other and the
@@ -326,50 +339,28 @@ where
         FsPair::Shared(fs) => match item.action {
             TransferAction::CopyLeft => {
                 // Copy from right to left.
-                copy_entry(
-                    fs,
-                    right_path,
-                    &item.name,
-                    item.is_dir,
-                    fs,
-                    left_path,
-                    &item.name,
-                )
-                .await
+                copy_entry(fs, right_path, rel, item.is_dir, fs, left_path)
+                    .await
             }
             TransferAction::CopyRight => {
                 // Copy from left to right.
-                copy_entry(
-                    fs,
-                    left_path,
-                    &item.name,
-                    item.is_dir,
-                    fs,
-                    right_path,
-                    &item.name,
-                )
-                .await
+                copy_entry(fs, left_path, rel, item.is_dir, fs, right_path)
+                    .await
             }
             TransferAction::CopyCenter => Err(center_copy_error(item)),
             TransferAction::DeleteLeft => {
-                delete_entry(fs, left_path, &item.name, item.is_dir).await
+                delete_entry(fs, left_path, rel, item.is_dir).await
             }
             TransferAction::DeleteRight => {
-                delete_entry(fs, right_path, &item.name, item.is_dir).await
+                delete_entry(fs, right_path, rel, item.is_dir).await
             }
             TransferAction::MoveLeft => {
                 // Move from right to left.
-                move_entry(
-                    fs, right_path, &item.name, fs, left_path, &item.name,
-                )
-                .await
+                move_entry(fs, right_path, rel, fs, left_path).await
             }
             TransferAction::MoveRight => {
                 // Move from left to right.
-                move_entry(
-                    fs, left_path, &item.name, fs, right_path, &item.name,
-                )
-                .await
+                move_entry(fs, left_path, rel, fs, right_path).await
             }
         },
         // Two distinct provider instances. `copy_node` and `move_node`
@@ -384,7 +375,7 @@ where
                 copy_entry_cross(
                     right_fs,
                     right_path,
-                    &item.name,
+                    rel,
                     item.is_dir,
                     left_fs,
                     left_path,
@@ -396,7 +387,7 @@ where
                 copy_entry_cross(
                     left_fs,
                     left_path,
-                    &item.name,
+                    rel,
                     item.is_dir,
                     right_fs,
                     right_path,
@@ -405,18 +396,17 @@ where
             }
             TransferAction::CopyCenter => Err(center_copy_error(item)),
             TransferAction::DeleteLeft => {
-                delete_entry(left_fs, left_path, &item.name, item.is_dir).await
+                delete_entry(left_fs, left_path, rel, item.is_dir).await
             }
             TransferAction::DeleteRight => {
-                delete_entry(right_fs, right_path, &item.name, item.is_dir)
-                    .await
+                delete_entry(right_fs, right_path, rel, item.is_dir).await
             }
             TransferAction::MoveLeft => {
                 // Move from right to left.
                 move_entry_cross(
                     right_fs,
                     right_path,
-                    &item.name,
+                    rel,
                     item.is_dir,
                     left_fs,
                     left_path,
@@ -428,7 +418,7 @@ where
                 move_entry_cross(
                     left_fs,
                     left_path,
-                    &item.name,
+                    rel,
                     item.is_dir,
                     right_fs,
                     right_path,
@@ -437,6 +427,29 @@ where
             }
         },
     }
+}
+
+/// The path a transfer item is addressed by, relative to the side roots.
+///
+/// Both sides of a comparison share the relative layout, so one path
+/// addresses the entry on either side. Falls back to the bare entry name for
+/// items built without a relative path.
+fn item_rel(item: &TransferItem) -> &str {
+    if item.rel_path.is_empty() {
+        &item.name
+    } else {
+        &item.rel_path
+    }
+}
+
+/// Split a relative entry path into its non-empty components.
+///
+/// Relative paths are `/`-separated (as produced by the scan); the platform
+/// separator is accepted as well.
+fn rel_components(rel: &str) -> Vec<&str> {
+    rel.split(std::path::is_separator)
+        .filter(|c| !c.is_empty())
+        .collect()
 }
 
 /// The error for center copies, which need a 3-way comparison.
@@ -461,6 +474,11 @@ where
     S: crate::fs::WritableFileSystem<Nid = u64>,
     D: crate::fs::WritableFileSystem<Nid = u64>,
 {
+    // `write_node` replaces the destination file's whole content on every
+    // provider, so the chunks must be collected before a single write:
+    // writing each chunk as it arrives would leave only the last chunk on
+    // the destination.
+    let mut content = BytesMut::new();
     let mut stream = src_fs.read_stream_node(src_file_id, None).await?;
     use futures::StreamExt;
     while let Some(chunk) = stream.next().await {
@@ -469,13 +487,16 @@ where
             path: src_path.to_path_buf(),
             message: format!("stream error: {e}"),
         })?;
-        dst_fs.write_node(dst_file_id, chunk).await?;
+        content.extend_from_slice(&chunk);
     }
 
-    Ok(())
+    dst_fs.write_node(dst_file_id, content.freeze()).await
 }
 
 /// Copy a file or directory from source to destination.
+///
+/// `rel` is the entry path relative to both side roots; the destination
+/// nesting is created on demand (see [`ensure_parent_dir`]).
 ///
 /// Only reached for [`FsPair::Shared`] pairs: `copy_node` and the file
 /// streaming path address one provider instance. Cross-boundary copies go
@@ -483,17 +504,16 @@ where
 async fn copy_entry<N>(
     src_fs: &N,
     src_root: &Path,
-    name: &str,
+    rel: &str,
     is_dir: bool,
     dst_fs: &N,
     dst_root: &Path,
-    _dst_name: &str,
 ) -> Result<(), FsError>
 where
     N: crate::fs::WritableFileSystem<Nid = u64>,
 {
-    let src_path = src_root.join(name);
-    let dst_node_id = resolve_dir_for_copy(dst_fs, dst_root, name).await?;
+    let src_path = src_root.join(rel);
+    let dst_dir_id = ensure_parent_dir(dst_fs, dst_root, rel).await?;
 
     // Resolve the source node.
     let src_node_id = src_fs.resolve_path(&src_path).await?;
@@ -501,15 +521,11 @@ where
 
     if is_dir {
         // Copy directory.
-        src_fs
-            .copy_node(src_node_id, crate::DirId::new(*dst_node_id.get()))
-            .await?;
+        src_fs.copy_node(src_node_id, dst_dir_id).await?;
     } else {
         // Copy file: create destination file, then stream content.
         let dst_name = src_node.name();
-        let new_file_id = dst_fs
-            .create_file(crate::DirId::new(*dst_node_id.get()), dst_name)
-            .await?;
+        let new_file_id = dst_fs.create_file(dst_dir_id, dst_name).await?;
 
         // Stream content from source to destination.
         stream_file_content(
@@ -525,41 +541,41 @@ where
     Ok(())
 }
 
-/// Delete a file or directory.
+/// Delete a file or directory addressed by `rel` under `root`.
 async fn delete_entry<N>(
     fs: &N,
     root: &Path,
-    name: &str,
+    rel: &str,
     _is_dir: bool,
 ) -> Result<(), FsError>
 where
     N: crate::fs::WritableFileSystem<Nid = u64>,
 {
-    let path = root.join(name);
+    let path = root.join(rel);
     let node_id = fs.resolve_path(&path).await?;
     fs.remove_all_node(node_id).await
 }
 
 /// Move a file or directory to a new location.
+///
+/// `rel` addresses the entry relative to both side roots; the destination
+/// nesting is created on demand (see [`ensure_parent_dir`]).
 async fn move_entry<N>(
     src_fs: &N,
     src_root: &Path,
-    name: &str,
+    rel: &str,
     dst_fs: &N,
     dst_root: &Path,
-    _dst_name: &str,
 ) -> Result<(), FsError>
 where
     N: crate::fs::WritableFileSystem<Nid = u64>,
 {
-    let src_path = src_root.join(name);
+    let src_path = src_root.join(rel);
     let src_node_id = src_fs.resolve_path(&src_path).await?;
 
-    let dst_node_id = resolve_dir_for_copy(dst_fs, dst_root, name).await?;
+    let dst_dir_id = ensure_parent_dir(dst_fs, dst_root, rel).await?;
 
-    src_fs
-        .move_node(src_node_id, crate::DirId::new(*dst_node_id.get()))
-        .await?;
+    src_fs.move_node(src_node_id, dst_dir_id).await?;
 
     Ok(())
 }
@@ -575,7 +591,7 @@ where
 async fn copy_entry_cross<S, D>(
     src_fs: &S,
     src_root: &Path,
-    name: &str,
+    rel: &str,
     is_dir: bool,
     dst_fs: &D,
     dst_root: &Path,
@@ -584,11 +600,10 @@ where
     S: crate::fs::WritableFileSystem<Nid = u64>,
     D: crate::fs::WritableFileSystem<Nid = u64>,
 {
-    let dst_node_id = resolve_dir_for_copy(dst_fs, dst_root, name).await?;
-    let dst_dir_id = crate::DirId::new(*dst_node_id.get());
+    let dst_dir_id = ensure_parent_dir(dst_fs, dst_root, rel).await?;
 
     // Resolve the source node.
-    let src_path = src_root.join(name);
+    let src_path = src_root.join(rel);
     let src_node_id = src_fs.resolve_path(&src_path).await?;
     let src_node = src_fs.get_node(src_node_id)?;
 
@@ -673,7 +688,7 @@ where
 async fn move_entry_cross<S, D>(
     src_fs: &S,
     src_root: &Path,
-    name: &str,
+    rel: &str,
     is_dir: bool,
     dst_fs: &D,
     dst_root: &Path,
@@ -682,33 +697,60 @@ where
     S: crate::fs::WritableFileSystem<Nid = u64>,
     D: crate::fs::WritableFileSystem<Nid = u64>,
 {
-    copy_entry_cross(src_fs, src_root, name, is_dir, dst_fs, dst_root).await?;
-    delete_entry(src_fs, src_root, name, is_dir).await
+    copy_entry_cross(src_fs, src_root, rel, is_dir, dst_fs, dst_root).await?;
+    delete_entry(src_fs, src_root, rel, is_dir).await
 }
 
-/// Resolve the destination directory for a copy/move operation. Returns the
-/// node ID of the root directory, which the caller uses to construct a
-/// [`crate::DirId`].
-async fn resolve_dir_for_copy<N>(
+/// Resolve the destination directory that will hold the entry addressed by
+/// `rel` under `root`, creating missing intermediate directories.
+///
+/// The last component of `rel` names the entry itself and is *not* created
+/// here; the caller copies or moves the node into the returned directory,
+/// keeping its name. A target side that does not know the nesting yet gets
+/// the whole ancestor chain created (e.g. `def/ghi` for `def/ghi/b.txt`).
+async fn ensure_parent_dir<N>(
     fs: &N,
     root: &Path,
-    _name: &str,
-) -> Result<crate::NodeId<u64>, FsError>
+    rel: &str,
+) -> Result<crate::DirId<u64>, FsError>
 where
     N: crate::fs::WritableFileSystem<Nid = u64>,
 {
-    let node_id = fs.resolve_path(root).await?;
-    let node = fs.get_node(node_id)?;
-
-    // Verify it's a directory.
-    if !node.kind().is_directory() {
+    let root_id = fs.resolve_path(root).await?;
+    let root_node = fs.get_node(root_id)?;
+    if !root_node.kind().is_directory() {
         return Err(FsError::WrongKind {
             expected: "directory",
             actual: "file",
         });
     }
 
-    Ok(node_id)
+    let mut path = root.to_path_buf();
+    let mut parent = crate::DirId::new(*root_id.get());
+    let comps = rel_components(rel);
+    for name in &comps[..comps.len().saturating_sub(1)] {
+        path.push(name);
+        parent = match fs.resolve_path(&path).await {
+            Ok(id) => {
+                let node = fs.get_node(id)?;
+                if !node.kind().is_directory() {
+                    return Err(FsError::WrongKind {
+                        expected: "directory",
+                        actual: "file",
+                    });
+                }
+                crate::DirId::new(*id.get())
+            }
+            // The target side does not know this nesting level yet.
+            Err(FsError::NotFound { .. }) => {
+                fs.create_dir_node(parent, std::ffi::OsStr::new(name))
+                    .await?
+            }
+            Err(e) => return Err(e),
+        };
+    }
+
+    Ok(parent)
 }
 
 // ---------------------------------------------------------------------------
@@ -1034,7 +1076,7 @@ mod tests {
             TransferAction::CopyRight,
             "left_only.txt".to_string(),
             false,
-            left.join("left_only.txt").to_string_lossy().into_owned(),
+            "left_only.txt".to_string(),
         )];
 
         let result =
@@ -1053,6 +1095,160 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn execute_copy_right_nested_creates_target_dirs() {
+        // The reported failure: a deeply nested selection whose target-side
+        // directories do not exist yet.
+        let base = env::temp_dir()
+            .join(format!("cocomo_transfer_deep_{}", process::id()));
+        let _ = fs_err::remove_dir_all(&base);
+        let left = base.join("abc");
+        let right = base.join("xyz");
+        fs_err::create_dir_all(left.join("def/ghi")).unwrap();
+        fs_err::create_dir_all(&right).unwrap();
+        fs_err::write(left.join("def/ghi/b.txt"), "nested payload").unwrap();
+
+        let fs = LocalFs::new("test");
+        let items = vec![TransferItem::new(
+            TransferAction::CopyRight,
+            "b.txt".to_string(),
+            false,
+            "def/ghi/b.txt".to_string(),
+        )];
+
+        let result =
+            execute_transfers(&items, &left, &right, FsPair::shared(&fs))
+                .await;
+        assert!(
+            result.is_ok(),
+            "transfer should succeed: {:?}",
+            result.errors
+        );
+        // The full relative path was mirrored onto the target side.
+        assert_eq!(
+            fs_err::read_to_string(right.join("def/ghi/b.txt")).unwrap(),
+            "nested payload"
+        );
+        // The source is untouched by a copy.
+        assert!(left.join("def/ghi/b.txt").exists());
+
+        fs_err::remove_dir_all(&base).ok();
+    }
+
+    #[tokio::test]
+    async fn execute_move_right_nested_creates_target_dirs() {
+        let base = env::temp_dir()
+            .join(format!("cocomo_transfer_deep_mv_{}", process::id()));
+        let _ = fs_err::remove_dir_all(&base);
+        let left = base.join("abc");
+        let right = base.join("xyz");
+        fs_err::create_dir_all(left.join("def/ghi")).unwrap();
+        fs_err::create_dir_all(&right).unwrap();
+        fs_err::write(left.join("def/ghi/b.txt"), "payload").unwrap();
+
+        let fs = LocalFs::new("test");
+        let items = vec![TransferItem::new(
+            TransferAction::MoveRight,
+            "b.txt".to_string(),
+            false,
+            "def/ghi/b.txt".to_string(),
+        )];
+
+        let result =
+            execute_transfers(&items, &left, &right, FsPair::shared(&fs))
+                .await;
+        assert!(
+            result.is_ok(),
+            "transfer should succeed: {:?}",
+            result.errors
+        );
+        assert_eq!(
+            fs_err::read_to_string(right.join("def/ghi/b.txt")).unwrap(),
+            "payload"
+        );
+        assert!(!left.join("def/ghi/b.txt").exists());
+
+        fs_err::remove_dir_all(&base).ok();
+    }
+
+    #[tokio::test]
+    async fn execute_copy_right_nested_directory() {
+        // A nested *directory* transfer creates the ancestors of the entry
+        // itself but keeps the entry's own name as the leaf.
+        let base = env::temp_dir()
+            .join(format!("cocomo_transfer_deepdir_{}", process::id()));
+        let _ = fs_err::remove_dir_all(&base);
+        let left = base.join("abc");
+        let right = base.join("xyz");
+        fs_err::create_dir_all(left.join("def/ghi")).unwrap();
+        fs_err::write(left.join("def/ghi/c.txt"), "charlie").unwrap();
+        fs_err::create_dir_all(&right).unwrap();
+
+        let fs = LocalFs::new("test");
+        let items = vec![TransferItem::new(
+            TransferAction::CopyRight,
+            "ghi".to_string(),
+            true,
+            "def/ghi".to_string(),
+        )];
+
+        let result =
+            execute_transfers(&items, &left, &right, FsPair::shared(&fs))
+                .await;
+        assert!(
+            result.is_ok(),
+            "transfer should succeed: {:?}",
+            result.errors
+        );
+        assert_eq!(
+            fs_err::read_to_string(right.join("def/ghi/c.txt")).unwrap(),
+            "charlie"
+        );
+
+        fs_err::remove_dir_all(&base).ok();
+    }
+
+    #[tokio::test]
+    async fn execute_copy_right_beyond_one_chunk() {
+        let (left, right) = make_test_dirs();
+        let fs = LocalFs::new("test");
+
+        // Content larger than the stream chunk size, so the copy streams
+        // several chunks into the destination.
+        let content = vec![0xA5u8; 100 * 1024];
+        fs_err::write(left.join("big.bin"), &content).unwrap();
+
+        let items = vec![TransferItem::new(
+            TransferAction::CopyRight,
+            "big.bin".to_string(),
+            false,
+            "big.bin".to_string(),
+        )];
+
+        let result =
+            execute_transfers(&items, &left, &right, FsPair::shared(&fs))
+                .await;
+
+        assert!(
+            result.is_ok(),
+            "transfer should succeed: {:?}",
+            result.errors
+        );
+        // The destination must hold the full source content, not just the
+        // last chunk.
+        assert_eq!(fs_err::read(right.join("big.bin")).unwrap(), content);
+
+        // The cached node metadata the comparison displays must show the
+        // copied size, not the zero bytes of the freshly created file.
+        let right_id = fs.resolve_path(&right.join("big.bin")).await.unwrap();
+        assert_eq!(
+            fs.node_metadata(right_id).unwrap().size,
+            content.len() as u64
+        );
+
+        fs_err::remove_dir_all(left.parent().unwrap()).ok();
+    }
+
+    #[tokio::test]
     async fn execute_delete_left() {
         let (left, right) = make_test_dirs();
         let fs = LocalFs::new("test");
@@ -1061,7 +1257,7 @@ mod tests {
             TransferAction::DeleteLeft,
             "left_only.txt".to_string(),
             false,
-            left.join("left_only.txt").to_string_lossy().into_owned(),
+            "left_only.txt".to_string(),
         )];
 
         let result =
@@ -1080,6 +1276,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn execute_delete_left_nested() {
+        let base = env::temp_dir()
+            .join(format!("cocomo_transfer_deepdel_{}", process::id()));
+        let _ = fs_err::remove_dir_all(&base);
+        let left = base.join("left");
+        fs_err::create_dir_all(left.join("def/ghi")).unwrap();
+        fs_err::write(left.join("def/ghi/b.txt"), "payload").unwrap();
+
+        let fs = LocalFs::new("test");
+        let items = vec![TransferItem::new(
+            TransferAction::DeleteLeft,
+            "b.txt".to_string(),
+            false,
+            "def/ghi/b.txt".to_string(),
+        )];
+
+        let result =
+            execute_transfers(&items, &left, &left, FsPair::shared(&fs)).await;
+        assert!(result.is_ok(), "delete should succeed: {:?}", result.errors);
+        assert!(!left.join("def/ghi/b.txt").exists());
+
+        fs_err::remove_dir_all(&base).ok();
+    }
+
+    #[tokio::test]
     async fn execute_copy_directory() {
         let (left, right) = make_nested_dirs();
         let fs = LocalFs::new("test");
@@ -1089,7 +1310,7 @@ mod tests {
             TransferAction::CopyRight,
             "subdir".to_string(),
             true,
-            left.join("subdir").to_string_lossy().into_owned(),
+            "subdir".to_string(),
         )];
 
         let result =
@@ -1120,7 +1341,7 @@ mod tests {
             TransferAction::DeleteLeft,
             "nonexistent.txt".to_string(),
             false,
-            base.join("nonexistent.txt").to_string_lossy().into_owned(),
+            "nonexistent.txt".to_string(),
         )];
 
         let result =
@@ -1185,7 +1406,7 @@ mod tests {
             TransferAction::CopyRight,
             "left_only.txt".to_string(),
             false,
-            left.join("left_only.txt").to_string_lossy().into_owned(),
+            "left_only.txt".to_string(),
         )];
 
         let result = execute_transfers(
@@ -1223,7 +1444,7 @@ mod tests {
             TransferAction::DeleteLeft,
             "left_only.txt".to_string(),
             false,
-            left.join("left_only.txt").to_string_lossy().into_owned(),
+            "left_only.txt".to_string(),
         )];
 
         let result = execute_transfers(
@@ -1254,7 +1475,7 @@ mod tests {
             TransferAction::CopyRight,
             "tree".to_string(),
             true,
-            "/src/tree".to_string(),
+            "tree".to_string(),
         )];
 
         let result = execute_transfers(
@@ -1276,6 +1497,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn execute_separate_pair_copy_nested_creates_target_dirs() {
+        // Cross-boundary variant: the destination side lacks the whole
+        // nesting of the transferred entry.
+        let src = MockFs::new("src")
+            .with_dir("/src")
+            .with_file("/src/def/ghi/b.txt", "bravo");
+        let dst = MockFs::new("dst").with_dir("/dst");
+
+        let items = vec![TransferItem::new(
+            TransferAction::CopyRight,
+            "b.txt".to_string(),
+            false,
+            "def/ghi/b.txt".to_string(),
+        )];
+
+        let result = execute_transfers(
+            &items,
+            Path::new("/src"),
+            Path::new("/dst"),
+            FsPair::Separate(&src, &dst),
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "transfer should succeed: {:?}",
+            result.errors
+        );
+        assert_eq!(mock_content(&dst, "/dst/def/ghi/b.txt").await, b"bravo");
+    }
+
+    #[tokio::test]
     async fn execute_separate_pair_move_cross() {
         let src = MockFs::new("src")
             .with_dir("/src")
@@ -1286,7 +1539,7 @@ mod tests {
             TransferAction::MoveRight,
             "moved.txt".to_string(),
             false,
-            "/src/moved.txt".to_string(),
+            "moved.txt".to_string(),
         )];
 
         let result = execute_transfers(
@@ -1330,7 +1583,7 @@ mod tests {
             TransferAction::CopyRight,
             "broken.txt".to_string(),
             false,
-            "/src/broken.txt".to_string(),
+            "broken.txt".to_string(),
         )];
 
         let result = execute_transfers(
@@ -1372,7 +1625,7 @@ mod tests {
             TransferAction::CopyRight,
             "tree".to_string(),
             true,
-            "/src/tree".to_string(),
+            "tree".to_string(),
         )];
 
         let result = execute_transfers(
@@ -1407,7 +1660,7 @@ mod tests {
             TransferAction::MoveRight,
             "moved.txt".to_string(),
             false,
-            "/src/moved.txt".to_string(),
+            "moved.txt".to_string(),
         )];
 
         let result = execute_transfers(
@@ -1442,7 +1695,7 @@ mod tests {
             TransferAction::CopyRight,
             "hetero.txt".to_string(),
             false,
-            "/src/hetero.txt".to_string(),
+            "hetero.txt".to_string(),
         )];
 
         let result = execute_transfers(

@@ -180,17 +180,12 @@ impl LocalFs {
         self.next_id.fetch_add(1, Ordering::Relaxed)
     }
 
-    /// Build a [`Node`] from OS metadata.
-    fn build_node(
-        path: &Path,
-        meta: &fs::Metadata,
-        parent_id: Option<u64>,
-    ) -> Node {
-        let name = path.file_name().map(OsString::from).unwrap_or_default();
+    /// Build crate [`Metadata`] from OS metadata.
+    fn os_metadata(meta: &fs::Metadata) -> Metadata {
         let (ino, dev) = platform_ids(meta);
         let perms = platform_permissions(meta);
         let created = meta.created().ok().map(DateTime::<Utc>::from);
-        let metadata = Metadata {
+        Metadata {
             size: meta.len(),
             created,
             modified: to_utc(meta.modified().ok()),
@@ -199,7 +194,30 @@ impl LocalFs {
             inode: Some(ino),
             device_id: Some(dev),
             permissions: perms,
-        };
+        }
+    }
+
+    /// Refresh the cached metadata of a node from a fresh stat of its
+    /// path.
+    ///
+    /// [`Self::cache_node`] never replaces a cached node, so a mutating
+    /// operation that does not update the cache leaves scans reading the
+    /// pre-write metadata (e.g. a copied file reported as 0 bytes).
+    fn refresh_cached_metadata(&self, id: u64, meta: &fs::Metadata) {
+        let metadata = Self::os_metadata(meta);
+        if let Some(arc) = self.nodes.write().get_mut(&id) {
+            Arc::make_mut(arc).set_metadata(metadata);
+        }
+    }
+
+    /// Build a [`Node`] from OS metadata.
+    fn build_node(
+        path: &Path,
+        meta: &fs::Metadata,
+        parent_id: Option<u64>,
+    ) -> Node {
+        let name = path.file_name().map(OsString::from).unwrap_or_default();
+        let metadata = Self::os_metadata(meta);
 
         if meta.file_type().is_symlink() {
             let target_path = fs::read_link(path).unwrap_or_else(|_| {
@@ -997,7 +1015,14 @@ impl WritableFileSystem for LocalFs {
     ) -> Result<()> {
         let node = self.get_node(id.as_node_id())?;
         // Delegate to path-based write.
-        self.write(node.path(), data).await
+        self.write(node.path(), data).await?;
+        // Re-stat and refresh the cached node so subsequent scans observe
+        // the written size and modification time.
+        let meta = fs_err::symlink_metadata(node.path()).map_err(|e| {
+            wrap(e, FsOperation::Resolve, node.path().to_path_buf())
+        })?;
+        self.refresh_cached_metadata(*id.get(), &meta);
+        Ok(())
     }
 
     async fn flush_node(&self, id: FileId<Self::Nid>) -> Result<()> {
@@ -1251,7 +1276,7 @@ async fn copy_dir_all(src: &Path, dst: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::{env, process};
+    use std::{env, ffi::OsStr, process};
 
     use super::*;
 
@@ -1289,6 +1314,36 @@ mod tests {
 
         let content = fs.read(&path, None).await.unwrap();
         assert_eq!(content, data);
+
+        fs_err::remove_dir_all(&base).ok();
+    }
+
+    #[tokio::test]
+    async fn write_node_refreshes_cached_node_metadata() {
+        let base = temp_dir().join("write_node_meta");
+        let _ = fs_err::remove_dir_all(&base);
+        fs_err::create_dir_all(&base).unwrap();
+
+        let fs = LocalFs::new("test");
+        let dir_id = fs.resolve_path(&base).await.unwrap();
+        let file_id = fs
+            .create_file(DirId::new(*dir_id.get()), OsStr::new("copied.txt"))
+            .await
+            .unwrap();
+
+        // A freshly created file is cached with a size of zero.
+        assert_eq!(fs.node_metadata(file_id.as_node_id()).unwrap().size, 0);
+
+        // Writing through the node API must refresh the cached node: the
+        // comparison layer reads size and mtime from the cache, which
+        // `cache_node` never replaces.
+        let data = Bytes::from_static(b"1234567890");
+        fs.write_node(file_id, data.clone()).await.unwrap();
+        assert_eq!(
+            fs.node_metadata(file_id.as_node_id()).unwrap().size,
+            data.len() as u64
+        );
+        assert_eq!(fs.read_node(file_id, None).await.unwrap(), data);
 
         fs_err::remove_dir_all(&base).ok();
     }
