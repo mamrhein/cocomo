@@ -46,10 +46,10 @@ use crate::{
         CopyToLeft, CopyToOtherSide, CopyToRight, DeleteLeftSide,
         DeleteRightSide, ExchangeEntry, ExcludeEntry, MoveToFolder,
         MoveToLeft, MoveToRight, NewFolder, OpenDirDiff, OpenFileDiff,
-        QuickCompare, RefreshSelection, RenameEntry, RevealInExplorer,
-        SetBaseBoth, SetBaseLeft, SetBaseRight, SetSidePath, ShowAttributes,
-        SyncMirrorLeft, SyncMirrorRight, SyncUpdateBoth, SyncUpdateLeft,
-        SyncUpdateRight, ToggleIgnored, TouchEntry,
+        OpenMerge, QuickCompare, RefreshSelection, RenameEntry,
+        RevealInExplorer, SetBaseBoth, SetBaseLeft, SetBaseRight, SetSidePath,
+        ShowAttributes, SyncMirrorLeft, SyncMirrorRight, SyncUpdateBoth,
+        SyncUpdateLeft, SyncUpdateRight, ToggleIgnored, TouchEntry,
     },
 };
 
@@ -654,7 +654,19 @@ fn build_row_menu(
         && row.status != DirEntryStatus::SameBinary;
     let mut menu = menu
         .menu("Open", row.open_action())
-        .menu("Quick Compare", Box::new(QuickCompare))
+        .menu("Quick Compare", Box::new(QuickCompare));
+    // A file present on both sides can be merged (two-way: a folder
+    // comparison has no ancestor to offer).
+    if !row.is_dir && row.has_left && row.has_right {
+        menu = menu.menu(
+            "Merge…",
+            Box::new(OpenMerge {
+                left_path: row.left_endpoint.clone(),
+                right_path: row.right_endpoint.clone(),
+            }),
+        );
+    }
+    let mut menu = menu
         .submenu("Compare Contents", window, cx, |menu: PopupMenu, _, _| {
             menu.menu("By content (hash)", Box::new(CompareContentsHash))
                 .menu("By size & date", Box::new(CompareContentsMeta))

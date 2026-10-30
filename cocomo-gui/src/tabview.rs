@@ -38,6 +38,7 @@ use crate::{
     session_manager::GuiSessionManager,
     state::AppState,
     text_diff::{TextDiffSession, TextDiffView},
+    text_merge::{MergeSession, MergeView},
     ui::FolderCompareView,
 };
 
@@ -77,6 +78,13 @@ impl TabEntity {
         }
     }
 
+    /// Create from a text merge view.
+    pub fn from_text_merge(view: Entity<MergeView>) -> Self {
+        Self {
+            inner: Box::new(MergeTabEntity(view)),
+        }
+    }
+
     /// Create from a home view.
     pub fn from_home(view: Entity<HomeView>) -> Self {
         Self {
@@ -112,6 +120,14 @@ impl TabEntity {
         self.inner.text_state(cx)
     }
 
+    /// Return the text-merge session, if this tab is a text merge.
+    ///
+    /// The window root uses this to sync the merge menu state to the
+    /// active tab; other tabs return `None`.
+    pub fn merge_state(&self, cx: &App) -> Option<Entity<MergeSession>> {
+        self.inner.merge_state(cx)
+    }
+
     /// Render this tab's toolbar row 2, or `None` when the view has no
     /// view-specific controls.
     pub fn view_toolbar(
@@ -143,6 +159,9 @@ trait TabEntityInner: Any + Send + Sync {
     fn any_view(&self) -> AnyView;
     fn folder_state(&self, cx: &App) -> Option<Entity<AppState>>;
     fn text_state(&self, _cx: &App) -> Option<Entity<TextDiffSession>> {
+        None
+    }
+    fn merge_state(&self, _cx: &App) -> Option<Entity<MergeSession>> {
         None
     }
     fn view_toolbar(
@@ -252,6 +271,46 @@ impl TabEntityInner for TextDiffTabEntity {
 }
 
 struct HomeTabEntity(Entity<HomeView>);
+
+struct MergeTabEntity(Entity<MergeView>);
+
+impl TabEntityInner for MergeTabEntity {
+    fn focus_handle(&self, cx: &App) -> FocusHandle {
+        self.0.read(cx).focus_handle(cx)
+    }
+
+    fn any_view(&self) -> AnyView {
+        self.0.clone().into()
+    }
+
+    fn folder_state(&self, _: &App) -> Option<Entity<AppState>> {
+        None
+    }
+
+    fn merge_state(&self, cx: &App) -> Option<Entity<MergeSession>> {
+        Some(self.0.read(cx).merge_state())
+    }
+
+    fn view_toolbar(
+        &self,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<AnyElement> {
+        Some(
+            self.0
+                .update(cx, |view, cx| view.render_view_toolbar(window, cx))
+                .into_any_element(),
+        )
+    }
+
+    fn window_title(&self, cx: &App) -> SharedString {
+        format!("Cocomo — Text Merge — {}", self.0.read(cx).title(cx)).into()
+    }
+
+    fn clone_inner(&self) -> Box<dyn TabEntityInner> {
+        Box::new(MergeTabEntity(self.0.clone()))
+    }
+}
 
 impl TabEntityInner for HomeTabEntity {
     fn focus_handle(&self, cx: &App) -> FocusHandle {
@@ -488,6 +547,10 @@ impl Render for WindowRoot {
         // and thumbnail toggles re-evaluate the menu snapshot.
         let text_state =
             active_tab.as_ref().and_then(|tab| tab.text_state(cx));
+        // Reading the merge state registers the dependency, so take and
+        // wrap toggles re-evaluate the menu snapshot.
+        let merge_state =
+            active_tab.as_ref().and_then(|tab| tab.merge_state(cx));
         let menu_state = folder_state
             .as_ref()
             .map(|state| {
@@ -496,6 +559,7 @@ impl Render for WindowRoot {
                 MenuState {
                     is_folder: true,
                     is_text: false,
+                    is_merge: false,
                     word_wrap: false,
                     show_thumbnails: false,
                     is_home: active_tab
@@ -520,6 +584,9 @@ impl Render for WindowRoot {
                     is_text_editing: false,
                     can_save_file: false,
                     detail_mode: Default::default(),
+                    show_ancestor: false,
+                    merge_can_take: false,
+                    merge_has_ancestor: false,
                 }
             })
             .or_else(|| {
@@ -532,6 +599,23 @@ impl Render for WindowRoot {
                         is_text_editing: state.is_editing(),
                         can_save_file: state.can_save(),
                         detail_mode: state.detail_mode(),
+                        is_home: active_tab
+                            .as_ref()
+                            .is_some_and(TabEntity::is_home),
+                        log_open: cx.global::<LogPaneOpen>().0,
+                        ..MenuState::empty()
+                    }
+                })
+            })
+            .or_else(|| {
+                merge_state.as_ref().map(|state| {
+                    let state = state.read(cx);
+                    MenuState {
+                        is_merge: true,
+                        word_wrap: state.is_word_wrap(),
+                        show_ancestor: state.show_ancestor(),
+                        merge_can_take: state.can_take(),
+                        merge_has_ancestor: state.has_ancestor(),
                         is_home: active_tab
                             .as_ref()
                             .is_some_and(TabEntity::is_home),

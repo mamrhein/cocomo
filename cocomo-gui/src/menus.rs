@@ -46,6 +46,7 @@ use crate::{
         DetailMode, InsertLineAfter, InsertLineBefore, SelectSection,
         SetDetailMode,
     },
+    text_merge::{SaveMergeOutput, TakeAncestor, TakeLeft, TakeRight},
     ui::{
         CopyToLeft, CopyToRight, DeleteLeftSide, DeleteRightSide, GoBack,
         GoForward, MoveToLeft, MoveToRight, NextDifference, PrevDifference,
@@ -79,6 +80,7 @@ actions!(
         ClearSession,
         SessionReport,
         SessionInfo,
+        MergeFiles,
         OpenFile,
         OpenClipboard,
         OpenWithAssociatedApp,
@@ -93,6 +95,7 @@ actions!(
         ShowDetails,
         ShowThumbnails,
         ShowPanels,
+        ToggleMergeAncestor,
         LayoutSideBySide,
         LayoutOverUnder,
         Options,
@@ -139,6 +142,9 @@ pub struct MenuState {
     /// Whether the active tab is a text compare (enables the text-only
     /// commands: report, info, sections, wrap, thumbnails).
     pub is_text: bool,
+    /// Whether the active tab is a text merge (enables the merge
+    /// commands: take, save output, ancestor pane).
+    pub is_merge: bool,
     /// Whether the active tab is the Home start screen (hides the
     /// view-specific menus, which have nothing to act on).
     pub is_home: bool,
@@ -176,6 +182,13 @@ pub struct MenuState {
     /// Which detail panes the active text compare shows (checkmarks on
     /// the View menu).
     pub detail_mode: DetailMode,
+    /// Whether the active text merge shows its ancestor pane (checkmark
+    /// on the View toggle).
+    pub show_ancestor: bool,
+    /// Whether the active text merge can run a take command.
+    pub merge_can_take: bool,
+    /// Whether the active text merge has an ancestor (three-way).
+    pub merge_has_ancestor: bool,
 }
 
 impl MenuState {
@@ -184,6 +197,7 @@ impl MenuState {
         Self {
             is_folder: false,
             is_text: false,
+            is_merge: false,
             is_home: false,
             loading: false,
             can_copy_left: false,
@@ -200,6 +214,9 @@ impl MenuState {
             is_text_editing: false,
             can_save_file: false,
             detail_mode: DetailMode::default(),
+            show_ancestor: false,
+            merge_can_take: false,
+            merge_has_ancestor: false,
         }
     }
 }
@@ -237,6 +254,12 @@ fn build_app_menus(state: MenuState) -> Vec<Menu> {
             MenuItem::action("Report…", SessionReport)
                 .disabled(!state.is_text),
             MenuItem::action("Info…", SessionInfo).disabled(!state.is_text),
+            MenuItem::separator(),
+            // Merging needs a text compare tab to seed left and right;
+            // the ancestor stays empty until three-file merges arrive from
+            // the Home card or a folder merge.
+            MenuItem::action("Merge files…", MergeFiles)
+                .disabled(!state.is_text),
         ]),
         Menu::new("File").items([
             MenuItem::action("New compare…", NewCompare),
@@ -380,6 +403,21 @@ fn build_app_menus(state: MenuState) -> Vec<Menu> {
                     CopyFileLeftNext,
                 )
                 .disabled(!state.is_text),
+                MenuItem::separator(),
+                // Merge commands act on the focused merge view's selected
+                // section; the ancestor command needs a three-way merge.
+                MenuItem::action("Take left", TakeLeft)
+                    .disabled(!(state.is_merge && state.merge_can_take)),
+                MenuItem::action("Take right", TakeRight)
+                    .disabled(!(state.is_merge && state.merge_can_take)),
+                MenuItem::action("Take ancestor", TakeAncestor).disabled(
+                    !(state.is_merge
+                        && state.merge_can_take
+                        && state.merge_has_ancestor),
+                ),
+                MenuItem::separator(),
+                MenuItem::action("Save merge output…", SaveMergeOutput)
+                    .disabled(!state.is_merge),
             ]),
             Menu::new("Search").items([
                 MenuItem::action("Next difference", NextDifference)
@@ -401,11 +439,14 @@ fn build_app_menus(state: MenuState) -> Vec<Menu> {
 
     menus.extend([
         Menu::new("View").items([
-            // Word wrap and thumbnails are text-compare-only; the focused
-            // text view handles the actions.
+            // Word wrap and thumbnails are text-view-only; the focused
+            // text or merge view handles the actions.
             MenuItem::action("Word wrap", ToggleWordWrap)
-                .disabled(!state.is_text)
+                .disabled(!(state.is_text || state.is_merge))
                 .checked(state.word_wrap),
+            MenuItem::action("Show ancestor pane", ToggleMergeAncestor)
+                .disabled(!state.is_merge)
+                .checked(state.show_ancestor),
             MenuItem::separator(),
             // Detail pane modes are text-compare-only; the focused text
             // view handles the actions.
@@ -729,6 +770,22 @@ pub fn register_menu_handlers(
         };
         let side = session.read(cx).focus_side();
         session.update(cx, |s, cx| s.save_side(side, true, cx));
+    });
+
+    // Session menu — merge the active text compare's pair in a new merge
+    // tab (two-way: no ancestor is known from a plain comparison).
+    let mgr_merge = session_manager.clone();
+    cx.on_action(move |_action: &MergeFiles, cx: &mut App| {
+        let Some(session) = mgr_merge.read(cx).active_text_session(cx) else {
+            return;
+        };
+        let (left, right) = {
+            let session = session.read(cx);
+            (session.left_endpoint(), session.right_endpoint())
+        };
+        mgr_merge.update(cx, |m, cx| {
+            m.add_text_merge_tab(left, right, None, cx);
+        });
     });
 
     // Session menu and toolbar Rules button — the session-rules dialog,

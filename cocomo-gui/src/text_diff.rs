@@ -171,7 +171,7 @@ fn split_any_line(text: &str) -> Vec<&str> {
 
 /// Rewrite line endings to one convention, preserving whether the text
 /// ends with a newline.
-fn normalize_endings(text: &str, ending: LineEnding) -> String {
+pub(crate) fn normalize_endings(text: &str, ending: LineEnding) -> String {
     let sep = match ending {
         LineEnding::Crlf => "\r\n",
         LineEnding::Cr => "\r",
@@ -225,7 +225,7 @@ fn convert_text(text: &str, op: ConvertOp) -> String {
 }
 
 /// Encode edited text for writing back to disk.
-fn encode_text(
+pub(crate) fn encode_text(
     text: &str,
     ending: LineEnding,
     encoding: TextEncoding,
@@ -811,7 +811,7 @@ pub(crate) fn thumbnail_runs(
 ///
 /// UTF-8 is lossy so undecodable bytes never abort a comparison; ANSI is
 /// treated as Latin-1, which maps bytes 1:1 onto the first Unicode plane.
-fn decode_bytes(bytes: &[u8], encoding: TextEncoding) -> String {
+pub(crate) fn decode_bytes(bytes: &[u8], encoding: TextEncoding) -> String {
     match encoding {
         TextEncoding::Latin1 => bytes.iter().map(|&b| char::from(b)).collect(),
         _ => String::from_utf8_lossy(bytes).into_owned(),
@@ -1149,6 +1149,16 @@ impl TextDiffSession {
     /// Return the tab title.
     pub fn title(&self) -> &SharedString {
         &self.title
+    }
+
+    /// The left file endpoint.
+    pub fn left_endpoint(&self) -> Endpoint {
+        self.left.clone()
+    }
+
+    /// The right file endpoint.
+    pub fn right_endpoint(&self) -> Endpoint {
+        self.right.clone()
     }
 
     /// Whether a load is in flight.

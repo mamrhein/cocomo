@@ -111,6 +111,64 @@ fn prompt_text_compare_pair(mgr: Entity<GuiSessionManager>, cx: &mut App) {
     .detach();
 }
 
+/// Ask for a left, right, and ancestor file in sequence, then open a
+/// Text Merge tab.
+///
+/// Cancelling the left or right prompt abandons the flow; cancelling the
+/// ancestor prompt opens a two-way merge instead, as the dialog text
+/// announces.
+fn prompt_text_merge_triple(mgr: Entity<GuiSessionManager>, cx: &mut App) {
+    let options = |prompt: &'static str| PathPromptOptions {
+        files: true,
+        directories: false,
+        multiple: false,
+        prompt: Some(prompt.into()),
+    };
+    let left_receiver = cx.prompt_for_paths(options("Choose the left file"));
+    cx.spawn(move |cx: &mut AsyncApp| {
+        let cx = cx.clone();
+        async move {
+            let Ok(Ok(Some(paths))) = left_receiver.await else {
+                return;
+            };
+            let Some(left) = paths.into_iter().next() else {
+                return;
+            };
+            let right_receiver = cx.update(|cx| {
+                cx.prompt_for_paths(options("Choose the right file"))
+            });
+            let Ok(Ok(Some(paths))) = right_receiver.await else {
+                return;
+            };
+            let Some(right) = paths.into_iter().next() else {
+                return;
+            };
+            let ancestor_receiver = cx.update(|cx| {
+                cx.prompt_for_paths(options(
+                    "Choose the ancestor file (Cancel for a two-way merge)",
+                ))
+            });
+            let ancestor = match ancestor_receiver.await {
+                Ok(Ok(Some(paths))) => {
+                    paths.into_iter().next().map(Endpoint::local)
+                }
+                _ => None,
+            };
+            cx.update(|cx| {
+                mgr.update(cx, |m, cx| {
+                    m.add_text_merge_tab(
+                        Endpoint::local(left),
+                        Endpoint::local(right),
+                        ancestor,
+                        cx,
+                    );
+                });
+            });
+        }
+    })
+    .detach();
+}
+
 // ---------------------------------------------------------------------------
 // Launcher cards
 // ---------------------------------------------------------------------------
@@ -143,6 +201,11 @@ fn session_card(
         let mgr = session_manager.clone();
         button.on_click(move |_, _, cx| {
             prompt_text_compare_pair(mgr.clone(), cx);
+        })
+    } else if drop_kind == Some(SessionType::TextMerge) {
+        let mgr = session_manager.clone();
+        button.on_click(move |_, _, cx| {
+            prompt_text_merge_triple(mgr.clone(), cx);
         })
     } else {
         let mgr = session_manager.clone();
@@ -659,8 +722,8 @@ impl Render for HomeView {
                 "text-merge",
                 IconName::Merge,
                 "Text Merge",
-                None,
-                true,
+                Some(SessionType::TextMerge),
+                false,
                 mgr.clone(),
                 cx,
             ))

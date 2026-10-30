@@ -352,6 +352,58 @@ impl GuiSessionManager {
         cx.notify();
     }
 
+    /// Add a text merge tab for the given file endpoints and make it
+    /// active. `ancestor` is the common base for a three-way merge; `None`
+    /// runs a two-way merge where any difference is a conflict.
+    pub fn add_text_merge_tab(
+        &mut self,
+        left: Endpoint,
+        right: Endpoint,
+        ancestor: Option<Endpoint>,
+        cx: &mut Context<Self>,
+    ) {
+        let mgr = cx.entity().clone();
+        let view = crate::text_merge::new_text_merge_view(
+            left.clone(),
+            right.clone(),
+            ancestor.clone(),
+            Some(mgr),
+            cx,
+        );
+
+        let config = SessionConfig {
+            name: "text merge".to_string(),
+            session_type: SessionType::TextMerge,
+            left: ProviderRef {
+                provider: left.provider_ref(),
+                path: left.path().to_path_buf(),
+            },
+            right: ProviderRef {
+                provider: right.provider_ref(),
+                path: right.path().to_path_buf(),
+            },
+            center: ancestor.map(|a| ProviderRef {
+                provider: a.provider_ref(),
+                path: a.path().to_path_buf(),
+            }),
+            settings: SessionSettings::default(),
+        };
+
+        let tab_entity = TabEntity::from_text_merge(view);
+
+        self.record_history(config.clone(), cx);
+        let session = OpenSession {
+            tab_id: self.next_tab_id,
+            config,
+            dirty: false,
+            tab_entity,
+        };
+        self.next_tab_id += 1;
+        self.open_sessions.push(session);
+        self.active_index = self.open_sessions.len() - 1;
+        cx.notify();
+    }
+
     /// Add a text diff tab over two in-memory texts ("compare selection
     /// to clipboard") and make it active.
     pub fn add_text_diff_tab_from_texts(
@@ -413,6 +465,16 @@ impl GuiSessionManager {
         self.open_sessions
             .get(self.active_index)
             .and_then(|s| s.tab_entity.folder_state(cx))
+    }
+
+    /// The active tab's text merge session, if it is one.
+    pub fn active_merge_session(
+        &self,
+        cx: &gpui::App,
+    ) -> Option<gpui::Entity<crate::text_merge::MergeSession>> {
+        self.open_sessions
+            .get(self.active_index)
+            .and_then(|s| s.tab_entity.merge_state(cx))
     }
 
     /// Open a directory compare in a new tab.
@@ -497,8 +559,8 @@ impl GuiSessionManager {
 
     /// Open a tab for a saved session, dispatching on its session type.
     ///
-    /// Text-compare configs open the text diff view; everything else
-    /// currently opens as a folder compare.
+    /// Text-compare and text-merge configs open their respective views;
+    /// everything else currently opens as a folder compare.
     pub fn open_saved(
         &mut self,
         config: SessionConfig,
@@ -531,14 +593,59 @@ impl GuiSessionManager {
             self.add_text_diff_tab(left, right, None, cx);
             return Ok(());
         }
+        if config.session_type == SessionType::TextMerge {
+            let prompter = NullPrompter;
+            let left = Endpoint::from_ref(
+                &config.left.provider,
+                config.left.path.clone(),
+                &prompter,
+            )
+            .with_context(|| {
+                format!(
+                    "failed to resolve left endpoint: {}",
+                    config.left.path.display()
+                )
+            })?;
+            let right = Endpoint::from_ref(
+                &config.right.provider,
+                config.right.path.clone(),
+                &prompter,
+            )
+            .with_context(|| {
+                format!(
+                    "failed to resolve right endpoint: {}",
+                    config.right.path.display()
+                )
+            })?;
+            let ancestor = config
+                .center
+                .as_ref()
+                .map(|center| {
+                    Endpoint::from_ref(
+                        &center.provider,
+                        center.path.clone(),
+                        &prompter,
+                    )
+                    .with_context(|| {
+                        format!(
+                            "failed to resolve ancestor endpoint: {}",
+                            center.path.display()
+                        )
+                    })
+                })
+                .transpose()?;
+            self.add_text_merge_tab(left, right, ancestor, cx);
+            return Ok(());
+        }
         self.open_session_config(config, cx)
     }
 
     /// Open a session of `kind` from paths dropped onto a Home card.
     ///
-    /// One path is used for both sides, two paths become left and right.
-    /// Dropped items are always local, so the endpoints are built directly
-    /// and validated with a synchronous metadata read.
+    /// One path is used for both sides, two paths become left and right
+    /// (for a merge: left, ancestor, right with three). Dropped items are
+    /// always local, so the endpoints are built directly and validated
+    /// with a synchronous metadata read.
     pub fn start_dropped_session(
         &mut self,
         kind: SessionType,
@@ -546,9 +653,12 @@ impl GuiSessionManager {
         cx: &mut Context<Self>,
     ) {
         match resolve_dropped_paths(kind, paths) {
-            Ok((left, right)) => match kind {
+            Ok((left, ancestor, right)) => match kind {
                 SessionType::TextCompare => {
                     self.add_text_diff_tab(left, right, None, cx);
+                }
+                SessionType::TextMerge => {
+                    self.add_text_merge_tab(left, right, ancestor, cx);
                 }
                 _ => {
                     let config = SessionConfig {
@@ -1329,24 +1439,36 @@ async fn prune_history(dir: &Path) -> Result<()> {
 /// Validate dropped paths for a session kind and build local endpoints.
 ///
 /// One path is used for both sides, two paths become left and right;
-/// anything else is rejected. Folder kinds require directories, text kinds
-/// require files.
+/// a merge accepts two (two-way) or three files (left, ancestor, right).
+/// Folder kinds require directories, text kinds require files.
 fn resolve_dropped_paths(
     kind: SessionType,
     paths: &[PathBuf],
-) -> std::result::Result<(Endpoint, Endpoint), String> {
-    if paths.is_empty() || paths.len() > 2 {
-        return Err(
+) -> std::result::Result<(Endpoint, Option<Endpoint>, Endpoint), String> {
+    let is_merge = kind == SessionType::TextMerge;
+    let min = if is_merge { 2 } else { 1 };
+    let max = if is_merge { 3 } else { 2 };
+    if paths.len() < min || paths.len() > max {
+        return Err(if is_merge {
+            "Drop two or three files onto the card to start a merge.".into()
+        } else {
             "Drop one or two items onto the card to start a session.".into()
-        );
+        });
     }
-    let (left, right) = if paths.len() == 1 {
-        (&paths[0], &paths[0])
+    let (left, ancestor, right) = if is_merge {
+        if paths.len() == 2 {
+            (&paths[0], None, &paths[1])
+        } else {
+            (&paths[0], Some(&paths[1]), &paths[2])
+        }
+    } else if paths.len() == 1 {
+        (&paths[0], None, &paths[0])
     } else {
-        (&paths[0], &paths[1])
+        (&paths[0], None, &paths[1])
     };
-    let want_dir = kind != SessionType::TextCompare;
-    for path in [left, right] {
+    let want_dir =
+        kind != SessionType::TextCompare && kind != SessionType::TextMerge;
+    for path in [Some(left), ancestor, Some(right)].into_iter().flatten() {
         let metadata = fs_err::metadata(path)
             .map_err(|e| format!("Couldn't read {}: {e}", path.display()))?;
         if want_dir && !metadata.is_dir() {
@@ -1358,6 +1480,7 @@ fn resolve_dropped_paths(
     }
     Ok((
         Endpoint::local(left.clone()),
+        ancestor.map(|p| Endpoint::local(p.clone())),
         Endpoint::local(right.clone()),
     ))
 }
@@ -1434,12 +1557,13 @@ mod tests {
     #[test]
     fn dropped_single_directory_serves_both_sides() {
         let dir = tempfile::tempdir().unwrap();
-        let (left, right) = resolve_dropped_paths(
+        let (left, ancestor, right) = resolve_dropped_paths(
             SessionType::DirCompare,
             &[dir.path().to_path_buf()],
         )
         .unwrap();
         assert_eq!(left.path(), dir.path());
+        assert!(ancestor.is_none());
         assert_eq!(right.path(), dir.path());
     }
 
@@ -1450,13 +1574,63 @@ mod tests {
         let right = root.path().join("right");
         fs_err::create_dir(&left).unwrap();
         fs_err::create_dir(&right).unwrap();
-        let (l, r) = resolve_dropped_paths(
+        let (l, ancestor, r) = resolve_dropped_paths(
             SessionType::DirCompare,
             &[left.clone(), right.clone()],
         )
         .unwrap();
         assert_eq!(l.path(), left);
+        assert!(ancestor.is_none());
         assert_eq!(r.path(), right);
+    }
+
+    #[test]
+    fn dropped_merge_pair_has_no_ancestor() {
+        let root = tempfile::tempdir().unwrap();
+        let left = root.path().join("left.txt");
+        let right = root.path().join("right.txt");
+        fs_err::write(&left, b"a").unwrap();
+        fs_err::write(&right, b"b").unwrap();
+        let (l, ancestor, r) = resolve_dropped_paths(
+            SessionType::TextMerge,
+            &[left.clone(), right.clone()],
+        )
+        .unwrap();
+        assert_eq!(l.path(), left);
+        assert!(ancestor.is_none());
+        assert_eq!(r.path(), right);
+    }
+
+    #[test]
+    fn dropped_merge_triple_places_the_ancestor_in_the_middle() {
+        let root = tempfile::tempdir().unwrap();
+        let left = root.path().join("left.txt");
+        let ancestor_file = root.path().join("base.txt");
+        let right = root.path().join("right.txt");
+        fs_err::write(&left, b"a").unwrap();
+        fs_err::write(&ancestor_file, b"a").unwrap();
+        fs_err::write(&right, b"a").unwrap();
+        let (l, ancestor, r) = resolve_dropped_paths(
+            SessionType::TextMerge,
+            &[left.clone(), ancestor_file.clone(), right.clone()],
+        )
+        .unwrap();
+        assert_eq!(l.path(), left);
+        assert_eq!(ancestor.expect("ancestor").path(), ancestor_file);
+        assert_eq!(r.path(), right);
+    }
+
+    #[test]
+    fn dropped_single_file_is_rejected_for_merges() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("f.txt");
+        fs_err::write(&file, b"x").unwrap();
+        let err = resolve_dropped_paths(
+            SessionType::TextMerge,
+            std::slice::from_ref(&file),
+        )
+        .unwrap_err();
+        assert!(err.contains("two or three"), "unexpected error: {err}");
     }
 
     #[test]

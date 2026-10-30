@@ -70,6 +70,7 @@ pub mod hash;
 pub mod human;
 pub mod identity;
 pub mod local;
+pub mod merge;
 pub mod meta;
 pub mod mockfs;
 pub mod node;
@@ -112,6 +113,7 @@ pub use hash::{
 pub use human::{format_date, format_size};
 pub use identity::{DirId, FileId, FileSystemId, NodeId};
 pub use local::LocalFs;
+pub use merge::{MergeKind, MergeResult, MergeSection, merge_texts};
 pub use meta::Metadata;
 pub use mockfs::{MockFile, MockFs, MockWritableFile};
 pub use node::{Node, NodeKind, SymlinkTarget, UserPermissions};

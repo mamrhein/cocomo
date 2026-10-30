@@ -122,6 +122,16 @@ pub struct OpenFileDiff {
     pub right_path: Option<Endpoint>,
 }
 
+/// Action to open a two-way text merge for a file pair in a new tab.
+#[derive(Action, Clone, Debug, PartialEq)]
+#[action(namespace = folder_compare, no_json)]
+pub struct OpenMerge {
+    /// Left file endpoint.
+    pub left_path: Endpoint,
+    /// Right file endpoint.
+    pub right_path: Endpoint,
+}
+
 /// Action to open a directory compare in a new tab.
 #[derive(Action, Clone, Debug, PartialEq)]
 #[action(namespace = folder_compare, no_json)]
@@ -640,6 +650,24 @@ impl FolderCompareView {
             mgr.add_dir_diff_tab(
                 action.left_path.clone(),
                 action.right_path.clone(),
+                cx,
+            );
+        });
+    }
+
+    /// Handle OpenMerge: open the pair as a two-way text merge tab (no
+    /// ancestor is known from a folder comparison).
+    fn handle_open_merge(
+        &mut self,
+        action: &OpenMerge,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.session_manager.update(cx, |mgr, cx| {
+            mgr.add_text_merge_tab(
+                action.left_path.clone(),
+                action.right_path.clone(),
+                None,
                 cx,
             );
         });
@@ -1541,6 +1569,7 @@ impl Render for FolderCompareView {
             // File/dir diff actions.
             .on_action(cx.listener(Self::handle_open_file_diff))
             .on_action(cx.listener(Self::handle_open_dir_diff))
+            .on_action(cx.listener(Self::handle_open_merge))
             // Clipboard actions (Edit menu and row context menu).
             .on_action(cx.listener(Self::handle_copy_path_left))
             .on_action(cx.listener(Self::handle_copy_path_right))

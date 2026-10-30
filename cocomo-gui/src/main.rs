@@ -27,6 +27,7 @@ mod session_manager;
 mod state;
 mod tabview;
 mod text_diff;
+mod text_merge;
 mod ui;
 
 use anyhow::Result;
