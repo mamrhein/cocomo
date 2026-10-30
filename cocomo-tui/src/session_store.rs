@@ -55,6 +55,7 @@ pub(crate) fn session_to_config(
             show_same: dir.display.show_same,
             show_different: dir.display.show_different,
             show_orphans: dir.display.show_orphans,
+            ..SessionSettings::default()
         },
     })
 }

@@ -177,6 +177,14 @@ pub struct SessionSettings {
     /// Show orphan entries (exist on one side only).
     #[serde(default = "default_true")]
     pub show_orphans: bool,
+    /// Entry names marked as ignored by the user. Ignored entries stay
+    /// visible in the comparison but are rendered neutral and excluded
+    /// from synchronization planning.
+    #[serde(default)]
+    pub ignored: Vec<String>,
+    /// Optional row color overrides for the comparison views.
+    #[serde(default)]
+    pub color_overrides: ColorOverrides,
 }
 
 impl Default for SessionSettings {
@@ -191,8 +199,33 @@ impl Default for SessionSettings {
             show_same: true,
             show_different: true,
             show_orphans: true,
+            ignored: Vec::new(),
+            color_overrides: ColorOverrides::default(),
         }
     }
+}
+
+/// Per-session row color overrides for the comparison views.
+///
+/// Colors are stored as `#rrggbb` hex strings so session files stay
+/// human-readable; `None` keeps the theme-derived default. This is the
+/// personalization hook of the UI spec (section 7.1): the views resolve
+/// every semantic color role through these overrides before falling
+/// back to the active theme.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ColorOverrides {
+    /// Text color for the newer side of an important content difference.
+    #[serde(default)]
+    pub important: Option<String>,
+    /// Text color for the newer side of a minor difference.
+    #[serde(default)]
+    pub minor: Option<String>,
+    /// Text color for orphan entries.
+    #[serde(default)]
+    pub orphan: Option<String>,
+    /// Text color for the older side of a difference.
+    #[serde(default)]
+    pub other_side: Option<String>,
 }
 
 fn default_true() -> bool {

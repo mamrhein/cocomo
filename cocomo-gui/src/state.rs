@@ -14,7 +14,7 @@
 //! compare directories asynchronously, and the UI observes this entity
 //! for updates.
 
-use std::{cmp::Ordering, sync::Arc, time::Instant};
+use std::{cmp::Ordering, collections::HashSet, sync::Arc, time::Instant};
 
 use cocomo_lib::{
     CancellationToken, CompareConfig, ContentCache, DirComparison, DirEntry,
@@ -25,7 +25,10 @@ use cocomo_lib::{
 };
 use gpui::{App, Context, FocusHandle, SharedString};
 
-use crate::log::{self, LogLevel};
+use crate::{
+    color::Side,
+    log::{self, LogLevel},
+};
 
 // ---------------------------------------------------------------------------
 // Sorting
@@ -35,6 +38,10 @@ use crate::log::{self, LogLevel};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SortKey {
     /// Comparison status (groups identical, different, and orphan entries).
+    ///
+    /// Not offered by the pane headers (which sort by name, size, and
+    /// date), but kept for callers that order by comparison outcome.
+    #[allow(dead_code)]
     Status,
     /// Entry name, case-insensitive.
     Name,
@@ -142,7 +149,7 @@ impl DisplayFilters {
 // Sorting
 // ---------------------------------------------------------------------------
 
-/// Compute the display order (indices into `entries`) for a sort.
+/// Compute the display order (indices into `entries`) for one tree level.
 ///
 /// Entries hidden by `filters` are excluded outright. Missing side values
 /// always sort last regardless of direction, so an orphan never jumps to
@@ -190,6 +197,127 @@ fn compute_display_order(
         ord.then_with(|| name_cmp(&ea.name, &eb.name))
     });
     order
+}
+
+// ---------------------------------------------------------------------------
+// Tree rows
+// ---------------------------------------------------------------------------
+
+/// One visible row of the mirrored tree panes.
+///
+/// The folder view renders the *current subtree*: rows of the root
+/// comparison plus, below every expanded directory, the rows of its
+/// `sub_entries` comparison. Both panes render the same row list, so
+/// mirrored rows align by construction.
+#[derive(Clone, Debug)]
+pub(crate) struct TreeRow {
+    /// Comparison owning the entry; `None` is the root comparison.
+    parent: Option<Arc<DirComparison>>,
+    /// Index of the entry within its owning comparison.
+    entry_index: usize,
+    /// Tree depth (0 for rows of the current comparison root).
+    depth: usize,
+    /// Path of the entry relative to the comparison root.
+    path: String,
+}
+
+impl TreeRow {
+    /// Tree depth of this row (0 at the comparison root).
+    pub(crate) fn depth(&self) -> usize {
+        self.depth
+    }
+
+    /// Path of the entry relative to the comparison root, used as the
+    /// expansion key.
+    pub(crate) fn path(&self) -> &str {
+        &self.path
+    }
+
+    /// A root-level row pointing at `entry_index`, for tests.
+    #[cfg(test)]
+    pub(crate) fn new_for_test(entry_index: usize, path: &str) -> Self {
+        Self {
+            parent: None,
+            entry_index,
+            depth: 0,
+            path: path.to_string(),
+        }
+    }
+}
+
+/// Whether either side of the entry is a directory.
+fn entry_is_dir(entry: &DirEntry) -> bool {
+    entry.left.as_ref().is_some_and(|l| l.is_dir)
+        || entry.right.as_ref().is_some_and(|r| r.is_dir)
+}
+
+/// The expansion key of an entry: its side path relative to the
+/// comparison root, preferring the left side.
+fn entry_tree_path(entry: &DirEntry) -> String {
+    entry
+        .left
+        .as_ref()
+        .map(|l| l.path.clone())
+        .or_else(|| entry.right.as_ref().map(|r| r.path.clone()))
+        .unwrap_or_else(|| entry.name.clone())
+}
+
+/// Sort, filter, and expansion settings shared by every tree level.
+struct TreeWalk<'a> {
+    key: SortKey,
+    descending: bool,
+    filters: &'a DisplayFilters,
+    expanded: &'a HashSet<String>,
+}
+
+/// Flatten the expanded subtree into display rows, depth-first.
+///
+/// Each level is filtered and sorted on its own, so a filter hides
+/// matching rows at every depth and an expanded directory's children
+/// follow the same order rules as their parent level.
+fn compute_tree_rows(
+    comparison: &DirComparison,
+    key: SortKey,
+    descending: bool,
+    filters: &DisplayFilters,
+    expanded: &HashSet<String>,
+) -> Vec<TreeRow> {
+    let walk = TreeWalk {
+        key,
+        descending,
+        filters,
+        expanded,
+    };
+    let mut rows = Vec::new();
+    collect_tree_rows(None, &comparison.entries, 0, &walk, &mut rows);
+    rows
+}
+
+fn collect_tree_rows(
+    parent: Option<&Arc<DirComparison>>,
+    entries: &[DirEntry],
+    depth: usize,
+    walk: &TreeWalk<'_>,
+    rows: &mut Vec<TreeRow>,
+) {
+    for entry_index in
+        compute_display_order(entries, walk.key, walk.descending, walk.filters)
+    {
+        let entry = &entries[entry_index];
+        let path = entry_tree_path(entry);
+        rows.push(TreeRow {
+            parent: parent.cloned(),
+            entry_index,
+            depth,
+            path: path.clone(),
+        });
+        if entry_is_dir(entry)
+            && walk.expanded.contains(&path)
+            && let Some(sub) = &entry.sub_entries
+        {
+            collect_tree_rows(Some(sub), &sub.entries, depth + 1, walk, rows);
+        }
+    }
 }
 
 /// Reverse `ord` when sorting descending.
@@ -324,6 +452,155 @@ pub enum BaseSide {
     Both,
 }
 
+/// A whole-comparison synchronization run offered by the Synchronize
+/// submenu of the row context menu.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SyncKind {
+    /// Bring the right side up to date (copy newer and left-only
+    /// entries to the right); nothing is deleted.
+    UpdateRight,
+    /// Bring the left side up to date; nothing is deleted.
+    UpdateLeft,
+    /// Propagate each side's newer and orphan entries to the other.
+    UpdateBoth,
+    /// Make the right side an exact copy of the left, deleting
+    /// right-side extras.
+    MirrorRight,
+    /// Make the left side an exact copy of the right, deleting
+    /// left-side extras.
+    MirrorLeft,
+}
+
+impl SyncKind {
+    /// Label for the confirmation dialog and the completion notice.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::UpdateRight => "Update right",
+            Self::UpdateLeft => "Update left",
+            Self::UpdateBoth => "Update both",
+            Self::MirrorRight => "Mirror to right",
+            Self::MirrorLeft => "Mirror to left",
+        }
+    }
+
+    /// Whether the run deletes content (mirrors remove the target
+    /// side's extras) and therefore confirms as destructive.
+    pub fn destructive(self) -> bool {
+        matches!(self, Self::MirrorRight | Self::MirrorLeft)
+    }
+}
+
+/// Collect the transfer items a sync run performs over a comparison
+/// tree, walking expanded and collapsed subdirectories alike.
+fn collect_sync_items(
+    comparison: &DirComparison,
+    kind: SyncKind,
+    items: &mut Vec<TransferItem>,
+) {
+    for entry in &comparison.entries {
+        if entry.name_conflict {
+            continue;
+        }
+        let is_dir = entry_is_dir(entry);
+        let differs = !matches!(
+            entry.status,
+            DirEntryStatus::Same | DirEntryStatus::SameBinary
+        );
+        let to_right = matches!(
+            kind,
+            SyncKind::UpdateRight
+                | SyncKind::MirrorRight
+                | SyncKind::UpdateBoth
+        );
+        let to_left = matches!(
+            kind,
+            SyncKind::UpdateLeft | SyncKind::MirrorLeft | SyncKind::UpdateBoth
+        );
+        if to_right {
+            match (&entry.left, &entry.right) {
+                (Some(l), Some(r)) if differs && newer_to_right(l, r) => {
+                    items.push(TransferItem::new(
+                        TransferAction::CopyRight,
+                        entry.name.clone(),
+                        is_dir,
+                        l.path.clone(),
+                    ));
+                }
+                (Some(l), None) => items.push(TransferItem::new(
+                    TransferAction::CopyRight,
+                    entry.name.clone(),
+                    is_dir,
+                    l.path.clone(),
+                )),
+                _ => {}
+            }
+        }
+        if to_left {
+            match (&entry.left, &entry.right) {
+                (Some(l), Some(r)) if differs && !newer_to_right(l, r) => {
+                    items.push(TransferItem::new(
+                        TransferAction::CopyLeft,
+                        entry.name.clone(),
+                        is_dir,
+                        r.path.clone(),
+                    ));
+                }
+                (None, Some(r)) => items.push(TransferItem::new(
+                    TransferAction::CopyLeft,
+                    entry.name.clone(),
+                    is_dir,
+                    r.path.clone(),
+                )),
+                _ => {}
+            }
+        }
+        if kind == SyncKind::MirrorRight
+            && entry.left.is_none()
+            && let Some(r) = &entry.right
+        {
+            items.push(TransferItem::new(
+                TransferAction::DeleteRight,
+                entry.name.clone(),
+                r.is_dir,
+                r.path.clone(),
+            ));
+        }
+        if kind == SyncKind::MirrorLeft
+            && entry.right.is_none()
+            && let Some(l) = &entry.left
+        {
+            items.push(TransferItem::new(
+                TransferAction::DeleteLeft,
+                entry.name.clone(),
+                l.is_dir,
+                l.path.clone(),
+            ));
+        }
+        if let Some(sub) = &entry.sub_entries {
+            collect_sync_items(sub, kind, items);
+        }
+    }
+}
+
+/// Whether the left side of a differing pair is the newer source when
+/// syncing toward the right.
+///
+/// With a determinable newer side, only that direction syncs; without
+/// one (equal or unparseable stamps) the left is taken as the source so
+/// an update run still converges.
+fn newer_to_right(
+    left: &cocomo_lib::EntryInfo,
+    right: &cocomo_lib::EntryInfo,
+) -> bool {
+    match (
+        crate::color::parse_modified(&left.modified),
+        crate::color::parse_modified(&right.modified),
+    ) {
+        (Some(l), Some(r)) => l >= r,
+        _ => true,
+    }
+}
+
 /// A transfer the UI can run on the selected entry, with the labels and
 /// the confirmation requirement derived from the entry's shape.
 #[derive(Clone, Debug, PartialEq)]
@@ -436,11 +713,14 @@ pub struct AppState {
     sort_key: SortKey,
     /// Whether the active sort is descending.
     sort_descending: bool,
-    /// Entry indices in display order (positions into `comparison.entries`).
+    /// Visible tree rows (root entries plus the expanded subtrees).
     ///
-    /// All row access and selection goes through this map so sorting and
-    /// filtering never reorder the underlying comparison data.
-    display_order: Vec<usize>,
+    /// All row access and selection goes through this list so sorting,
+    /// filtering, and expansion never reorder the underlying comparison
+    /// data.
+    tree_rows: Vec<TreeRow>,
+    /// Root-relative paths of the directories expanded in place.
+    expanded: HashSet<String>,
     /// Which entry categories the table displays.
     filters: DisplayFilters,
     /// Selected row index in display order.
@@ -511,7 +791,8 @@ impl AppState {
             comparison: None,
             sort_key: SortKey::Name,
             sort_descending: false,
-            display_order: Vec::new(),
+            tree_rows: Vec::new(),
+            expanded: HashSet::new(),
             filters: DisplayFilters::default(),
             selected_index: 0,
             loading: false,
@@ -550,7 +831,8 @@ impl AppState {
             comparison: None,
             sort_key: SortKey::Name,
             sort_descending: false,
-            display_order: Vec::new(),
+            tree_rows: Vec::new(),
+            expanded: HashSet::new(),
             filters: DisplayFilters::default(),
             selected_index: 0,
             loading: false,
@@ -657,8 +939,22 @@ impl AppState {
 
     /// Return the entry at a display-order position, if any.
     pub fn entry_at(&self, display_index: usize) -> Option<&DirEntry> {
-        let &entry_index = self.display_order.get(display_index)?;
-        self.comparison.as_ref()?.entries.get(entry_index)
+        let row = self.tree_rows.get(display_index)?;
+        let entries = match &row.parent {
+            Some(sub) => &sub.entries,
+            None => &self.comparison.as_ref()?.entries,
+        };
+        entries.get(row.entry_index)
+    }
+
+    /// Return the tree row at a display-order position, if any.
+    pub(crate) fn row_at(&self, display_index: usize) -> Option<&TreeRow> {
+        self.tree_rows.get(display_index)
+    }
+
+    /// Whether the directory with this root-relative path is expanded.
+    pub fn is_expanded(&self, path: &str) -> bool {
+        self.expanded.contains(path)
     }
 
     /// Return the currently selected entry, if any.
@@ -680,19 +976,16 @@ impl AppState {
         Some(right.display())
     }
 
-    /// Return the number of entries in the comparison.
+    /// Return the number of visible tree rows.
     pub fn entry_count(&self) -> usize {
-        self.display_order.len()
+        self.tree_rows.len()
     }
 
-    /// Summary counts over the visible (filtered) entries, so the status
-    /// bar describes what the table actually shows.
+    /// Summary counts over the visible (filtered) rows, so the status
+    /// bar describes what the panes actually show.
     pub fn visible_summary(&self) -> StatusSummary {
-        let Some(comparison) = self.comparison.as_ref() else {
-            return StatusSummary::default();
-        };
         StatusSummary::from_entries(
-            self.display_order.iter().map(|&i| &comparison.entries[i]),
+            (0..self.tree_rows.len()).filter_map(|i| self.entry_at(i)),
         )
     }
 
@@ -703,9 +996,13 @@ impl AppState {
     }
 
     /// Return the session settings.
-    #[allow(dead_code)]
     pub fn settings(&self) -> &SessionSettings {
         &self.settings
+    }
+
+    /// Whether the entry name is marked ignored in the session settings.
+    pub fn is_ignored(&self, name: &str) -> bool {
+        self.settings.ignored.iter().any(|n| n == name)
     }
 
     /// Convert the current state to a serializable session config.
@@ -1050,7 +1347,7 @@ impl AppState {
 
     /// Select a row by display-order index.
     pub fn select_row(&mut self, index: usize, cx: &mut Context<Self>) {
-        if index < self.display_order.len() {
+        if index < self.tree_rows.len() {
             self.selected_index = index;
             cx.notify();
         }
@@ -1058,7 +1355,7 @@ impl AppState {
 
     /// Navigate down by one row.
     pub fn select_next(&mut self, cx: &mut Context<Self>) {
-        if self.selected_index + 1 < self.display_order.len() {
+        if self.selected_index + 1 < self.tree_rows.len() {
             self.selected_index += 1;
             cx.notify();
         }
@@ -1088,19 +1385,18 @@ impl AppState {
     /// Move the selection `direction` rows to the next non-`Same` entry,
     /// wrapping around the visible list.
     fn select_difference(&mut self, direction: isize, cx: &mut Context<Self>) {
-        let len = self.display_order.len() as isize;
+        let len = self.tree_rows.len() as isize;
         if len == 0 {
             return;
         }
-        let Some(comparison) = self.comparison.as_ref() else {
-            return;
-        };
         let start = self.selected_index as isize;
         // A full turn covers every visible row, including wrapping back
         // to the start; landing on the current row is a deliberate no-op.
         for offset in 1..=len {
             let index = (start + direction * offset).rem_euclid(len) as usize;
-            let status = comparison.entries[self.display_order[index]].status;
+            let Some(status) = self.entry_at(index).map(|e| e.status) else {
+                continue;
+            };
             if status_category(&status) != StatusCategory::Same {
                 if index != self.selected_index {
                     self.selected_index = index;
@@ -1137,6 +1433,7 @@ impl AppState {
         self.left = left_sub;
         self.right = right_sub;
         self.notice = None;
+        self.expanded.clear();
         self.record_history();
         self.load_comparison(cx);
     }
@@ -1166,6 +1463,7 @@ impl AppState {
             return;
         }
         self.notice = None;
+        self.expanded.clear();
         self.record_history();
         self.load_comparison(cx);
     }
@@ -1187,6 +1485,7 @@ impl AppState {
         self.left = left;
         self.right = right;
         self.notice = None;
+        self.expanded.clear();
         self.record_history();
         self.load_comparison(cx);
     }
@@ -1197,6 +1496,7 @@ impl AppState {
     pub fn swap_sides(&mut self, cx: &mut Context<Self>) {
         self.swap_sides_in_place();
         self.notice = None;
+        self.expanded.clear();
         self.record_history();
         self.load_comparison(cx);
     }
@@ -1269,6 +1569,7 @@ impl AppState {
         self.left = left;
         self.right = right;
         self.notice = None;
+        self.expanded.clear();
         self.load_comparison(cx);
     }
 
@@ -1317,6 +1618,7 @@ impl AppState {
         self.left = self.root_left.clone();
         self.right = self.root_right.clone();
         self.notice = None;
+        self.expanded.clear();
         log::push(
             LogLevel::Info,
             format!(
@@ -1377,6 +1679,45 @@ impl AppState {
             );
             cx.notify();
         }
+    }
+
+    /// Show `message` in the status bar until the next operation.
+    pub fn set_notice(&mut self, message: String, cx: &mut Context<Self>) {
+        self.notice = Some(message.into());
+        cx.notify();
+    }
+
+    /// Human-readable metadata of the selected entry for the Attributes
+    /// modal.
+    pub fn selected_attributes(&self) -> Option<AttributesDetail> {
+        let entry = self.selected_entry()?;
+        let (left, right) = entry_endpoints(entry, &self.left, &self.right);
+        let side = |info: Option<&cocomo_lib::EntryInfo>,
+                    endpoint: &Endpoint| {
+            match info {
+                Some(i) => format!(
+                    "{} · {} · {}",
+                    endpoint.display(),
+                    if i.is_dir {
+                        "directory".to_string()
+                    } else {
+                        format_size_display(i.size)
+                    },
+                    if i.modified.is_empty() {
+                        "no date".to_string()
+                    } else {
+                        i.modified.clone()
+                    }
+                ),
+                None => "missing".to_string(),
+            }
+        };
+        Some(AttributesDetail {
+            name: entry.name.clone(),
+            status: format!("{:?}", entry.status),
+            left: side(entry.left.as_ref(), &left),
+            right: side(entry.right.as_ref(), &right),
+        })
     }
 
     /// Execute a previously planned transfer on the selected entry, then
@@ -1472,6 +1813,333 @@ impl AppState {
     pub fn reload(&mut self, cx: &mut Context<Self>) {
         self.notice = None;
         self.load_comparison(cx);
+    }
+
+    // -----------------------------------------------------------------------
+    // Row commands (touch, rename, exchange, folders, sync)
+    // -----------------------------------------------------------------------
+
+    /// Absolute endpoints of the selected entry's two sides.
+    pub fn selected_endpoints(&self) -> Option<(Endpoint, Endpoint)> {
+        let entry = self.selected_entry()?;
+        Some(entry_endpoints(entry, &self.left, &self.right))
+    }
+
+    /// Run a local filesystem operation on the tokio runtime, then
+    /// re-compare so the panes reflect the change. Failures land in the
+    /// notice and the log, mirroring [`Self::run_transfer`].
+    fn run_fs_op(
+        &mut self,
+        busy: &'static str,
+        done: &'static str,
+        op: impl std::future::Future<Output = crate::fsops::FsResult>
+        + Send
+        + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        if self.loading {
+            return;
+        }
+        self.loading = true;
+        self.busy_label = Some(busy.into());
+        self.notice = None;
+        cx.notify();
+
+        let join_handle = crate::runtime::spawn_on_tokio(async move {
+            op.await.map_err(|e| anyhow::anyhow!(e))
+        });
+        let weak = cx.entity().downgrade();
+        cx.spawn(move |_, cx: &mut gpui::AsyncApp| {
+            let async_app = cx.clone();
+            async move {
+                let result = match join_handle.await {
+                    Ok(r) => r.map_err(|e| e.to_string()),
+                    Err(e) => Err(format!("task panicked: {e}")),
+                };
+                async_app.update(|cx| {
+                    let Some(state) = weak.upgrade() else { return };
+                    state.update(cx, |state, cx| {
+                        state.loading = false;
+                        state.busy_label = None;
+                        state.notice = Some(match result {
+                            Ok(()) => {
+                                let message = done.to_string();
+                                log::push(LogLevel::Info, message.clone(), cx);
+                                message.into()
+                            }
+                            Err(e) => {
+                                log::push(LogLevel::Error, e.clone(), cx);
+                                e.into()
+                            }
+                        });
+                        state.load_comparison(cx);
+                    });
+                });
+            }
+        })
+        .detach();
+    }
+
+    /// Set the modification time of the selected entry to now, on every
+    /// side that has it.
+    pub fn touch_selected(&mut self, cx: &mut Context<Self>) {
+        let Some((left, right)) = self.selected_endpoints() else {
+            return;
+        };
+        let has_left = self.selected_entry().is_some_and(|e| e.left.is_some());
+        let has_right =
+            self.selected_entry().is_some_and(|e| e.right.is_some());
+        self.run_fs_op(
+            "Touching…",
+            "Touched the selected entry",
+            async move {
+                if has_left {
+                    crate::fsops::touch(left).await?;
+                }
+                if has_right {
+                    crate::fsops::touch(right).await?;
+                }
+                Ok(())
+            },
+            cx,
+        );
+    }
+
+    /// Rename the selected entry to `new_name` on every side that has
+    /// it, sequentially so a failure on one side is reported before the
+    /// other is attempted.
+    pub fn rename_selected(
+        &mut self,
+        new_name: String,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((left, right)) = self.selected_endpoints() else {
+            return;
+        };
+        let has_left = self.selected_entry().is_some_and(|e| e.left.is_some());
+        let has_right =
+            self.selected_entry().is_some_and(|e| e.right.is_some());
+        self.run_fs_op(
+            "Renaming…",
+            "Renamed the selected entry",
+            async move {
+                if has_left {
+                    crate::fsops::rename(left, new_name.clone()).await?;
+                }
+                if has_right {
+                    crate::fsops::rename(right, new_name).await?;
+                }
+                Ok(())
+            },
+            cx,
+        );
+    }
+
+    /// Swap the selected entry between the two sides.
+    pub fn exchange_selected(&mut self, cx: &mut Context<Self>) {
+        let Some((left, right)) = self.selected_endpoints() else {
+            return;
+        };
+        self.run_fs_op(
+            "Exchanging…",
+            "Exchanged the selected entry",
+            async move { crate::fsops::exchange(left, right).await },
+            cx,
+        );
+    }
+
+    /// Whether the selected entry can be exchanged: both sides exist,
+    /// neither is a name clash, and the entry actually differs.
+    pub fn can_exchange(&self) -> bool {
+        self.selected_entry().is_some_and(|e| {
+            !e.name_conflict
+                && e.left.is_some()
+                && e.right.is_some()
+                && status_category(&e.status) != StatusCategory::Same
+        })
+    }
+
+    /// Create a new folder inside `side`'s current directory.
+    pub fn new_folder(&mut self, side: Side, cx: &mut Context<Self>) {
+        let endpoint = match side {
+            Side::Left => self.left.clone(),
+            Side::Right => self.right.clone(),
+        };
+        self.run_fs_op(
+            "Creating folder…",
+            "Created a new folder",
+            async move {
+                crate::fsops::create_folder(endpoint).await.map(|_| ())
+            },
+            cx,
+        );
+    }
+
+    /// Create a new folder with the same name inside both sides' current
+    /// directories, backing the context menu's New Folder command.
+    pub fn new_folder_both(&mut self, cx: &mut Context<Self>) {
+        let left = self.left.clone();
+        let right = self.right.clone();
+        self.run_fs_op(
+            "Creating folder…",
+            "Created a new folder on both sides",
+            async move {
+                let name = crate::fsops::create_folder(left).await?;
+                let target = right.path().join(&name);
+                if fs_err::tokio::symlink_metadata(&target).await.is_ok() {
+                    return Err(format!(
+                        "New Folder failed: {} already exists",
+                        target.display()
+                    ));
+                }
+                fs_err::tokio::create_dir_all(&target)
+                    .await
+                    .map_err(|e| format!("New Folder failed: {e}"))
+            },
+            cx,
+        );
+    }
+
+    /// The compared path of `side` at every recorded history position,
+    /// oldest first, for the path bar's history dropdown.
+    pub fn side_path_history(&self, side: Side) -> Vec<String> {
+        self.history
+            .iter()
+            .map(|h| {
+                let (left, right) = endpoints_at_depth(
+                    &h.root_left,
+                    &h.root_right,
+                    &h.nav_steps,
+                );
+                match side {
+                    Side::Left => left.display(),
+                    Side::Right => right.display(),
+                }
+            })
+            .collect()
+    }
+
+    /// Copy (or move) the selected entry into `dest_dir`.
+    pub fn copy_selected_to_folder(
+        &mut self,
+        dest_dir: std::path::PathBuf,
+        move_entry: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(entry) = self.selected_entry() else {
+            return;
+        };
+        // Copy from the side that exists, preferring the left.
+        let source = if entry.left.is_some() {
+            entry_endpoints(entry, &self.left, &self.right).0
+        } else {
+            entry_endpoints(entry, &self.left, &self.right).1
+        };
+        let busy = if move_entry {
+            "Moving to folder…"
+        } else {
+            "Copying to folder…"
+        };
+        let done = if move_entry {
+            "Moved the selected entry"
+        } else {
+            "Copied the selected entry"
+        };
+        self.run_fs_op(
+            busy,
+            done,
+            async move {
+                crate::fsops::copy_to_folder(source, dest_dir, move_entry)
+                    .await
+            },
+            cx,
+        );
+    }
+
+    /// The transfer items a sync run would execute over the whole
+    /// comparison tree; `None` when there is nothing to do.
+    pub fn sync_plan(&self, kind: SyncKind) -> Option<Vec<TransferItem>> {
+        let comparison = self.comparison.as_ref()?;
+        let mut items = Vec::new();
+        collect_sync_items(comparison, kind, &mut items);
+        (!items.is_empty()).then_some(items)
+    }
+
+    /// Execute a whole-comparison sync run and re-compare afterwards.
+    pub fn run_sync(&mut self, kind: SyncKind, cx: &mut Context<Self>) {
+        if self.loading {
+            return;
+        }
+        let Some(items) = self.sync_plan(kind) else {
+            self.notice = Some("Nothing to synchronize".into());
+            cx.notify();
+            return;
+        };
+        let count = items.len();
+        self.loading = true;
+        self.busy_label = Some(format!("{}…", kind.label()).into());
+        self.notice = None;
+        cx.notify();
+
+        let left = self.left.clone();
+        let right = self.right.clone();
+        let join_handle = crate::runtime::spawn_on_tokio(async move {
+            let pair = if left.same_provider(&right) {
+                FsPair::Shared(left.fs())
+            } else {
+                FsPair::Separate(left.fs(), right.fs())
+            };
+            let result =
+                execute_transfers(&items, left.path(), right.path(), pair)
+                    .await;
+            if result.is_ok() {
+                Ok(result.succeeded)
+            } else {
+                let details: Vec<String> =
+                    result.errors.iter().map(|e| e.to_string()).collect();
+                Err(anyhow::anyhow!(details.join("; ")))
+            }
+        });
+
+        let weak = cx.entity().downgrade();
+        cx.spawn(move |_, cx: &mut gpui::AsyncApp| {
+            let async_app = cx.clone();
+            async move {
+                let result = match join_handle.await {
+                    Ok(r) => r.map_err(|e| e.to_string()),
+                    Err(e) => Err(format!("task panicked: {e}")),
+                };
+                async_app.update(|cx| {
+                    let Some(state) = weak.upgrade() else { return };
+                    state.update(cx, |state, cx| {
+                        state.loading = false;
+                        state.busy_label = None;
+                        state.notice = Some(match result {
+                            Ok(succeeded) => {
+                                let message = format!(
+                                    "{}: {succeeded}/{count} operations",
+                                    kind.label()
+                                );
+                                log::push(LogLevel::Info, message.clone(), cx);
+                                message.into()
+                            }
+                            Err(e) => {
+                                let message =
+                                    format!("{} failed: {e}", kind.label());
+                                log::push(
+                                    LogLevel::Error,
+                                    message.clone(),
+                                    cx,
+                                );
+                                message.into()
+                            }
+                        });
+                        state.load_comparison(cx);
+                    });
+                });
+            }
+        })
+        .detach();
     }
 
     /// Sort the entry table by `key`, toggling the direction when it is
@@ -1616,23 +2284,116 @@ impl AppState {
 
     /// Display-order position of the entry with the given name.
     fn display_index_of_name(&self, name: &str) -> Option<usize> {
-        let comparison = self.comparison.as_ref()?;
-        self.display_order
+        self.tree_rows
             .iter()
-            .position(|&i| comparison.entries[i].name == name)
+            .position(|row| self.entry_name_at_row(row) == name)
     }
 
-    /// Recompute the display order from the comparison, sort, and filters.
+    /// Name of the entry a tree row points at.
+    fn entry_name_at_row<'a>(&'a self, row: &'a TreeRow) -> &'a str {
+        let entries = match &row.parent {
+            Some(sub) => &sub.entries,
+            None => {
+                return self
+                    .comparison
+                    .as_ref()
+                    .and_then(|c| c.entries.get(row.entry_index))
+                    .map_or("", |e| e.name.as_str());
+            }
+        };
+        entries.get(row.entry_index).map_or("", |e| e.name.as_str())
+    }
+
+    /// Recompute the visible tree rows from the comparison, sort,
+    /// filters, and expansion set.
     fn recompute_display_order(&mut self) {
-        self.display_order =
-            self.comparison.as_ref().map_or_else(Vec::new, |c| {
-                compute_display_order(
-                    &c.entries,
-                    self.sort_key,
-                    self.sort_descending,
-                    &self.filters,
-                )
-            });
+        self.tree_rows = self.comparison.as_ref().map_or_else(Vec::new, |c| {
+            compute_tree_rows(
+                c,
+                self.sort_key,
+                self.sort_descending,
+                &self.filters,
+                &self.expanded,
+            )
+        });
+    }
+
+    /// Expand or collapse the directory with the given root-relative
+    /// path, keeping the selection on the same entry by name.
+    pub fn toggle_expanded(&mut self, path: &str, cx: &mut Context<Self>) {
+        if !self.expanded.remove(path) {
+            self.expanded.insert(path.to_string());
+        }
+        let selected_name = self.selected_entry().map(|e| e.name.clone());
+        self.recompute_display_order();
+        self.selected_index = selected_name
+            .as_deref()
+            .and_then(|name| self.display_index_of_name(name))
+            .unwrap_or(0);
+        cx.notify();
+    }
+
+    /// Point `side` at `path`, keeping the other side, and re-compare.
+    ///
+    /// This is the "compare now" of the per-pane path bar: editing one
+    /// side rebuilds the compared pair endpoint and reloads.
+    pub fn set_side_path(
+        &mut self,
+        side: Side,
+        path: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let path = path.trim();
+        if path.is_empty() {
+            return;
+        }
+        match side {
+            Side::Left => self.left = self.left.with_path(path),
+            Side::Right => self.right = self.right.with_path(path),
+        }
+        self.root_left = self.left.clone();
+        self.root_right = self.right.clone();
+        self.nav_steps.clear();
+        self.notice = None;
+        self.expanded.clear();
+        self.record_history();
+        self.load_comparison(cx);
+    }
+
+    /// Set whether the comparison hashes file contents, then reload.
+    ///
+    /// Backs the "Compare contents" submenu: content hashing versus a
+    /// metadata-only (size and date) comparison.
+    pub fn set_compare_files(
+        &mut self,
+        compare_files: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if self.settings.compare_files == compare_files {
+            return;
+        }
+        self.settings.compare_files = compare_files;
+        self.reload(cx);
+    }
+
+    /// Toggle `name` in the session's ignore list.
+    pub fn toggle_ignored(&mut self, name: &str, cx: &mut Context<Self>) {
+        if let Some(pos) = self.settings.ignored.iter().position(|n| n == name)
+        {
+            self.settings.ignored.remove(pos);
+        } else {
+            self.settings.ignored.push(name.to_string());
+        }
+        cx.notify();
+    }
+
+    /// Add the selected entry's name to the session's name filter, so
+    /// the Exclude command hides it from the panes.
+    pub fn exclude_selected(&mut self, cx: &mut Context<Self>) {
+        let Some(name) = self.selected_entry().map(|e| e.name.clone()) else {
+            return;
+        };
+        self.push_filter_pattern(&name, cx);
     }
 
     /// Inject a comparison result without running the async load.
@@ -1670,16 +2431,37 @@ impl gpui::Focusable for AppState {
 // Status summary helpers
 // ---------------------------------------------------------------------------
 
+/// Format a file size in human-readable form for metadata displays.
+fn format_size_display(bytes: u64) -> String {
+    crate::folder_panes::format_size(bytes)
+}
+
+/// Metadata of the selected entry, rendered by the Attributes modal.
+pub struct AttributesDetail {
+    /// Entry name.
+    pub name: String,
+    /// Comparison status.
+    pub status: String,
+    /// Left side description.
+    pub left: String,
+    /// Right side description.
+    pub right: String,
+}
+
 /// Summary counts for the comparison results.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct StatusSummary {
     /// Total number of entries.
     pub total: usize,
+    /// Number of entries that are directories on either side.
+    pub dirs: usize,
+    /// Number of entries that are files on both existing sides.
+    pub files: usize,
     /// Number of identical entries.
     pub same: usize,
     /// Number of different entries.
     pub different: usize,
-    /// Number of orphan entries (only on one side).
+    /// Number of orphan entries (exist on one side only).
     pub orphans: usize,
 }
 
@@ -1692,6 +2474,11 @@ impl StatusSummary {
         let mut summary = Self::default();
         for entry in entries {
             summary.total += 1;
+            if entry_is_dir(entry) {
+                summary.dirs += 1;
+            } else {
+                summary.files += 1;
+            }
             match status_category(&entry.status) {
                 StatusCategory::Same => summary.same += 1,
                 StatusCategory::Different => summary.different += 1,
@@ -2530,6 +3317,239 @@ mod tests {
                 ),
                 (3, 0, 1, 2)
             );
+        });
+    }
+
+    /// A directory entry carrying a prebuilt subtree, for tree tests.
+    fn dir_with_sub(
+        name: &str,
+        status: DirEntryStatus,
+        sub: DirComparison,
+    ) -> DirEntry {
+        DirEntry {
+            sub_entries: Some(Arc::new(sub)),
+            ..entry(name, status, Some(dir_info(name)), Some(dir_info(name)))
+        }
+    }
+
+    #[gpui::test]
+    fn tree_rows_expand_and_collapse_a_directory_in_place(
+        cx: &mut TestAppContext,
+    ) {
+        init_log_globals(cx);
+        let state = cx.new(|cx| {
+            let mut state = AppState::new(
+                Endpoint::local("/left"),
+                Endpoint::local("/right"),
+                "test".into(),
+                cx,
+            );
+            state.set_comparison_for_test(comparison(vec![
+                dir_with_sub(
+                    "sub",
+                    DirEntryStatus::Same,
+                    comparison(vec![entry(
+                        "inner.txt",
+                        DirEntryStatus::Same,
+                        Some(info("sub/inner.txt", 1, "")),
+                        Some(info("sub/inner.txt", 1, "")),
+                    )]),
+                ),
+                entry(
+                    "top.txt",
+                    DirEntryStatus::Same,
+                    Some(info("top.txt", 1, "")),
+                    Some(info("top.txt", 1, "")),
+                ),
+            ]));
+            state
+        });
+
+        // Collapsed: only the two root rows are visible.
+        cx.update(|cx| {
+            let state = state.read(cx);
+            assert_eq!(state.entry_count(), 2);
+            assert!(!state.is_expanded("sub"));
+        });
+
+        // Expanding `sub` inserts its child right below it, at depth 1.
+        cx.update(|cx| {
+            state.update(cx, |state, cx| state.toggle_expanded("sub", cx));
+            let state = state.read(cx);
+            assert_eq!(state.entry_count(), 3);
+            assert!(state.is_expanded("sub"));
+            assert_eq!(state.entry_at(1).unwrap().name, "inner.txt");
+            assert_eq!(state.row_at(1).unwrap().depth(), 1);
+            assert_eq!(state.row_at(1).unwrap().path(), "sub/inner.txt");
+        });
+
+        // Collapsing restores the two-row view.
+        cx.update(|cx| {
+            state.update(cx, |state, cx| state.toggle_expanded("sub", cx));
+            assert_eq!(state.read(cx).entry_count(), 2);
+        });
+    }
+
+    #[gpui::test]
+    fn tree_expansion_survives_a_sort_and_keeps_selection(
+        cx: &mut TestAppContext,
+    ) {
+        init_log_globals(cx);
+        let state = cx.new(|cx| {
+            let mut state = AppState::new(
+                Endpoint::local("/left"),
+                Endpoint::local("/right"),
+                "test".into(),
+                cx,
+            );
+            state.set_comparison_for_test(comparison(vec![
+                dir_with_sub(
+                    "sub",
+                    DirEntryStatus::Same,
+                    comparison(vec![entry(
+                        "inner.txt",
+                        DirEntryStatus::Same,
+                        Some(info("sub/inner.txt", 1, "")),
+                        Some(info("sub/inner.txt", 1, "")),
+                    )]),
+                ),
+                entry(
+                    "aaa.txt",
+                    DirEntryStatus::Same,
+                    Some(info("aaa.txt", 1, "")),
+                    Some(info("aaa.txt", 1, "")),
+                ),
+            ]));
+            state
+        });
+
+        cx.update(|cx| {
+            // Expand and select the child row (name order: aaa.txt, sub,
+            // sub/inner.txt).
+            state.update(cx, |state, cx| {
+                state.toggle_expanded("sub", cx);
+                state.select_row(2, cx);
+            });
+            assert_eq!(
+                state.read(cx).selected_entry().unwrap().name,
+                "inner.txt"
+            );
+            assert_eq!(
+                state.read(cx).selected_entry().unwrap().name,
+                "inner.txt"
+            );
+
+            // Re-sorting recomputes the tree; the selection follows the
+            // child by name and the expansion stays open.
+            state.update(cx, |state, cx| state.set_sort(SortKey::Name, cx));
+            let state_r = state.read(cx);
+            assert!(state_r.is_expanded("sub"));
+            assert_eq!(state_r.selected_entry().unwrap().name, "inner.txt");
+        });
+    }
+
+    #[test]
+    fn sync_plan_collects_items_over_the_whole_tree() {
+        let sub = comparison(vec![entry(
+            "sub/new.txt",
+            DirEntryStatus::RightOnly,
+            None,
+            Some(info("sub/new.txt", 1, "")),
+        )]);
+        let root = comparison(vec![
+            entry(
+                "only-left.txt",
+                DirEntryStatus::LeftOnly,
+                Some(info("only-left.txt", 1, "")),
+                None,
+            ),
+            entry(
+                "only-right.txt",
+                DirEntryStatus::RightOnly,
+                None,
+                Some(info("only-right.txt", 1, "")),
+            ),
+            DirEntry {
+                sub_entries: Some(Arc::new(sub)),
+                ..entry(
+                    "sub",
+                    DirEntryStatus::Same,
+                    Some(dir_info("sub")),
+                    Some(dir_info("sub")),
+                )
+            },
+        ]);
+
+        let mut items = Vec::new();
+        collect_sync_items(&root, SyncKind::UpdateRight, &mut items);
+        // Update right copies the left orphan toward the right; the right
+        // orphans are not touched by an update-right run.
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].action, TransferAction::CopyRight);
+        assert_eq!(items[0].rel_path, "only-left.txt");
+
+        let mut items = Vec::new();
+        collect_sync_items(&root, SyncKind::UpdateBoth, &mut items);
+        // Update both also copies the right orphans (including the nested
+        // one) toward the left.
+        assert_eq!(items.len(), 3);
+
+        let mut items = Vec::new();
+        collect_sync_items(&root, SyncKind::MirrorRight, &mut items);
+        // Mirror right additionally deletes the right orphans.
+        let deletes = items
+            .iter()
+            .filter(|i| i.action == TransferAction::DeleteRight)
+            .count();
+        assert_eq!(deletes, 2);
+    }
+
+    #[gpui::test]
+    fn visible_summary_counts_dirs_and_files(cx: &mut TestAppContext) {
+        init_log_globals(cx);
+        let state = cx.new(|cx| {
+            let mut state = AppState::new(
+                Endpoint::local("/left"),
+                Endpoint::local("/right"),
+                "test".into(),
+                cx,
+            );
+            state.set_comparison_for_test(comparison(vec![
+                entry(
+                    "a.txt",
+                    DirEntryStatus::Same,
+                    Some(info("a.txt", 1, "")),
+                    Some(info("a.txt", 1, "")),
+                ),
+                entry(
+                    "b.txt",
+                    DirEntryStatus::Different,
+                    Some(info("b.txt", 1, "")),
+                    Some(info("b.txt", 2, "")),
+                ),
+                entry(
+                    "c.txt",
+                    DirEntryStatus::LeftOnly,
+                    Some(info("c.txt", 1, "")),
+                    None,
+                ),
+                entry(
+                    "sub",
+                    DirEntryStatus::Same,
+                    Some(dir_info("sub")),
+                    Some(dir_info("sub")),
+                ),
+            ]));
+            state
+        });
+
+        cx.update(|cx| {
+            let summary = state.read(cx).visible_summary();
+            assert_eq!(summary.dirs, 1);
+            assert_eq!(summary.files, 3);
+            assert_eq!(summary.same, 2);
+            assert_eq!(summary.different, 1);
+            assert_eq!(summary.orphans, 1);
         });
     }
 }

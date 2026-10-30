@@ -131,8 +131,8 @@ pub use s3::{S3Config, S3DirId, S3FileId, S3Fs, S3NodeId};
 pub use scan::{ScanConfig, ScanEntry, ScanResult, scan_directory_node};
 pub use secrets::{NullPrompter, Prompter, Secrets, TtyPrompter};
 pub use session::{
-    ProviderRef, Session, SessionConfig, SessionManager, SessionSettings,
-    SessionType, default_session_dir, list_saved_sessions,
+    ColorOverrides, ProviderRef, Session, SessionConfig, SessionManager,
+    SessionSettings, SessionType, default_session_dir, list_saved_sessions,
     list_saved_sessions_in,
 };
 pub use sftp::{SftpConfig, SftpDirId, SftpFileId, SftpFs, SftpNodeId};

@@ -15,6 +15,9 @@
 
 mod chrome;
 mod cli;
+mod color;
+mod folder_panes;
+mod fsops;
 mod home;
 mod log;
 mod menus;

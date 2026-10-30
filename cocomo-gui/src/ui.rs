@@ -13,15 +13,12 @@
 //! status indicators, sortable entry columns, navigation, and entry
 //! rendering.
 
-use std::{ops::Range, sync::Arc};
-
-use cocomo_lib::{DirEntry, DirEntryStatus, Endpoint, TransferAction};
+use cocomo_lib::{DirEntryStatus, Endpoint, TransferAction};
 use gpui::{
-    Action, Anchor, AnyElement, App, ClickEvent, ClipboardItem, Context, Div,
-    ElementId, Entity, FocusHandle, FontFeatures, FontWeight, Hsla,
-    KeyBinding, MouseButton, Render, Role, ScrollStrategy, SharedString,
-    Subscription, TestSupportExt as _, UniformListScrollHandle, Window,
-    actions,
+    Action, Anchor, AnyElement, App, ClipboardItem, Context, Div, Entity,
+    FocusHandle, Focusable, FontWeight, Hsla, KeyBinding, Render,
+    ScrollStrategy, SharedString, Subscription, UniformListScrollHandle,
+    Window, actions,
     assets::IconName,
     base::Disableable as _,
     component::{
@@ -30,29 +27,25 @@ use gpui::{
         button::{Button, ButtonVariant, ButtonVariants as _},
         h_flex,
         input::{Input, InputEvent, InputState},
-        menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenuItem},
+        menu::{DropdownMenu as _, PopupMenuItem},
         popover::Popover,
         spinner::Spinner,
         status_bar::StatusBar,
         toolbar::{Toolbar, ToolbarGroup},
-        tooltip::Tooltip,
         v_flex,
     },
     div,
     prelude::*,
-    uniform_list,
 };
 
 use crate::{
+    color::Side,
     menus::{
         CopyPathLeft, CopyPathRight, ReloadCompare, SaveSession, StopCompare,
         ToggleShowDifferent, ToggleShowOrphans, ToggleShowSame,
     },
     session_manager::GuiSessionManager,
-    state::{
-        AppState, BaseSide, SortKey, StatusCategory, entry_endpoints,
-        status_category,
-    },
+    state::{AppState, BaseSide, StatusCategory},
 };
 
 // ---------------------------------------------------------------------------
@@ -66,16 +59,38 @@ actions!(
         SelectPrev,
         EnterDir,
         LeaveDir,
+        ToggleExpand,
         Reload,
         NextDifference,
         PrevDifference,
         SwapSides,
         CopyToLeft,
         CopyToRight,
+        CopyToOtherSide,
         MoveToLeft,
         MoveToRight,
+        ExchangeEntry,
         DeleteLeftSide,
         DeleteRightSide,
+        CopyToFolder,
+        MoveToFolder,
+        RenameEntry,
+        ShowAttributes,
+        TouchEntry,
+        ExcludeEntry,
+        ToggleIgnored,
+        NewFolder,
+        CopyFilename,
+        RefreshSelection,
+        QuickCompare,
+        CompareContentsHash,
+        CompareContentsMeta,
+        RevealInExplorer,
+        SyncUpdateRight,
+        SyncUpdateLeft,
+        SyncUpdateBoth,
+        SyncMirrorRight,
+        SyncMirrorLeft,
         SetBaseLeft,
         SetBaseRight,
         SetBaseBoth,
@@ -83,6 +98,17 @@ actions!(
         GoForward,
     ]
 );
+
+/// Action that points one side of the comparison at a new path, from the
+/// per-pane path bar's history dropdown.
+#[derive(Action, Clone, Debug, PartialEq)]
+#[action(namespace = folder_compare, no_json)]
+pub struct SetSidePath {
+    /// The side whose endpoint changes.
+    pub side: crate::color::Side,
+    /// The new path for that side.
+    pub path: String,
+}
 
 /// Action to open a text diff for a file in a new tab.
 #[derive(Action, Clone, Debug, PartialEq)]
@@ -114,6 +140,9 @@ pub fn folder_compare_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("up", SelectPrev, None),
         KeyBinding::new("enter", EnterDir, None),
         KeyBinding::new("backspace", LeaveDir, None),
+        // Explorer-style tree expansion on the horizontal arrows.
+        KeyBinding::new("right", ToggleExpand, None),
+        KeyBinding::new("left", ToggleExpand, None),
         KeyBinding::new("r", Reload, None),
         // Walk the differences: the single highest-value navigation,
         // matching the familiar next/previous-difference commands.
@@ -151,7 +180,7 @@ pub struct FolderCompareView {
     state: Entity<AppState>,
     /// Handle to the session manager.
     session_manager: Entity<GuiSessionManager>,
-    /// Scroll handle for the entry list.
+    /// Scroll handle shared by both tree panes.
     scroll_handle: UniformListScrollHandle,
     /// Editable name-filter combo in toolbar row 2.
     ///
@@ -161,6 +190,12 @@ pub struct FolderCompareView {
     filter_input: Option<Entity<InputState>>,
     /// Subscription that commits the filter input on Enter.
     _filter_subscription: Option<Subscription>,
+    /// Editable left-side path field of the pane path bar.
+    left_path_input: Option<Entity<InputState>>,
+    /// Editable right-side path field of the pane path bar.
+    right_path_input: Option<Entity<InputState>>,
+    /// Subscriptions committing the path fields on Enter.
+    _path_subscriptions: Vec<Subscription>,
 }
 
 impl FolderCompareView {
@@ -181,6 +216,9 @@ impl FolderCompareView {
             scroll_handle: UniformListScrollHandle::new(),
             filter_input: None,
             _filter_subscription: None,
+            left_path_input: None,
+            right_path_input: None,
+            _path_subscriptions: Vec::new(),
         }
     }
 
@@ -431,39 +469,60 @@ impl FolderCompareView {
         });
     }
 
-    /// Handle the enter-directory action: open a new dir-diff tab.
+    /// Handle the enter action: a directory replaces the current view
+    /// with its subtree; a file opens a child text-diff session.
     fn enter_dir(
         &mut self,
         _: &EnterDir,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let entry = match self.state.read(cx).selected_entry() {
-            Some(e) => e,
-            None => return,
-        };
+        let is_dir = self.state.read(cx).selected_entry().is_some_and(|e| {
+            e.left.as_ref().is_some_and(|l| l.is_dir)
+                || e.right.as_ref().is_some_and(|r| r.is_dir)
+        });
+        if is_dir {
+            self.state.update(cx, |state, cx| {
+                state.navigate_into_subdir(cx);
+            });
+            return;
+        }
+        let endpoints = self.state.read(cx).selected_endpoints();
+        let has_right = self
+            .state
+            .read(cx)
+            .selected_entry()
+            .is_some_and(|e| e.right.is_some());
+        if let Some((left, right)) = endpoints {
+            cx.dispatch_action(&OpenFileDiff {
+                left_path: left,
+                right_path: has_right.then_some(right),
+            });
+        }
+    }
 
-        // Determine sub-endpoints for both sides. An entry's `path` is
-        // relative to the current comparison root, so it must be joined onto
-        // the endpoint path rather than used as the endpoint path directly
-        // (which would drop the root and resolve to a non-existent location).
-        let left_sub = match &entry.left {
-            Some(left_info) => {
-                self.state.read(cx).left().join(&left_info.path)
-            }
-            None => self.state.read(cx).left().join(&entry.name),
+    /// Handle the expand/collapse action on the selected directory.
+    fn toggle_expand(
+        &mut self,
+        _: &ToggleExpand,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let path = self.state.read(cx).selected_index();
+        let path = {
+            let state = self.state.read(cx);
+            state.row_at(path).map(|row| row.path().to_string())
         };
-        let right_sub = match &entry.right {
-            Some(right_info) => {
-                self.state.read(cx).right().join(&right_info.path)
-            }
-            None => self.state.read(cx).right().join(&entry.name),
-        };
-
-        // Dispatch action to open a new dir-diff tab.
-        cx.dispatch_action(&crate::ui::OpenDirDiff {
-            left_path: left_sub,
-            right_path: right_sub,
+        let Some(path) = path else { return };
+        let is_dir = self.state.read(cx).selected_entry().is_some_and(|e| {
+            e.left.as_ref().is_some_and(|l| l.is_dir)
+                || e.right.as_ref().is_some_and(|r| r.is_dir)
+        });
+        if !is_dir {
+            return;
+        }
+        self.state.update(cx, |state, cx| {
+            state.toggle_expanded(&path, cx);
         });
     }
 
@@ -854,6 +913,472 @@ impl FolderCompareView {
         self.state.update(cx, |state, cx| state.go_forward(cx));
     }
 
+    // -----------------------------------------------------------------------
+    // Row commands (spec section 4.4)
+    // -----------------------------------------------------------------------
+
+    /// Handle a path-history selection: point one side at the picked
+    /// path and re-compare.
+    fn handle_set_side_path(
+        &mut self,
+        action: &SetSidePath,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let path = action.path.clone();
+        self.state.update(cx, |state, cx| {
+            state.set_side_path(action.side, &path, cx);
+        });
+    }
+
+    /// Handle Quick Compare: open a child session over the selected
+    /// entry. Directories get a metadata-only folder compare, files a
+    /// text diff.
+    fn handle_quick_compare(
+        &mut self,
+        _: &QuickCompare,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((left, right)) = self.state.read(cx).selected_endpoints()
+        else {
+            return;
+        };
+        let (is_dir, has_right) = {
+            let state = self.state.read(cx);
+            let entry = match state.selected_entry() {
+                Some(e) => e,
+                None => return,
+            };
+            (
+                entry.left.as_ref().is_some_and(|l| l.is_dir)
+                    || entry.right.as_ref().is_some_and(|r| r.is_dir),
+                entry.right.is_some(),
+            )
+        };
+        if is_dir {
+            self.session_manager.update(cx, |mgr, cx| {
+                mgr.add_folder_tab(left, right, false, cx);
+            });
+        } else {
+            let right = if has_right { right.clone() } else { right };
+            self.session_manager.update(cx, |mgr, cx| {
+                mgr.add_text_diff_tab(left, right, cx);
+            });
+        }
+    }
+
+    /// Switch the comparison strategy to content hashing.
+    fn handle_compare_contents_hash(
+        &mut self,
+        _: &CompareContentsHash,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.state
+            .update(cx, |state, cx| state.set_compare_files(true, cx));
+    }
+
+    /// Switch the comparison strategy to metadata only (size & date).
+    fn handle_compare_contents_meta(
+        &mut self,
+        _: &CompareContentsMeta,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.state
+            .update(cx, |state, cx| state.set_compare_files(false, cx));
+    }
+
+    /// Copy an orphan entry to the side that is missing it.
+    fn handle_copy_to_other_side(
+        &mut self,
+        _: &CopyToOtherSide,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let has_left = self
+            .state
+            .read(cx)
+            .selected_entry()
+            .is_some_and(|e| e.left.is_some());
+        self.run_transfer_action(
+            if has_left {
+                TransferAction::CopyRight
+            } else {
+                TransferAction::CopyLeft
+            },
+            window,
+            cx,
+        );
+    }
+
+    /// Exchange the selected entry between the sides after confirmation:
+    /// both sides lose their current version.
+    fn handle_exchange(
+        &mut self,
+        _: &ExchangeEntry,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.state.read(cx).can_exchange() {
+            self.state.update(cx, |state, cx| {
+                state.explain_blocked_transfer(cx);
+            });
+            return;
+        }
+        let name = self
+            .state
+            .read(cx)
+            .selected_entry()
+            .map(|e| e.name.clone())
+            .unwrap_or_default();
+        let state = self.state.clone();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let state = state.clone();
+            alert
+                .confirm()
+                .title("Exchange both versions?")
+                .description(format!(
+                    "The left and right versions of \"{name}\" swap places. \
+                     Both current versions are overwritten."
+                ))
+                .ok_text("Exchange")
+                .ok_variant(ButtonVariant::Danger)
+                .on_ok(move |_, _, cx| {
+                    state.update(cx, |state, cx| {
+                        state.exchange_selected(cx);
+                    });
+                    true
+                })
+        });
+    }
+
+    /// Copy or move the selected entry into a folder picked through the
+    /// native directory dialog.
+    fn run_copy_to_folder(
+        &mut self,
+        move_entry: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if self.state.read(cx).selected_entry().is_none() {
+            return;
+        }
+        let state = self.state.clone();
+        let receiver = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some(
+                if move_entry {
+                    "Move to folder"
+                } else {
+                    "Copy to folder"
+                }
+                .into(),
+            ),
+        });
+        cx.spawn(move |_, cx: &mut gpui::AsyncApp| {
+            let cx = cx.clone();
+            async move {
+                let paths = match receiver.await {
+                    Ok(Ok(Some(paths))) => paths,
+                    _ => return,
+                };
+                let Some(dir) = paths.into_iter().next() else {
+                    return;
+                };
+                cx.update(|cx| {
+                    state.update(cx, |state, cx| {
+                        state.copy_selected_to_folder(dir, move_entry, cx);
+                    });
+                });
+            }
+        })
+        .detach();
+    }
+
+    /// Handle Copy to Folder…
+    fn handle_copy_to_folder(
+        &mut self,
+        _: &CopyToFolder,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.run_copy_to_folder(false, cx);
+    }
+
+    /// Handle Move to Folder…
+    fn handle_move_to_folder(
+        &mut self,
+        _: &MoveToFolder,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.run_copy_to_folder(true, cx);
+    }
+
+    /// Handle Rename…: a dialog prefilled with the entry name; OK
+    /// renames the entry on every side that has it.
+    fn handle_rename(
+        &mut self,
+        _: &RenameEntry,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(name) =
+            self.state.read(cx).selected_entry().map(|e| e.name.clone())
+        else {
+            return;
+        };
+        let state = self.state.clone();
+        let input =
+            cx.new(|cx| InputState::new(window, cx).default_value(&name));
+        window.open_dialog(cx, move |dialog, _, _| {
+            let state = state.clone();
+            let input = input.clone();
+            let name = name.clone();
+            dialog
+                .title("Rename entry")
+                .child(Input::new(&input))
+                .footer(
+                    h_flex()
+                        .justify_end()
+                        .gap_2()
+                        .child(
+                            Button::new("rename_cancel")
+                                .label("Cancel")
+                                .on_click(|_, window, cx| {
+                                    window.close_dialog(cx);
+                                }),
+                        )
+                        .child(
+                            Button::new("rename_ok")
+                                .label("Rename")
+                                .primary()
+                                .on_click(move |_, window, cx| {
+                                    let new_name = input
+                                        .read(cx)
+                                        .value()
+                                        .trim()
+                                        .to_string();
+                                    if !new_name.is_empty() && new_name != name
+                                    {
+                                        state.update(cx, |state, cx| {
+                                            state
+                                                .rename_selected(new_name, cx);
+                                        });
+                                    }
+                                    window.close_dialog(cx);
+                                }),
+                        ),
+                )
+        });
+    }
+
+    /// Handle Attributes: an informational modal over the selected
+    /// entry's metadata.
+    fn handle_attributes(
+        &mut self,
+        _: &ShowAttributes,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let detail = self.state.read(cx).selected_attributes();
+        let Some(detail) = detail else { return };
+        window.open_dialog(cx, move |dialog, _, _| {
+            dialog
+                .title(format!("Attributes — {name}", name = detail.name))
+                .child(
+                    v_flex()
+                        .gap_1()
+                        .text_sm()
+                        .child(format!("Status: {}", detail.status))
+                        .child(format!("Left: {}", detail.left))
+                        .child(format!("Right: {}", detail.right)),
+                )
+        });
+    }
+
+    /// Handle Touch: set the selected entry's modification time to now.
+    fn handle_touch(
+        &mut self,
+        _: &TouchEntry,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.state.update(cx, |state, cx| state.touch_selected(cx));
+    }
+
+    /// Handle Exclude: add the entry name to the session's name filter.
+    fn handle_exclude(
+        &mut self,
+        _: &ExcludeEntry,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.state
+            .update(cx, |state, cx| state.exclude_selected(cx));
+    }
+
+    /// Handle the Ignored toggle for the selected entry.
+    fn handle_toggle_ignored(
+        &mut self,
+        _: &ToggleIgnored,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(name) =
+            self.state.read(cx).selected_entry().map(|e| e.name.clone())
+        else {
+            return;
+        };
+        self.state.update(cx, |state, cx| {
+            state.toggle_ignored(&name, cx);
+        });
+    }
+
+    /// Handle New Folder: create a folder on both sides.
+    fn handle_new_folder(
+        &mut self,
+        _: &NewFolder,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.state.update(cx, |state, cx| state.new_folder_both(cx));
+    }
+
+    /// Handle Copy Filename.
+    fn handle_copy_filename(
+        &mut self,
+        _: &CopyFilename,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(name) =
+            self.state.read(cx).selected_entry().map(|e| e.name.clone())
+        {
+            cx.write_to_clipboard(ClipboardItem::new_string(name));
+        }
+    }
+
+    /// Handle Refresh Selection: re-read the pair from disk.
+    fn handle_refresh_selection(
+        &mut self,
+        _: &RefreshSelection,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.state.update(cx, |state, cx| state.reload(cx));
+    }
+
+    /// Run a whole-comparison sync after confirmation; mirrors confirm
+    /// as destructive because they delete the target side's extras.
+    fn run_sync_action(
+        &mut self,
+        kind: crate::state::SyncKind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let count =
+            self.state.read(cx).sync_plan(kind).map(|items| items.len());
+        let Some(count) = count else {
+            self.state.update(cx, |state, cx| {
+                state.set_notice("Nothing to synchronize".to_string(), cx);
+            });
+            return;
+        };
+        let state = self.state.clone();
+        let label = kind.label();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let state = state.clone();
+            let mut alert = alert
+                .confirm()
+                .title(format!("{label}?"))
+                .description(format!(
+                    "{count} operations will run over the whole comparison. \
+                     This cannot be undone."
+                ))
+                .ok_text(label);
+            if kind.destructive() {
+                alert = alert.ok_variant(ButtonVariant::Danger);
+            }
+            alert.on_ok(move |_, _, cx| {
+                state.update(cx, |state, cx| state.run_sync(kind, cx));
+                true
+            })
+        });
+    }
+
+    /// Handle Synchronize ▸ Update Right.
+    fn handle_sync_update_right(
+        &mut self,
+        _: &SyncUpdateRight,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.run_sync_action(crate::state::SyncKind::UpdateRight, window, cx);
+    }
+
+    /// Handle Synchronize ▸ Update Left.
+    fn handle_sync_update_left(
+        &mut self,
+        _: &SyncUpdateLeft,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.run_sync_action(crate::state::SyncKind::UpdateLeft, window, cx);
+    }
+
+    /// Handle Synchronize ▸ Update Both.
+    fn handle_sync_update_both(
+        &mut self,
+        _: &SyncUpdateBoth,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.run_sync_action(crate::state::SyncKind::UpdateBoth, window, cx);
+    }
+
+    /// Handle Synchronize ▸ Mirror to Right.
+    fn handle_sync_mirror_right(
+        &mut self,
+        _: &SyncMirrorRight,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.run_sync_action(crate::state::SyncKind::MirrorRight, window, cx);
+    }
+
+    /// Handle Synchronize ▸ Mirror to Left.
+    fn handle_sync_mirror_left(
+        &mut self,
+        _: &SyncMirrorLeft,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.run_sync_action(crate::state::SyncKind::MirrorLeft, window, cx);
+    }
+
+    /// Handle Explorer: open the selected entry in the file explorer.
+    fn handle_reveal(
+        &mut self,
+        _: &RevealInExplorer,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let endpoint = match self.state.read(cx).selected_endpoints() {
+            Some((left, _)) => left,
+            None => return,
+        };
+        if let Err(e) = crate::fsops::reveal_in_explorer(&endpoint) {
+            self.state.update(cx, |state, cx| {
+                state.set_notice(e.clone(), cx);
+            });
+            crate::menus::notify_error(e, cx);
+        }
+    }
+
     /// Handle a display-filter toggle dispatched from the View menu or the
     /// toolbar filter dropdown. The filter state lives in [`AppState`].
     fn handle_toggle_show_same(
@@ -939,6 +1464,7 @@ impl Render for FolderCompareView {
             .on_action(cx.listener(Self::select_prev))
             .on_action(cx.listener(Self::enter_dir))
             .on_action(cx.listener(Self::leave_dir))
+            .on_action(cx.listener(Self::toggle_expand))
             .on_action(cx.listener(Self::reload))
             .on_action(cx.listener(Self::handle_next_difference))
             .on_action(cx.listener(Self::handle_prev_difference))
@@ -954,6 +1480,29 @@ impl Render for FolderCompareView {
             .on_action(cx.listener(Self::handle_set_base_both))
             .on_action(cx.listener(Self::handle_go_back))
             .on_action(cx.listener(Self::handle_go_forward))
+            // Row commands (context menu).
+            .on_action(cx.listener(Self::handle_set_side_path))
+            .on_action(cx.listener(Self::handle_quick_compare))
+            .on_action(cx.listener(Self::handle_compare_contents_hash))
+            .on_action(cx.listener(Self::handle_compare_contents_meta))
+            .on_action(cx.listener(Self::handle_copy_to_other_side))
+            .on_action(cx.listener(Self::handle_exchange))
+            .on_action(cx.listener(Self::handle_copy_to_folder))
+            .on_action(cx.listener(Self::handle_move_to_folder))
+            .on_action(cx.listener(Self::handle_rename))
+            .on_action(cx.listener(Self::handle_attributes))
+            .on_action(cx.listener(Self::handle_touch))
+            .on_action(cx.listener(Self::handle_exclude))
+            .on_action(cx.listener(Self::handle_toggle_ignored))
+            .on_action(cx.listener(Self::handle_new_folder))
+            .on_action(cx.listener(Self::handle_copy_filename))
+            .on_action(cx.listener(Self::handle_refresh_selection))
+            .on_action(cx.listener(Self::handle_sync_update_right))
+            .on_action(cx.listener(Self::handle_sync_update_left))
+            .on_action(cx.listener(Self::handle_sync_update_both))
+            .on_action(cx.listener(Self::handle_sync_mirror_right))
+            .on_action(cx.listener(Self::handle_sync_mirror_left))
+            .on_action(cx.listener(Self::handle_reveal))
             // Display filters (View menu and toolbar filter dropdown).
             .on_action(cx.listener(Self::handle_toggle_show_same))
             .on_action(cx.listener(Self::handle_toggle_show_different))
@@ -972,13 +1521,13 @@ impl Render for FolderCompareView {
 }
 
 impl FolderCompareView {
-    /// Render the header bar showing the compared paths, the up-one-level
-    /// control, the status legend trigger, and the navigation breadcrumb.
+    /// Render the header bar: the up-one-level control, the status
+    /// legend trigger, and the navigation breadcrumb.
     ///
-    /// Pair controls (swap) and display filters live in the toolbar rows;
-    /// this header only names what is being compared.
+    /// The compared paths themselves live in the per-pane path bars, so
+    /// this header only carries the pair-level controls.
     fn render_header(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let (left_path, right_path, at_root, crumbs, root_label) = {
+        let (at_root, crumbs, root_label) = {
             let state = self.state.read(cx);
             let crumbs: Vec<(SharedString, usize)> = state
                 .nav_steps()
@@ -986,21 +1535,13 @@ impl FolderCompareView {
                 .enumerate()
                 .map(|(i, step)| (step.label.clone(), i + 1))
                 .collect();
-            (
-                state.left().display().to_string(),
-                state.right().display().to_string(),
-                state.nav_steps().is_empty(),
-                crumbs,
-                state.title().clone(),
-            )
+            (state.nav_steps().is_empty(), crumbs, state.title().clone())
         };
         let theme = cx.theme();
         let state_entity = self.state.clone();
 
-        // The two compared roots are the primary information of this view,
-        // so they take the full width; the window title already names the
-        // product, so no branding competes with the paths. Up and Swap act
-        // on both sides at once, mirroring a compare tool's pair controls.
+        // Up and the legend act on the pair as a whole; the window title
+        // already names the product, so nothing competes with them.
         let path_row = h_flex()
             .items_center()
             .gap_2()
@@ -1030,25 +1571,10 @@ impl FolderCompareView {
                         }
                     }),
             )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .text_color(theme.foreground)
-                    .child(left_path),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .text_color(theme.foreground)
-                    .child(right_path),
-            )
+            .child(div().flex_1())
             // The legend explains every status marker; it belongs to this
             // view (the toolbar is shared with the text-diff tabs), so the
-            // trigger sits at the trailing edge of the path header.
+            // trigger sits at the trailing edge of the header.
             .child(
                 Popover::new("status-legend")
                     .anchor(Anchor::TopRight)
@@ -1098,34 +1624,23 @@ impl FolderCompareView {
         v_flex().child(path_row).children(breadcrumb)
     }
 
-    /// Render the main content area with the entry list.
+    /// Render the main content area: the two mirrored tree panes.
     fn render_content(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let (entry_count, is_loading, sort_key, sort_descending) = {
-            let state = self.state.read(cx);
-            (
-                state.entry_count(),
-                state.is_loading(),
-                state.sort_key(),
-                state.is_sort_descending(),
-            )
-        };
-        let theme = cx.theme();
-        // The list is the keyboard target of this view's focus handle; a
-        // tinted border tells the user where j/k/Enter will act.
-        let list_focused = self.focus_handle(cx).is_focused(window);
+        let (left_path, right_path) = self.ensure_path_inputs(window, cx);
+        // Keep the path fields showing the compared endpoints unless the
+        // user is mid-edit in one of them.
+        self.sync_path_input(&left_path, Side::Left, window, cx);
+        self.sync_path_input(&right_path, Side::Right, window, cx);
 
-        // Clone data needed inside the closures.
-        let state_entity = self.state.clone();
-        let state_weak = self.state.downgrade();
-        let scroll_handle = self.scroll_handle.clone();
         let focus_handle = self.focus_handle(cx);
+        let theme = cx.theme().clone();
+        let list_focused = focus_handle.is_focused(window);
 
         div()
-            .flex()
             .flex_1()
             .min_h_0()
             .overflow_hidden()
@@ -1138,91 +1653,76 @@ impl FolderCompareView {
                 theme.border
             })
             .bg(theme.background)
-            // Column headers
-            .child(render_column_headers(
-                SortState {
-                    key: sort_key,
-                    descending: sort_descending,
-                },
-                &state_entity,
-                theme,
+            .child(crate::folder_panes::render_folder_panes(
+                &self.state,
+                &self.scroll_handle,
+                &focus_handle,
+                &left_path,
+                &right_path,
+                cx,
             ))
-            // Entry list
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_hidden()
-                    .when(is_loading, |this| {
-                        this.child(
-                            div()
-                                .size_full()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .gap_2()
-                                .text_color(theme.muted_foreground)
-                                .child(Spinner::new().small())
-                                .child("Loading comparison…"),
-                        )
-                    })
-                    .when(!is_loading, |this| {
-                        this.child(
-                            uniform_list(
-                                "entries",
-                                entry_count,
-                                move |range: Range<usize>,
-                                      _: &mut Window,
-                                      app: &mut App| {
-                                    let mut items =
-                                        Vec::with_capacity(range.len());
-                                    let theme = app.theme();
-                                    if let Some(state_entity) =
-                                        state_weak.upgrade()
-                                    {
-                                        let app_state =
-                                            state_entity.read(app);
-                                        let selected =
-                                            app_state.selected_index();
-                                        let left_root =
-                                            app_state.left().clone();
-                                        let right_root =
-                                            app_state.right().clone();
-                                        for i in range {
-                                            // Rows come through the display
-                                            // order, so the sort never
-                                            // reorders the comparison data.
-                                            if let Some(entry) =
-                                                app_state.entry_at(i)
-                                            {
-                                                items.push(
-                                                    EntryRowData::new(
-                                                        i,
-                                                        entry,
-                                                        i == selected,
-                                                        &left_root,
-                                                        &right_root,
-                                                    )
-                                                    .render_row(
-                                                        theme,
-                                                        state_entity
-                                                            .clone(),
-                                                        focus_handle
-                                                            .clone(),
-                                                    )
-                                                    .into_any_element(),
-                                                );
-                                            }
-                                        }
-                                    }
-                                    items
-                                },
-                            )
-                            .size_full()
-                            .track_scroll(&scroll_handle),
-                        )
-                    }),
-            )
+    }
+
+    /// Create the two path-field states on first use and subscribe their
+    /// Enter key to "compare now" for the respective side.
+    fn ensure_path_inputs(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> (Entity<InputState>, Entity<InputState>) {
+        if self.left_path_input.is_none() {
+            let left = cx.new(|cx| {
+                InputState::new(window, cx).placeholder("Left path")
+            });
+            let right = cx.new(|cx| {
+                InputState::new(window, cx).placeholder("Right path")
+            });
+            for (side, input) in [(Side::Left, &left), (Side::Right, &right)] {
+                let state = self.state.clone();
+                let sub = cx.subscribe(input, {
+                    let input = input.clone();
+                    move |_, _, event: &InputEvent, cx| {
+                        if matches!(event, InputEvent::PressEnter { .. }) {
+                            let value = input.read(cx).value().to_string();
+                            state.update(cx, |state, cx| {
+                                state.set_side_path(side, &value, cx);
+                            });
+                        }
+                    }
+                });
+                self._path_subscriptions.push(sub);
+            }
+            self.left_path_input = Some(left);
+            self.right_path_input = Some(right);
+        }
+        (
+            self.left_path_input.clone().expect("created above"),
+            self.right_path_input.clone().expect("created above"),
+        )
+    }
+
+    /// Refresh one path field from the state's endpoint when it is not
+    /// focused, so navigation updates the bar without fighting an edit.
+    fn sync_path_input(
+        &self,
+        input: &Entity<InputState>,
+        side: Side,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let current = match side {
+            Side::Left => self.state.read(cx).left().display(),
+            Side::Right => self.state.read(cx).right().display(),
+        };
+        if input.read(cx).value() == current {
+            return;
+        }
+        if input.read(cx).focus_handle(cx).is_focused(window) {
+            return;
+        }
+        input.update(cx, |input, cx| {
+            input.set_value(current, window, cx);
+        });
     }
 
     /// Render the status bar at the bottom.
@@ -1244,10 +1744,11 @@ impl FolderCompareView {
                 h_flex()
                     .items_center()
                     .gap_3()
-                    .child(status_count("Entries", summary.total, theme))
+                    .child(status_count("Dirs", summary.dirs, theme))
+                    .child(status_count("Files", summary.files, theme))
                     .child(status_count("Same", summary.same, theme))
-                    .child(status_count("Different", summary.different, theme))
-                    .child(status_count("Orphan", summary.orphans, theme)),
+                    .child(status_count("Diff", summary.different, theme))
+                    .child(status_count("Orphans", summary.orphans, theme)),
             );
         }
 
@@ -1304,473 +1805,13 @@ fn status_count(
 }
 
 // ---------------------------------------------------------------------------
-// Entry table columns
+// Status legend
 // ---------------------------------------------------------------------------
-//
-// The lane helpers are shared by `render_column_headers` and
-// `EntryRowData::render_row` so headers and values stay aligned; the fixed
-// widths are functional data lanes, not decorative sizes.
 
-/// Status lane: colored dot plus the color-independent glyph.
-///
-/// The width fits the "Status" header plus its sort arrow, so the header
-/// label and the row markers share one lane without overlapping the name.
+/// Status lane: colored dot plus the color-independent glyph, used by
+/// the legend popover.
 fn status_lane() -> Div {
     div().w_16().flex_shrink_0().flex().items_center().gap_1()
-}
-
-/// Name lane: type icon plus the entry name, truncating as needed.
-fn name_lane() -> Div {
-    div().flex_1().min_w_0().flex().items_center().gap_1p5()
-}
-
-/// Mirrored size lane: right-aligned so magnitudes compare at a glance.
-fn size_lane() -> Div {
-    div()
-        .w_20()
-        .flex_shrink_0()
-        .text_right()
-        .text_xs()
-        .font_features(tabular_features())
-}
-
-/// Mirrored modification-date lane, right-aligned like the sizes.
-///
-/// `w_32` is the widest lane and holds the full `YYYY-MM-DD HH:MM` stamp;
-/// the name lane absorbs the remaining width instead of truncating dates.
-fn date_lane() -> Div {
-    div()
-        .w_32()
-        .flex_shrink_0()
-        .text_right()
-        .text_xs()
-        .font_features(tabular_features())
-}
-
-/// Tabular figures for the numeric lanes, so columns of digits align.
-fn tabular_features() -> FontFeatures {
-    FontFeatures(Arc::new(vec![("tnum".into(), 1)]))
-}
-
-/// Which column the table is sorted by, and in which direction.
-#[derive(Clone, Copy)]
-struct SortState {
-    /// Active sort column.
-    key: SortKey,
-    /// Whether the active column sorts descending.
-    descending: bool,
-}
-
-/// A column of the entry table: header label, sort key, lane builder, and
-/// whether its values align to the trailing edge.
-type Column = (&'static str, SortKey, fn() -> Div, bool);
-
-/// The columns in display order: the decision (status), the identity (name),
-/// then the mirrored left/right data lanes. Header and rows share the lane
-/// builders, so the two always line up.
-const COLUMNS: [Column; 6] = [
-    ("Status", SortKey::Status, status_lane, false),
-    ("Name", SortKey::Name, name_lane, false),
-    ("Left size", SortKey::SizeLeft, size_lane, true),
-    ("Left date", SortKey::DateLeft, date_lane, true),
-    ("Right size", SortKey::SizeRight, size_lane, true),
-    ("Right date", SortKey::DateRight, date_lane, true),
-];
-
-/// Render the sortable column header row.
-fn render_column_headers(
-    sort: SortState,
-    state: &Entity<AppState>,
-    theme: &Theme,
-) -> impl IntoElement {
-    div()
-        .flex()
-        .items_center()
-        .gap_1()
-        .px_2()
-        .py_1()
-        .bg(theme.muted)
-        .border_b_1()
-        .border_color(theme.border)
-        .text_xs()
-        .font_weight(FontWeight(600.))
-        .children(COLUMNS.iter().map(|(label, key, lane, align_end)| {
-            sort_header_cell(
-                *lane, label, *key, sort, state, theme, *align_end,
-            )
-        }))
-}
-
-/// One clickable column header cell with a visible sort indicator.
-///
-/// The active column shows its direction as an arrow and the stronger
-/// foreground; inactive columns stay muted until hovered, keeping the
-/// header quiet while making sorting discoverable and reversible.
-fn sort_header_cell(
-    lane: fn() -> Div,
-    label: &'static str,
-    key: SortKey,
-    sort: SortState,
-    state: &Entity<AppState>,
-    theme: &Theme,
-    align_end: bool,
-) -> impl IntoElement {
-    let is_active = sort.key == key;
-    let descending = sort.descending;
-    let state = state.clone();
-    lane()
-        .id((ElementId::from("sort_header"), label))
-        .when(align_end, |this| this.justify_end())
-        .text_color(if is_active {
-            theme.foreground
-        } else {
-            theme.muted_foreground
-        })
-        .hover(|this| this.bg(theme.accent))
-        .role(Role::Button)
-        .aria_label(format!("Sort by {label}"))
-        .tooltip(move |window, cx| {
-            Tooltip::new(format!("Sort by {label}")).build(window, cx)
-        })
-        .on_click(move |_, _, cx| {
-            state.update(cx, |state, cx| state.set_sort(key, cx));
-        })
-        .child(label)
-        .when(is_active, |this| {
-            this.child(div().flex_shrink_0().child(if descending {
-                IconName::ArrowDown
-            } else {
-                IconName::ArrowUp
-            }))
-        })
-        // Observed for UI integration tests; inert without `test-support`.
-        .test_support()
-}
-
-// ---------------------------------------------------------------------------
-// Entry Row
-// ---------------------------------------------------------------------------
-
-/// Data for a single row in the entry list.
-#[derive(Clone)]
-struct EntryRowData {
-    /// Row index in the display order.
-    index: usize,
-    /// Entry name.
-    name: SharedString,
-    /// Entry status.
-    status: DirEntryStatus,
-    /// Whether this is a directory.
-    is_dir: bool,
-    /// Whether this row is selected.
-    is_selected: bool,
-    /// Size from left side, if available.
-    left_size: Option<u64>,
-    /// Size from right side, if available.
-    right_size: Option<u64>,
-    /// Modification time from left side, if available.
-    left_modified: Option<SharedString>,
-    /// Modification time from right side, if available.
-    right_modified: Option<SharedString>,
-    /// Whether entry exists on right side. Only the right side needs this:
-    /// `OpenFileDiff` takes an optional right endpoint, while its left
-    /// endpoint is always present.
-    has_right: bool,
-    /// Whether entry exists on left side (drives the context-menu
-    /// reconcile commands).
-    has_left: bool,
-    /// Whether the left side of the entry is a directory.
-    left_is_dir: bool,
-    /// Whether the right side of the entry is a directory.
-    right_is_dir: bool,
-    /// Absolute left endpoint (comparison root joined with the side path).
-    left_endpoint: Endpoint,
-    /// Absolute right endpoint (comparison root joined with the side path).
-    right_endpoint: Endpoint,
-}
-
-impl EntryRowData {
-    /// Create entry row data from a comparison entry.
-    ///
-    /// `left_root` and `right_root` are the current comparison endpoints;
-    /// side paths are resolved through [`entry_endpoints`].
-    fn new(
-        index: usize,
-        entry: &DirEntry,
-        is_selected: bool,
-        left_root: &Endpoint,
-        right_root: &Endpoint,
-    ) -> Self {
-        let has_right = entry.right.is_some();
-        let has_left = entry.left.is_some();
-        let left_is_dir = entry.left.as_ref().is_some_and(|l| l.is_dir);
-        let right_is_dir = entry.right.as_ref().is_some_and(|r| r.is_dir);
-        let left_size = entry.left.as_ref().map(|l| l.size);
-        let right_size = entry.right.as_ref().map(|r| r.size);
-        let left_modified = entry
-            .left
-            .as_ref()
-            .map(|l| SharedString::from(l.modified.clone()));
-        let right_modified = entry
-            .right
-            .as_ref()
-            .map(|r| SharedString::from(r.modified.clone()));
-        let is_dir = entry.left.as_ref().is_some_and(|l| l.is_dir)
-            || entry.right.as_ref().is_some_and(|r| r.is_dir);
-        let (left_endpoint, right_endpoint) =
-            entry_endpoints(entry, left_root, right_root);
-
-        Self {
-            index,
-            name: SharedString::from(entry.name.clone()),
-            status: entry.status,
-            is_dir,
-            is_selected,
-            left_size,
-            right_size,
-            left_modified,
-            right_modified,
-            has_right,
-            has_left,
-            left_is_dir,
-            right_is_dir,
-            left_endpoint,
-            right_endpoint,
-        }
-    }
-
-    /// Build the action that opens this entry: a nested directory compare
-    /// for directories, a text diff for files. A file missing on one side
-    /// diffs with `None` for that side, letting the handler fall back to
-    /// the existing single-file behavior.
-    fn open_action(&self) -> Box<dyn Action> {
-        if self.is_dir {
-            Box::new(OpenDirDiff {
-                left_path: self.left_endpoint.clone(),
-                right_path: self.right_endpoint.clone(),
-            })
-        } else {
-            Box::new(OpenFileDiff {
-                left_path: self.left_endpoint.clone(),
-                right_path: self
-                    .has_right
-                    .then(|| self.right_endpoint.clone()),
-            })
-        }
-    }
-}
-
-impl EntryRowData {
-    /// Render a row as a div (for use in uniform_list).
-    ///
-    /// Selection is shown through the row's own surface (`list_active`
-    /// fill, distinct `list_hover` feedback), following the `ListItem`
-    /// treatment. A left click focuses the view and selects the row; a
-    /// double-click additionally dispatches the open action. A right click
-    /// selects the row and opens the context menu (Open, Copy path).
-    fn render_row(
-        self,
-        theme: &Theme,
-        state: Entity<AppState>,
-        focus_handle: FocusHandle,
-    ) -> impl IntoElement {
-        let data = self.clone();
-        let EntryRowData {
-            index,
-            name,
-            status,
-            is_dir,
-            is_selected,
-            left_size,
-            right_size,
-            left_modified,
-            right_modified,
-            has_right,
-            has_left,
-            left_is_dir,
-            right_is_dir,
-            left_endpoint: _,
-            right_endpoint: _,
-        } = self;
-
-        let status_char = status_indicator(&status);
-        let status_color = status_role(&status).color(theme);
-        // Domain identity: entry names are unique within a directory, so
-        // the row's stateful id survives reloads that reorder rows.
-        let row_id = (ElementId::from("entry_row"), name.clone());
-        let open_data = data.clone();
-        let click_state = state.clone();
-        let click_focus = focus_handle.clone();
-
-        div()
-            .id(row_id)
-            .flex()
-            .items_center()
-            .gap_1()
-            .px_2()
-            .py_0p5()
-            .text_color(theme.foreground)
-            .when(is_selected, |this| this.bg(theme.list_active))
-            // Register `hover` unconditionally; a conditional registration
-            // leaves a stale hover style behind when the row turns selected.
-            .hover(|this| {
-                if is_selected {
-                    this
-                } else {
-                    this.bg(theme.list_hover)
-                }
-            })
-            .role(Role::ListItem)
-            .aria_selected(is_selected)
-            .on_click(move |event: &ClickEvent, window, cx| {
-                // Clicking the list should make it the keyboard target,
-                // so j/k/Enter keep working after pointer interaction.
-                click_focus.focus(window, cx);
-                let double_click = event.click_count() == 2;
-                let open = click_state.update(cx, |state, cx| {
-                    state.select_row(index, cx);
-                    double_click.then(|| data.open_action())
-                });
-                if let Some(action) = open {
-                    window.dispatch_action(action, cx);
-                }
-            })
-            // Right click selects the row under the pointer before the
-            // context menu (registered below) opens for it.
-            .on_mouse_down(MouseButton::Right, {
-                let state = state.clone();
-                let focus = focus_handle.clone();
-                move |_, window, cx| {
-                    focus.focus(window, cx);
-                    state.update(cx, |state, cx| {
-                        state.select_row(index, cx);
-                    });
-                }
-            })
-            .context_menu(move |menu, _, _| {
-                let menu = menu
-                    .menu("Open", open_data.open_action())
-                    .separator()
-                    .menu("Copy left path", Box::new(CopyPathLeft))
-                    .menu("Copy right path", Box::new(CopyPathRight));
-                // Reconcile commands follow the entry's shape: each is
-                // offered only when its source (or delete target)
-                // exists, and identical entries need none of them.
-                // Overwriting copies, moves, and deletes confirm in the
-                // handler before running.
-                let differs = status_category(&status) != StatusCategory::Same;
-                let mut menu = menu;
-                if differs {
-                    if has_right {
-                        menu = menu
-                            .separator()
-                            .menu("Copy to left", Box::new(CopyToLeft))
-                            .menu("Move to left", Box::new(MoveToLeft))
-                            .menu(
-                                "Delete from right",
-                                Box::new(DeleteRightSide),
-                            );
-                    }
-                    if has_left {
-                        menu = menu
-                            .menu("Copy to right", Box::new(CopyToRight))
-                            .menu("Move to right", Box::new(MoveToRight))
-                            .menu(
-                                "Delete from left",
-                                Box::new(DeleteLeftSide),
-                            );
-                    }
-                }
-                // Re-root the session at the selected directory, per
-                // side or for both sides at once.
-                if left_is_dir || right_is_dir {
-                    menu = menu.separator();
-                    if left_is_dir {
-                        menu = menu.menu(
-                            "Set as base folder (left)",
-                            Box::new(SetBaseLeft),
-                        );
-                    }
-                    if right_is_dir {
-                        menu = menu.menu(
-                            "Set as base folder (right)",
-                            Box::new(SetBaseRight),
-                        );
-                    }
-                    if left_is_dir && right_is_dir {
-                        menu = menu.menu(
-                            "Set as base folder (both)",
-                            Box::new(SetBaseBoth),
-                        );
-                    }
-                }
-                menu
-            })
-            // Status: dot carries the semantic color, the glyph keeps the
-            // meaning independent of color (see the legend popover).
-            .child(
-                status_lane()
-                    .child(
-                        div()
-                            .size_2()
-                            .flex_shrink_0()
-                            .rounded_full()
-                            .bg(status_color),
-                    )
-                    .child(
-                        div()
-                            .font_weight(FontWeight(700.))
-                            .text_color(status_color)
-                            .child(status_char),
-                    ),
-            )
-            // Name with a type icon, so the double-click result (enter a
-            // directory vs. open a text diff) is predictable from the row.
-            .child(
-                name_lane()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .child(
-                        div()
-                            .text_xs()
-                            .flex_shrink_0()
-                            .text_color(theme.muted_foreground)
-                            .child(if is_dir {
-                                IconName::Folder
-                            } else {
-                                IconName::File
-                            }),
-                    )
-                    .child(div().truncate().child(name)),
-            )
-            // Mirrored left/right size and date lanes; a side missing the
-            // entry shows an empty cell, existence being implied by the
-            // status marker.
-            .child(
-                size_lane()
-                    .child(left_size.map(format_size).unwrap_or_default()),
-            )
-            .child(
-                date_lane().child(
-                    left_modified
-                        .as_deref()
-                        .map(format_modified)
-                        .unwrap_or_default(),
-                ),
-            )
-            .child(
-                size_lane()
-                    .child(right_size.map(format_size).unwrap_or_default()),
-            )
-            .child(
-                date_lane().child(
-                    right_modified
-                        .as_deref()
-                        .map(format_modified)
-                        .unwrap_or_default(),
-                ),
-            )
-    }
 }
 
 /// Semantic color role for a directory entry status.
@@ -1834,25 +1875,12 @@ fn status_indicator(status: &DirEntryStatus) -> &'static str {
     }
 }
 
-/// Format a file size in human-readable form.
-fn format_size(bytes: u64) -> String {
-    if bytes < 1024 {
-        format!("{bytes}B")
-    } else if bytes < 1024 * 1024 {
-        format!("{:.1}K", bytes as f64 / 1024.0)
-    } else if bytes < 1024 * 1024 * 1024 {
-        format!("{:.1}M", bytes as f64 / (1024.0 * 1024.0))
-    } else {
-        format!("{:.1}G", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
-    }
-}
-
 /// Compact display for an RFC 3339 modification timestamp.
 ///
 /// Renders `2026-10-27T21:50:51+01:00` as `2026-10-27 21:50`; seconds and
 /// offset carry no comparison signal and the full string would dominate
 /// the date lanes. Anything shorter than a timestamp is passed through.
-fn format_modified(modified: &str) -> String {
+pub(crate) fn format_modified(modified: &str) -> String {
     if modified.len() >= 16
         && modified.is_char_boundary(10)
         && modified.is_char_boundary(16)
@@ -1957,10 +1985,11 @@ fn status_legend(theme: &Theme) -> impl IntoElement {
 
 #[cfg(test)]
 mod tests {
-    use cocomo_lib::EntryInfo;
-    use gpui::TestAppContext;
+    use cocomo_lib::{DirEntry, EntryInfo};
+    use gpui::{ElementId, TestAppContext};
 
     use super::*;
+    use crate::state::SortKey;
 
     fn entry_info(path: &str, is_dir: bool) -> EntryInfo {
         EntryInfo {
@@ -1994,105 +2023,6 @@ mod tests {
             sub_entries: None,
             name_conflict: false,
         }
-    }
-
-    #[test]
-    fn row_endpoints_join_side_paths_onto_the_comparison_root() {
-        let left_root = Endpoint::local("/left");
-        let right_root = Endpoint::local("/right");
-        let data = EntryRowData::new(
-            0,
-            &entry(
-                "sub",
-                Some(entry_info("sub", true)),
-                Some(entry_info("other/sub", true)),
-            ),
-            false,
-            &left_root,
-            &right_root,
-        );
-
-        assert_eq!(data.left_endpoint.display(), "/left/sub");
-        assert_eq!(data.right_endpoint.display(), "/right/other/sub");
-    }
-
-    #[test]
-    fn row_endpoints_fall_back_to_name_for_missing_side() {
-        let left_root = Endpoint::local("/left");
-        let right_root = Endpoint::local("/right");
-        let data = EntryRowData::new(
-            0,
-            &entry("orphan.txt", Some(entry_info("orphan.txt", false)), None),
-            false,
-            &left_root,
-            &right_root,
-        );
-
-        assert_eq!(data.left_endpoint.display(), "/left/orphan.txt");
-        assert_eq!(data.right_endpoint.display(), "/right/orphan.txt");
-    }
-
-    #[test]
-    fn double_click_on_dir_opens_dir_diff() {
-        let data = EntryRowData::new(
-            3,
-            &entry(
-                "sub",
-                Some(entry_info("sub", true)),
-                Some(entry_info("sub", true)),
-            ),
-            false,
-            &Endpoint::local("/left"),
-            &Endpoint::local("/right"),
-        );
-
-        let expected = OpenDirDiff {
-            left_path: Endpoint::local("/left/sub"),
-            right_path: Endpoint::local("/right/sub"),
-        };
-        assert!(data.open_action().partial_eq(&expected));
-    }
-
-    #[test]
-    fn double_click_on_file_opens_file_diff_with_both_sides() {
-        let data = EntryRowData::new(
-            0,
-            &entry(
-                "a.txt",
-                Some(entry_info("a.txt", false)),
-                Some(entry_info("a.txt", false)),
-            ),
-            false,
-            &Endpoint::local("/left"),
-            &Endpoint::local("/right"),
-        );
-
-        let expected = OpenFileDiff {
-            left_path: Endpoint::local("/left/a.txt"),
-            right_path: Some(Endpoint::local("/right/a.txt")),
-        };
-        assert!(data.open_action().partial_eq(&expected));
-    }
-
-    #[test]
-    fn double_click_on_orphan_file_opens_file_diff_without_right() {
-        let data = EntryRowData::new(
-            0,
-            &entry(
-                "only-left.txt",
-                Some(entry_info("only-left.txt", false)),
-                None,
-            ),
-            false,
-            &Endpoint::local("/left"),
-            &Endpoint::local("/right"),
-        );
-
-        let expected = OpenFileDiff {
-            left_path: Endpoint::local("/left/only-left.txt"),
-            right_path: None,
-        };
-        assert!(data.open_action().partial_eq(&expected));
     }
 
     #[test]
@@ -2152,8 +2082,8 @@ mod tests {
     }
 
     /// UI integration test: the header cell is a real control. Renders the
-    /// production view in a headless window, clicks the "Left size" header,
-    /// and verifies the table reorders through `AppState`.
+    /// production view in a headless window, clicks the left pane's
+    /// "Size" header, and verifies the table reorders through `AppState`.
     #[gpui::test]
     fn clicking_a_column_header_sorts_the_table(cx: &mut TestAppContext) {
         use cocomo_lib::DirComparison;
@@ -2216,7 +2146,8 @@ mod tests {
 
         // Default order is by name; clicking the size header reorders by
         // size, putting the smaller entry first.
-        let size_header = (ElementId::from("sort_header"), "Left size");
+        let size_header =
+            (ElementId::from("sort_header"), "Left:Size".to_string());
         cx.update_window(window, |_, window, cx| {
             window.render_frame(cx);
             assert_eq!(state.read(cx).entry_at(0).unwrap().name, "alpha.txt");
