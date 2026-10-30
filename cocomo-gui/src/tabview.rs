@@ -37,7 +37,7 @@ use crate::{
     menus::{self, MenuState},
     session_manager::GuiSessionManager,
     state::AppState,
-    text_diff::TextDiffView,
+    text_diff::{TextDiffSession, TextDiffView},
     ui::FolderCompareView,
 };
 
@@ -104,6 +104,14 @@ impl TabEntity {
         self.inner.folder_state(cx)
     }
 
+    /// Return the text-compare session, if this tab is a text compare.
+    ///
+    /// The window root uses this to sync the view menus (word wrap,
+    /// thumbnails) to the active tab; folder tabs return `None`.
+    pub fn text_state(&self, cx: &App) -> Option<Entity<TextDiffSession>> {
+        self.inner.text_state(cx)
+    }
+
     /// Render this tab's toolbar row 2, or `None` when the view has no
     /// view-specific controls.
     pub fn view_toolbar(
@@ -134,6 +142,9 @@ trait TabEntityInner: Any + Send + Sync {
     fn focus_handle(&self, cx: &App) -> FocusHandle;
     fn any_view(&self) -> AnyView;
     fn folder_state(&self, cx: &App) -> Option<Entity<AppState>>;
+    fn text_state(&self, _cx: &App) -> Option<Entity<TextDiffSession>> {
+        None
+    }
     fn view_toolbar(
         &self,
         window: &mut Window,
@@ -215,10 +226,20 @@ impl TabEntityInner for TextDiffTabEntity {
         None
     }
 
-    fn view_toolbar(&self, _: &mut Window, _: &mut App) -> Option<AnyElement> {
-        // The text view's row-2 controls (Format, sections) arrive with
-        // the Text Compare phase.
-        None
+    fn text_state(&self, cx: &App) -> Option<Entity<TextDiffSession>> {
+        Some(self.0.read(cx).text_state())
+    }
+
+    fn view_toolbar(
+        &self,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<AnyElement> {
+        Some(
+            self.0
+                .update(cx, |view, cx| view.render_view_toolbar(window, cx))
+                .into_any_element(),
+        )
     }
 
     fn window_title(&self, cx: &App) -> SharedString {
@@ -463,6 +484,10 @@ impl Render for WindowRoot {
         // re-evaluate the snapshot).
         let folder_state =
             active_tab.as_ref().and_then(|tab| tab.folder_state(cx));
+        // Reading the text state registers the dependency, so word-wrap
+        // and thumbnail toggles re-evaluate the menu snapshot.
+        let text_state =
+            active_tab.as_ref().and_then(|tab| tab.text_state(cx));
         let menu_state = folder_state
             .as_ref()
             .map(|state| {
@@ -470,6 +495,9 @@ impl Render for WindowRoot {
                 use cocomo_lib::TransferAction;
                 MenuState {
                     is_folder: true,
+                    is_text: false,
+                    word_wrap: false,
+                    show_thumbnails: false,
                     is_home: active_tab
                         .as_ref()
                         .is_some_and(TabEntity::is_home),
@@ -491,6 +519,21 @@ impl Render for WindowRoot {
                     log_open: cx.global::<LogPaneOpen>().0,
                 }
             })
+            .or_else(|| {
+                text_state.as_ref().map(|state| {
+                    let state = state.read(cx);
+                    MenuState {
+                        is_text: true,
+                        word_wrap: state.is_word_wrap(),
+                        show_thumbnails: state.is_show_thumbnail(),
+                        is_home: active_tab
+                            .as_ref()
+                            .is_some_and(TabEntity::is_home),
+                        log_open: cx.global::<LogPaneOpen>().0,
+                        ..MenuState::empty()
+                    }
+                })
+            })
             .unwrap_or_else(|| MenuState {
                 is_home: active_tab.as_ref().is_some_and(TabEntity::is_home),
                 log_open: cx.global::<LogPaneOpen>().0,
@@ -508,7 +551,7 @@ impl Render for WindowRoot {
             self.session_manager.clone(),
             cx,
         );
-        // Row 2 belongs to the active view; text tabs contribute none yet.
+        // Row 2 belongs to the active view.
         let view_toolbar = active_tab
             .as_ref()
             .and_then(|tab| tab.view_toolbar(window, cx));

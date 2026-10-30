@@ -123,6 +123,9 @@ pub struct MenuState {
     /// Whether the active tab is a folder compare (enables the
     /// folder-only commands).
     pub is_folder: bool,
+    /// Whether the active tab is a text compare (enables the text-only
+    /// commands: report, info, sections, wrap, thumbnails).
+    pub is_text: bool,
     /// Whether the active tab is the Home start screen (hides the
     /// view-specific menus, which have nothing to act on).
     pub is_home: bool,
@@ -146,6 +149,12 @@ pub struct MenuState {
     pub can_go_forward: bool,
     /// Whether the log pane is visible (checkmark on the View toggle).
     pub log_open: bool,
+    /// Whether the active text compare wraps long lines (checkmark on
+    /// the View toggle).
+    pub word_wrap: bool,
+    /// Whether the active text compare shows its thumbnail strips
+    /// (checkmark on the View toggle).
+    pub show_thumbnails: bool,
 }
 
 impl MenuState {
@@ -153,6 +162,7 @@ impl MenuState {
     pub fn empty() -> Self {
         Self {
             is_folder: false,
+            is_text: false,
             is_home: false,
             loading: false,
             can_copy_left: false,
@@ -164,6 +174,8 @@ impl MenuState {
             can_go_back: false,
             can_go_forward: false,
             log_open: true,
+            word_wrap: false,
+            show_thumbnails: false,
         }
     }
 }
@@ -191,14 +203,16 @@ fn build_app_menus(state: MenuState) -> Vec<Menu> {
             MenuItem::action("Forward", GoForward)
                 .disabled(off(state.can_go_forward)),
             MenuItem::separator(),
-            MenuItem::action("Swap sides", SwapSides).disabled(no_folder),
+            MenuItem::action("Swap sides", SwapSides)
+                .disabled(!(state.is_folder || state.is_text)),
             MenuItem::action("Reload / recompare files", ReloadCompare)
                 .disabled(is_home),
             MenuItem::action("Stop comparison", StopCompare)
                 .disabled(no_folder || !state.loading),
             MenuItem::separator(),
-            MenuItem::action("Report…", SessionReport).disabled(true),
-            MenuItem::action("Info…", SessionInfo).disabled(true),
+            MenuItem::action("Report…", SessionReport)
+                .disabled(!state.is_text),
+            MenuItem::action("Info…", SessionInfo).disabled(!state.is_text),
         ]),
         Menu::new("File").items([
             MenuItem::action("New compare…", NewCompare),
@@ -260,14 +274,14 @@ fn build_app_menus(state: MenuState) -> Vec<Menu> {
             ]),
             Menu::new("Search").items([
                 MenuItem::action("Next difference", NextDifference)
-                    .disabled(no_folder),
+                    .disabled(!(state.is_folder || state.is_text)),
                 MenuItem::action("Previous difference", PrevDifference)
-                    .disabled(no_folder),
+                    .disabled(!(state.is_folder || state.is_text)),
                 MenuItem::separator(),
                 MenuItem::action("Next difference section", NextSection)
-                    .disabled(true),
+                    .disabled(!state.is_text),
                 MenuItem::action("Previous difference section", PrevSection)
-                    .disabled(true),
+                    .disabled(!state.is_text),
                 MenuItem::separator(),
                 MenuItem::action("Find filename…", FindFilename)
                     .disabled(true),
@@ -278,12 +292,16 @@ fn build_app_menus(state: MenuState) -> Vec<Menu> {
 
     menus.extend([
         Menu::new("View").items([
-            // Wired to the text view in a later phase; disabled until it
-            // can actually change something.
-            MenuItem::action("Word wrap", ToggleWordWrap).disabled(true),
+            // Word wrap and thumbnails are text-compare-only; the focused
+            // text view handles the actions.
+            MenuItem::action("Word wrap", ToggleWordWrap)
+                .disabled(!state.is_text)
+                .checked(state.word_wrap),
             MenuItem::separator(),
             MenuItem::action("Show details", ShowDetails).disabled(true),
-            MenuItem::action("Show thumbnails", ShowThumbnails).disabled(true),
+            MenuItem::action("Show thumbnails", ShowThumbnails)
+                .disabled(!state.is_text)
+                .checked(state.show_thumbnails),
             MenuItem::action("Show panels", ShowPanels).disabled(true),
             MenuItem::action("Side-by-side layout", LayoutSideBySide)
                 .disabled(true),
@@ -540,9 +558,8 @@ pub fn register_menu_handlers(
     // View menu — display filters are handled by the focused folder view,
     // which owns the filter state; there is no global handler here.
 
-    cx.on_action(move |_action: &ToggleWordWrap, cx: &mut App| {
-        log::push(LogLevel::Info, "Word wrap — not yet implemented", cx);
-    });
+    // View menu — word wrap is handled by the focused text view, which
+    // owns the wrap state; there is no global handler here.
 
     // View menu — log pane visibility is a global the window root
     // observes, so the toggle works regardless of which view has focus.

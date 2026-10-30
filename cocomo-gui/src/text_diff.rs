@@ -7,60 +7,753 @@
 // $Source$
 // $Revision$
 
-//! Side-by-side text diff view.
+//! Side-by-side text compare view (UI spec section 5).
 //!
-//! Displays a line-by-line comparison of two text files with status
-//! indicators. Opens as a new session tab when a file is double-clicked
-//! in the folder compare view.
+//! [`TextDiffSession`] owns one text comparison: the loaded bytes of both
+//! files, the [`TextDiff`] from `cocomo_lib`, and the aligned row model
+//! derived from it. [`TextDiffView`] renders the model as two
+//! scroll-synchronized virtual lists with a gutter (arrows and section
+//! collapse boxes), per-pane file bars, an optional thumbnail strip,
+//! read-only detail panes, and a status bar.
+//!
+//! The alignment model inserts blank counterpart cells so both panes show
+//! the same row at the same height; difference rows group into *sections*
+//! that can be collapsed to a "N FILTERED LINES" header in either pane.
 
+use std::{
+    cell::Cell, collections::HashSet, rc::Rc, sync::Arc, time::Instant,
+};
+
+use chrono::{DateTime, Local, Utc};
 use cocomo_lib::{
-    Endpoint, FsError, LineInfo, NodeFileSystem, TextCompareSettings,
-    TextDiff, compare_texts,
+    ColorOverrides, Endpoint, FsError, Grammar, Importance, LineEnding,
+    LineInfo, NodeFileSystem, TextCompareSettings, TextDiff, TextDifference,
+    TextEncoding, compare_texts, format_size,
 };
 use gpui::{
-    App, Context, Entity, FocusHandle, Render, SharedString, Window, actions,
-    component::{ActiveTheme, Theme},
-    div,
+    AnyElement, App, Bounds, Context, CursorStyle, DispatchPhase, Div,
+    Element, ElementId, Entity, FocusHandle, GlobalElementId, Hitbox, Hsla,
+    InspectorElementId, IntoElement, KeyBinding, LayoutId, List,
+    ListAlignment, ListScrollEvent, ListState, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, PathBuilder, Pixels, Render, SharedString,
+    Style, Subscription, Window, actions,
+    assets::IconName,
+    base::Disableable as _,
+    component::{
+        ActiveTheme, Sizable as _, Theme, WindowExt as _,
+        button::{Button, ButtonVariants as _},
+        h_flex,
+        input::{Input, InputEvent, InputState},
+        menu::{DropdownMenu as _, PopupMenuItem},
+        resizable::{h_resizable, resizable_panel},
+        spinner::Spinner,
+        status_bar::StatusBar,
+        toolbar::{Toolbar, ToolbarGroup},
+        v_flex,
+    },
+    div, fill, list, outline, point,
     prelude::*,
+    px, relative, size,
+};
+
+use crate::{
+    color::{ColorRole, Side},
+    log::{self, LogLevel},
+    menus::{
+        NextSection, PrevSection, ReloadCompare, SessionInfo, SessionReport,
+        ShowThumbnails, ToggleWordWrap,
+    },
+    ui::{NextDifference, PrevDifference, SwapSides},
 };
 
 // ---------------------------------------------------------------------------
 // Actions
 // ---------------------------------------------------------------------------
 
-actions!(text_diff, [SelectNext, SelectPrev]);
+actions!(text_compare, [NextLine, PrevLine]);
 
 // ---------------------------------------------------------------------------
-// State
+// Diff alignment model
 // ---------------------------------------------------------------------------
 
-/// Application state for a text diff session.
-pub struct TextDiffState {
-    /// Focus handle for keyboard navigation.
+/// Status of one aligned row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RowStatus {
+    /// Both sides carry the same line.
+    Same,
+    /// Both sides carry a line, but the contents differ.
+    Changed,
+    /// Only the right side carries the line.
+    Inserted,
+    /// Only the left side carries the line.
+    Deleted,
+}
+
+impl RowStatus {
+    /// Whether this row participates in a difference.
+    pub(crate) fn is_difference(self) -> bool {
+        self != RowStatus::Same
+    }
+
+    /// Gutter arrow for a difference row, per spec section 5.2.
+    pub(crate) fn gutter_arrow(self) -> Option<&'static str> {
+        match self {
+            Self::Same => None,
+            Self::Inserted => Some("→"),
+            Self::Deleted => Some("←"),
+            Self::Changed => Some("↔"),
+        }
+    }
+
+    /// Short label for the status bar's state field.
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Same => "Same",
+            Self::Changed => "Change",
+            Self::Inserted => "Insert",
+            Self::Deleted => "Delete",
+        }
+    }
+}
+
+/// One row of the side-by-side alignment.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct DiffRow {
+    /// 1-based left line number, `None` for an inserted row.
+    pub(crate) left: Option<usize>,
+    /// 1-based right line number, `None` for a deleted row.
+    pub(crate) right: Option<usize>,
+    /// Alignment status of the row.
+    pub(crate) status: RowStatus,
+    /// Whether every token on the row is comment-or-lower importance.
+    pub(crate) minor: bool,
+}
+
+/// Whether all tokens of the given lines are of minor importance.
+///
+/// Minor means comment-or-lower; lines without tokens (no grammar was
+/// applied) are *not* minor, so an unclassified diff stays important.
+fn lines_are_minor<'a>(lines: impl IntoIterator<Item = &'a LineInfo>) -> bool {
+    let mut saw_token = false;
+    for line in lines {
+        for token in &line.tokens {
+            saw_token = true;
+            if token.importance > Importance::Comment {
+                return false;
+            }
+        }
+    }
+    saw_token
+}
+
+/// Push aligned context rows until both cursors reach their targets, then
+/// emit any leftover left rows as deleted and right rows as inserted.
+///
+/// Cursors are 0-based line indices; targets are exclusive 0-based bounds.
+fn push_context(
+    rows: &mut Vec<DiffRow>,
+    l: &mut usize,
+    r: &mut usize,
+    left_target: usize,
+    right_target: usize,
+) {
+    while *l < left_target && *r < right_target {
+        rows.push(DiffRow {
+            left: Some(*l + 1),
+            right: Some(*r + 1),
+            status: RowStatus::Same,
+            minor: false,
+        });
+        *l += 1;
+        *r += 1;
+    }
+    while *l < left_target {
+        rows.push(DiffRow {
+            left: Some(*l + 1),
+            right: None,
+            status: RowStatus::Deleted,
+            minor: false,
+        });
+        *l += 1;
+    }
+    while *r < right_target {
+        rows.push(DiffRow {
+            left: None,
+            right: Some(*r + 1),
+            status: RowStatus::Inserted,
+            minor: false,
+        });
+        *r += 1;
+    }
+}
+
+/// Align a [`TextDiff`] into side-by-side rows.
+///
+/// Context between differences is aligned pairwise; added and removed
+/// blocks get a blank counterpart cell on the other side.
+pub(crate) fn align_rows(diff: &TextDiff) -> Vec<DiffRow> {
+    let mut rows = Vec::new();
+    let (mut l, mut r) = (0usize, 0usize);
+    for difference in &diff.differences {
+        match difference {
+            TextDifference::LineDifferent(left, right) => {
+                push_context(
+                    &mut rows,
+                    &mut l,
+                    &mut r,
+                    left.number - 1,
+                    right.number - 1,
+                );
+                let minor = lines_are_minor([left, right]);
+                rows.push(DiffRow {
+                    left: Some(left.number),
+                    right: Some(right.number),
+                    status: RowStatus::Changed,
+                    minor,
+                });
+                l = left.number;
+                r = right.number;
+            }
+            TextDifference::LinesAdded(start, lines) => {
+                let right_target = start - 1;
+                let left_target = l + right_target.saturating_sub(r);
+                push_context(
+                    &mut rows,
+                    &mut l,
+                    &mut r,
+                    left_target,
+                    right_target,
+                );
+                for line in lines {
+                    let minor = lines_are_minor([line]);
+                    rows.push(DiffRow {
+                        left: None,
+                        right: Some(line.number),
+                        status: RowStatus::Inserted,
+                        minor,
+                    });
+                }
+                r = right_target + lines.len();
+            }
+            TextDifference::LinesRemoved(start, lines) => {
+                let left_target = start - 1;
+                let right_target = r + left_target.saturating_sub(l);
+                push_context(
+                    &mut rows,
+                    &mut l,
+                    &mut r,
+                    left_target,
+                    right_target,
+                );
+                for line in lines {
+                    let minor = lines_are_minor([line]);
+                    rows.push(DiffRow {
+                        left: Some(line.number),
+                        right: None,
+                        status: RowStatus::Deleted,
+                        minor,
+                    });
+                }
+                l = left_target + lines.len();
+            }
+            TextDifference::LinesChanged(start, removed, added) => {
+                let left_target = start - 1;
+                let right_target = r + left_target.saturating_sub(l);
+                push_context(
+                    &mut rows,
+                    &mut l,
+                    &mut r,
+                    left_target,
+                    right_target,
+                );
+                let paired = removed.len().min(added.len());
+                for i in 0..paired {
+                    let minor = lines_are_minor([&removed[i], &added[i]]);
+                    rows.push(DiffRow {
+                        left: Some(removed[i].number),
+                        right: Some(added[i].number),
+                        status: RowStatus::Changed,
+                        minor,
+                    });
+                }
+                for line in &removed[paired..] {
+                    let minor = lines_are_minor([line]);
+                    rows.push(DiffRow {
+                        left: Some(line.number),
+                        right: None,
+                        status: RowStatus::Deleted,
+                        minor,
+                    });
+                }
+                for line in &added[paired..] {
+                    let minor = lines_are_minor([line]);
+                    rows.push(DiffRow {
+                        left: None,
+                        right: Some(line.number),
+                        status: RowStatus::Inserted,
+                        minor,
+                    });
+                }
+                l = left_target + removed.len();
+                r = right_target + added.len();
+            }
+            // A blank-line classification difference carries no line
+            // numbers to align on; ignore it.
+            TextDifference::BlankLine => {}
+        }
+    }
+    push_context(
+        &mut rows,
+        &mut l,
+        &mut r,
+        diff.left_line_count,
+        diff.right_line_count,
+    );
+    rows
+}
+
+/// Kind of a difference section, for the report and gutter.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SectionKind {
+    /// The section only inserts lines on the right.
+    Insert,
+    /// The section only deletes lines from the left.
+    Delete,
+    /// The section changes lines on both sides.
+    Change,
+}
+
+/// A maximal run of consecutive difference rows.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct DiffSection {
+    /// Aggregated kind of the section's rows.
+    pub(crate) kind: SectionKind,
+    /// Whether every row of the section is minor.
+    pub(crate) minor: bool,
+    /// First row index of the section.
+    pub(crate) start_row: usize,
+    /// One past the last row index of the section.
+    pub(crate) end_row: usize,
+}
+
+/// Group consecutive difference rows into sections.
+pub(crate) fn diff_sections(rows: &[DiffRow]) -> Vec<DiffSection> {
+    let mut sections = Vec::new();
+    let mut start: Option<usize> = None;
+    for (ix, row) in rows.iter().enumerate() {
+        if row.status.is_difference() {
+            if start.is_none() {
+                start = Some(ix);
+            }
+        } else if let Some(s) = start.take() {
+            sections.push(make_section(rows, s, ix));
+        }
+    }
+    if let Some(s) = start {
+        sections.push(make_section(rows, s, rows.len()));
+    }
+    sections
+}
+
+fn make_section(rows: &[DiffRow], start: usize, end: usize) -> DiffSection {
+    let (mut has_insert, mut has_delete, mut has_change) =
+        (false, false, false);
+    let mut minor = true;
+    for row in &rows[start..end] {
+        match row.status {
+            RowStatus::Inserted => has_insert = true,
+            RowStatus::Deleted => has_delete = true,
+            RowStatus::Changed => has_change = true,
+            RowStatus::Same => {}
+        }
+        minor &= row.minor;
+    }
+    let kind = if has_change || (has_insert && has_delete) {
+        SectionKind::Change
+    } else if has_insert {
+        SectionKind::Insert
+    } else {
+        SectionKind::Delete
+    };
+    DiffSection {
+        kind,
+        minor,
+        start_row: start,
+        end_row: end,
+    }
+}
+
+/// One row of the *displayed* list: either a diff row or a collapsed
+/// section's filtered-lines header.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum DisplayRow {
+    /// Display index maps to this row index.
+    Line(usize),
+    /// Collapsed section header for `count` hidden rows.
+    Filtered { section: usize, count: usize },
+}
+
+/// Build the display list from the rows and the collapsed sections.
+///
+/// Returns the display rows, the row-index → display-index map, and the
+/// section-index → display-index map (`usize::MAX` for absent entries).
+pub(crate) fn display_rows(
+    rows: &[DiffRow],
+    sections: &[DiffSection],
+    collapsed: &HashSet<usize>,
+) -> (Vec<DisplayRow>, Vec<usize>, Vec<usize>) {
+    let mut section_of_row = vec![usize::MAX; rows.len()];
+    for (si, section) in sections.iter().enumerate() {
+        for slot in &mut section_of_row[section.start_row..section.end_row] {
+            *slot = si;
+        }
+    }
+    let mut display = Vec::with_capacity(rows.len());
+    let mut line_display = vec![usize::MAX; rows.len()];
+    let mut section_display = vec![usize::MAX; sections.len()];
+    let mut i = 0;
+    while i < rows.len() {
+        let si = section_of_row[i];
+        if si != usize::MAX && collapsed.contains(&si) {
+            let section = &sections[si];
+            section_display[si] = display.len();
+            display.push(DisplayRow::Filtered {
+                section: si,
+                count: section.end_row - section.start_row,
+            });
+            i = section.end_row;
+        } else {
+            line_display[i] = display.len();
+            display.push(DisplayRow::Line(i));
+            i += 1;
+        }
+    }
+    (display, line_display, section_display)
+}
+
+/// Next display index at or after `from` (wrapping) that shows a
+/// difference row.
+fn next_difference_index(
+    display: &[DisplayRow],
+    rows: &[DiffRow],
+    from: usize,
+) -> Option<usize> {
+    if display.is_empty() {
+        return None;
+    }
+    let n = display.len();
+    for k in 0..n {
+        let d = (from + k) % n;
+        if let DisplayRow::Line(r) = display[d]
+            && rows[r].status.is_difference()
+        {
+            return Some(d);
+        }
+    }
+    None
+}
+
+/// Previous display index before `from` (wrapping) that shows a
+/// difference row.
+fn prev_difference_index(
+    display: &[DisplayRow],
+    rows: &[DiffRow],
+    from: usize,
+) -> Option<usize> {
+    if display.is_empty() {
+        return None;
+    }
+    let n = display.len();
+    for k in 1..=n {
+        let d = (from + n - k) % n;
+        if let DisplayRow::Line(r) = display[d]
+            && rows[r].status.is_difference()
+        {
+            return Some(d);
+        }
+    }
+    None
+}
+
+/// Next section header/first-row display index after `selected`,
+/// wrapping to the first section.
+fn next_section_index(
+    section_display: &[usize],
+    selected: Option<usize>,
+) -> Option<usize> {
+    let present: Vec<usize> = section_display
+        .iter()
+        .copied()
+        .filter(|&d| d != usize::MAX)
+        .collect();
+    match selected {
+        None => present.first().copied(),
+        Some(cur) => present
+            .iter()
+            .copied()
+            .find(|&d| d > cur)
+            .or_else(|| present.first().copied()),
+    }
+}
+
+/// Previous section display index before `selected`, wrapping to the last.
+fn prev_section_index(
+    section_display: &[usize],
+    selected: Option<usize>,
+) -> Option<usize> {
+    let present: Vec<usize> = section_display
+        .iter()
+        .copied()
+        .filter(|&d| d != usize::MAX)
+        .collect();
+    match selected {
+        None => present.last().copied(),
+        Some(cur) => present
+            .iter()
+            .copied()
+            .rev()
+            .find(|&d| d < cur)
+            .or_else(|| present.last().copied()),
+    }
+}
+
+/// Runs of the thumbnail strip: (start fraction, end fraction, role).
+///
+/// Consecutive difference rows of the same severity merge into one run so
+/// the strip paints one quad per run instead of one per line.
+pub(crate) fn thumbnail_runs(
+    display: &[DisplayRow],
+    rows: &[DiffRow],
+) -> Vec<(f32, f32, ColorRole)> {
+    let total = display.len();
+    if total == 0 {
+        return Vec::new();
+    }
+    let mut runs: Vec<(f32, f32, ColorRole)> = Vec::new();
+    for (d, item) in display.iter().enumerate() {
+        let DisplayRow::Line(r) = item else { continue };
+        let row = &rows[*r];
+        if !row.status.is_difference() {
+            continue;
+        }
+        let role = if row.minor {
+            ColorRole::Minor
+        } else {
+            ColorRole::Important
+        };
+        let start = d as f32 / total as f32;
+        let end = (d + 1) as f32 / total as f32;
+        match runs.last_mut() {
+            Some(last)
+                if last.2 == role && (last.1 - start).abs() < f32::EPSILON =>
+            {
+                last.1 = end;
+            }
+            _ => runs.push((start, end, role)),
+        }
+    }
+    runs
+}
+
+// ---------------------------------------------------------------------------
+// Text decoding helpers
+// ---------------------------------------------------------------------------
+
+/// Decode raw file bytes under the selected encoding.
+///
+/// UTF-8 is lossy so undecodable bytes never abort a comparison; ANSI is
+/// treated as Latin-1, which maps bytes 1:1 onto the first Unicode plane.
+fn decode_bytes(bytes: &[u8], encoding: TextEncoding) -> String {
+    match encoding {
+        TextEncoding::Latin1 => bytes.iter().map(|&b| char::from(b)).collect(),
+        _ => String::from_utf8_lossy(bytes).into_owned(),
+    }
+}
+
+/// Split decoded text into 1-based [`LineInfo`] rows, treating CR, LF, and
+/// CRLF all as line endings. A trailing newline does not add an empty line.
+fn split_lines(text: &str) -> Vec<LineInfo> {
+    let mut lines = Vec::new();
+    let bytes = text.as_bytes();
+    let (mut start, mut i, mut number) = (0usize, 0usize, 1usize);
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\r' => {
+                lines.push(LineInfo::new(number, text[start..i].to_string()));
+                number += 1;
+                i += if bytes.get(i + 1) == Some(&b'\n') {
+                    2
+                } else {
+                    1
+                };
+                start = i;
+            }
+            b'\n' => {
+                lines.push(LineInfo::new(number, text[start..i].to_string()));
+                number += 1;
+                i += 1;
+                start = i;
+            }
+            _ => i += 1,
+        }
+    }
+    if start < text.len() {
+        lines.push(LineInfo::new(number, text[start..].to_string()));
+    }
+    lines
+}
+
+/// Detect the dominant line-ending convention from raw bytes.
+fn detect_line_ending(bytes: &[u8]) -> LineEnding {
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\r' => {
+                return if bytes.get(i + 1) == Some(&b'\n') {
+                    LineEnding::Crlf
+                } else {
+                    LineEnding::Cr
+                };
+            }
+            b'\n' => return LineEnding::Lf,
+            _ => i += 1,
+        }
+    }
+    LineEnding::Lf
+}
+
+/// Display label for an encoding selector entry.
+fn encoding_label(encoding: TextEncoding) -> &'static str {
+    match encoding {
+        TextEncoding::Latin1 => "ANSI",
+        _ => "UTF-8",
+    }
+}
+
+/// Display label for a line-ending selector entry.
+fn line_ending_label(ending: LineEnding) -> &'static str {
+    match ending {
+        LineEnding::Crlf => "PC",
+        LineEnding::Cr => "Mac",
+        LineEnding::Lf => "Unix",
+        LineEnding::Ignore => "—",
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Session state
+// ---------------------------------------------------------------------------
+
+/// Per-side file metadata shown in the file bar.
+#[derive(Clone, Debug)]
+struct FileMeta {
+    /// Modification time, formatted for display.
+    modified: String,
+    /// Size in bytes.
+    size: u64,
+}
+
+impl FileMeta {
+    fn from_parts(size: u64, modified: DateTime<Utc>) -> Self {
+        Self {
+            modified: modified
+                .with_timezone(&Local)
+                .format("%Y-%m-%d %H:%M")
+                .to_string(),
+            size,
+        }
+    }
+}
+
+/// Statistics for the Info dialog.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct InfoStats {
+    /// Lines in the left file.
+    pub(crate) left_lines: usize,
+    /// Lines in the right file.
+    pub(crate) right_lines: usize,
+    /// Number of difference sections.
+    pub(crate) sections: usize,
+    /// Lines inserted on the right.
+    pub(crate) insertions: usize,
+    /// Lines deleted from the left.
+    pub(crate) deletions: usize,
+    /// Lines changed on both sides.
+    pub(crate) changes: usize,
+}
+
+/// State of one text compare session.
+///
+/// Owns the endpoints, the raw bytes and decoded lines of both sides, the
+/// diff model, and the view options (wrap, thumbnail, collapsed sections,
+/// selection). The view observes this entity and re-renders on notify.
+pub struct TextDiffSession {
+    /// Focus handle shared with the view.
     focus_handle: FocusHandle,
-    /// Window / tab title.
+    /// Tab title.
     title: SharedString,
     /// Left file endpoint.
     left: Endpoint,
     /// Right file endpoint.
     right: Endpoint,
-    /// Text diff result.
+    /// Raw left bytes from the last load.
+    left_raw: Option<Vec<u8>>,
+    /// Raw right bytes from the last load.
+    right_raw: Option<Vec<u8>>,
+    /// Decoded left lines.
+    left_lines: Arc<Vec<LineInfo>>,
+    /// Decoded right lines.
+    right_lines: Arc<Vec<LineInfo>>,
+    /// Left file metadata, if the file exists.
+    left_meta: Option<FileMeta>,
+    /// Right file metadata, if the file exists.
+    right_meta: Option<FileMeta>,
+    /// Left read encoding.
+    left_encoding: TextEncoding,
+    /// Right read encoding.
+    right_encoding: TextEncoding,
+    /// Left line-ending convention (detected, selectable).
+    left_ending: LineEnding,
+    /// Right line-ending convention (detected, selectable).
+    right_ending: LineEnding,
+    /// Previously loaded left paths, oldest first.
+    left_history: Vec<String>,
+    /// Previously loaded right paths, oldest first.
+    right_history: Vec<String>,
+    /// Raw diff result.
     diff: Option<TextDiff>,
-    /// Left file lines.
-    left_lines: Vec<LineInfo>,
-    /// Right file lines.
-    right_lines: Vec<LineInfo>,
-    /// Selected row index in the diff list.
-    selected_index: usize,
-    /// Whether the diff is currently being computed.
+    /// Aligned rows derived from the diff.
+    rows: Arc<Vec<DiffRow>>,
+    /// Sections derived from the rows.
+    sections: Arc<Vec<DiffSection>>,
+    /// Display list (rows plus filtered headers).
+    display: Arc<Vec<DisplayRow>>,
+    /// Section index → display index.
+    section_display: Arc<Vec<usize>>,
+    /// Row index → section index (`usize::MAX` when none).
+    row_section: Arc<Vec<usize>>,
+    /// Row index → is the first row of its section.
+    is_section_start: Arc<Vec<bool>>,
+    /// Collapsed section indices.
+    collapsed: HashSet<usize>,
+    /// Selected display index.
+    selected: Option<usize>,
+    /// Whether a load is in flight.
     loading: bool,
-    /// Error message, if any.
+    /// Last load error, if any.
     error: Option<String>,
+    /// Duration of the last successful load, in milliseconds.
+    load_ms: Option<u128>,
+    /// Word-wrap rows instead of clipping them.
+    word_wrap: bool,
+    /// Show the thumbnail strip beside the panes.
+    show_thumbnail: bool,
+    /// Per-session color overrides.
+    overrides: ColorOverrides,
 }
 
-#[allow(dead_code)]
-impl TextDiffState {
-    /// Create a new text diff state for the given file endpoints.
+impl TextDiffSession {
+    /// Create a session for the given endpoints; loads on demand.
     pub fn new(
         left: Endpoint,
         right: Endpoint,
@@ -72,17 +765,59 @@ impl TextDiffState {
             title,
             left,
             right,
+            left_raw: None,
+            right_raw: None,
+            left_lines: Arc::new(Vec::new()),
+            right_lines: Arc::new(Vec::new()),
+            left_meta: None,
+            right_meta: None,
+            left_encoding: TextEncoding::Utf8,
+            right_encoding: TextEncoding::Utf8,
+            left_ending: LineEnding::Lf,
+            right_ending: LineEnding::Lf,
+            left_history: Vec::new(),
+            right_history: Vec::new(),
             diff: None,
-            left_lines: Vec::new(),
-            right_lines: Vec::new(),
-            selected_index: 0,
+            rows: Arc::new(Vec::new()),
+            sections: Arc::new(Vec::new()),
+            display: Arc::new(Vec::new()),
+            section_display: Arc::new(Vec::new()),
+            row_section: Arc::new(Vec::new()),
+            is_section_start: Arc::new(Vec::new()),
+            collapsed: HashSet::new(),
+            selected: None,
             loading: false,
             error: None,
+            load_ms: None,
+            word_wrap: false,
+            show_thumbnail: false,
+            overrides: ColorOverrides::default(),
         }
     }
 
+    /// Build a session from in-memory texts, without any file I/O. Used by
+    /// tests that exercise the model and view synchronously.
+    #[cfg(test)]
+    fn for_test(
+        left_text: &str,
+        right_text: &str,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut session = Self::new(
+            Endpoint::local("/left.txt"),
+            Endpoint::local("/right.txt"),
+            "test".into(),
+            cx,
+        );
+        session.left_raw = Some(left_text.as_bytes().to_vec());
+        session.right_raw = Some(right_text.as_bytes().to_vec());
+        session.load_ms = Some(1);
+        session.redecode_and_compare();
+        session
+    }
+
     /// Return the focus handle.
-    pub fn focus_handle(&self, _cx: &App) -> FocusHandle {
+    pub fn focus_handle(&self) -> FocusHandle {
         self.focus_handle.clone()
     }
 
@@ -91,122 +826,180 @@ impl TextDiffState {
         &self.title
     }
 
-    /// Whether the diff is currently being computed.
+    /// Whether a load is in flight.
     pub fn is_loading(&self) -> bool {
         self.loading
     }
 
-    /// Return the error message, if any.
+    /// Return the last error message, if any.
     pub fn error(&self) -> Option<&str> {
         self.error.as_deref()
     }
 
-    /// Return the diff result, if loaded.
-    pub fn diff(&self) -> Option<&TextDiff> {
-        self.diff.as_ref()
+    /// Whether word wrap is on.
+    pub fn is_word_wrap(&self) -> bool {
+        self.word_wrap
     }
 
-    /// Return the left lines.
-    pub fn left_lines(&self) -> &[LineInfo] {
-        &self.left_lines
+    /// Whether the thumbnail strip is shown.
+    pub fn is_show_thumbnail(&self) -> bool {
+        self.show_thumbnail
     }
 
-    /// Return the right lines.
-    pub fn right_lines(&self) -> &[LineInfo] {
-        &self.right_lines
+    /// Number of difference sections.
+    pub fn section_count(&self) -> usize {
+        self.sections.len()
     }
 
-    /// Return the selected index.
-    pub fn selected_index(&self) -> usize {
-        self.selected_index
-    }
-
-    /// Navigate to the next diff row.
-    pub fn select_next(&mut self, cx: &mut Context<Self>) {
-        let max = self
-            .diff
-            .as_ref()
-            .map_or(0, |d| d.differences.len().saturating_sub(1));
-        if self.selected_index < max {
-            self.selected_index += 1;
-            cx.notify();
+    /// The selected aligned row, if any.
+    fn selected_row(&self) -> Option<&DiffRow> {
+        let d = self.selected?;
+        match self.display.get(d)? {
+            DisplayRow::Line(r) => self.rows.get(*r),
+            DisplayRow::Filtered { .. } => None,
         }
     }
 
-    /// Navigate to the previous diff row.
-    pub fn select_previous(&mut self, cx: &mut Context<Self>) {
-        if self.selected_index > 0 {
-            self.selected_index -= 1;
-            cx.notify();
+    /// Alignment label `left:right` for the status bar.
+    pub fn alignment_label(&self) -> String {
+        match self.selected_row() {
+            Some(row) => format!(
+                "{}:{}",
+                row.left
+                    .map(|n| n.to_string())
+                    .unwrap_or_else(|| "—".into()),
+                row.right
+                    .map(|n| n.to_string())
+                    .unwrap_or_else(|| "—".into()),
+            ),
+            None => "—:—".to_string(),
         }
     }
 
-    /// Compute the text diff asynchronously.
-    pub fn load_diff(&mut self, cx: &mut Context<Self>) {
+    /// State label (Same/Change/Insert/Delete) for the status bar.
+    pub fn state_label(&self) -> &'static str {
+        self.selected_row()
+            .map(|row| row.status.label())
+            .unwrap_or("—")
+    }
+
+    /// Load-duration label for the status bar.
+    pub fn load_label(&self) -> Option<String> {
+        self.load_ms.map(|ms| format!("Loaded in {ms} ms"))
+    }
+
+    /// Statistics for the Info dialog.
+    pub fn info_stats(&self) -> InfoStats {
+        let (mut insertions, mut deletions, mut changes) = (0, 0, 0);
+        for row in self.rows.iter() {
+            match row.status {
+                RowStatus::Inserted => insertions += 1,
+                RowStatus::Deleted => deletions += 1,
+                RowStatus::Changed => changes += 1,
+                RowStatus::Same => {}
+            }
+        }
+        InfoStats {
+            left_lines: self.left_lines.len(),
+            right_lines: self.right_lines.len(),
+            sections: self.sections.len(),
+            insertions,
+            deletions,
+            changes,
+        }
+    }
+
+    /// Plain-text report of the comparison for the Report dialog and file.
+    pub fn report_text(&self) -> String {
+        let stats = self.info_stats();
+        let mut out = String::new();
+        out.push_str("Text compare report\n");
+        out.push_str("===================\n\n");
+        out.push_str(&format!("Left:  {}\n", self.left.display()));
+        out.push_str(&format!("Right: {}\n\n", self.right.display()));
+        out.push_str(&format!("Left lines:  {}\n", stats.left_lines));
+        out.push_str(&format!("Right lines: {}\n", stats.right_lines));
+        out.push_str(&format!("Difference sections: {}\n", stats.sections));
+        out.push_str(&format!("Inserted lines: {}\n", stats.insertions));
+        out.push_str(&format!("Deleted lines: {}\n", stats.deletions));
+        out.push_str(&format!("Changed lines: {}\n", stats.changes));
+        if let Some(ms) = self.load_ms {
+            out.push_str(&format!("Loaded in {ms} ms\n"));
+        }
+        if !self.sections.is_empty() {
+            out.push_str("\nSections:\n");
+            for (ix, section) in self.sections.iter().enumerate() {
+                let first = &self.rows[section.start_row];
+                let last = &self.rows[section.end_row - 1];
+                let side_range = |lo: Option<usize>, hi: Option<usize>| {
+                    format!(
+                        "{}-{}",
+                        lo.map(|n| n.to_string())
+                            .unwrap_or_else(|| "—".into()),
+                        hi.map(|n| n.to_string())
+                            .unwrap_or_else(|| "—".into()),
+                    )
+                };
+                out.push_str(&format!(
+                    "  #{} {:<6}{} left {} right {}\n",
+                    ix + 1,
+                    match section.kind {
+                        SectionKind::Insert => "Insert",
+                        SectionKind::Delete => "Delete",
+                        SectionKind::Change => "Change",
+                    },
+                    if section.minor { " (minor)" } else { "" },
+                    side_range(first.left, last.left),
+                    side_range(first.right, last.right),
+                ));
+            }
+        }
+        out
+    }
+
+    /// (Re)read both files and recompute the diff.
+    pub fn load(&mut self, cx: &mut Context<Self>) {
         if self.loading {
             return;
         }
-
         self.loading = true;
         self.error = None;
-        self.diff = None;
-        self.left_lines.clear();
-        self.right_lines.clear();
-        self.selected_index = 0;
         cx.notify();
 
         let left = self.left.clone();
         let right = self.right.clone();
         let weak = cx.entity().downgrade();
 
-        // Spawn file I/O on the tokio runtime because the providers use
-        // tokio-based IO internally and require a tokio reactor. A missing
-        // file yields empty content: one side of a comparison can
-        // legitimately not exist (an orphan entry).
+        // File I/O runs on the tokio runtime because the providers use
+        // tokio-based IO internally. A missing file yields empty content:
+        // one side of a comparison can legitimately not exist.
         let join_handle = crate::runtime::spawn_on_tokio(async move {
-            let read = |endpoint: Endpoint| async move {
-                match endpoint.fs().read_path(endpoint.path(), None).await {
-                    Ok(bytes) => Ok::<_, anyhow::Error>(
-                        String::from_utf8_lossy(&bytes).into_owned(),
-                    ),
-                    Err(FsError::NotFound { .. }) => Ok(String::new()),
-                    Err(e) => Err(anyhow::anyhow!("{e}")),
-                }
+            let started = Instant::now();
+            let read_side = |endpoint: Endpoint| async move {
+                let bytes =
+                    match endpoint.fs().read_path(endpoint.path(), None).await
+                    {
+                        Ok(bytes) => bytes.to_vec(),
+                        Err(FsError::NotFound { .. }) => Vec::new(),
+                        Err(e) => return Err(anyhow::anyhow!("{e}")),
+                    };
+                let meta = endpoint
+                    .fs()
+                    .metadata_path(endpoint.path())
+                    .await
+                    .ok()
+                    .map(|m| (m.size, m.modified));
+                Ok::<_, anyhow::Error>((bytes, meta))
             };
-            let left_content = read(left).await?;
-            let right_content = read(right).await?;
-
-            let settings = TextCompareSettings::new();
-
-            let left_lines: Vec<LineInfo> = left_content
-                .lines()
-                .enumerate()
-                .map(|(i, line)| LineInfo::new(i + 1, line.to_string()))
-                .collect();
-
-            let right_lines: Vec<LineInfo> = right_content
-                .lines()
-                .enumerate()
-                .map(|(i, line)| LineInfo::new(i + 1, line.to_string()))
-                .collect();
-
-            let left_text = left_lines
-                .iter()
-                .map(|l| l.content.as_str())
-                .collect::<Vec<_>>()
-                .join("\n");
-            let right_text = right_lines
-                .iter()
-                .map(|l| l.content.as_str())
-                .collect::<Vec<_>>()
-                .join("\n");
-
-            let diff = compare_texts(&left_text, &right_text, &settings);
-
-            Ok((diff, left_lines, right_lines))
+            let left = read_side(left).await?;
+            let right = read_side(right).await?;
+            Ok::<_, anyhow::Error>((
+                left,
+                right,
+                started.elapsed().as_millis(),
+            ))
         });
 
-        // Await the JoinHandle inside a gpui Task.
         cx.spawn(|_, cx: &mut gpui::AsyncApp| {
             let async_app = cx.clone();
             async move {
@@ -215,20 +1008,28 @@ impl TextDiffState {
                     Err(e) => Err(anyhow::anyhow!("task panicked: {e}")),
                 };
                 async_app.update(|cx| {
-                    if let Some(state) = weak.upgrade() {
-                        state.update(cx, |state, _| {
-                            state.loading = false;
+                    if let Some(entity) = weak.upgrade() {
+                        entity.update(cx, |session, cx| {
+                            session.loading = false;
                             match result {
-                                Ok((diff, left_lines, right_lines)) => {
-                                    state.diff = Some(diff);
-                                    state.left_lines = left_lines;
-                                    state.right_lines = right_lines;
+                                Ok(((lb, lm), (rb, rm), ms)) => {
+                                    session.left_raw = Some(lb);
+                                    session.right_raw = Some(rb);
+                                    session.left_meta = lm.map(|(s, m)| {
+                                        FileMeta::from_parts(s, m)
+                                    });
+                                    session.right_meta = rm.map(|(s, m)| {
+                                        FileMeta::from_parts(s, m)
+                                    });
+                                    session.load_ms = Some(ms);
+                                    session.redecode_and_compare();
                                 }
                                 Err(e) => {
-                                    state.error =
-                                        Some(format!("Diff failed: {e}"));
+                                    session.error =
+                                        Some(format!("Compare failed: {e}"));
                                 }
                             }
+                            cx.notify();
                         });
                     }
                 });
@@ -237,297 +1038,2215 @@ impl TextDiffState {
         .detach();
     }
 
-    /// Trigger auto-load if not already loaded.
-    pub fn trigger_auto_load(&mut self, cx: &mut Context<Self>) {
-        if !self.loading && self.diff.is_none() && self.error.is_none() {
-            self.load_diff(cx);
+    /// Start the initial load unless the model is already populated.
+    pub fn ensure_loaded(&mut self, cx: &mut Context<Self>) {
+        if self.diff.is_none()
+            && !self.loading
+            && self.error.is_none()
+            && self.left_raw.is_none()
+        {
+            self.load(cx);
         }
+    }
+
+    /// Re-decode both sides from the raw bytes, re-split, re-compare, and
+    /// rebuild the model. Also refreshes the detected line endings.
+    fn redecode_and_compare(&mut self) {
+        let left_text = decode_bytes(
+            self.left_raw.as_deref().unwrap_or(&[]),
+            self.left_encoding,
+        );
+        let right_text = decode_bytes(
+            self.right_raw.as_deref().unwrap_or(&[]),
+            self.right_encoding,
+        );
+        self.left_ending =
+            detect_line_ending(self.left_raw.as_deref().unwrap_or(&[]));
+        self.right_ending =
+            detect_line_ending(self.right_raw.as_deref().unwrap_or(&[]));
+        self.left_lines = Arc::new(split_lines(&left_text));
+        self.right_lines = Arc::new(split_lines(&right_text));
+        self.diff = Some(compare_texts(
+            &left_text,
+            &right_text,
+            &TextCompareSettings::new(),
+        ));
+        self.rebuild_model();
+    }
+
+    /// Rebuild rows, sections, and the display list from the diff.
+    fn rebuild_model(&mut self) {
+        let rows = self.diff.as_ref().map(align_rows).unwrap_or_default();
+        let sections = diff_sections(&rows);
+        let mut row_section = vec![usize::MAX; rows.len()];
+        let mut is_section_start = vec![false; rows.len()];
+        for (si, section) in sections.iter().enumerate() {
+            for slot in &mut row_section[section.start_row..section.end_row] {
+                *slot = si;
+            }
+            if section.start_row < rows.len() {
+                is_section_start[section.start_row] = true;
+            }
+        }
+        self.rows = Arc::new(rows);
+        self.sections = Arc::new(sections);
+        self.row_section = Arc::new(row_section);
+        self.is_section_start = Arc::new(is_section_start);
+        self.rebuild_display();
+    }
+
+    /// Rebuild the display list from rows and collapsed sections, keeping
+    /// the selection within bounds.
+    fn rebuild_display(&mut self) {
+        let (display, _line_display, section_display) =
+            display_rows(&self.rows, &self.sections, &self.collapsed);
+        self.display = Arc::new(display);
+        self.section_display = Arc::new(section_display);
+        if let Some(sel) = self.selected
+            && sel >= self.display.len()
+        {
+            self.selected = self.display.len().checked_sub(1);
+        }
+    }
+
+    /// Point one side at a new path and reload; the previous path goes to
+    /// that side's history.
+    pub fn set_side_path(
+        &mut self,
+        side: Side,
+        path: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let (endpoint, history) = match side {
+            Side::Left => (&self.left, &mut self.left_history),
+            Side::Right => (&self.right, &mut self.right_history),
+        };
+        let current = endpoint.display();
+        if current != path {
+            if !history.contains(&current) {
+                history.push(current);
+                if history.len() > 20 {
+                    history.remove(0);
+                }
+            }
+            let updated = endpoint.with_path(path);
+            match side {
+                Side::Left => self.left = updated,
+                Side::Right => self.right = updated,
+            }
+            self.load(cx);
+        }
+    }
+
+    /// Change one side's read encoding and re-decode from the raw bytes.
+    pub fn set_encoding(
+        &mut self,
+        side: Side,
+        encoding: TextEncoding,
+        cx: &mut Context<Self>,
+    ) {
+        match side {
+            Side::Left => self.left_encoding = encoding,
+            Side::Right => self.right_encoding = encoding,
+        }
+        if self.left_raw.is_some() || self.right_raw.is_some() {
+            self.redecode_and_compare();
+            cx.notify();
+        }
+    }
+
+    /// Change one side's line-ending indicator (display-only on read).
+    pub fn set_line_ending(
+        &mut self,
+        side: Side,
+        ending: LineEnding,
+        cx: &mut Context<Self>,
+    ) {
+        match side {
+            Side::Left => self.left_ending = ending,
+            Side::Right => self.right_ending = ending,
+        }
+        cx.notify();
+    }
+
+    /// Swap all per-side state and recompute.
+    pub fn swap_sides(&mut self, cx: &mut Context<Self>) {
+        std::mem::swap(&mut self.left, &mut self.right);
+        std::mem::swap(&mut self.left_raw, &mut self.right_raw);
+        std::mem::swap(&mut self.left_lines, &mut self.right_lines);
+        std::mem::swap(&mut self.left_meta, &mut self.right_meta);
+        std::mem::swap(&mut self.left_encoding, &mut self.right_encoding);
+        std::mem::swap(&mut self.left_ending, &mut self.right_ending);
+        std::mem::swap(&mut self.left_history, &mut self.right_history);
+        self.rebuild_model();
+        cx.notify();
+    }
+
+    /// Collapse or expand one section.
+    pub fn toggle_section(&mut self, section: usize, cx: &mut Context<Self>) {
+        if !self.collapsed.remove(&section) {
+            self.collapsed.insert(section);
+        }
+        self.rebuild_display();
+        cx.notify();
+    }
+
+    /// Toggle word wrap.
+    pub fn toggle_wrap(&mut self, cx: &mut Context<Self>) {
+        self.word_wrap = !self.word_wrap;
+        cx.notify();
+    }
+
+    /// Toggle the thumbnail strip.
+    pub fn toggle_thumbnail(&mut self, cx: &mut Context<Self>) {
+        self.show_thumbnail = !self.show_thumbnail;
+        cx.notify();
+    }
+
+    /// Select a display row (from a row click or the thumbnail).
+    pub fn select_display(&mut self, d: usize, cx: &mut Context<Self>) {
+        if d < self.display.len() {
+            self.selected = Some(d);
+            cx.notify();
+        }
+    }
+
+    /// Select the row at a vertical fraction of the strip.
+    pub fn select_frac(
+        &mut self,
+        frac: f32,
+        cx: &mut Context<Self>,
+    ) -> Option<usize> {
+        let n = self.display.len();
+        if n == 0 {
+            return None;
+        }
+        let ix = (frac * n as f32).clamp(0., 1.) as usize;
+        self.selected = Some(ix.min(n - 1));
+        cx.notify();
+        self.selected
+    }
+
+    /// Move the selection by one display row, clamped.
+    pub fn select_line_delta(
+        &mut self,
+        delta: isize,
+        cx: &mut Context<Self>,
+    ) -> Option<usize> {
+        if self.display.is_empty() {
+            return None;
+        }
+        let cur = self.selected.unwrap_or(0) as isize;
+        let next = (cur + delta).clamp(0, self.display.len() as isize - 1);
+        self.selected = Some(next as usize);
+        cx.notify();
+        self.selected
+    }
+
+    /// Walk to the next difference row, wrapping.
+    pub fn next_difference(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Option<usize> {
+        let from = self.selected.map(|s| s + 1).unwrap_or(0);
+        let from = from % self.display.len().max(1);
+        let target = next_difference_index(&self.display, &self.rows, from);
+        if target.is_some() {
+            self.selected = target;
+            cx.notify();
+        }
+        target
+    }
+
+    /// Walk to the previous difference row, wrapping.
+    pub fn prev_difference(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Option<usize> {
+        let from = self.selected.unwrap_or(0);
+        let target = prev_difference_index(&self.display, &self.rows, from);
+        if target.is_some() {
+            self.selected = target;
+            cx.notify();
+        }
+        target
+    }
+
+    /// Walk to the next difference section, wrapping.
+    pub fn next_section(&mut self, cx: &mut Context<Self>) -> Option<usize> {
+        let target = next_section_index(&self.section_display, self.selected);
+        if target.is_some() {
+            self.selected = target;
+            cx.notify();
+        }
+        target
+    }
+
+    /// Walk to the previous difference section, wrapping.
+    pub fn prev_section(&mut self, cx: &mut Context<Self>) -> Option<usize> {
+        let target = prev_section_index(&self.section_display, self.selected);
+        if target.is_some() {
+            self.selected = target;
+            cx.notify();
+        }
+        target
+    }
+
+    /// Left endpoint display path.
+    pub fn left_path(&self) -> String {
+        self.left.display()
+    }
+
+    /// Right endpoint display path.
+    pub fn right_path(&self) -> String {
+        self.right.display()
+    }
+
+    /// Left file-bar metadata line.
+    pub fn left_meta_label(&self) -> String {
+        meta_label(self.left_meta.as_ref(), self.left_ending)
+    }
+
+    /// Right file-bar metadata line.
+    pub fn right_meta_label(&self) -> String {
+        meta_label(self.right_meta.as_ref(), self.right_ending)
+    }
+
+    /// Left encoding selector label.
+    pub fn left_encoding_label(&self) -> &'static str {
+        encoding_label(self.left_encoding)
+    }
+
+    /// Right encoding selector label.
+    pub fn right_encoding_label(&self) -> &'static str {
+        encoding_label(self.right_encoding)
+    }
+
+    /// Left line-ending selector label.
+    pub fn left_ending_label(&self) -> &'static str {
+        line_ending_label(self.left_ending)
+    }
+
+    /// Right line-ending selector label.
+    pub fn right_ending_label(&self) -> &'static str {
+        line_ending_label(self.right_ending)
+    }
+
+    /// Left path history, oldest first.
+    pub fn left_history(&self) -> &[String] {
+        &self.left_history
+    }
+
+    /// Right path history, oldest first.
+    pub fn right_history(&self) -> &[String] {
+        &self.right_history
     }
 }
 
-impl gpui::Focusable for TextDiffState {
+/// File-bar metadata line: modified · size · format · line endings.
+fn meta_label(meta: Option<&FileMeta>, ending: LineEnding) -> String {
+    let size = meta
+        .map(|m| format_size(m.size))
+        .unwrap_or_else(|| "—".to_string());
+    let modified = meta
+        .map(|m| m.modified.clone())
+        .unwrap_or_else(|| "—".to_string());
+    format!("{modified} · {size} · Text · {}", line_ending_label(ending))
+}
+
+impl gpui::Focusable for TextDiffSession {
     fn focus_handle(&self, _cx: &App) -> FocusHandle {
         self.focus_handle.clone()
     }
 }
 
 // ---------------------------------------------------------------------------
-// View
+// Thumbnail strip element
 // ---------------------------------------------------------------------------
 
-/// Side-by-side text diff view.
+/// A narrow vertical strip that maps the whole display list onto its
+/// height: difference rows paint as colored runs, the viewport shows as a
+/// white outline, and the selection as a triangle marker. Clicking or
+/// dragging navigates.
+struct ThumbnailStrip {
+    id: ElementId,
+    /// (start fraction, end fraction, color) per run.
+    runs: Vec<(f32, f32, Hsla)>,
+    /// Viewport top fraction and height fraction.
+    viewport: (f32, f32),
+    /// Selection marker fraction.
+    marker: Option<f32>,
+    background: Hsla,
+    viewport_color: Hsla,
+    marker_color: Hsla,
+    width: Pixels,
+    dragging: Rc<Cell<bool>>,
+    on_navigate: NavigateFn,
+}
+
+/// Callback from the thumbnail strip: navigate to a vertical fraction of
+/// the display list.
+type NavigateFn = Rc<dyn Fn(f32, &mut Window, &mut App)>;
+
+impl IntoElement for ThumbnailStrip {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+impl Element for ThumbnailStrip {
+    type RequestLayoutState = ();
+    type PrepaintState = Hitbox;
+
+    fn id(&self) -> Option<ElementId> {
+        Some(self.id.clone())
+    }
+
+    fn source_location(
+        &self,
+    ) -> Option<&'static std::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, Self::RequestLayoutState) {
+        let mut style = Style::default();
+        style.size.width = self.width.into();
+        style.size.height = relative(1.).into();
+        (window.request_layout(style, None, cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _: &mut Self::RequestLayoutState,
+        window: &mut Window,
+        _: &mut App,
+    ) -> Self::PrepaintState {
+        window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal)
+    }
+
+    fn paint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _: &mut Self::RequestLayoutState,
+        hitbox: &mut Hitbox,
+        window: &mut Window,
+        _cx: &mut App,
+    ) {
+        let top = bounds.origin.y;
+        let height = bounds.size.height.as_f32();
+        window.paint_quad(fill(bounds, self.background));
+        // One quad per merged run, positioned by fraction of the height.
+        for (start, end, color) in &self.runs {
+            let y = top + px(height * start);
+            let h = px((height * (end - start)).max(1.));
+            window.paint_quad(fill(
+                Bounds {
+                    origin: point(bounds.origin.x, y),
+                    size: size(bounds.size.width, h),
+                },
+                *color,
+            ));
+        }
+        // The viewport rectangle as an outline.
+        let (vtop, vheight) = self.viewport;
+        if vheight > 0. {
+            let rect = Bounds {
+                origin: point(bounds.origin.x, top + px(height * vtop)),
+                size: size(bounds.size.width, px((height * vheight).max(2.))),
+            };
+            window.paint_quad(outline(
+                rect,
+                self.viewport_color,
+                gpui::BorderStyle::Solid,
+            ));
+        }
+        // The selection marker: a small right-pointing triangle.
+        if let Some(frac) = self.marker {
+            let y = top + px(height * frac);
+            let mut path = PathBuilder::fill();
+            path.move_to(point(bounds.origin.x, y - px(4.)));
+            path.line_to(point(bounds.origin.x + px(6.), y));
+            path.line_to(point(bounds.origin.x, y + px(4.)));
+            path.close();
+            if let Ok(built) = path.build() {
+                window.paint_path(built, self.marker_color);
+            }
+        }
+        if hitbox.is_hovered(window) {
+            window.set_cursor_style(CursorStyle::PointingHand, hitbox);
+        }
+        // Click or drag anywhere on the strip navigates to that fraction.
+        let dragging = self.dragging.clone();
+        let on_navigate = self.on_navigate.clone();
+        let hitbox_id = hitbox.id;
+        window.on_mouse_event({
+            let dragging = dragging.clone();
+            let on_navigate = on_navigate.clone();
+            move |event: &MouseDownEvent, phase, window, cx| {
+                if matches!(phase, DispatchPhase::Capture)
+                    && event.button == MouseButton::Left
+                    && hitbox_id.is_hovered(window)
+                {
+                    dragging.set(true);
+                    let frac = ((event.position.y - top).as_f32() / height)
+                        .clamp(0., 1.);
+                    on_navigate(frac, window, cx);
+                }
+            }
+        });
+        window.on_mouse_event({
+            let dragging = dragging.clone();
+            let on_navigate = on_navigate.clone();
+            move |event: &MouseMoveEvent, phase, window, cx| {
+                if matches!(phase, DispatchPhase::Capture)
+                    && dragging.get()
+                    && event.pressed_button == Some(MouseButton::Left)
+                {
+                    let frac = ((event.position.y - top).as_f32() / height)
+                        .clamp(0., 1.);
+                    on_navigate(frac, window, cx);
+                }
+            }
+        });
+        window.on_mouse_event(move |_: &MouseUpEvent, phase, _, _| {
+            if matches!(phase, DispatchPhase::Capture) {
+                dragging.set(false);
+            }
+        });
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Text compare view
+// ---------------------------------------------------------------------------
+
+/// The side-by-side text compare view (UI spec section 5).
 ///
-/// Like the folder compare view, this view renders only its own regions;
-/// window chrome and focus acquisition are owned by
-/// [`crate::tabview::WindowRoot`].
+/// Renders the session's aligned rows as two scroll-synchronized virtual
+/// lists with per-pane file bars, an optional thumbnail strip, read-only
+/// detail panes, and a status bar. All state lives in the session entity;
+/// the view only owns the list states and the path inputs.
 pub struct TextDiffView {
-    /// Handle to the diff state.
-    state: Entity<TextDiffState>,
+    /// The compare session this view renders.
+    state: Entity<TextDiffSession>,
+    /// Left pane's virtual list.
+    left_list: ListState,
+    /// Right pane's virtual list.
+    right_list: ListState,
+    /// Left file-bar path input, created on first render.
+    left_path_input: Option<Entity<InputState>>,
+    /// Right file-bar path input, created on first render.
+    right_path_input: Option<Entity<InputState>>,
+    /// Subscriptions for the path inputs' Enter commits.
+    _path_subs: Vec<Subscription>,
+    /// Re-render whenever the session notifies.
+    _state_sub: Subscription,
+    /// Drag flag shared with the thumbnail strip element.
+    thumbnail_drag: Rc<Cell<bool>>,
+    /// Display-row count the lists were last reset to.
+    list_count: usize,
+    /// Wrap mode the lists were last reset to.
+    list_wrap: bool,
 }
 
 impl TextDiffView {
-    /// Create a new text diff view.
-    pub fn new(state: Entity<TextDiffState>, cx: &mut Context<Self>) -> Self {
-        // Register key bindings once at construction, not from `render`.
-        cx.bind_keys(vec![
-            gpui::KeyBinding::new("j", SelectNext, None),
-            gpui::KeyBinding::new("k", SelectPrev, None),
-            gpui::KeyBinding::new("down", SelectNext, None),
-            gpui::KeyBinding::new("up", SelectPrev, None),
+    /// Create a view over an existing session; starts the initial load.
+    pub fn new(
+        state: Entity<TextDiffSession>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        // Line stepping and section walking are scoped to the text view's
+        // key context so they never shadow the folder view's plain j/k.
+        cx.bind_keys([
+            KeyBinding::new("j", NextLine, Some("TextCompare")),
+            KeyBinding::new("k", PrevLine, Some("TextCompare")),
+            KeyBinding::new("down", NextLine, Some("TextCompare")),
+            KeyBinding::new("up", PrevLine, Some("TextCompare")),
+            KeyBinding::new("cmd-shift-]", NextSection, Some("TextCompare")),
+            KeyBinding::new("cmd-shift-[", PrevSection, Some("TextCompare")),
         ]);
 
-        state.update(cx, |s, cx| {
-            s.trigger_auto_load(cx);
+        let left_list = ListState::new(0, ListAlignment::Top, px(100.));
+        let right_list = ListState::new(0, ListAlignment::Top, px(100.));
+        // Wheel-scrolling one pane scrolls the other to the same logical
+        // offset. The handler runs while the source list still holds a
+        // mutable borrow of its own state, so reading the offset and
+        // scrolling the target must be deferred to the next cycle.
+        // `scroll_to` never fires the handler, so this cannot loop.
+        left_list.set_scroll_handler({
+            let (src, dst) = (left_list.clone(), right_list.clone());
+            let weak = cx.entity().downgrade();
+            move |_: &ListScrollEvent, _window: &mut Window, cx: &mut App| {
+                let (src, dst, weak) =
+                    (src.clone(), dst.clone(), weak.clone());
+                cx.defer(move |cx| {
+                    let top = src.logical_scroll_top();
+                    dst.scroll_to(top);
+                    let _ = weak.update(cx, |_, cx| cx.notify());
+                });
+            }
+        });
+        right_list.set_scroll_handler({
+            let (src, dst) = (right_list.clone(), left_list.clone());
+            let weak = cx.entity().downgrade();
+            move |_: &ListScrollEvent, _window: &mut Window, cx: &mut App| {
+                let (src, dst, weak) =
+                    (src.clone(), dst.clone(), weak.clone());
+                cx.defer(move |cx| {
+                    let top = src.logical_scroll_top();
+                    dst.scroll_to(top);
+                    let _ = weak.update(cx, |_, cx| cx.notify());
+                });
+            }
         });
 
-        Self { state }
+        let _state_sub = cx.observe(&state, |_, _, cx| cx.notify());
+        state.update(cx, |session, cx| session.ensure_loaded(cx));
+        Self {
+            state,
+            left_list,
+            right_list,
+            left_path_input: None,
+            right_path_input: None,
+            _path_subs: Vec::new(),
+            _state_sub,
+            thumbnail_drag: Rc::new(Cell::new(false)),
+            list_count: 0,
+            list_wrap: false,
+        }
     }
 
-    /// Return the focus handle.
+    /// The session's focus handle, shared with the tab entity.
     pub fn focus_handle(&self, cx: &App) -> FocusHandle {
-        self.state.read(cx).focus_handle(cx).clone()
+        self.state.read(cx).focus_handle()
     }
 
-    /// The tab's display title (the file name or "Untitled").
+    /// The tab title.
     pub fn title(&self, cx: &App) -> SharedString {
         self.state.read(cx).title().clone()
     }
 
-    /// Handle select-next action.
-    fn select_next(
+    /// The underlying session, for the window root's menu sync.
+    pub fn text_state(&self) -> Entity<TextDiffSession> {
+        self.state.clone()
+    }
+
+    /// Scroll both panes so the display row is visible.
+    fn reveal(&self, target: Option<usize>) {
+        if let Some(ix) = target {
+            self.left_list.scroll_to_reveal_item(ix);
+            self.right_list.scroll_to_reveal_item(ix);
+        }
+    }
+
+    // -- Action handlers ---------------------------------------------------
+
+    fn handle_next_line(
         &mut self,
-        _: &SelectNext,
+        _: &NextLine,
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.state.update(cx, |s, cx| {
-            s.select_next(cx);
+        let target = self.state.update(cx, |s, cx| s.select_line_delta(1, cx));
+        self.reveal(target);
+    }
+
+    fn handle_prev_line(
+        &mut self,
+        _: &PrevLine,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let target =
+            self.state.update(cx, |s, cx| s.select_line_delta(-1, cx));
+        self.reveal(target);
+    }
+
+    fn handle_next_difference(
+        &mut self,
+        _: &NextDifference,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let target = self.state.update(cx, |s, cx| s.next_difference(cx));
+        self.reveal(target);
+    }
+
+    fn handle_prev_difference(
+        &mut self,
+        _: &PrevDifference,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let target = self.state.update(cx, |s, cx| s.prev_difference(cx));
+        self.reveal(target);
+    }
+
+    fn handle_next_section(
+        &mut self,
+        _: &NextSection,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let target = self.state.update(cx, |s, cx| s.next_section(cx));
+        self.reveal(target);
+    }
+
+    fn handle_prev_section(
+        &mut self,
+        _: &PrevSection,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let target = self.state.update(cx, |s, cx| s.prev_section(cx));
+        self.reveal(target);
+    }
+
+    fn handle_toggle_wrap(
+        &mut self,
+        _: &ToggleWordWrap,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.state.update(cx, |s, cx| s.toggle_wrap(cx));
+    }
+
+    fn handle_toggle_thumbnails(
+        &mut self,
+        _: &ShowThumbnails,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.state.update(cx, |s, cx| s.toggle_thumbnail(cx));
+    }
+
+    fn handle_reload(
+        &mut self,
+        _: &ReloadCompare,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.state.update(cx, |s, cx| s.load(cx));
+    }
+
+    fn handle_swap_sides(
+        &mut self,
+        _: &SwapSides,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.state.update(cx, |s, cx| s.swap_sides(cx));
+        self.sync_path_inputs(window, cx);
+    }
+
+    /// Re-read both path inputs from the (possibly swapped) session.
+    fn sync_path_inputs(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let (left, right) = {
+            let session = self.state.read(cx);
+            (session.left_path(), session.right_path())
+        };
+        if let Some(input) = &self.left_path_input {
+            input.update(cx, |input, cx| {
+                input.set_value(left.clone(), window, cx);
+            });
+        }
+        if let Some(input) = &self.right_path_input {
+            input.update(cx, |input, cx| input.set_value(right, window, cx));
+        }
+    }
+
+    // -- Dialogs -----------------------------------------------------------
+
+    fn handle_report(
+        &mut self,
+        _: &SessionReport,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let text = self.state.read(cx).report_text();
+        // Suggest the left file's directory as the save location.
+        let dir = std::path::PathBuf::from(self.state.read(cx).left_path())
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_default();
+        let preview = text.clone();
+        window.open_dialog(cx, move |dialog, _, _| {
+            dialog
+                .title("Session report")
+                .child(
+                    div()
+                        .id(ElementId::Name("report-preview".into()))
+                        .max_h(px(384.))
+                        .overflow_y_scroll()
+                        .child(preview.clone()),
+                )
+                .footer(
+                    h_flex()
+                        .justify_end()
+                        .gap_2()
+                        .child(
+                            Button::new("report_cancel")
+                                .label("Cancel")
+                                .on_click(|_, window, cx| {
+                                    window.close_dialog(cx);
+                                }),
+                        )
+                        .child(
+                            Button::new("report_save")
+                                .label("Save to file…")
+                                .primary()
+                                .on_click({
+                                    let text = text.clone();
+                                    let dir = dir.clone();
+                                    move |_, window, cx| {
+                                        window.close_dialog(cx);
+                                        save_report(&text, &dir, cx);
+                                    }
+                                }),
+                        ),
+                )
         });
     }
 
-    /// Handle select-previous action.
-    fn select_prev(
+    fn handle_info(
         &mut self,
-        _: &SelectPrev,
-        _: &mut Window,
+        _: &SessionInfo,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.state.update(cx, |s, cx| {
-            s.select_previous(cx);
+        let stats = self.state.read(cx).info_stats();
+        let (left, right) = {
+            let session = self.state.read(cx);
+            (session.left_path(), session.right_path())
+        };
+        window.open_dialog(cx, move |dialog, _, _| {
+            dialog.title("Session info").child(
+                v_flex()
+                    .gap_1()
+                    .text_sm()
+                    .child(format!("Left:  {left}"))
+                    .child(format!("Right: {right}"))
+                    .child(format!("Left lines:  {}", stats.left_lines))
+                    .child(format!("Right lines: {}", stats.right_lines))
+                    .child(format!("Difference sections: {}", stats.sections))
+                    .child(format!("Inserted lines: {}", stats.insertions))
+                    .child(format!("Deleted lines: {}", stats.deletions))
+                    .child(format!("Changed lines: {}", stats.changes)),
+            )
         });
+    }
+}
+
+/// Prompt for a path and write the report; the outcome goes to the log.
+fn save_report(text: &str, dir: &std::path::Path, cx: &mut App) {
+    let text = text.to_string();
+    let receiver = cx.prompt_for_new_path(dir, Some("cocomo-report.txt"));
+    cx.spawn(async move |cx| {
+        let path = match receiver.await {
+            Ok(Ok(Some(path))) => path,
+            // The user cancelled the save dialog.
+            Ok(Ok(None)) => return,
+            Ok(Err(e)) => {
+                cx.update(|cx| {
+                    log::push(
+                        LogLevel::Error,
+                        format!("Report save failed: {e}"),
+                        cx,
+                    );
+                });
+                return;
+            }
+            Err(_) => return,
+        };
+        let for_log = path.display().to_string();
+        let result = crate::runtime::spawn_on_tokio(async move {
+            fs_err::tokio::write(&path, text.as_bytes())
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))
+        })
+        .await;
+        cx.update(|cx| match result {
+            Ok(Ok(())) => log::push(
+                LogLevel::Info,
+                format!("Report saved: {for_log}"),
+                cx,
+            ),
+            Ok(Err(e)) => log::push(
+                LogLevel::Error,
+                format!("Report save failed: {e}"),
+                cx,
+            ),
+            Err(e) => log::push(
+                LogLevel::Error,
+                format!("Report save task panicked: {e}"),
+                cx,
+            ),
+        });
+    })
+    .detach();
+}
+
+impl TextDiffView {
+    /// Render the view's toolbar row (row 2) for the window root.
+    pub fn render_view_toolbar(
+        &mut self,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let (word_wrap, has_sections) = {
+            let session = self.state.read(cx);
+            (session.is_word_wrap(), session.section_count() > 0)
+        };
+
+        let wrap_btn = Button::new("text2_wrap")
+            .icon(IconName::TextWrap)
+            .ghost()
+            .small()
+            .toggled(word_wrap)
+            .tooltip("Toggle word wrap")
+            .accessibility_label("Toggle word wrap")
+            .on_click({
+                let state = self.state.clone();
+                move |_, _, cx| {
+                    state.update(cx, |s, cx| s.toggle_wrap(cx));
+                }
+            });
+
+        let prev_section_btn = {
+            let state = self.state.clone();
+            let left = self.left_list.clone();
+            let right = self.right_list.clone();
+            Button::new("text2_prev_section")
+                .icon(IconName::ChevronsUp)
+                .ghost()
+                .small()
+                .disabled(!has_sections)
+                .tooltip("Previous difference section")
+                .accessibility_label("Previous difference section")
+                .on_click(move |_, _, cx| {
+                    let target = state.update(cx, |s, cx| s.prev_section(cx));
+                    if let Some(ix) = target {
+                        left.scroll_to_reveal_item(ix);
+                        right.scroll_to_reveal_item(ix);
+                    }
+                })
+        };
+        let next_section_btn = {
+            let state = self.state.clone();
+            let left = self.left_list.clone();
+            let right = self.right_list.clone();
+            Button::new("text2_next_section")
+                .icon(IconName::ChevronsDown)
+                .ghost()
+                .small()
+                .disabled(!has_sections)
+                .tooltip("Next difference section")
+                .accessibility_label("Next difference section")
+                .on_click(move |_, _, cx| {
+                    let target = state.update(cx, |s, cx| s.next_section(cx));
+                    if let Some(ix) = target {
+                        left.scroll_to_reveal_item(ix);
+                        right.scroll_to_reveal_item(ix);
+                    }
+                })
+        };
+
+        let swap_btn = {
+            let state = self.state.clone();
+            let left_input = self.left_path_input.clone();
+            let right_input = self.right_path_input.clone();
+            Button::new("text2_swap")
+                .icon(IconName::ArrowLeftRight)
+                .ghost()
+                .small()
+                .tooltip("Swap sides")
+                .accessibility_label("Swap sides")
+                .on_click(move |_, window, cx| {
+                    state.update(cx, |s, cx| s.swap_sides(cx));
+                    let (l, r) = {
+                        let s = state.read(cx);
+                        (s.left_path(), s.right_path())
+                    };
+                    if let Some(input) = &left_input {
+                        input.update(cx, |i, cx| {
+                            i.set_value(l.clone(), window, cx);
+                        });
+                    }
+                    if let Some(input) = &right_input {
+                        input.update(cx, |i, cx| i.set_value(r, window, cx));
+                    }
+                })
+        };
+
+        let reload_btn = {
+            let state = self.state.clone();
+            Button::new("text2_reload")
+                .icon(IconName::RefreshCw)
+                .ghost()
+                .small()
+                .tooltip("Reload / recompare files")
+                .accessibility_label("Reload comparison")
+                .on_click(move |_, _, cx| {
+                    state.update(cx, |s, cx| s.load(cx));
+                })
+        };
+
+        Toolbar::new("text-view-toolbar")
+            .child(
+                ToolbarGroup::new("text-view-toolbar-view")
+                    .label("View")
+                    .child(wrap_btn),
+            )
+            .child(
+                ToolbarGroup::new("text-view-toolbar-sections")
+                    .label("Sections")
+                    .child(prev_section_btn)
+                    .child(next_section_btn),
+            )
+            .child(
+                ToolbarGroup::new("text-view-toolbar-pair")
+                    .label("Pair")
+                    .child(swap_btn),
+            )
+            .child(
+                ToolbarGroup::new("text-view-toolbar-reload")
+                    .label("Reload")
+                    .child(reload_btn),
+            )
+            .into_any_element()
     }
 }
 
 impl Render for TextDiffView {
     fn render(
         &mut self,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        // Tracking the focus handle makes this region (with its
-        // `key_context` and `on_action` handlers) the focused region for
-        // keyboard input; `WindowRoot` moves focus here on activation.
-        let focus_handle = self.focus_handle(cx);
-        let theme = cx.theme();
-        let title = self.state.read(cx).title().clone();
+        // Create the path inputs on first render; Enter commits a new
+        // path and reloads that side.
+        if self.left_path_input.is_none() {
+            let input = cx.new(|cx| {
+                InputState::new(window, cx).placeholder("Left file path")
+            });
+            let sub = cx.subscribe(&input, |this, input, event, cx| {
+                if matches!(event, InputEvent::PressEnter { .. }) {
+                    let value = input.read(cx).value().trim().to_string();
+                    if !value.is_empty() {
+                        this.state.update(cx, |s, cx| {
+                            s.set_side_path(Side::Left, &value, cx);
+                        });
+                    }
+                }
+            });
+            self._path_subs.push(sub);
+            self.left_path_input = Some(input);
+        }
+        if self.right_path_input.is_none() {
+            let input = cx.new(|cx| {
+                InputState::new(window, cx).placeholder("Right file path")
+            });
+            let sub = cx.subscribe(&input, |this, input, event, cx| {
+                if matches!(event, InputEvent::PressEnter { .. }) {
+                    let value = input.read(cx).value().trim().to_string();
+                    if !value.is_empty() {
+                        this.state.update(cx, |s, cx| {
+                            s.set_side_path(Side::Right, &value, cx);
+                        });
+                    }
+                }
+            });
+            self._path_subs.push(sub);
+            self.right_path_input = Some(input);
+        }
+        let left_input = self.left_path_input.clone().expect("just created");
+        let right_input = self.right_path_input.clone().expect("just created");
 
+        // Snapshot the session so the list closures own cheap Arc clones
+        // and no borrow of `cx` outlives this scope head.
+        let session = self.state.read(cx);
+        let rows = session.rows.clone();
+        let display = session.display.clone();
+        let row_section = session.row_section.clone();
+        let is_section_start = session.is_section_start.clone();
+        let left_lines = session.left_lines.clone();
+        let right_lines = session.right_lines.clone();
+        let selected = session.selected;
+        let word_wrap = session.word_wrap;
+        let show_thumbnail = session.show_thumbnail;
+        let loading = session.is_loading();
+        let error_text = session.error().map(str::to_string);
+        let left_path = session.left_path();
+        let right_path = session.right_path();
+        let left_meta = session.left_meta_label();
+        let right_meta = session.right_meta_label();
+        let left_enc = session.left_encoding_label();
+        let right_enc = session.right_encoding_label();
+        let left_end = session.left_ending_label();
+        let right_end = session.right_ending_label();
+        let left_hist = session.left_history().to_vec();
+        let right_hist = session.right_history().to_vec();
+        let overrides = session.overrides.clone();
+        let section_count = session.sections.len();
+        let alignment = session.alignment_label();
+        let state_label = session.state_label();
+        let load_label = session.load_label();
+        let selected_row = session.selected_row().copied();
+
+        // Seed the inputs once from the endpoints; later edits belong to
+        // the user (swap re-syncs them through `sync_path_inputs`).
+        if left_input.read(cx).value().is_empty() && !left_path.is_empty() {
+            left_input.update(cx, |i, cx| {
+                i.set_value(left_path.clone(), window, cx);
+            });
+        }
+        if right_input.read(cx).value().is_empty() && !right_path.is_empty() {
+            right_input.update(cx, |i, cx| {
+                i.set_value(right_path.clone(), window, cx);
+            });
+        }
+
+        // Reset the lists only when the row count or wrap mode changed;
+        // a reset per frame would destroy the scroll position.
+        let count = display.len();
+        let row_h = px(window.rem_size().as_f32() * 1.5);
+        if self.list_count != count || self.list_wrap != word_wrap {
+            if word_wrap {
+                self.left_list.reset(count);
+                self.right_list.reset(count);
+            } else {
+                self.left_list.reset_with_uniform_height(count, row_h);
+                self.right_list.reset_with_uniform_height(count, row_h);
+            }
+            self.list_count = count;
+            self.list_wrap = word_wrap;
+        }
+
+        let theme = cx.theme().clone();
+        let important = ColorRole::Important.resolve(&theme, &overrides);
+        let minor = ColorRole::Minor.resolve(&theme, &overrides);
+        let mono = theme.mono_font_family.clone();
+        let fg = theme.foreground;
+        let muted = theme.muted;
+        let muted_fg = theme.muted_foreground;
+        let list_active = theme.list_active;
+        let list_hover = theme.list_hover;
+        let border = theme.border;
+        let danger = theme.danger;
+
+        let left_el = list(self.left_list.clone(), {
+            let rows = rows.clone();
+            let display = display.clone();
+            let row_section = row_section.clone();
+            let is_section_start = is_section_start.clone();
+            let lines = left_lines.clone();
+            let state = self.state.clone();
+            let mono = mono.clone();
+            move |d, _window, _cx| {
+                render_diff_row(
+                    Side::Left,
+                    d,
+                    &display,
+                    &rows,
+                    &row_section,
+                    &is_section_start,
+                    &lines,
+                    selected,
+                    word_wrap,
+                    row_h,
+                    important,
+                    minor,
+                    muted,
+                    muted_fg,
+                    list_active,
+                    list_hover,
+                    fg,
+                    &mono,
+                    &state,
+                )
+            }
+        })
+        .size_full()
+        .min_h_0();
+        let right_el = list(self.right_list.clone(), {
+            let rows = rows.clone();
+            let display = display.clone();
+            let row_section = row_section.clone();
+            let is_section_start = is_section_start.clone();
+            let lines = right_lines.clone();
+            let state = self.state.clone();
+            let mono = mono.clone();
+            move |d, _window, _cx| {
+                render_diff_row(
+                    Side::Right,
+                    d,
+                    &display,
+                    &rows,
+                    &row_section,
+                    &is_section_start,
+                    &lines,
+                    selected,
+                    word_wrap,
+                    row_h,
+                    important,
+                    minor,
+                    muted,
+                    muted_fg,
+                    list_active,
+                    list_hover,
+                    fg,
+                    &mono,
+                    &state,
+                )
+            }
+        })
+        .size_full()
+        .min_h_0();
+
+        // The thumbnail maps the whole display list onto its height.
+        let strip = show_thumbnail.then(|| {
+            let runs: Vec<(f32, f32, Hsla)> = thumbnail_runs(&display, &rows)
+                .into_iter()
+                .map(|(s, e, role)| (s, e, role.resolve(&theme, &overrides)))
+                .collect();
+            let scroll =
+                self.left_list.scroll_px_offset_for_scrollbar().y.as_f32();
+            let max_off = self.left_list.max_offset_for_scrollbar().y.as_f32();
+            let vp_h = self.left_list.viewport_bounds().size.height.as_f32();
+            let total = max_off + vp_h;
+            let viewport = if total > 0. {
+                ((-scroll).max(0.) / total, (vp_h / total).min(1.))
+            } else {
+                (0., 1.)
+            };
+            let marker = selected
+                .map(|s| (s as f32 + 0.5) / display.len().max(1) as f32);
+            let on_navigate: NavigateFn = {
+                let state = self.state.clone();
+                let left = self.left_list.clone();
+                let right = self.right_list.clone();
+                Rc::new(move |frac, _window, cx| {
+                    let target =
+                        state.update(cx, |s, cx| s.select_frac(frac, cx));
+                    if let Some(ix) = target {
+                        left.scroll_to_reveal_item(ix);
+                        right.scroll_to_reveal_item(ix);
+                    }
+                })
+            };
+            div().flex_shrink_0().h_full().child(ThumbnailStrip {
+                id: ElementId::Name("text_thumbnail".into()),
+                runs,
+                viewport,
+                marker,
+                background: theme.muted,
+                viewport_color: theme.foreground,
+                marker_color: theme.accent,
+                width: px(12.),
+                dragging: self.thumbnail_drag.clone(),
+                on_navigate,
+            })
+        });
+
+        // Read-only detail panes: the selected row's line on each side.
+        let detail_line = |lines: &[LineInfo], n: Option<usize>| -> String {
+            n.and_then(|n| lines.get(n - 1))
+                .map(|l| l.content.clone())
+                .unwrap_or_default()
+        };
+        let details = h_flex()
+            .flex_shrink_0()
+            .h(px(64.))
+            .border_t_1()
+            .border_color(border)
+            .bg(muted)
+            .child(detail_half(
+                detail_line(&left_lines, selected_row.and_then(|r| r.left)),
+                &mono,
+            ))
+            .child(div().w(px(1.)).bg(border))
+            .child(detail_half(
+                detail_line(&right_lines, selected_row.and_then(|r| r.right)),
+                &mono,
+            ));
+
+        let mut bar = StatusBar::new();
+        bar = bar.left(
+            h_flex()
+                .items_center()
+                .gap_3()
+                .child(format!("{section_count} difference section(s)"))
+                .child(format!("Alignment {alignment}"))
+                .child(state_label.to_string()),
+        );
+        let right_status = if loading {
+            h_flex()
+                .items_center()
+                .gap_1p5()
+                .child(Spinner::new().xsmall())
+                .child("Loading…")
+                .into_any_element()
+        } else if let Some(err) = &error_text {
+            div()
+                .text_color(danger)
+                .child(err.clone())
+                .into_any_element()
+        } else if let Some(label) = &load_label {
+            div().child(label.clone()).into_any_element()
+        } else {
+            div().child("Ready").into_any_element()
+        };
+        let status_bar = bar.right(right_status);
+
+        let focus = self.state.read(cx).focus_handle();
         div()
-            .key_context("TextDiff")
-            .track_focus(&focus_handle)
+            .key_context("TextCompare")
+            .track_focus(&focus)
+            .size_full()
             .flex()
             .flex_col()
-            .size_full()
             .bg(theme.background)
-            .text_color(theme.foreground)
-            .text_xs()
-            // Title bar.
+            .text_color(fg)
             .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .px_3()
-                    .py_1()
-                    .bg(theme.muted)
-                    .border_b_1()
-                    .border_color(theme.border)
-                    .child(div().text_color(theme.foreground).child(title))
-                    .child(
-                        div()
-                            .text_color(theme.muted_foreground)
-                            .child(SharedString::from("text diff")),
-                    ),
-            )
-            // Content area.
-            .child(
-                div()
+                h_flex()
                     .flex_1()
                     .min_h_0()
-                    .overflow_hidden()
-                    .p_2()
-                    .child(self.render_content(cx)),
+                    .when_some(strip, |row, strip| row.child(strip))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .min_h_0()
+                            .overflow_hidden()
+                            .child(
+                                h_resizable("text-panes")
+                                    .child(resizable_panel().child(
+                                        render_pane(
+                                            Side::Left,
+                                            &left_input,
+                                            &left_meta,
+                                            left_enc,
+                                            left_end,
+                                            &left_hist,
+                                            left_el,
+                                            &theme,
+                                            &self.state,
+                                        ),
+                                    ))
+                                    .child(resizable_panel().child(
+                                        render_pane(
+                                            Side::Right,
+                                            &right_input,
+                                            &right_meta,
+                                            right_enc,
+                                            right_end,
+                                            &right_hist,
+                                            right_el,
+                                            &theme,
+                                            &self.state,
+                                        ),
+                                    )),
+                            ),
+                    ),
             )
-            .on_action(cx.listener(Self::select_next))
-            .on_action(cx.listener(Self::select_prev))
+            .child(details)
+            .child(status_bar)
+            .on_action(cx.listener(Self::handle_next_line))
+            .on_action(cx.listener(Self::handle_prev_line))
+            .on_action(cx.listener(Self::handle_next_difference))
+            .on_action(cx.listener(Self::handle_prev_difference))
+            .on_action(cx.listener(Self::handle_next_section))
+            .on_action(cx.listener(Self::handle_prev_section))
+            .on_action(cx.listener(Self::handle_toggle_wrap))
+            .on_action(cx.listener(Self::handle_toggle_thumbnails))
+            .on_action(cx.listener(Self::handle_reload))
+            .on_action(cx.listener(Self::handle_swap_sides))
+            .on_action(cx.listener(Self::handle_report))
+            .on_action(cx.listener(Self::handle_info))
     }
 }
 
-impl TextDiffView {
-    /// Render the content area (loading, error, or diff).
-    fn render_content(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        // Clone state data to avoid borrow issues.
-        let theme = cx.theme();
-        let state = self.state.read(cx);
-        let loading = state.is_loading();
-        let error = state.error().map(|s| s.to_string());
-        let left_lines: Vec<(usize, String)> = state
-            .left_lines()
-            .iter()
-            .map(|l| (l.number, l.content.clone()))
-            .collect();
-        let right_lines: Vec<(usize, String)> = state
-            .right_lines()
-            .iter()
-            .map(|l| (l.number, l.content.clone()))
-            .collect();
-        let has_diff = state.diff().is_some();
-        let selected_index = state.selected_index();
+/// One half of the read-only detail row.
+fn detail_half(text: String, mono: &SharedString) -> Div {
+    div()
+        .flex_1()
+        .min_w_0()
+        .px_2()
+        .py_1()
+        .overflow_hidden()
+        .font_family(mono.clone())
+        .text_xs()
+        .child(text)
+}
 
-        if loading {
+/// One text pane: file bar (history, path input, encoding, line
+/// endings, metadata) above the diff list.
+#[allow(clippy::too_many_arguments)]
+fn render_pane(
+    side: Side,
+    input: &Entity<InputState>,
+    meta: &str,
+    enc: &'static str,
+    ending: &'static str,
+    history: &[String],
+    list_el: List,
+    theme: &Theme,
+    state: &Entity<TextDiffSession>,
+) -> impl IntoElement {
+    let side_key = if side == Side::Left { "l" } else { "r" };
+    let history = history.to_vec();
+    v_flex()
+        .size_full()
+        .min_h_0()
+        .child(
+            v_flex()
+                .flex_shrink_0()
+                .px_2()
+                .py_1()
+                .gap_0p5()
+                .border_b_1()
+                .border_color(theme.border)
+                .child(
+                    h_flex()
+                        .items_center()
+                        .gap_1()
+                        .child(
+                            Button::new(ElementId::Name(
+                                format!("text_hist_{side_key}").into(),
+                            ))
+                            .icon(IconName::ChevronDown)
+                            .ghost()
+                            .xsmall()
+                            .disabled(history.is_empty())
+                            .tooltip("Path history")
+                            .accessibility_label("Path history")
+                            .dropdown_menu({
+                                let input = input.clone();
+                                let state = state.clone();
+                                move |menu, _, _| {
+                                    let mut menu = menu;
+                                    for entry in history.iter().rev() {
+                                        let input = input.clone();
+                                        let state = state.clone();
+                                        let entry = entry.clone();
+                                        menu = menu.item(
+                                            PopupMenuItem::new(entry.clone())
+                                                .on_click(
+                                                    move |_, window, cx| {
+                                                        input.update(
+                                                            cx,
+                                                            |i, cx| {
+                                                                i.set_value(
+                                                                    entry
+                                                                        .clone(
+                                                                        ),
+                                                                    window,
+                                                                    cx,
+                                                                );
+                                                            },
+                                                        );
+                                                        state.update(
+                                                        cx,
+                                                        |s, cx| {
+                                                            s.set_side_path(
+                                                                side, &entry,
+                                                                cx,
+                                                            );
+                                                        },
+                                                    );
+                                                    },
+                                                ),
+                                        );
+                                    }
+                                    menu
+                                }
+                            }),
+                        )
+                        .child(
+                            Input::new(input)
+                                .small()
+                                .flex_1()
+                                .min_w_0()
+                                .text_color(theme.foreground),
+                        )
+                        .child(
+                            Button::new(ElementId::Name(
+                                format!("text_enc_{side_key}").into(),
+                            ))
+                            .label(enc)
+                            .ghost()
+                            .xsmall()
+                            .tooltip("File encoding")
+                            .accessibility_label("File encoding")
+                            .dropdown_menu({
+                                let state = state.clone();
+                                move |menu, _, _| {
+                                    let menu = menu.item(
+                                        PopupMenuItem::new("UTF-8")
+                                            .checked(enc == "UTF-8")
+                                            .on_click({
+                                                let state = state.clone();
+                                                move |_, _, cx| {
+                                                    state.update(
+                                                        cx,
+                                                        |s, cx| {
+                                                            s.set_encoding(
+                                                        side,
+                                                        TextEncoding::Utf8,
+                                                        cx,
+                                                    );
+                                                        },
+                                                    );
+                                                }
+                                            }),
+                                    );
+                                    menu.item(
+                                        PopupMenuItem::new("ANSI")
+                                            .checked(enc == "ANSI")
+                                            .on_click({
+                                                let state = state.clone();
+                                                move |_, _, cx| {
+                                                    state.update(
+                                                        cx,
+                                                        |s, cx| {
+                                                            s.set_encoding(
+                                                        side,
+                                                        TextEncoding::Latin1,
+                                                        cx,
+                                                    );
+                                                        },
+                                                    );
+                                                }
+                                            }),
+                                    )
+                                }
+                            }),
+                        )
+                        .child(
+                            Button::new(ElementId::Name(
+                                format!("text_end_{side_key}").into(),
+                            ))
+                            .label(ending)
+                            .ghost()
+                            .xsmall()
+                            .tooltip("Line endings")
+                            .accessibility_label("Line endings")
+                            .dropdown_menu({
+                                let state = state.clone();
+                                move |menu, _, _| {
+                                    let menu = menu.item(
+                                        PopupMenuItem::new("PC")
+                                            .checked(ending == "PC")
+                                            .on_click({
+                                                let state = state.clone();
+                                                move |_, _, cx| {
+                                                    state.update(
+                                                        cx,
+                                                        |s, cx| {
+                                                            s.set_line_ending(
+                                                        side,
+                                                        LineEnding::Crlf,
+                                                        cx,
+                                                    );
+                                                        },
+                                                    );
+                                                }
+                                            }),
+                                    );
+                                    let menu = menu.item(
+                                        PopupMenuItem::new("Mac")
+                                            .checked(ending == "Mac")
+                                            .on_click({
+                                                let state = state.clone();
+                                                move |_, _, cx| {
+                                                    state.update(
+                                                        cx,
+                                                        |s, cx| {
+                                                            s.set_line_ending(
+                                                                side,
+                                                                LineEnding::Cr,
+                                                                cx,
+                                                            );
+                                                        },
+                                                    );
+                                                }
+                                            }),
+                                    );
+                                    menu.item(
+                                        PopupMenuItem::new("Unix")
+                                            .checked(ending == "Unix")
+                                            .on_click({
+                                                let state = state.clone();
+                                                move |_, _, cx| {
+                                                    state.update(
+                                                        cx,
+                                                        |s, cx| {
+                                                            s.set_line_ending(
+                                                                side,
+                                                                LineEnding::Lf,
+                                                                cx,
+                                                            );
+                                                        },
+                                                    );
+                                                }
+                                            }),
+                                    )
+                                }
+                            }),
+                        ),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(meta.to_string()),
+                ),
+        )
+        .child(div().flex_1().min_h_0().overflow_hidden().child(list_el))
+}
+
+/// Render one display row of one pane: the collapsed-section header or
+/// an aligned diff row with gutter arrow (or collapse box), line number,
+/// and content.
+#[allow(clippy::too_many_arguments)]
+fn render_diff_row(
+    side: Side,
+    d: usize,
+    display: &[DisplayRow],
+    rows: &[DiffRow],
+    row_section: &[usize],
+    is_section_start: &[bool],
+    lines: &[LineInfo],
+    selected: Option<usize>,
+    word_wrap: bool,
+    row_h: Pixels,
+    important: Hsla,
+    minor: Hsla,
+    muted: Hsla,
+    muted_fg: Hsla,
+    list_active: Hsla,
+    list_hover: Hsla,
+    foreground: Hsla,
+    mono: &SharedString,
+    state: &Entity<TextDiffSession>,
+) -> AnyElement {
+    let side_key = if side == Side::Left { "l" } else { "r" };
+    let Some(item) = display.get(d) else {
+        return div().size_full().into_any_element();
+    };
+    match item {
+        DisplayRow::Filtered { section, count } => {
+            let state = state.clone();
+            let section = *section;
             div()
-                .text_color(theme.muted_foreground)
-                .child(SharedString::from("loading diff..."))
-        } else if let Some(err) = error {
-            div()
-                .text_color(theme.danger)
-                .child(SharedString::from(err))
-        } else if !has_diff {
-            div()
-                .text_color(theme.success)
-                .child(SharedString::from("files are identical"))
-        } else {
-            div()
+                .id((
+                    ElementId::from("text_filtered"),
+                    format!("{side_key}-{d}"),
+                ))
+                .w_full()
                 .flex()
-                .size_full()
-                .gap_2()
-                .child(Self::render_pane(
-                    theme,
-                    "left",
-                    &left_lines,
-                    selected_index,
-                ))
-                .child(Self::render_pane(
-                    theme,
-                    "right",
-                    &right_lines,
-                    selected_index,
-                ))
+                .flex_shrink_0()
+                .justify_center()
+                .py_0p5()
+                .text_xs()
+                .text_color(muted_fg)
+                .hover(|el| el.bg(list_hover))
+                .child(format!("[+] {count} FILTERED LINES"))
+                .on_click(move |_, _, cx| {
+                    state.update(cx, |s, cx| s.toggle_section(section, cx));
+                })
+                .into_any_element()
+        }
+        DisplayRow::Line(r) => {
+            let Some(row) = rows.get(*r) else {
+                return div().size_full().into_any_element();
+            };
+            let number = match side {
+                Side::Left => row.left,
+                Side::Right => row.right,
+            };
+            // The blank counterpart of an inserted/deleted row stays
+            // muted so the row alignment remains visible in both panes.
+            let Some(number) = number else {
+                return div()
+                    .id((
+                        ElementId::from("text_row"),
+                        format!("{side_key}-{d}"),
+                    ))
+                    .w_full()
+                    .h(row_h)
+                    .flex_shrink_0()
+                    .bg(muted)
+                    .into_any_element();
+            };
+            let si = row_section.get(*r).copied().unwrap_or(usize::MAX);
+            let show_collapse = si != usize::MAX
+                && is_section_start.get(*r).copied().unwrap_or(false);
+            let gutter: AnyElement = if show_collapse {
+                let state = state.clone();
+                div()
+                    .id((
+                        ElementId::from("text_collapse"),
+                        format!("{side_key}-{d}"),
+                    ))
+                    .w(px(24.))
+                    .flex_shrink_0()
+                    .flex()
+                    .justify_center()
+                    .text_color(muted_fg)
+                    .hover(|el| el.text_color(foreground))
+                    .child("[-]")
+                    .on_click(move |_, _, cx| {
+                        state.update(cx, |s, cx| s.toggle_section(si, cx));
+                    })
+                    .into_any_element()
+            } else {
+                div()
+                    .w(px(24.))
+                    .flex_shrink_0()
+                    .flex()
+                    .justify_center()
+                    .text_color(muted_fg)
+                    .child(row.status.gutter_arrow().unwrap_or("").to_string())
+                    .into_any_element()
+            };
+            let content = lines
+                .get(number - 1)
+                .map(|l| l.content.as_str())
+                .unwrap_or("");
+            let fg = if row.status == RowStatus::Same {
+                foreground
+            } else if row.minor {
+                minor
+            } else {
+                important
+            };
+            // Difference rows tint their background with the severity
+            // color at low alpha, per the spec's 18% background.
+            let diff_bg = row.status.is_difference().then(|| {
+                let mut c = if row.minor { minor } else { important };
+                c.a = 0.18;
+                c
+            });
+            div()
+                .id((ElementId::from("text_row"), format!("{side_key}-{d}")))
+                .w_full()
+                .flex()
+                .flex_shrink_0()
+                .text_color(fg)
+                .font_family(mono.clone())
+                .text_xs()
+                .when_some(diff_bg, |el, c| el.bg(c))
+                .when(selected == Some(d), |el| el.bg(list_active))
+                .hover(|el| el.bg(list_hover))
+                .when(!word_wrap, |el| {
+                    el.h(row_h).overflow_hidden().whitespace_nowrap()
+                })
+                .when(word_wrap, |el| el.py_0p5())
+                .child(gutter)
+                .child(
+                    div()
+                        .w(px(40.))
+                        .flex_shrink_0()
+                        .pr_1()
+                        .text_right()
+                        .text_color(muted_fg)
+                        .child(number.to_string()),
+                )
+                .child(div().flex_1().min_w_0().child(content.to_string()))
+                .on_click({
+                    let state = state.clone();
+                    move |_, window, cx| {
+                        let focus = state.read(cx).focus_handle();
+                        window.focus(&focus, cx);
+                        state.update(cx, |s, cx| s.select_display(d, cx));
+                    }
+                })
+                .into_any_element()
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tab factory
+// ---------------------------------------------------------------------------
+
+/// Create a text compare tab view for the given file pair.
+pub(crate) fn new_text_diff_view(
+    left: Endpoint,
+    right: Endpoint,
+    grammar: Option<Grammar>,
+    cx: &mut App,
+) -> Entity<TextDiffView> {
+    // Grammar-aware token classification arrives with the editing phase.
+    let _ = grammar;
+    let title = format!("{} vs {}", base_name(&left), base_name(&right));
+    let session =
+        cx.new(|cx| TextDiffSession::new(left, right, title.into(), cx));
+    cx.new(|cx| TextDiffView::new(session, cx))
+}
+
+/// File name of an endpoint, for the tab title.
+fn base_name(endpoint: &Endpoint) -> String {
+    endpoint
+        .path()
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| endpoint.display())
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use cocomo_lib::Token;
+    use gpui::TestAppContext;
+
+    use super::*;
+
+    fn line(number: usize, content: &str) -> LineInfo {
+        LineInfo::new(number, content.to_string())
+    }
+
+    fn token_line(
+        number: usize,
+        content: &str,
+        importance: Importance,
+    ) -> LineInfo {
+        let mut info = line(number, content);
+        info.tokens.push(Token {
+            text: content.to_string(),
+            importance,
+            offset: 0,
+        });
+        info
+    }
+
+    fn diff_with(
+        differences: Vec<TextDifference>,
+        left_line_count: usize,
+        right_line_count: usize,
+    ) -> TextDiff {
+        TextDiff {
+            differences,
+            left_line_count,
+            right_line_count,
+            max_importance: Importance::Code,
         }
     }
 
-    /// Render a single pane (left or right) as a simple list.
-    fn render_pane(
-        theme: &Theme,
-        label: &str,
-        lines: &[(usize, String)],
-        selected_index: usize,
-    ) -> impl IntoElement {
-        div()
-            .flex()
-            .flex_col()
-            .flex_1()
-            .min_w_0()
-            .bg(theme.background)
-            .rounded_md()
-            .border_1()
-            .border_color(theme.border)
-            .overflow_hidden()
-            // Header.
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .px_2()
-                    .py_0p5()
-                    .bg(theme.muted)
-                    .border_b_1()
-                    .border_color(theme.border)
-                    .child(
-                        div()
-                            .text_color(theme.foreground)
-                            .child(SharedString::from(label)),
-                    )
-                    .child(div().text_color(theme.muted_foreground).child(
-                        SharedString::from(format!("{} lines", lines.len())),
-                    )),
-            )
-            // Lines.
-            .child(div().flex_1().min_h_0().overflow_hidden().children(
-                lines.iter().enumerate().map(|(i, (line_num, content))| {
-                    let bg = if i == selected_index {
-                        theme.accent
-                    } else {
-                        theme.background
-                    };
-                    div()
-                        .flex()
-                        .w_full()
-                        .py_0p5()
-                        .bg(bg)
-                        .child(
-                            div()
-                                .w_10()
-                                .text_right()
-                                .px_1()
-                                .text_color(theme.muted_foreground)
-                                .font(gpui::Font::default())
-                                .child(SharedString::from(format!(
-                                    "{:>4}",
-                                    line_num
-                                ))),
-                        )
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .px_1()
-                                .overflow_hidden()
-                                .text_color(theme.foreground)
-                                .font(gpui::Font::default())
-                                .child(SharedString::from(content)),
-                        )
-                }),
-            ))
+    #[test]
+    fn align_rows_pairs_context_around_a_changed_line() {
+        let diff = diff_with(
+            vec![TextDifference::LineDifferent(line(2, "b"), line(2, "B"))],
+            3,
+            3,
+        );
+        let rows = align_rows(&diff);
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].status, RowStatus::Same);
+        assert_eq!(rows[1].status, RowStatus::Changed);
+        assert_eq!(rows[1].left, Some(2));
+        assert_eq!(rows[1].right, Some(2));
+        assert_eq!(rows[2].status, RowStatus::Same);
     }
-}
 
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
+    #[test]
+    fn align_rows_gives_added_lines_a_blank_left_cell() {
+        let diff = diff_with(
+            vec![TextDifference::LinesAdded(2, vec![line(2, "n")])],
+            2,
+            3,
+        );
+        let rows = align_rows(&diff);
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].status, RowStatus::Same);
+        assert_eq!(rows[1].status, RowStatus::Inserted);
+        assert_eq!(rows[1].left, None);
+        assert_eq!(rows[1].right, Some(2));
+        assert_eq!(rows[2].status, RowStatus::Same);
+        assert_eq!(rows[2].left, Some(2));
+        assert_eq!(rows[2].right, Some(3));
+    }
 
-/// Create a new text diff view entity for the given file endpoints.
-pub fn new_text_diff_view(
-    left: Endpoint,
-    right: Endpoint,
-    _grammar: Option<cocomo_lib::Grammar>,
-    cx: &mut App,
-) -> Entity<TextDiffView> {
-    let left_name = left
-        .path()
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| "left".to_string());
-    let right_name = right
-        .path()
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| "right".to_string());
-    let title = format!("{left_name} vs {right_name}");
+    #[test]
+    fn align_rows_gives_removed_lines_a_blank_right_cell() {
+        let diff = diff_with(
+            vec![TextDifference::LinesRemoved(2, vec![line(2, "x")])],
+            3,
+            2,
+        );
+        let rows = align_rows(&diff);
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[1].status, RowStatus::Deleted);
+        assert_eq!(rows[1].left, Some(2));
+        assert_eq!(rows[1].right, None);
+        assert_eq!(rows[2].status, RowStatus::Same);
+    }
 
-    let state = cx.new(|cx| {
-        TextDiffState::new(left, right, SharedString::from(title), cx)
-    });
+    #[test]
+    fn align_rows_splits_an_uneven_changed_block() {
+        let diff = diff_with(
+            vec![TextDifference::LinesChanged(
+                2,
+                vec![line(2, "b"), line(3, "c")],
+                vec![line(2, "X")],
+            )],
+            3,
+            2,
+        );
+        let rows = align_rows(&diff);
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].status, RowStatus::Same);
+        assert_eq!(rows[1].status, RowStatus::Changed);
+        assert_eq!(rows[2].status, RowStatus::Deleted);
+    }
 
-    cx.new(|cx| TextDiffView::new(state, cx))
+    #[test]
+    fn identical_texts_align_to_same_rows() {
+        let diff = diff_with(Vec::new(), 2, 2);
+        let rows = align_rows(&diff);
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|r| r.status == RowStatus::Same));
+    }
+
+    #[test]
+    fn minor_requires_tokens_at_comment_or_lower() {
+        // No tokens (no grammar applied) is *not* minor.
+        assert!(!lines_are_minor([&line(1, "a")]));
+        assert!(lines_are_minor([&token_line(1, "a", Importance::Comment)]));
+        assert!(lines_are_minor([&token_line(1, "a", Importance::Ignored)]));
+        assert!(!lines_are_minor([&token_line(1, "a", Importance::Data)]));
+        // A mixed pair is only minor when *both* lines are.
+        assert!(!lines_are_minor([
+            &token_line(1, "a", Importance::Comment),
+            &token_line(1, "b", Importance::Code),
+        ]));
+    }
+
+    fn row(
+        left: Option<usize>,
+        right: Option<usize>,
+        status: RowStatus,
+        minor: bool,
+    ) -> DiffRow {
+        DiffRow {
+            left,
+            right,
+            status,
+            minor,
+        }
+    }
+
+    #[test]
+    fn diff_sections_aggregate_kind_and_minor() {
+        let rows = vec![
+            row(Some(1), Some(1), RowStatus::Same, false),
+            row(None, Some(2), RowStatus::Inserted, true),
+            row(None, Some(3), RowStatus::Inserted, true),
+            row(Some(2), Some(4), RowStatus::Same, false),
+            row(Some(3), None, RowStatus::Deleted, false),
+            row(Some(4), Some(5), RowStatus::Changed, false),
+        ];
+        let sections = diff_sections(&rows);
+        assert_eq!(sections.len(), 2);
+        assert_eq!(sections[0].kind, SectionKind::Insert);
+        assert!(sections[0].minor);
+        assert_eq!(sections[0].start_row, 1);
+        assert_eq!(sections[0].end_row, 3);
+        // A run with both a delete and a change aggregates to Change.
+        assert_eq!(sections[1].kind, SectionKind::Change);
+        assert!(!sections[1].minor);
+        assert_eq!(sections[1].start_row, 4);
+        assert_eq!(sections[1].end_row, 6);
+    }
+
+    #[test]
+    fn display_rows_replaces_collapsed_sections_with_headers() {
+        let rows = vec![
+            row(Some(1), Some(1), RowStatus::Same, false),
+            row(Some(2), Some(2), RowStatus::Changed, false),
+            row(Some(3), Some(3), RowStatus::Changed, false),
+            row(Some(4), Some(4), RowStatus::Same, false),
+        ];
+        let sections = diff_sections(&rows);
+        let (display, line_display, section_display) =
+            display_rows(&rows, &sections, &HashSet::new());
+        assert_eq!(display.len(), 4);
+        // Expanded sections have no display index of their own.
+        assert_eq!(section_display[0], usize::MAX);
+        let collapsed = HashSet::from([0usize]);
+        let (display, line_display_c, section_display) =
+            display_rows(&rows, &sections, &collapsed);
+        assert_eq!(display.len(), 3);
+        assert_eq!(
+            display[1],
+            DisplayRow::Filtered {
+                section: 0,
+                count: 2
+            }
+        );
+        assert_eq!(section_display[0], 1);
+        assert_eq!(line_display_c[1], usize::MAX);
+        assert_eq!(line_display[1], 1);
+    }
+
+    #[test]
+    fn difference_navigation_wraps_around() {
+        let rows = vec![
+            row(Some(1), Some(1), RowStatus::Same, false),
+            row(Some(2), Some(2), RowStatus::Changed, false),
+            row(Some(3), Some(3), RowStatus::Same, false),
+            row(None, Some(4), RowStatus::Inserted, false),
+        ];
+        let display: Vec<DisplayRow> =
+            (0..rows.len()).map(DisplayRow::Line).collect();
+        assert_eq!(next_difference_index(&display, &rows, 0), Some(1));
+        assert_eq!(next_difference_index(&display, &rows, 2), Some(3));
+        // `from` is inclusive: standing on a difference keeps you there.
+        assert_eq!(next_difference_index(&display, &rows, 3), Some(3));
+        // Past the end the scan wraps back to the first difference.
+        assert_eq!(next_difference_index(&display, &rows, 4), Some(1));
+        assert_eq!(prev_difference_index(&display, &rows, 2), Some(1));
+        assert_eq!(prev_difference_index(&display, &rows, 1), Some(3));
+        assert_eq!(next_difference_index(&[], &[], 0), None);
+    }
+
+    #[test]
+    fn section_navigation_wraps_around() {
+        let section_display = vec![1usize, 4];
+        assert_eq!(next_section_index(&section_display, None), Some(1));
+        assert_eq!(next_section_index(&section_display, Some(1)), Some(4));
+        assert_eq!(next_section_index(&section_display, Some(4)), Some(1));
+        assert_eq!(prev_section_index(&section_display, None), Some(4));
+        assert_eq!(prev_section_index(&section_display, Some(4)), Some(1));
+        assert_eq!(prev_section_index(&section_display, Some(1)), Some(4));
+    }
+
+    #[test]
+    fn thumbnail_runs_merge_adjacent_rows_of_equal_severity() {
+        let rows = vec![
+            row(Some(1), Some(1), RowStatus::Same, false),
+            row(Some(2), Some(2), RowStatus::Changed, false),
+            row(Some(3), Some(3), RowStatus::Inserted, false),
+            row(Some(4), Some(4), RowStatus::Same, false),
+            row(Some(5), Some(5), RowStatus::Deleted, true),
+        ];
+        let display: Vec<DisplayRow> =
+            (0..rows.len()).map(DisplayRow::Line).collect();
+        let runs = thumbnail_runs(&display, &rows);
+        assert_eq!(runs.len(), 2);
+        assert!((runs[0].0 - 0.2).abs() < f32::EPSILON);
+        assert!((runs[0].1 - 0.6).abs() < f32::EPSILON);
+        assert_eq!(runs[0].2, ColorRole::Important);
+        assert_eq!(runs[1].2, ColorRole::Minor);
+        assert!(thumbnail_runs(&[], &[]).is_empty());
+    }
+
+    #[test]
+    fn decode_bytes_handles_both_encodings() {
+        // Latin-1 maps bytes 1:1, so 0xE9 is é.
+        assert_eq!(
+            decode_bytes(&[0x65, 0xE9], TextEncoding::Latin1),
+            "e\u{e9}"
+        );
+        // UTF-8 decoding is lossy, never fatal.
+        assert_eq!(decode_bytes(b"a\xffb", TextEncoding::Utf8), "a\u{fffd}b");
+    }
+
+    #[test]
+    fn split_lines_handles_all_endings_without_trailing_empty() {
+        let split = split_lines("a\r\nb\rc\nd\n");
+        let contents: Vec<&str> =
+            split.iter().map(|l| l.content.as_str()).collect();
+        assert_eq!(contents, vec!["a", "b", "c", "d"]);
+        let numbers: Vec<usize> =
+            split_lines("a\nb").iter().map(|l| l.number).collect();
+        assert_eq!(numbers, vec![1, 2]);
+        assert!(split_lines("").is_empty());
+    }
+
+    #[test]
+    fn detect_line_ending_finds_the_first_convention() {
+        assert_eq!(detect_line_ending(b"a\r\nb"), LineEnding::Crlf);
+        assert_eq!(detect_line_ending(b"a\rb"), LineEnding::Cr);
+        assert_eq!(detect_line_ending(b"a\nb"), LineEnding::Lf);
+        assert_eq!(detect_line_ending(b"ab"), LineEnding::Lf);
+    }
+
+    #[test]
+    fn labels_match_the_spec() {
+        assert_eq!(RowStatus::Inserted.gutter_arrow(), Some("→"));
+        assert_eq!(RowStatus::Deleted.gutter_arrow(), Some("←"));
+        assert_eq!(RowStatus::Changed.gutter_arrow(), Some("↔"));
+        assert_eq!(RowStatus::Same.gutter_arrow(), None);
+        assert_eq!(RowStatus::Changed.label(), "Change");
+        assert_eq!(encoding_label(TextEncoding::Latin1), "ANSI");
+        assert_eq!(encoding_label(TextEncoding::Utf8), "UTF-8");
+        assert_eq!(line_ending_label(LineEnding::Crlf), "PC");
+        assert_eq!(line_ending_label(LineEnding::Cr), "Mac");
+        assert_eq!(line_ending_label(LineEnding::Lf), "Unix");
+    }
+
+    #[gpui::test]
+    fn session_model_compares_reports_and_navigates(cx: &mut TestAppContext) {
+        let session = cx.new(|cx| {
+            TextDiffSession::for_test("a\nb\nc\nd\n", "a\nX\nY\nd\n", cx)
+        });
+
+        cx.update(|cx| {
+            let s = session.read(cx);
+            let stats = s.info_stats();
+            assert_eq!(stats.left_lines, 4);
+            assert_eq!(stats.right_lines, 4);
+            assert_eq!(stats.sections, 1);
+            assert_eq!(stats.changes, 2);
+            assert_eq!(s.section_count(), 1);
+            assert_eq!(s.alignment_label(), "—:—");
+            assert_eq!(s.load_label().as_deref(), Some("Loaded in 1 ms"));
+            let report = s.report_text();
+            assert!(report.contains("Changed lines: 2"));
+            assert!(report.contains("#1 Change"));
+        });
+
+        // Navigation walks to the first difference row.
+        let target =
+            cx.update(|cx| session.update(cx, |s, cx| s.next_difference(cx)));
+        assert_eq!(target, Some(1));
+        cx.update(|cx| {
+            session.update(cx, |s, cx| {
+                assert_eq!(s.state_label(), "Change");
+                assert_eq!(s.alignment_label(), "2:2");
+                // Collapsing the section replaces its two rows with one
+                // filtered-lines header.
+                s.toggle_section(0, cx);
+                assert_eq!(s.display.len(), s.rows.len() - 1);
+                assert!(matches!(s.display[1], DisplayRow::Filtered { .. }));
+                s.toggle_section(0, cx);
+                assert_eq!(s.display.len(), s.rows.len());
+            });
+        });
+
+        // View options toggle.
+        cx.update(|cx| {
+            session.update(cx, |s, cx| {
+                s.toggle_wrap(cx);
+                s.toggle_thumbnail(cx);
+                assert!(s.is_word_wrap());
+                assert!(s.is_show_thumbnail());
+            });
+        });
+
+        // Swapping sides exchanges the endpoints and their state.
+        cx.update(|cx| {
+            session.update(cx, |s, cx| {
+                s.swap_sides(cx);
+                assert_eq!(s.left_path(), "/right.txt");
+                assert_eq!(s.right_path(), "/left.txt");
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn encoding_and_ending_selectors_update_the_session(
+        cx: &mut TestAppContext,
+    ) {
+        // The left file holds UTF-8 `café`, the right the mojibake
+        // `cafÃ©`. Under UTF-8 the lines differ; re-reading the left side
+        // as Latin-1 turns its UTF-8 bytes into the same mojibake, making
+        // the sides equal.
+        let session = cx.new(|cx| {
+            TextDiffSession::for_test("caf\u{e9}\n", "caf\u{c3}\u{a9}\n", cx)
+        });
+        cx.update(|cx| {
+            assert_eq!(session.read(cx).info_stats().changes, 1);
+        });
+        cx.update(|cx| {
+            session.update(cx, |s, cx| {
+                s.set_encoding(Side::Left, TextEncoding::Latin1, cx);
+                assert_eq!(s.left_encoding_label(), "ANSI");
+                assert_eq!(s.info_stats().changes, 0);
+                s.set_line_ending(Side::Left, LineEnding::Crlf, cx);
+                assert_eq!(s.left_ending_label(), "PC");
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn text_view_handles_navigation_and_view_actions(cx: &mut TestAppContext) {
+        use gpui::{Bounds, WindowBounds, WindowOptions, test::TestWindowExt};
+
+        use crate::{
+            menus::{ShowThumbnails, ToggleWordWrap},
+            ui::NextDifference,
+        };
+
+        cx.update(gpui::init);
+
+        let session = cx
+            .new(|cx| TextDiffSession::for_test("a\nb\nc\n", "a\nX\nc\n", cx));
+        let (window, view) = cx.update(|cx| {
+            gpui::open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(
+                        Bounds::maximized(None, cx),
+                    )),
+                    ..Default::default()
+                },
+                cx,
+                |_, cx| cx.new(|cx| TextDiffView::new(session.clone(), cx)),
+            )
+            .expect("failed to open the test window")
+        });
+
+        // Focus the view so dispatched actions reach its handlers, then
+        // walk to the only difference.
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            let focus = view.read(cx).focus_handle(cx);
+            focus.focus(window, cx);
+            window.dispatch_action(Box::new(NextDifference), cx);
+        })
+        .expect("failed to dispatch the next-difference action");
+
+        cx.update(|cx| {
+            let s = session.read(cx);
+            let row = s.selected.unwrap();
+            match s.display[row] {
+                DisplayRow::Line(r) => {
+                    assert_eq!(s.rows[r].status, RowStatus::Changed)
+                }
+                DisplayRow::Filtered { .. } => panic!("expected a line row"),
+            }
+        });
+
+        // The View menu actions toggle the session's display options.
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.dispatch_action(Box::new(ToggleWordWrap), cx);
+            window.dispatch_action(Box::new(ShowThumbnails), cx);
+        })
+        .expect("failed to dispatch the view actions");
+
+        cx.update(|cx| {
+            let s = session.read(cx);
+            assert!(s.is_word_wrap());
+            assert!(s.is_show_thumbnail());
+        });
+    }
 }
