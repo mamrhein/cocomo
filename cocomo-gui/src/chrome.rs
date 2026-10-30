@@ -167,6 +167,7 @@ pub fn tab_bar_element(
 /// button additionally takes the theme's danger color while selected, as
 /// the spec asks for a red difference state. Selection stays visible on
 /// its own, so color is never the only cue.
+#[allow(clippy::too_many_arguments)]
 fn filter_toggle(
     id: &'static str,
     icon: IconName,
