@@ -169,10 +169,14 @@ pub enum Cmd {
     NextDiff,
     /// Jump to the previous difference group.
     PrevDiff,
-    /// Expand the selected directory in place (`+`).
+    /// Expand the selected directory in place (`\u{2192}`).
     ExpandDir,
-    /// Collapse the selected directory in place (`-`).
+    /// Collapse the selected directory in place (`\u{2190}`).
     CollapseDir,
+    /// Expand every directory recursively (View menu).
+    ExpandAllDirs,
+    /// Collapse every expanded directory (View menu).
+    CollapseAllDirs,
     /// Open the copy dialog for the selected entry (`c`).
     CopyDialog,
     /// Open the delete dialog for the selected entry (`d`).
@@ -292,18 +296,18 @@ const KEYMAP: &[KeyBinding] = &[
         help: None,
     },
     KeyBinding {
-        key: KeyCode::Char('+'),
+        key: KeyCode::Right,
         modifiers: NONE,
         scope: KeyScope::DirNormal,
         cmd: Cmd::ExpandDir,
-        help: Some(("+", "expand")),
+        help: Some(("\u{2192}", "expand")),
     },
     KeyBinding {
-        key: KeyCode::Char('-'),
+        key: KeyCode::Left,
         modifiers: NONE,
         scope: KeyScope::DirNormal,
         cmd: Cmd::CollapseDir,
-        help: Some(("-", "collapse")),
+        help: Some(("\u{2190}", "collapse")),
     },
     KeyBinding {
         key: KeyCode::Char('f'),
@@ -711,6 +715,22 @@ const KEYMAP: &[KeyBinding] = &[
         cmd: Cmd::MenuConfirm,
         help: None,
     },
+    // `\u{2190}`/`\u{2192}` switch menus while a dropdown is open; with a
+    // closed bar they belong to the dir view's expand/collapse.
+    KeyBinding {
+        key: KeyCode::Left,
+        modifiers: NONE,
+        scope: KeyScope::Menu,
+        cmd: Cmd::MenuPrev,
+        help: Some(("\u{2190}/\u{2192}", "menu")),
+    },
+    KeyBinding {
+        key: KeyCode::Right,
+        modifiers: NONE,
+        scope: KeyScope::Menu,
+        cmd: Cmd::MenuNext,
+        help: None,
+    },
     KeyBinding {
         key: KeyCode::Esc,
         modifiers: NONE,
@@ -754,20 +774,6 @@ const KEYMAP: &[KeyBinding] = &[
         modifiers: CTRL,
         scope: KeyScope::Global,
         cmd: Cmd::SwitchTab,
-        help: None,
-    },
-    KeyBinding {
-        key: KeyCode::Left,
-        modifiers: NONE,
-        scope: KeyScope::Global,
-        cmd: Cmd::MenuPrev,
-        help: Some(("\u{2190}/\u{2192}", "menu")),
-    },
-    KeyBinding {
-        key: KeyCode::Right,
-        modifiers: NONE,
-        scope: KeyScope::Global,
-        cmd: Cmd::MenuNext,
         help: None,
     },
     // -- Alt accelerators: one per menu, opening its dropdown directly.
@@ -1171,6 +1177,14 @@ fn execute(cmd: Cmd, session: &mut SessionView) -> SessionAction {
         }
         Cmd::CollapseDir => {
             toggle_selected_dir(session, false);
+            SessionAction::None
+        }
+        Cmd::ExpandAllDirs => {
+            session.expand_all_dirs();
+            SessionAction::None
+        }
+        Cmd::CollapseAllDirs => {
+            session.collapse_all_dirs();
             SessionAction::None
         }
         Cmd::CopyDialog => open_dialog(session, TransferOp::Copy),
@@ -2081,8 +2095,16 @@ mod tests {
             lookup(KeyScope::Menu, key(KeyCode::Esc)),
             Some(Cmd::MenuClose)
         );
-        // The `←`/`→` menu switching stays in the Global scope.
-        assert!(lookup(KeyScope::Menu, key(KeyCode::Left)).is_none());
+        // The `←`/`→` menu switching lives in this scope, so the dir view
+        // can use the cursor keys when no dropdown is open.
+        assert_eq!(
+            lookup(KeyScope::Menu, key(KeyCode::Left)),
+            Some(Cmd::MenuPrev)
+        );
+        assert_eq!(
+            lookup(KeyScope::Menu, key(KeyCode::Right)),
+            Some(Cmd::MenuNext)
+        );
         // Plain session keys belong to the shell's swallow rule, not to
         // this scope.
         assert!(lookup(KeyScope::Menu, key(KeyCode::Char('x'))).is_none());
@@ -2234,12 +2256,12 @@ mod tests {
     }
 
     #[test]
-    fn plus_expands_and_minus_collapses_the_selected_dir() {
+    fn cursor_right_expands_and_cursor_left_collapses_the_selected_dir() {
         let mut session = dir_session_with_tree();
         assert_eq!(session.row_count(), 2);
         session.ui.table_state.select(Some(0));
         assert_eq!(
-            press(&mut session, KeyCode::Char('+')),
+            press(&mut session, KeyCode::Right),
             Some(SessionAction::None)
         );
         assert_eq!(session.row_count(), 4);
@@ -2250,7 +2272,7 @@ mod tests {
         assert_eq!(rows[1].depth, 1);
 
         assert_eq!(
-            press(&mut session, KeyCode::Char('-')),
+            press(&mut session, KeyCode::Left),
             Some(SessionAction::None)
         );
         assert_eq!(session.row_count(), 2);
@@ -2260,19 +2282,38 @@ mod tests {
     }
 
     #[test]
-    fn plus_on_a_file_row_is_a_noop() {
+    fn cursor_right_on_a_file_row_is_a_noop() {
         let mut session = dir_session_with_tree();
         session.ui.table_state.select(Some(1));
-        press(&mut session, KeyCode::Char('+'));
+        press(&mut session, KeyCode::Right);
         assert!(session.dir().unwrap().expanded.is_empty());
         assert_eq!(session.row_count(), 2);
+    }
+
+    #[test]
+    fn expand_and_collapse_all_menu_commands_toggle_the_whole_tree() {
+        let mut session = dir_session_with_tree();
+        assert_eq!(session.row_count(), 2);
+        assert!(matches!(
+            run_menu_command(&mut session, Cmd::ExpandAllDirs),
+            SessionAction::None
+        ));
+        assert_eq!(session.row_count(), 4);
+        assert!(session.dir().unwrap().expanded.contains("sub"));
+
+        assert!(matches!(
+            run_menu_command(&mut session, Cmd::CollapseAllDirs),
+            SessionAction::None
+        ));
+        assert_eq!(session.row_count(), 2);
+        assert!(session.dir().unwrap().expanded.is_empty());
     }
 
     #[test]
     fn backspace_collapses_the_containing_directory() {
         let mut session = dir_session_with_tree();
         session.ui.table_state.select(Some(0));
-        press(&mut session, KeyCode::Char('+'));
+        press(&mut session, KeyCode::Right);
         // Select the second child (`sub/b.txt`, row 2).
         session.ui.table_state.select(Some(2));
         assert_eq!(
@@ -2301,7 +2342,7 @@ mod tests {
         // opening it in a new tab must produce `<root>/sub/a.txt`.
         let mut session = dir_session_with_tree();
         session.ui.table_state.select(Some(0));
-        press(&mut session, KeyCode::Char('+'));
+        press(&mut session, KeyCode::Right);
         session.ui.table_state.select(Some(1));
         match press(&mut session, KeyCode::Enter) {
             Some(SessionAction::OpenFile { left, right }) => {

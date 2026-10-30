@@ -63,7 +63,7 @@ pub(super) fn TextCompareView(
 
     // Event handler for session-level keys (j/k, g/G, n/N, l/Tab).
     // The App component's global handler runs first and consumes global keys
-    // (Ctrl+W, Ctrl+Tab, Left/Right, q).  For remaining keys, the controller
+    // (Ctrl+W, Ctrl+Tab, q).  For remaining keys, the controller
     // locks the state briefly, lets `handle_session_key` mutate the session,
     // and dispatches the resulting intent. Like the hooks above it, this
     // registration must stay above the early returns below (stable hook

@@ -42,14 +42,14 @@ use crate::{
 /// and registers an event handler that delegates to the controller
 /// (`dispatch_dir_key`); all state mutations go through controller
 /// functions. The table renders the comparison as an expandable tree with
-/// the same box-drawing indicators as `cocomo-cli`'s tree output; `+`/`-`
-/// expand or collapse the selected directory in place, and `Enter` opens a
-/// new tab rooted at the selection. The table rows are memoized view models
-/// ([`CellRow`]) that are rebuilt only when the comparison revision, the tree
-/// revision, the display filters, or the name filter changes. All text entry
-/// (save name and search) uses `SearchInput`, which owns its exclusive input
-/// layer; the filter panel, session browser, settings, and report live in
-/// modal components in the App shell.
+/// the same box-drawing indicators as `cocomo-cli`'s tree output; the
+/// cursor keys `→`/`←` expand or collapse the selected directory in place,
+/// and `Enter` opens a new tab rooted at the selection. The table rows are
+/// memoized view models ([`CellRow`]) that are rebuilt only when the
+/// comparison revision, the tree revision, the display filters, or the name
+/// filter changes. All text entry (save name and search) uses `SearchInput`,
+/// which owns its exclusive input layer; the filter panel, session browser,
+/// settings, and report live in modal components in the App shell.
 #[component]
 pub(super) fn DirCompareView(
     mut hooks: Hooks,
@@ -66,7 +66,7 @@ pub(super) fn DirCompareView(
 
     // Event handler for session-level keys (j/k, g/G, Enter, f, F, etc.).
     // The App component's global handler runs first and consumes global keys
-    // (Ctrl+W, Ctrl+Tab, Left/Right, q). For remaining keys, the controller
+    // (Ctrl+W, Ctrl+Tab, q). For remaining keys, the controller
     // locks the state briefly, lets `handle_session_key` mutate the session,
     // and dispatches the resulting intent. Like the hooks above it, this
     // registration must stay above the early returns below (stable hook

@@ -1025,6 +1025,65 @@ impl SessionView {
             .position(|row| row.rel_path == rel_path)
     }
 
+    /// Expand every directory in the tree, recursively (View menu "expand
+    /// all").
+    ///
+    /// The name and display filters are not consulted here; a directory
+    /// hidden by a filter is still marked expanded and simply stays
+    /// invisible until the filter changes.
+    pub fn expand_all_dirs(&mut self) {
+        let Some(dir) = self.dir_mut() else {
+            return;
+        };
+        let Some(comparison) = &dir.comparison else {
+            return;
+        };
+        let mut paths = Vec::new();
+        Self::collect_dir_paths(&comparison.entries, "", &mut paths);
+        let before = dir.expanded.len();
+        dir.expanded.extend(paths);
+        if dir.expanded.len() != before {
+            dir.tree_revision += 1;
+        }
+    }
+
+    /// Collapse every expanded directory (View menu "collapse all").
+    pub fn collapse_all_dirs(&mut self) {
+        let Some(dir) = self.dir_mut() else {
+            return;
+        };
+        if !dir.expanded.is_empty() {
+            dir.expanded.clear();
+            dir.tree_revision += 1;
+        }
+    }
+
+    /// Collect the `/`-separated relative paths of every directory in
+    /// `entries` (and its subtrees) into `paths`. `prefix` is the parent's
+    /// relative path (empty at the root).
+    fn collect_dir_paths(
+        entries: &[DirEntry],
+        prefix: &str,
+        paths: &mut Vec<String>,
+    ) {
+        for entry in entries {
+            let is_dir = entry.left.as_ref().is_some_and(|l| l.is_dir)
+                || entry.right.as_ref().is_some_and(|r| r.is_dir);
+            if !is_dir {
+                continue;
+            }
+            let rel_path = if prefix.is_empty() {
+                entry.name.clone()
+            } else {
+                format!("{prefix}/{}", entry.name)
+            };
+            paths.push(rel_path.clone());
+            if let Some(sub) = entry.sub_entries.as_deref() {
+                Self::collect_dir_paths(&sub.entries, &rel_path, paths);
+            }
+        }
+    }
+
     /// Resolve the transfer target for the current selection.
     ///
     /// A directory session targets the selected entry. A text session
@@ -1409,6 +1468,23 @@ mod tests {
         }
     }
 
+    /// A nested tree for tree tests: dir `a` contains dir `a1` (with
+    /// `deep.txt`) and `b.txt`; at the top level there is also `top2.txt`.
+    fn nested_tree() -> Vec<DirEntry> {
+        let a1 = dir_entry(
+            "a1",
+            DirEntryStatus::Different,
+            Some(comparison(&[("deep.txt", DirEntryStatus::Same)])),
+        );
+        let mut a_sub = comparison(&[("b.txt", DirEntryStatus::Same)]);
+        a_sub.entries.insert(0, a1);
+        let mut entries =
+            vec![dir_entry("a", DirEntryStatus::Different, Some(a_sub))];
+        entries
+            .extend(comparison(&[("top2.txt", DirEntryStatus::Same)]).entries);
+        entries
+    }
+
     #[test]
     fn set_comparison_resets_selection() {
         let mut session = dir_session();
@@ -1599,19 +1675,8 @@ mod tests {
     #[test]
     fn tree_prefixes_match_the_cli_indicators() {
         let mut session = dir_session();
-        let a1 = dir_entry(
-            "a1",
-            DirEntryStatus::Different,
-            Some(comparison(&[("deep.txt", DirEntryStatus::Same)])),
-        );
-        let mut a_sub = comparison(&[("b.txt", DirEntryStatus::Same)]);
-        a_sub.entries.insert(0, a1);
-        let mut entries =
-            vec![dir_entry("a", DirEntryStatus::Different, Some(a_sub))];
-        entries
-            .extend(comparison(&[("top2.txt", DirEntryStatus::Same)]).entries);
         session.set_comparison(Some(DirComparison {
-            entries,
+            entries: nested_tree(),
             ..Default::default()
         }));
         session.dir_mut().unwrap().expanded.insert("a".into());
@@ -1638,6 +1703,35 @@ mod tests {
                 ("top2.txt", ""),
             ]
         );
+    }
+
+    #[test]
+    fn expand_and_collapse_all_toggle_every_subtree_recursively() {
+        let mut session = dir_session();
+        session.set_comparison(Some(DirComparison {
+            entries: nested_tree(),
+            ..Default::default()
+        }));
+        assert_eq!(session.visible_rows().len(), 2);
+
+        session.expand_all_dirs();
+        let dir = session.dir().unwrap();
+        assert!(dir.expanded.contains("a"));
+        assert!(dir.expanded.contains("a/a1"));
+        let rows = session.visible_rows();
+        assert_eq!(rows.len(), 5);
+        // Every directory row reports itself as expanded.
+        assert!(rows.iter().all(|r| !r.is_dir || r.expanded));
+
+        // Expanding again is a no-op: the revision stays put.
+        let revision = session.dir().unwrap().tree_revision;
+        session.expand_all_dirs();
+        assert_eq!(session.dir().unwrap().tree_revision, revision);
+
+        session.collapse_all_dirs();
+        assert!(session.dir().unwrap().expanded.is_empty());
+        assert_eq!(session.visible_rows().len(), 2);
+        assert!(session.dir().unwrap().tree_revision > revision);
     }
 
     #[test]
