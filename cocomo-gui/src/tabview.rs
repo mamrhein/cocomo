@@ -463,14 +463,39 @@ impl Render for WindowRoot {
         // re-evaluate the snapshot).
         let folder_state =
             active_tab.as_ref().and_then(|tab| tab.folder_state(cx));
-        let menu_state = MenuState {
-            is_folder: folder_state.is_some(),
-            is_home: active_tab.as_ref().is_some_and(TabEntity::is_home),
-            selected_orphan: folder_state
-                .as_ref()
-                .is_some_and(|state| state.read(cx).selected_is_orphan()),
-            log_open: cx.global::<LogPaneOpen>().0,
-        };
+        let menu_state = folder_state
+            .as_ref()
+            .map(|state| {
+                let state = state.read(cx);
+                use cocomo_lib::TransferAction;
+                MenuState {
+                    is_folder: true,
+                    is_home: active_tab
+                        .as_ref()
+                        .is_some_and(TabEntity::is_home),
+                    loading: state.is_loading(),
+                    can_copy_left: state
+                        .can_transfer(TransferAction::CopyLeft),
+                    can_copy_right: state
+                        .can_transfer(TransferAction::CopyRight),
+                    can_move_left: state
+                        .can_transfer(TransferAction::MoveLeft),
+                    can_move_right: state
+                        .can_transfer(TransferAction::MoveRight),
+                    can_delete_left: state
+                        .can_transfer(TransferAction::DeleteLeft),
+                    can_delete_right: state
+                        .can_transfer(TransferAction::DeleteRight),
+                    can_go_back: state.can_go_back(),
+                    can_go_forward: state.can_go_forward(),
+                    log_open: cx.global::<LogPaneOpen>().0,
+                }
+            })
+            .unwrap_or_else(|| MenuState {
+                is_home: active_tab.as_ref().is_some_and(TabEntity::is_home),
+                log_open: cx.global::<LogPaneOpen>().0,
+                ..MenuState::empty()
+            });
         if self.last_menu_state != Some(menu_state) {
             menus::refresh_view_menus(menu_state, cx);
             self.last_menu_state = Some(menu_state);

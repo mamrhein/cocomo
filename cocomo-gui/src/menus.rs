@@ -34,7 +34,11 @@ use gpui::{
 use crate::{
     log::{self, LogLevel, LogPaneOpen},
     session_manager::GuiSessionManager,
-    ui::{CopyToLeft, CopyToRight, NextDifference, PrevDifference, SwapSides},
+    ui::{
+        CopyToLeft, CopyToRight, DeleteLeftSide, DeleteRightSide, GoBack,
+        GoForward, MoveToLeft, MoveToRight, NextDifference, PrevDifference,
+        SwapSides,
+    },
 };
 
 // ---------------------------------------------------------------------------
@@ -93,8 +97,8 @@ actions!(
 
 /// Register menu-related global key bindings.
 ///
-/// Reload lives on `cmd-shift-r`: plain `cmd-r` stays free for the
-/// copy-to-right command the spec assigns it (wired in a later phase).
+/// Reload lives on `cmd-shift-r`: plain `cmd-r` is the copy-to-right
+/// command the spec assigns it, bound with the folder-view bindings.
 pub fn menu_bindings() -> Vec<KeyBinding> {
     vec![
         KeyBinding::new("cmd-n", NewCompare, None),
@@ -122,9 +126,24 @@ pub struct MenuState {
     /// Whether the active tab is the Home start screen (hides the
     /// view-specific menus, which have nothing to act on).
     pub is_home: bool,
-    /// Whether the selected entry exists on only one side (enables the
-    /// copy-to-side commands).
-    pub selected_orphan: bool,
+    /// Whether a comparison or transfer is in flight (enables Stop).
+    pub loading: bool,
+    /// Whether the selected entry can be copied to the left.
+    pub can_copy_left: bool,
+    /// Whether the selected entry can be copied to the right.
+    pub can_copy_right: bool,
+    /// Whether the selected entry can be moved to the left.
+    pub can_move_left: bool,
+    /// Whether the selected entry can be moved to the right.
+    pub can_move_right: bool,
+    /// Whether the selected entry can be deleted from the left.
+    pub can_delete_left: bool,
+    /// Whether the selected entry can be deleted from the right.
+    pub can_delete_right: bool,
+    /// Whether the pair can step back in the session history.
+    pub can_go_back: bool,
+    /// Whether the pair can step forward in the session history.
+    pub can_go_forward: bool,
     /// Whether the log pane is visible (checkmark on the View toggle).
     pub log_open: bool,
 }
@@ -135,7 +154,15 @@ impl MenuState {
         Self {
             is_folder: false,
             is_home: false,
-            selected_orphan: false,
+            loading: false,
+            can_copy_left: false,
+            can_copy_right: false,
+            can_move_left: false,
+            can_move_right: false,
+            can_delete_left: false,
+            can_delete_right: false,
+            can_go_back: false,
+            can_go_forward: false,
             log_open: true,
         }
     }
@@ -144,7 +171,7 @@ impl MenuState {
 /// Build the full application menu bar from the current snapshot.
 fn build_app_menus(state: MenuState) -> Vec<Menu> {
     let no_folder = !state.is_folder;
-    let no_orphan = !(state.is_folder && state.selected_orphan);
+    let off = |allowed: bool| no_folder || !allowed;
     // While Home is active there is no session to save or reload, and the
     // view-specific menus (Edit, Actions, Search) have nothing to act on,
     // so they are hidden entirely. The View menu stays: its log pane
@@ -160,9 +187,15 @@ fn build_app_menus(state: MenuState) -> Vec<Menu> {
                 .disabled(true),
             MenuItem::action("Clear session", ClearSession).disabled(true),
             MenuItem::separator(),
+            MenuItem::action("Back", GoBack).disabled(off(state.can_go_back)),
+            MenuItem::action("Forward", GoForward)
+                .disabled(off(state.can_go_forward)),
+            MenuItem::separator(),
             MenuItem::action("Swap sides", SwapSides).disabled(no_folder),
             MenuItem::action("Reload / recompare files", ReloadCompare)
                 .disabled(is_home),
+            MenuItem::action("Stop comparison", StopCompare)
+                .disabled(no_folder || !state.loading),
             MenuItem::separator(),
             MenuItem::action("Report…", SessionReport).disabled(true),
             MenuItem::action("Info…", SessionInfo).disabled(true),
@@ -206,12 +239,24 @@ fn build_app_menus(state: MenuState) -> Vec<Menu> {
                     .disabled(no_folder),
             ]),
             Menu::new("Actions").items([
-                // Copying only makes sense for an entry that exists on one
-                // side; enabling otherwise would promise a no-op.
+                // Each reconcile command is enabled only when the
+                // selected entry's shape allows it; enabling otherwise
+                // would promise a no-op. Overwriting copies, moves, and
+                // deletes confirm in the handler before running.
                 MenuItem::action("Copy to right", CopyToRight)
-                    .disabled(no_orphan),
+                    .disabled(off(state.can_copy_right)),
                 MenuItem::action("Copy to left", CopyToLeft)
-                    .disabled(no_orphan),
+                    .disabled(off(state.can_copy_left)),
+                MenuItem::separator(),
+                MenuItem::action("Move to right", MoveToRight)
+                    .disabled(off(state.can_move_right)),
+                MenuItem::action("Move to left", MoveToLeft)
+                    .disabled(off(state.can_move_left)),
+                MenuItem::separator(),
+                MenuItem::action("Delete from right", DeleteRightSide)
+                    .disabled(off(state.can_delete_right)),
+                MenuItem::action("Delete from left", DeleteLeftSide)
+                    .disabled(off(state.can_delete_left)),
             ]),
             Menu::new("Search").items([
                 MenuItem::action("Next difference", NextDifference)

@@ -19,9 +19,11 @@ use std::{
 };
 
 use futures::future::BoxFuture;
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     NodeFileSystem, Result,
+    error::FsError,
     hash::{ContentCache, ContentId, hash_and_cache_node},
     identity::{FileId, NodeId},
     scan::{ScanConfig, ScanEntry, scan_directory_node},
@@ -228,12 +230,15 @@ pub async fn compare_directories_node<N>(
     right_path: &Path,
     config: &CompareConfig,
     cache: Option<&ContentCache>,
+    cancel: Option<&CancellationToken>,
 ) -> Result<DirComparison>
 where
     N: NodeFileSystem<Nid = u64>,
 {
-    compare_directories_pair_node(fs, fs, left_path, right_path, config, cache)
-        .await
+    compare_directories_pair_node(
+        fs, fs, left_path, right_path, config, cache, cancel,
+    )
+    .await
 }
 
 /// Compare two directory trees that may live on two different filesystem
@@ -256,6 +261,11 @@ where
 /// correct while the labels of the two sides are unique per provider
 /// instance (equal endpoint identities share one provider, different
 /// ones resolve to different lookup keys, hence different labels).
+///
+/// When `cancel` is provided and triggered, the scan or the merge walk
+/// aborts with [`FsError::Cancelled`]; partial results are never
+/// returned as `Ok`.
+#[allow(clippy::too_many_arguments)]
 pub async fn compare_directories_pair_node<L, R>(
     left_fs: &L,
     right_fs: &R,
@@ -263,6 +273,7 @@ pub async fn compare_directories_pair_node<L, R>(
     right_path: &Path,
     config: &CompareConfig,
     cache: Option<&ContentCache>,
+    cancel: Option<&CancellationToken>,
 ) -> Result<DirComparison>
 where
     L: NodeFileSystem<Nid = u64>,
@@ -274,9 +285,10 @@ where
     };
 
     let left_result =
-        scan_directory_node(left_fs, left_path, &scan_config).await?;
+        scan_directory_node(left_fs, left_path, &scan_config, cancel).await?;
     let right_result =
-        scan_directory_node(right_fs, right_path, &scan_config).await?;
+        scan_directory_node(right_fs, right_path, &scan_config, cancel)
+            .await?;
 
     let mut comparison = compare_children_node(
         left_fs,
@@ -287,14 +299,145 @@ where
         right_path,
         config,
         cache,
+        cancel,
     )
-    .await;
+    .await?;
 
     // Surface non-fatal scan errors instead of dropping them.
     comparison.errors.extend(left_result.errors);
     comparison.errors.extend(right_result.errors);
 
     Ok(comparison)
+}
+
+/// Refine a metadata-only comparison with content hashes.
+///
+/// Second pass for the "metadata first, content in the background"
+/// flow: takes an existing [`DirComparison`] (typically produced with
+/// [`CompareConfig::meta_data_only`]) and re-checks every top-level
+/// file pair that metadata alone classified as equal (`Same` or
+/// `SameBinary` with equal sizes) by comparing blake3 content hashes.
+/// Pairs whose hashes differ are downgraded to `Different` and the
+/// status counts are updated in place.
+///
+/// Hashes are read through the same node API and optional
+/// [`ContentCache`] as the main comparison, so hashes computed during
+/// an earlier pass are reused instead of re-read. A side whose content
+/// cannot be resolved or read is treated as unknown, which classifies
+/// the pair as `Different` — unknown content is never assumed equal.
+///
+/// `on_progress` is invoked with `(done, total)` after each checked
+/// file pair so callers can report progress. When `cancel` is
+/// triggered the pass stops with [`FsError::Cancelled`]; the partially
+/// refined comparison is dropped.
+///
+/// Only top-level entries are refined; subdirectory subtrees keep the
+/// statuses from the metadata pass. Callers that display a subtree
+/// re-compare it when the user navigates in.
+#[allow(clippy::too_many_arguments)]
+pub async fn compare_content_pair_node<L, R>(
+    left_fs: &L,
+    right_fs: &R,
+    left_path: &Path,
+    right_path: &Path,
+    mut comparison: DirComparison,
+    cache: Option<&ContentCache>,
+    cancel: Option<&CancellationToken>,
+    on_progress: &(dyn Fn(usize, usize) + Send + Sync),
+) -> Result<DirComparison>
+where
+    L: NodeFileSystem<Nid = u64>,
+    R: NodeFileSystem<Nid = u64>,
+{
+    let candidates: Vec<usize> = comparison
+        .entries
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| {
+            matches!(
+                e.status,
+                DirEntryStatus::Same | DirEntryStatus::SameBinary
+            ) && e.left.as_ref().is_some_and(|l| {
+                !l.is_dir
+                    && l.size == e.right.as_ref().map_or(u64::MAX, |r| r.size)
+            }) && e.right.as_ref().is_some_and(|r| !r.is_dir)
+        })
+        .map(|(i, _)| i)
+        .collect();
+    let total = candidates.len();
+    on_progress(0, total);
+
+    for (done, &index) in candidates.iter().enumerate() {
+        if cancel.is_some_and(CancellationToken::is_cancelled) {
+            return Err(FsError::Cancelled);
+        }
+        // The side `path`s are relative to the comparison roots.
+        let (left_file, right_file) = {
+            let entry = &comparison.entries[index];
+            let left_info =
+                entry.left.as_ref().expect("candidate has a left side");
+            let right_info =
+                entry.right.as_ref().expect("candidate has a right side");
+            (
+                left_path.join(&left_info.path),
+                right_path.join(&right_info.path),
+            )
+        };
+        let left_hash = side_content_hash(left_fs, &left_file, cache).await;
+        let right_hash = side_content_hash(right_fs, &right_file, cache).await;
+        let differs = match (&left_hash, &right_hash) {
+            (Ok(lh), Ok(rh)) => lh != rh,
+            _ => true,
+        };
+        if differs {
+            let old = comparison.entries[index].status;
+            comparison.entries[index].status = DirEntryStatus::Different;
+            if let Some(count) = comparison.counts.get_mut(&old) {
+                *count -= 1;
+            }
+            *comparison
+                .counts
+                .entry(DirEntryStatus::Different)
+                .or_insert(0) += 1;
+        }
+        on_progress(done + 1, total);
+    }
+
+    Ok(comparison)
+}
+
+/// Compute the blake3 hash of one file, consulting the optional
+/// [`ContentCache`] and the node's cached hash before reading content.
+async fn side_content_hash<N>(
+    fs: &N,
+    path: &Path,
+    cache: Option<&ContentCache>,
+) -> Result<blake3::Hash>
+where
+    N: NodeFileSystem<Nid = u64>,
+{
+    let label = fs.label();
+    if let Some(c) = cache
+        && let Some(cid) = c.get(label, path)
+        && let Ok(hash) = blake3::Hash::from_hex(&cid.hash)
+    {
+        return Ok(hash);
+    }
+    let id = fs.resolve_path(path).await?;
+    let node = fs.get_node(id)?;
+    let hash = match node
+        .cached_hash()
+        .and_then(|h| blake3::Hash::from_hex(h).ok())
+    {
+        Some(h) => h,
+        None => {
+            hash_and_cache_node(fs, id, FileId::new(*id.get()), &node).await?
+        }
+    };
+    if let Some(c) = cache {
+        c.insert(label, path, ContentId::from_blake3(node.metadata(), &hash));
+    }
+    Ok(hash)
 }
 
 /// Merge two lists of scanned sibling entries into a `DirComparison`.
@@ -327,7 +470,8 @@ fn compare_children_node<'a, L, R>(
     right_root: &'a Path,
     config: &'a CompareConfig,
     cache: Option<&'a ContentCache>,
-) -> BoxFuture<'a, DirComparison>
+    cancel: Option<&'a CancellationToken>,
+) -> BoxFuture<'a, Result<DirComparison>>
 where
     L: NodeFileSystem<Nid = u64>,
     R: NodeFileSystem<Nid = u64>,
@@ -350,6 +494,11 @@ where
         names.sort();
 
         for &name in &names {
+            // Abort the walk between entries when the caller cancelled
+            // the comparison; a partial tree is never a valid result.
+            if cancel.is_some_and(CancellationToken::is_cancelled) {
+                return Err(FsError::Cancelled);
+            }
             let left_entry = left_map.get(name).copied();
             let right_entry = right_map.get(name).copied();
 
@@ -405,9 +554,9 @@ where
 
                     let sub = compare_children_node(
                         left_fs, right_fs, lc, rc, left_root, right_root,
-                        config, cache,
+                        config, cache, cancel,
                     )
-                    .await;
+                    .await?;
 
                     let has_diff = sub.different_count() > 0;
                     entry.sub_entries = Some(Arc::new(sub));
@@ -424,7 +573,7 @@ where
             }
         }
 
-        comparison
+        Ok(comparison)
     })
 }
 
@@ -719,6 +868,7 @@ mod tests {
             &right,
             &config,
             Some(&cache),
+            None,
         )
         .await
         .unwrap();
@@ -743,6 +893,7 @@ mod tests {
             &right,
             &config,
             Some(&cache),
+            None,
         )
         .await
         .unwrap();
@@ -816,6 +967,7 @@ mod tests {
             &right,
             &config,
             Some(&cache),
+            None,
         )
         .await
         .unwrap();
@@ -907,6 +1059,7 @@ mod tests {
             &right,
             &config,
             Some(&cache),
+            None,
         )
         .await
         .unwrap();
@@ -955,7 +1108,7 @@ mod tests {
         let config = CompareConfig::meta_data_only();
 
         let result =
-            compare_directories_node(&fs, &left, &right, &config, None)
+            compare_directories_node(&fs, &left, &right, &config, None, None)
                 .await
                 .unwrap();
 
@@ -1100,6 +1253,7 @@ mod tests {
             &right,
             &config,
             Some(&single_cache),
+            None,
         )
         .await
         .unwrap();
@@ -1114,6 +1268,7 @@ mod tests {
             &right,
             &config,
             Some(&pair_cache),
+            None,
         )
         .await
         .unwrap();
@@ -1169,6 +1324,7 @@ mod tests {
             Path::new("/mirror"),
             &config,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -1223,6 +1379,7 @@ mod tests {
             Path::new("/mirror"),
             &config,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -1234,5 +1391,128 @@ mod tests {
         );
 
         fs_err::remove_dir_all(&base).ok();
+    }
+
+    // -----------------------------------------------------------------------
+    // Cancellation tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn cancelled_token_aborts_comparison() {
+        let (left, right) = make_test_dirs();
+        let fs = LocalFs::new("test");
+        let token = CancellationToken::new();
+        token.cancel();
+
+        let result = compare_directories_node(
+            &fs,
+            &left,
+            &right,
+            &CompareConfig::meta_data_only(),
+            None,
+            Some(&token),
+        )
+        .await;
+
+        assert!(matches!(result, Err(FsError::Cancelled)));
+        fs_err::remove_dir_all(left.parent().unwrap()).ok();
+    }
+
+    // -----------------------------------------------------------------------
+    // Background content pass tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn content_pass_refines_equal_size_pairs() {
+        let (left, right) = make_test_dirs();
+        let fs = LocalFs::new("test");
+
+        // Metadata alone cannot tell `diff.txt` apart: same size, so it
+        // is marked `Same` by the first pass.
+        let comparison = compare_directories_node(
+            &fs,
+            &left,
+            &right,
+            &CompareConfig::meta_data_only(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            status_of(&comparison, "diff.txt"),
+            Some(DirEntryStatus::Same)
+        );
+
+        let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = events.clone();
+        let refined = compare_content_pair_node(
+            &fs,
+            &fs,
+            &left,
+            &right,
+            comparison,
+            None,
+            None,
+            &move |done, total| sink.lock().unwrap().push((done, total)),
+        )
+        .await
+        .unwrap();
+
+        // The same-size pair with different content is downgraded; the
+        // genuinely equal file keeps its status.
+        assert_eq!(
+            status_of(&refined, "diff.txt"),
+            Some(DirEntryStatus::Different)
+        );
+        assert_eq!(
+            status_of(&refined, "same.txt"),
+            Some(DirEntryStatus::Same)
+        );
+        // The status counts follow the refinement (`common` is a shared
+        // directory that stays `Same`).
+        assert_eq!(refined.counts.get(&DirEntryStatus::Same), Some(&2));
+        assert_eq!(refined.counts.get(&DirEntryStatus::Different), Some(&1));
+
+        // Progress starts at zero and ends at the candidate total (the
+        // two shared files; the orphan pair is not a candidate).
+        let events = events.lock().unwrap();
+        assert_eq!(events.first(), Some(&(0, 2)));
+        assert_eq!(events.last(), Some(&(2, 2)));
+
+        fs_err::remove_dir_all(left.parent().unwrap()).ok();
+    }
+
+    #[tokio::test]
+    async fn content_pass_honours_cancellation() {
+        let (left, right) = make_test_dirs();
+        let fs = LocalFs::new("test");
+        let comparison = compare_directories_node(
+            &fs,
+            &left,
+            &right,
+            &CompareConfig::meta_data_only(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let token = CancellationToken::new();
+        token.cancel();
+        let result = compare_content_pair_node(
+            &fs,
+            &fs,
+            &left,
+            &right,
+            comparison,
+            None,
+            Some(&token),
+            &|_done, _total| {},
+        )
+        .await;
+
+        assert!(matches!(result, Err(FsError::Cancelled)));
+        fs_err::remove_dir_all(left.parent().unwrap()).ok();
     }
 }

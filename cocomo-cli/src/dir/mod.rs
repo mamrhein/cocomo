@@ -76,12 +76,12 @@ pub(crate) async fn dir_compare<R: EndpointResolver>(
 
     let comparison = match pair {
         EndpointPair::Shared(fs) => {
-            compare_directories_node(&*fs, &left, &right, &config, None)
+            compare_directories_node(&*fs, &left, &right, &config, None, None)
                 .await?
         }
         EndpointPair::Separate(left_fs, right_fs) => {
             compare_directories_pair_node(
-                &*left_fs, &*right_fs, &left, &right, &config, None,
+                &*left_fs, &*right_fs, &left, &right, &config, None, None,
             )
             .await?
         }

@@ -14,12 +14,13 @@
 //! compare directories asynchronously, and the UI observes this entity
 //! for updates.
 
-use std::cmp::Ordering;
+use std::{cmp::Ordering, sync::Arc, time::Instant};
 
 use cocomo_lib::{
-    CompareConfig, ContentCache, DirComparison, DirEntry, DirEntryStatus,
-    Endpoint, FsPair, ProviderRef, SessionConfig, SessionSettings,
-    SessionType, TransferAction, TransferItem, compare_directories_node,
+    CancellationToken, CompareConfig, ContentCache, DirComparison, DirEntry,
+    DirEntryStatus, Endpoint, FsPair, ProviderRef, SessionConfig,
+    SessionSettings, SessionType, TransferAction, TransferItem,
+    compare_content_pair_node, compare_directories_node,
     compare_directories_pair_node, execute_transfers,
 };
 use gpui::{App, Context, FocusHandle, SharedString};
@@ -302,34 +303,117 @@ fn nav_step_for(entry: &DirEntry) -> NavStep {
     }
 }
 
-/// Build the reconcile transfer for an entry, if its status allows one.
+/// A restorable navigation position in the session's back/forward
+/// history: the compared base-folder pair and the directories entered
+/// below it.
+#[derive(Clone, Debug)]
+struct HistoryEntry {
+    root_left: Endpoint,
+    root_right: Endpoint,
+    nav_steps: Vec<NavStep>,
+}
+
+/// Which side(s) a "set as base folder" command re-roots.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BaseSide {
+    /// Re-root the left side only.
+    Left,
+    /// Re-root the right side only.
+    Right,
+    /// Re-root both sides at the selected entry.
+    Both,
+}
+
+/// A transfer the UI can run on the selected entry, with the labels and
+/// the confirmation requirement derived from the entry's shape.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct TransferPlan {
+    /// The transfer item to execute.
+    pub(crate) item: TransferItem,
+    /// Whether the operation overwrites or destroys existing content and
+    /// therefore needs an explicit confirmation before running.
+    pub(crate) confirm: bool,
+    /// Label shown while the operation runs.
+    pub(crate) busy: &'static str,
+    /// Label prefix shown when the operation completes.
+    pub(crate) done: &'static str,
+}
+
+/// Build the transfer plan for `action` on `entry`, if the entry's shape
+/// allows it.
 ///
-/// Only orphans transfer without overwriting: a right-only entry copies
-/// to the left, a left-only entry copies to the right. Copying over an
-/// entry that exists on both sides needs a confirmation flow this GUI
-/// does not have yet, so those statuses produce no transfer.
-///
-/// Halves of a file-vs-directory name clash produce no transfer either:
-/// the target of a copy is ambiguous, so both are blocked.
-pub(crate) fn reconcile_transfer(entry: &DirEntry) -> Option<TransferItem> {
+/// The action names the destination side: `CopyLeft`/`MoveLeft` take the
+/// right side as source, `CopyRight`/`MoveRight` the left side, and the
+/// deletes remove the entry from the named side. An action is offered
+/// whenever its source (or delete target) exists; it requires
+/// confirmation whenever it overwrites an existing target or deletes
+/// content.
+pub(crate) fn transfer_plan_for(
+    entry: &DirEntry,
+    action: TransferAction,
+) -> Option<TransferPlan> {
     if entry.name_conflict {
         return None;
     }
-    let (action, side) = match entry.status {
-        DirEntryStatus::RightOnly => {
-            (TransferAction::CopyLeft, entry.right.as_ref()?)
-        }
-        DirEntryStatus::LeftOnly => {
-            (TransferAction::CopyRight, entry.left.as_ref()?)
-        }
-        _ => return None,
+    let (source, overwrite, busy, done) = match action {
+        TransferAction::CopyLeft => (
+            entry.right.as_ref()?,
+            entry.left.is_some(),
+            "Copying to left…",
+            "Copied to the left",
+        ),
+        TransferAction::CopyRight => (
+            entry.left.as_ref()?,
+            entry.right.is_some(),
+            "Copying to right…",
+            "Copied to the right",
+        ),
+        TransferAction::MoveLeft => (
+            entry.right.as_ref()?,
+            entry.left.is_some(),
+            "Moving to left…",
+            "Moved to the left",
+        ),
+        TransferAction::MoveRight => (
+            entry.left.as_ref()?,
+            entry.right.is_some(),
+            "Moving to right…",
+            "Moved to the right",
+        ),
+        TransferAction::DeleteLeft => (
+            entry.left.as_ref()?,
+            true,
+            "Deleting from left…",
+            "Deleted from the left",
+        ),
+        TransferAction::DeleteRight => (
+            entry.right.as_ref()?,
+            true,
+            "Deleting from right…",
+            "Deleted from the right",
+        ),
+        // 3-way merge actions belong to the merge view.
+        TransferAction::CopyCenter => return None,
     };
-    Some(TransferItem::new(
-        action,
-        entry.name.clone(),
-        side.is_dir,
-        side.path.clone(),
-    ))
+    // Identical entries need no reconciliation; copying them would only
+    // rewrite equal content.
+    if matches!(
+        entry.status,
+        DirEntryStatus::Same | DirEntryStatus::SameBinary
+    ) {
+        return None;
+    }
+    Some(TransferPlan {
+        item: TransferItem::new(
+            action,
+            entry.name.clone(),
+            source.is_dir,
+            source.path.clone(),
+        ),
+        confirm: overwrite,
+        busy,
+        done,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -385,6 +469,27 @@ pub struct AppState {
     filter_current: Option<String>,
     /// Session type.
     session_type: SessionType,
+    /// Monotonic counter that invalidates results of stopped or
+    /// superseded comparison loads.
+    load_revision: u64,
+    /// Cancellation token of the in-flight comparison, if any.
+    cancel_token: Option<CancellationToken>,
+    /// Hash cache shared by the metadata scan, the background content
+    /// pass, and later reloads of this session.
+    content_cache: Arc<ContentCache>,
+    /// Back/forward history of compared base-folder pairs, oldest first.
+    history: Vec<HistoryEntry>,
+    /// Position of the current state within `history`.
+    history_pos: usize,
+}
+
+/// The history entry recorded for a freshly opened session root pair.
+fn initial_history(left: &Endpoint, right: &Endpoint) -> Vec<HistoryEntry> {
+    vec![HistoryEntry {
+        root_left: left.clone(),
+        root_right: right.clone(),
+        nav_steps: Vec::new(),
+    }]
 }
 
 // TODO: remove this
@@ -397,6 +502,7 @@ impl AppState {
         title: SharedString,
         cx: &mut Context<Self>,
     ) -> Self {
+        let history = initial_history(&left, &right);
         Self {
             focus_handle: cx.focus_handle(),
             title,
@@ -418,6 +524,11 @@ impl AppState {
             settings: SessionSettings::default(),
             filter_current: None,
             session_type: SessionType::DirCompare,
+            load_revision: 0,
+            cancel_token: None,
+            content_cache: Arc::new(ContentCache::default_config()),
+            history,
+            history_pos: 0,
         }
     }
 
@@ -430,6 +541,7 @@ impl AppState {
         title: SharedString,
         cx: &mut Context<Self>,
     ) -> Self {
+        let history = initial_history(&left, &right);
         Self {
             focus_handle: cx.focus_handle(),
             title,
@@ -451,6 +563,11 @@ impl AppState {
             settings: config.settings.clone(),
             filter_current: config.settings.name_filter.last().cloned(),
             session_type: config.session_type,
+            load_revision: 0,
+            cancel_token: None,
+            content_cache: Arc::new(ContentCache::default_config()),
+            history,
+            history_pos: 0,
         }
     }
 
@@ -614,17 +731,25 @@ impl AppState {
     // -----------------------------------------------------------------------
 
     /// Load the comparison asynchronously.
+    ///
+    /// The load runs in two passes when content comparison is enabled:
+    /// a fast metadata scan whose result is displayed immediately, then
+    /// a background content pass that refines equal-size file pairs by
+    /// hashing. Results of a stopped or superseded load are dropped via
+    /// the revision guard, so the previously displayed comparison stays
+    /// visible until fresh results arrive.
     pub fn load_comparison(&mut self, cx: &mut Context<Self>) {
         if self.loading {
             return;
         }
 
         self.loading = true;
-        self.busy_label = None;
+        self.busy_label = Some("scanning…".into());
         self.error = None;
-        self.comparison = None;
-        self.display_order.clear();
-        self.selected_index = 0;
+        self.load_revision += 1;
+        let revision = self.load_revision;
+        let token = CancellationToken::new();
+        self.cancel_token = Some(token.clone());
         cx.notify();
 
         let left = self.left.clone();
@@ -632,6 +757,7 @@ impl AppState {
         let left_display = left.display();
         let right_display = right.display();
         let compare_files = self.settings.compare_files;
+        let cache = self.content_cache.clone();
         let weak = cx.entity().downgrade();
 
         log::push(
@@ -640,28 +766,25 @@ impl AppState {
             cx,
         );
 
-        // Spawn the comparison on the tokio runtime because the providers
-        // use tokio::fs internally and require a tokio reactor. Both sides
-        // on the same provider instance compare through the single-
-        // filesystem path; a mixed pair compares across providers.
+        // The metadata pass always runs metadata-only; content hashing
+        // is the second pass below. Spawned on the tokio runtime because
+        // the providers use tokio::fs internally and require a tokio
+        // reactor. Both sides on the same provider instance compare
+        // through the single-filesystem path; a mixed pair compares
+        // across providers.
+        let scan_token = token.clone();
         let join_handle = crate::runtime::spawn_on_tokio(async move {
-            let cache = ContentCache::default_config();
-            let config = if compare_files {
-                CompareConfig::full()
-            } else {
-                CompareConfig::meta_data_only()
-            };
-
-            if left.same_provider(&right) {
+            let config = CompareConfig::meta_data_only();
+            let comparison = if left.same_provider(&right) {
                 compare_directories_node(
                     left.fs(),
                     left.path(),
                     right.path(),
                     &config,
                     Some(&cache),
+                    Some(&scan_token),
                 )
                 .await
-                .map_err(|e| anyhow::anyhow!("{e}"))
             } else {
                 compare_directories_pair_node(
                     left.fs(),
@@ -670,16 +793,17 @@ impl AppState {
                     right.path(),
                     &config,
                     Some(&cache),
+                    Some(&scan_token),
                 )
                 .await
-                .map_err(|e| anyhow::anyhow!("{e}"))
-            }
+            };
+            comparison.map_err(|e| anyhow::anyhow!("{e}"))
         });
 
         // Await the JoinHandle inside a gpui Task. Awaiting a JoinHandle
         // does not require a tokio reactor — it just polls the task running
         // on tokio's executor.
-        cx.spawn(|_, cx: &mut gpui::AsyncApp| {
+        cx.spawn(move |_, cx: &mut gpui::AsyncApp| {
             let async_app = cx.clone();
             async move {
                 let result = match join_handle.await {
@@ -687,41 +811,241 @@ impl AppState {
                     Err(e) => Err(anyhow::anyhow!("task panicked: {e}")),
                 };
                 async_app.update(|cx| {
-                    if let Some(state) = weak.upgrade() {
-                        state.update(cx, |state, cx| {
-                            state.loading = false;
-                            match result {
-                                Ok(comparison) => {
-                                    let count = comparison.entries.len();
-                                    state.comparison = Some(comparison);
-                                    state.recompute_display_order();
-                                    state.selected_index = 0;
-                                    log::push(
-                                        LogLevel::Info,
-                                        format!(
-                                            "Comparison completed: {count} \
-                                             entries"
-                                        ),
-                                        cx,
-                                    );
-                                }
-                                Err(e) => {
-                                    state.error = Some(format!(
-                                        "Comparison failed: {e}"
-                                    ));
-                                    log::push(
-                                        LogLevel::Error,
-                                        format!("Comparison failed: {e}"),
-                                        cx,
-                                    );
+                    let Some(state) = weak.upgrade() else { return };
+                    state.update(cx, |state, cx| {
+                        // Drop results of a load that was stopped or
+                        // superseded; the stop path already logged.
+                        if revision != state.load_revision {
+                            return;
+                        }
+                        match result {
+                            Ok(comparison) => {
+                                let count = comparison.entries.len();
+                                state.comparison = Some(comparison);
+                                state.recompute_display_order();
+                                state.selected_index = 0;
+                                log::push(
+                                    LogLevel::Info,
+                                    format!(
+                                        "Comparison completed: {count} \
+                                         entries"
+                                    ),
+                                    cx,
+                                );
+                                if compare_files {
+                                    // The content pass takes over the
+                                    // cancellation token and the loading
+                                    // flag.
+                                    state.start_content_pass(revision, cx);
+                                } else {
+                                    state.cancel_token = None;
+                                    state.loading = false;
+                                    state.busy_label = None;
+                                    cx.notify();
                                 }
                             }
-                        });
-                    }
+                            Err(e) => {
+                                state.cancel_token = None;
+                                state.loading = false;
+                                state.busy_label = None;
+                                state.error =
+                                    Some(format!("Comparison failed: {e}"));
+                                log::push(
+                                    LogLevel::Error,
+                                    format!("Comparison failed: {e}"),
+                                    cx,
+                                );
+                                cx.notify();
+                            }
+                        }
+                    });
                 });
             }
         })
         .detach();
+    }
+
+    /// Refine the displayed comparison with content hashes in the
+    /// background.
+    ///
+    /// Runs [`compare_content_pair_node`] on the tokio runtime over the
+    /// currently displayed comparison, reporting `comparing content
+    /// N/M` progress into [`Self::busy_label`] until the pass finishes.
+    /// The refined comparison replaces the displayed one with the row
+    /// selection following the same entry by name.
+    fn start_content_pass(&mut self, revision: u64, cx: &mut Context<Self>) {
+        let (Some(comparison), Some(token)) =
+            (self.comparison.clone(), self.cancel_token.clone())
+        else {
+            self.cancel_token = None;
+            self.loading = false;
+            self.busy_label = None;
+            cx.notify();
+            return;
+        };
+        // Keep `loading` set: the status bar shows the progress label
+        // and transfers wait for the pass to finish.
+        self.busy_label = Some("comparing content…".into());
+        cx.notify();
+
+        log::push(LogLevel::Info, "Background content comparison started", cx);
+        let started = Instant::now();
+
+        let left = self.left.clone();
+        let right = self.right.clone();
+        let cache = self.content_cache.clone();
+        let weak = cx.entity().downgrade();
+
+        // Progress flows back on an unbounded channel; the sending side
+        // throttles so a large tree does not flood the main thread.
+        let (tx, mut rx) =
+            tokio::sync::mpsc::unbounded_channel::<(usize, usize)>();
+        let last_emit = Arc::new(std::sync::Mutex::new(Instant::now()));
+
+        let content_token = token.clone();
+        let join_handle = crate::runtime::spawn_on_tokio(async move {
+            let on_progress = move |done: usize, total: usize| {
+                let emit = done == total || {
+                    let mut last = last_emit.lock().unwrap();
+                    if last.elapsed().as_millis() >= 100 {
+                        *last = Instant::now();
+                        true
+                    } else {
+                        false
+                    }
+                };
+                if emit {
+                    let _ = tx.send((done, total));
+                }
+            };
+            // The pair function handles a shared provider instance
+            // exactly like the single-fs wrapper, so one call covers
+            // both endpoint shapes.
+            let result = compare_content_pair_node(
+                left.fs(),
+                right.fs(),
+                left.path(),
+                right.path(),
+                comparison,
+                Some(&cache),
+                Some(&content_token),
+                &on_progress,
+            )
+            .await;
+            result.map_err(|e| anyhow::anyhow!("{e}"))
+        });
+
+        // Drain progress events until the task finishes and the channel
+        // closes. Awaiting `recv` needs no tokio reactor; it is a plain
+        // waker future.
+        let progress_weak = weak.clone();
+        cx.spawn(move |_, cx: &mut gpui::AsyncApp| {
+            let async_app = cx.clone();
+            async move {
+                while let Some((done, total)) = rx.recv().await {
+                    async_app.update(|cx| {
+                        let Some(state) = progress_weak.upgrade() else {
+                            return;
+                        };
+                        state.update(cx, |state, cx| {
+                            // Ignore late events after stop or reload.
+                            if revision != state.load_revision
+                                || !state.loading
+                            {
+                                return;
+                            }
+                            state.busy_label = Some(
+                                format!("comparing content {done}/{total}")
+                                    .into(),
+                            );
+                            cx.notify();
+                        });
+                    });
+                }
+            }
+        })
+        .detach();
+
+        let content_weak = weak.clone();
+        cx.spawn(move |_, cx: &mut gpui::AsyncApp| {
+            let async_app = cx.clone();
+            async move {
+                let result = match join_handle.await {
+                    Ok(r) => r,
+                    Err(e) => Err(anyhow::anyhow!("task panicked: {e}")),
+                };
+                async_app.update(|cx| {
+                    let Some(state) = content_weak.upgrade() else {
+                        return;
+                    };
+                    state.update(cx, |state, cx| {
+                        // A stopped or superseded pass leaves the
+                        // displayed comparison as it is.
+                        if revision != state.load_revision {
+                            return;
+                        }
+                        state.loading = false;
+                        state.busy_label = None;
+                        state.cancel_token = None;
+                        match result {
+                            Ok(comparison) => {
+                                // Selection follows the same entry by
+                                // name across the in-place refinement.
+                                let selected_name = state
+                                    .selected_entry()
+                                    .map(|e| e.name.clone());
+                                state.comparison = Some(comparison);
+                                state.recompute_display_order();
+                                state.selected_index = selected_name
+                                    .as_deref()
+                                    .and_then(|name| {
+                                        state.display_index_of_name(name)
+                                    })
+                                    .unwrap_or(0);
+                                log::push(
+                                    LogLevel::Info,
+                                    format!(
+                                        "Background content comparison \
+                                         completed in {:.1} s",
+                                        started.elapsed().as_secs_f64()
+                                    ),
+                                    cx,
+                                );
+                            }
+                            Err(e) => {
+                                log::push(
+                                    LogLevel::Error,
+                                    format!("Content comparison failed: {e}"),
+                                    cx,
+                                );
+                            }
+                        }
+                        cx.notify();
+                    });
+                });
+            }
+        })
+        .detach();
+    }
+
+    /// Abort the in-flight comparison, keeping the currently displayed
+    /// results visible.
+    ///
+    /// The cancellation token stops the scan or content pass on the
+    /// tokio side; the revision guard drops whatever result the task
+    /// still delivers.
+    pub fn stop(&mut self, cx: &mut Context<Self>) {
+        if !self.loading {
+            return;
+        }
+        self.load_revision += 1;
+        if let Some(token) = self.cancel_token.take() {
+            token.cancel();
+        }
+        self.loading = false;
+        self.busy_label = None;
+        log::push(LogLevel::Info, "Comparison aborted", cx);
+        cx.notify();
     }
 
     /// Select a row by display-order index.
@@ -813,6 +1137,7 @@ impl AppState {
         self.left = left_sub;
         self.right = right_sub;
         self.notice = None;
+        self.record_history();
         self.load_comparison(cx);
     }
 
@@ -841,6 +1166,7 @@ impl AppState {
             return;
         }
         self.notice = None;
+        self.record_history();
         self.load_comparison(cx);
     }
 
@@ -861,6 +1187,7 @@ impl AppState {
         self.left = left;
         self.right = right;
         self.notice = None;
+        self.record_history();
         self.load_comparison(cx);
     }
 
@@ -870,6 +1197,7 @@ impl AppState {
     pub fn swap_sides(&mut self, cx: &mut Context<Self>) {
         self.swap_sides_in_place();
         self.notice = None;
+        self.record_history();
         self.load_comparison(cx);
     }
 
@@ -883,59 +1211,198 @@ impl AppState {
         }
     }
 
-    /// Copy the selected orphan entry toward `action`'s destination side,
-    /// then re-compare so the table reflects the transfer.
-    ///
-    /// The transfer only runs when `action` matches what the entry's
-    /// status allows, so a keyboard shortcut on a non-orphan entry is a
-    /// no-op rather than a surprise write in the other direction.
-    pub fn transfer_selected(
-        &mut self,
-        action: TransferAction,
-        cx: &mut Context<Self>,
-    ) {
-        if self.loading {
+    // -----------------------------------------------------------------------
+    // Back/forward session history
+    // -----------------------------------------------------------------------
+
+    /// Record the current root pair and navigation steps as a new
+    /// history entry, dropping any forward entries.
+    fn record_history(&mut self) {
+        self.history.truncate(self.history_pos + 1);
+        self.history.push(HistoryEntry {
+            root_left: self.root_left.clone(),
+            root_right: self.root_right.clone(),
+            nav_steps: self.nav_steps.clone(),
+        });
+        self.history_pos = self.history.len() - 1;
+    }
+
+    /// Whether the pair can step back to a previously compared state.
+    pub fn can_go_back(&self) -> bool {
+        self.history_pos > 0
+    }
+
+    /// Whether the pair can step forward after going back.
+    pub fn can_go_forward(&self) -> bool {
+        self.history_pos + 1 < self.history.len()
+    }
+
+    /// Step back to the previously compared base-folder pair.
+    pub fn go_back(&mut self, cx: &mut Context<Self>) {
+        if !self.can_go_back() {
+            return;
+        }
+        self.history_pos -= 1;
+        self.restore_history(cx);
+    }
+
+    /// Step forward to the next compared base-folder pair.
+    pub fn go_forward(&mut self, cx: &mut Context<Self>) {
+        if !self.can_go_forward() {
+            return;
+        }
+        self.history_pos += 1;
+        self.restore_history(cx);
+    }
+
+    /// Restore the roots and steps at `history_pos` and re-compare.
+    fn restore_history(&mut self, cx: &mut Context<Self>) {
+        let entry = self.history[self.history_pos].clone();
+        self.root_left = entry.root_left;
+        self.root_right = entry.root_right;
+        self.nav_steps = entry.nav_steps;
+        let (left, right) = endpoints_at_depth(
+            &self.root_left,
+            &self.root_right,
+            &self.nav_steps,
+        );
+        self.left = left;
+        self.right = right;
+        self.notice = None;
+        self.load_comparison(cx);
+    }
+
+    // -----------------------------------------------------------------------
+    // Base folder re-rooting
+    // -----------------------------------------------------------------------
+
+    /// Whether the selected entry can serve as the base folder for
+    /// `side`: the side must have the entry and it must be a directory.
+    pub fn can_set_base_folder(&self, side: BaseSide) -> bool {
+        let Some(entry) = self.selected_entry() else {
+            return false;
+        };
+        let side_info = match side {
+            BaseSide::Left => entry.left.as_ref(),
+            BaseSide::Right => entry.right.as_ref(),
+            BaseSide::Both => {
+                return entry.left.as_ref().is_some_and(|l| l.is_dir)
+                    && entry.right.as_ref().is_some_and(|r| r.is_dir);
+            }
+        };
+        side_info.is_some_and(|i| i.is_dir)
+    }
+
+    /// Re-root the session at the selected entry for `side`, so the
+    /// entry becomes the new base folder of the comparison. Navigation
+    /// steps below the old roots are dropped; the re-rooted pair is
+    /// recorded in the history so back/forward can undo it.
+    pub fn set_base_folder(&mut self, side: BaseSide, cx: &mut Context<Self>) {
+        if !self.can_set_base_folder(side) {
             return;
         }
         let Some(entry) = self.selected_entry() else {
             return;
         };
-        let item = reconcile_transfer(entry);
-        let conflict = entry.name_conflict.then(|| entry.name.clone());
-        let Some(item) = item else {
-            // A name clash is blocked in both directions: say so instead
-            // of a silent no-op.
-            if let Some(name) = conflict {
-                self.notice = Some(
-                    format!(
-                        "Skipped \"{name}\": a file and a directory share \
-                         this name"
-                    )
-                    .into(),
-                );
-                cx.notify();
+        let (left, right) = entry_endpoints(entry, &self.left, &self.right);
+        match side {
+            BaseSide::Left => self.root_left = left,
+            BaseSide::Right => self.root_right = right,
+            BaseSide::Both => {
+                self.root_left = left;
+                self.root_right = right;
             }
-            return;
-        };
-        if item.action != action {
+        }
+        self.nav_steps.clear();
+        self.left = self.root_left.clone();
+        self.right = self.root_right.clone();
+        self.notice = None;
+        log::push(
+            LogLevel::Info,
+            format!(
+                "Base folder set: {}",
+                match side {
+                    BaseSide::Left => self.root_left.display(),
+                    BaseSide::Right => self.root_right.display(),
+                    BaseSide::Both => {
+                        format!(
+                            "{} ↔ {}",
+                            self.root_left.display(),
+                            self.root_right.display()
+                        )
+                    }
+                }
+            ),
+            cx,
+        );
+        self.record_history();
+        self.load_comparison(cx);
+    }
+
+    /// Build the transfer plan for `action` on the selected entry.
+    ///
+    /// `None` means the entry's shape does not allow the action, which
+    /// drives the enabled state of the menu and context-menu commands.
+    pub fn transfer_plan(
+        &self,
+        action: TransferAction,
+    ) -> Option<TransferPlan> {
+        let entry = self.selected_entry()?;
+        transfer_plan_for(entry, action)
+    }
+
+    /// Whether the selected entry can be reconciled with `action`, for
+    /// the enabled state of the Actions menu commands.
+    pub fn can_transfer(&self, action: TransferAction) -> bool {
+        self.transfer_plan(action).is_some()
+    }
+
+    /// Surface why a reconcile command was not possible for the selected
+    /// entry, so a shortcut on a blocked entry is not a silent no-op.
+    ///
+    /// A file-vs-directory name clash is the one blocked shape worth
+    /// explaining; other blocked shapes are simply not offered.
+    pub fn explain_blocked_transfer(&mut self, cx: &mut Context<Self>) {
+        let conflict = self
+            .selected_entry()
+            .filter(|e| e.name_conflict)
+            .map(|e| e.name.clone());
+        if let Some(name) = conflict {
+            self.notice = Some(
+                format!(
+                    "Skipped \"{name}\": a file and a directory share this \
+                     name"
+                )
+                .into(),
+            );
+            cx.notify();
+        }
+    }
+
+    /// Execute a previously planned transfer on the selected entry, then
+    /// re-compare so the table reflects the transfer.
+    ///
+    /// Runs on the tokio runtime through the node-based provider API,
+    /// which needs the tokio reactor, like the comparison itself.
+    pub fn run_transfer(
+        &mut self,
+        plan: TransferPlan,
+        cx: &mut Context<Self>,
+    ) {
+        if self.loading {
             return;
         }
-        let (busy, done) = match item.action {
-            TransferAction::CopyLeft => {
-                ("Copying to left…", "Copied to the left")
-            }
-            _ => ("Copying to right…", "Copied to the right"),
-        };
+        let TransferPlan {
+            item, busy, done, ..
+        } = plan;
         let name = item.name.clone();
         self.loading = true;
         self.busy_label = Some(busy.into());
         self.notice = None;
         cx.notify();
 
-        // The transfer writes through the node-based provider API, which
-        // needs the tokio reactor, so it runs on the shared runtime like
-        // the comparison itself. Both endpoints are moved into the task so
-        // the provider borrows the `FsPair` addresses outlive the await.
+        // Both endpoints are moved into the task so the provider borrows
+        // the `FsPair` addresses outlive the await.
         let left = self.left.clone();
         let right = self.right.clone();
         let join_handle = crate::runtime::spawn_on_tokio(async move {
@@ -980,7 +1447,8 @@ impl AppState {
                                     message.into()
                                 }
                                 Err(e) => {
-                                    let message = format!("Copy failed: {e}");
+                                    let message =
+                                        format!("Transfer failed: {e}");
                                     log::push(
                                         LogLevel::Error,
                                         message.clone(),
@@ -1146,16 +1614,6 @@ impl AppState {
         cx.notify();
     }
 
-    /// Whether the selected entry exists on only one side.
-    ///
-    /// Drives the enabled state of the Actions menu's copy-to-side
-    /// commands, which are no-ops for any other entry.
-    pub fn selected_is_orphan(&self) -> bool {
-        self.selected_entry().is_some_and(|e| {
-            status_category(&e.status) == StatusCategory::Orphan
-        })
-    }
-
     /// Display-order position of the entry with the given name.
     fn display_index_of_name(&self, name: &str) -> Option<usize> {
         let comparison = self.comparison.as_ref()?;
@@ -1264,6 +1722,13 @@ mod tests {
         }
     }
 
+    fn dir_info(path: &str) -> EntryInfo {
+        EntryInfo {
+            is_dir: true,
+            ..info(path, 0, "")
+        }
+    }
+
     fn entry(
         name: &str,
         status: DirEntryStatus,
@@ -1287,6 +1752,26 @@ mod tests {
             counts: HashMap::new(),
             errors: Vec::new(),
         }
+    }
+
+    /// Install a tokio runtime handle so code paths that spawn through
+    /// the runtime bridge work in tests. The runtime must stay alive for
+    /// the test's duration, so the caller keeps the returned value.
+    fn init_tokio_handle() -> tokio::runtime::Runtime {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _guard = rt.enter();
+        crate::runtime::set_handle();
+        rt
+    }
+
+    /// Register the log globals that `log::push` requires.
+    fn init_log_globals(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(crate::log::LogBuffer::default());
+        });
     }
 
     fn sample_entries() -> Vec<DirEntry> {
@@ -1733,17 +2218,19 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_transfer_maps_orphans_only() {
+    fn transfer_plan_maps_orphans_without_confirmation() {
         let right_only = entry(
             "new.txt",
             DirEntryStatus::RightOnly,
             None,
             Some(info("nested/new.txt", 7, "")),
         );
-        let item = reconcile_transfer(&right_only).unwrap();
-        assert_eq!(item.action, TransferAction::CopyLeft);
-        assert_eq!(item.name, "new.txt");
-        assert_eq!(item.rel_path, "nested/new.txt");
+        let plan =
+            transfer_plan_for(&right_only, TransferAction::CopyLeft).unwrap();
+        assert_eq!(plan.item.action, TransferAction::CopyLeft);
+        assert_eq!(plan.item.name, "new.txt");
+        assert_eq!(plan.item.rel_path, "nested/new.txt");
+        assert!(!plan.confirm);
 
         let left_only = entry(
             "old.txt",
@@ -1751,23 +2238,68 @@ mod tests {
             Some(info("old.txt", 3, "")),
             None,
         );
-        let item = reconcile_transfer(&left_only).unwrap();
-        assert_eq!(item.action, TransferAction::CopyRight);
-        assert_eq!(item.rel_path, "old.txt");
+        let plan =
+            transfer_plan_for(&left_only, TransferAction::CopyRight).unwrap();
+        assert_eq!(plan.item.action, TransferAction::CopyRight);
+        assert_eq!(plan.item.rel_path, "old.txt");
+        assert!(!plan.confirm);
 
-        // Entries on both sides would need a confirmation flow; no
-        // transfer is offered for them.
+        // The reverse directions have no source on the missing side.
+        assert!(
+            transfer_plan_for(&right_only, TransferAction::CopyRight)
+                .is_none()
+        );
+        assert!(
+            transfer_plan_for(&left_only, TransferAction::CopyLeft).is_none()
+        );
+    }
+
+    #[test]
+    fn transfer_plan_offers_overwrite_copies_for_differing_entries() {
         let different = entry(
             "both.txt",
             DirEntryStatus::Different,
             Some(info("both.txt", 1, "")),
             Some(info("both.txt", 2, "")),
         );
-        assert!(reconcile_transfer(&different).is_none());
+        // Both copy directions exist and each overwrites the target, so
+        // both require confirmation.
+        let plan =
+            transfer_plan_for(&different, TransferAction::CopyRight).unwrap();
+        assert!(plan.confirm);
+        assert_eq!(plan.item.rel_path, "both.txt");
+        let plan =
+            transfer_plan_for(&different, TransferAction::CopyLeft).unwrap();
+        assert!(plan.confirm);
+
+        // Moves and deletes are offered for differing entries and always
+        // confirm.
+        assert!(
+            transfer_plan_for(&different, TransferAction::MoveRight)
+                .unwrap()
+                .confirm
+        );
+        assert!(
+            transfer_plan_for(&different, TransferAction::DeleteLeft)
+                .unwrap()
+                .confirm
+        );
+
+        // Identical entries need no reconciliation at all.
+        let same = entry(
+            "same.txt",
+            DirEntryStatus::Same,
+            Some(info("same.txt", 1, "")),
+            Some(info("same.txt", 1, "")),
+        );
+        assert!(transfer_plan_for(&same, TransferAction::CopyRight).is_none());
+        assert!(
+            transfer_plan_for(&same, TransferAction::DeleteLeft).is_none()
+        );
     }
 
     #[test]
-    fn reconcile_transfer_blocks_name_conflicts() {
+    fn transfer_plan_blocks_name_conflicts() {
         // Both halves of a file-vs-directory clash are blocked even though
         // their orphan statuses would map to a copy direction.
         let mut file_half = entry(
@@ -1777,7 +2309,9 @@ mod tests {
             None,
         );
         file_half.name_conflict = true;
-        assert!(reconcile_transfer(&file_half).is_none());
+        assert!(
+            transfer_plan_for(&file_half, TransferAction::CopyRight).is_none()
+        );
 
         let mut dir_half = entry(
             "notes",
@@ -1786,11 +2320,13 @@ mod tests {
             Some(info("notes", 4096, "")),
         );
         dir_half.name_conflict = true;
-        assert!(reconcile_transfer(&dir_half).is_none());
+        assert!(
+            transfer_plan_for(&dir_half, TransferAction::CopyLeft).is_none()
+        );
     }
 
     #[gpui::test]
-    fn transfer_selected_ignores_a_mismatched_direction(
+    fn transfer_plan_of_a_mismatched_direction_is_none(
         cx: &mut TestAppContext,
     ) {
         let state = cx.new(|cx| {
@@ -1804,14 +2340,156 @@ mod tests {
             state
         });
 
-        state.update(cx, |state, cx| {
+        state.update(cx, |state, _cx| {
             // Name ascending: row 2 is charlie.txt (LeftOnly). Asking to
-            // copy it to the left must not silently copy it to the right.
-            state.select_row(2, cx);
-            state.transfer_selected(TransferAction::CopyLeft, cx);
+            // copy it to the left has no plan, so nothing can run in the
+            // wrong direction.
+            state.select_row(2, _cx);
+            assert!(state.transfer_plan(TransferAction::CopyLeft).is_none());
+            assert!(state.transfer_plan(TransferAction::CopyRight).is_some());
             assert!(!state.is_loading());
             assert!(state.busy_label().is_none());
             assert!(state.notice().is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn stop_keeps_results_and_aborts_loading(cx: &mut TestAppContext) {
+        init_log_globals(cx);
+        let state = cx.new(|cx| {
+            let mut state = AppState::new(
+                Endpoint::local("/left"),
+                Endpoint::local("/right"),
+                "test".into(),
+                cx,
+            );
+            state.set_comparison_for_test(comparison(sample_entries()));
+            state
+        });
+
+        state.update(cx, |state, cx| {
+            // Simulate an in-flight load without spawning the real task.
+            state.loading = true;
+            state.busy_label = Some("scanning…".into());
+            state.cancel_token = Some(CancellationToken::new());
+            let entries_before = state.entry_count();
+
+            state.stop(cx);
+
+            assert!(!state.is_loading());
+            assert!(state.busy_label().is_none());
+            // The previously displayed comparison stays visible.
+            assert_eq!(state.entry_count(), entries_before);
+        });
+    }
+
+    #[gpui::test]
+    fn history_records_navigation_and_steps_back(cx: &mut TestAppContext) {
+        // Navigation restores go through the tokio bridge, so the test
+        // installs a runtime handle for the duration.
+        let _rt = init_tokio_handle();
+        init_log_globals(cx);
+        let state = cx.new(|cx| {
+            AppState::new(
+                Endpoint::local("/left"),
+                Endpoint::local("/right"),
+                "test".into(),
+                cx,
+            )
+        });
+
+        state.update(cx, |state, _cx| {
+            // A fresh session has nowhere to go back to.
+            assert!(!state.can_go_back());
+            assert!(!state.can_go_forward());
+
+            // Recording a navigation step makes back available.
+            state.nav_steps.push(NavStep {
+                label: "sub".into(),
+                left: "sub".into(),
+                right: "sub".into(),
+            });
+            state.left = state.left.join("sub");
+            state.right = state.right.join("sub");
+            state.record_history();
+            assert!(state.can_go_back());
+
+            // Stepping back restores the session roots.
+            state.history_pos -= 1;
+            state.restore_history(_cx);
+            assert_eq!(state.left().display(), "/left");
+            assert_eq!(state.right().display(), "/right");
+            assert!(state.nav_steps().is_empty());
+            assert!(state.can_go_forward());
+
+            // Stepping forward returns to the entered directory.
+            state.history_pos += 1;
+            state.restore_history(_cx);
+            assert_eq!(state.left().display(), "/left/sub");
+            assert_eq!(state.nav_steps().len(), 1);
+        });
+    }
+
+    #[gpui::test]
+    fn set_base_folder_reroots_the_selected_sides(cx: &mut TestAppContext) {
+        let _rt = init_tokio_handle();
+        init_log_globals(cx);
+        let state = cx.new(|cx| {
+            let mut state = AppState::new(
+                Endpoint::local("/left"),
+                Endpoint::local("/right"),
+                "test".into(),
+                cx,
+            );
+            state.set_comparison_for_test(comparison(vec![
+                entry(
+                    "both",
+                    DirEntryStatus::Same,
+                    Some(dir_info("both")),
+                    Some(dir_info("other/both")),
+                ),
+                entry(
+                    "lonely",
+                    DirEntryStatus::LeftOnly,
+                    Some(dir_info("lonely")),
+                    None,
+                ),
+                entry(
+                    "file.txt",
+                    DirEntryStatus::Same,
+                    Some(info("file.txt", 1, "")),
+                    Some(info("file.txt", 1, "")),
+                ),
+            ]));
+            state
+        });
+
+        state.update(cx, |state, _cx| {
+            // Row 0 is the shared directory: all three re-roots apply.
+            state.select_row(0, _cx);
+            assert!(state.can_set_base_folder(BaseSide::Left));
+            assert!(state.can_set_base_folder(BaseSide::Right));
+            assert!(state.can_set_base_folder(BaseSide::Both));
+
+            state.set_base_folder(BaseSide::Both, _cx);
+            assert_eq!(state.root_left().display(), "/left/both");
+            assert_eq!(state.root_right().display(), "/right/other/both");
+            assert!(state.nav_steps().is_empty());
+            // The re-root is recorded, so back can undo it.
+            assert!(state.can_go_back());
+        });
+
+        state.update(cx, |state, _cx| {
+            // Name ascending: row 2 is the left-only directory `lonely`,
+            // so only the left re-root applies; row 1 is a file, where
+            // none apply.
+            state.go_back(_cx);
+            state.select_row(2, _cx);
+            assert!(state.can_set_base_folder(BaseSide::Left));
+            assert!(!state.can_set_base_folder(BaseSide::Right));
+            assert!(!state.can_set_base_folder(BaseSide::Both));
+            state.select_row(1, _cx);
+            assert!(!state.can_set_base_folder(BaseSide::Left));
         });
     }
 

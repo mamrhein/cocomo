@@ -297,7 +297,8 @@ where
     // entry paths, which `collect_entries_from_scan` passes through
     // because `strip_prefix` fails on an already-relative path.
     let scan_result =
-        scan_directory_node(fs, root_path, &ScanConfig::default()).await?;
+        scan_directory_node(fs, root_path, &ScanConfig::default(), None)
+            .await?;
 
     // A partial scan would produce a misleading snapshot; refuse to capture
     // one that is missing entries.

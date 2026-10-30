@@ -1146,6 +1146,7 @@ mod tests {
             &right,
             &config,
             Some(&cache),
+            None,
         )
         .await
         .unwrap();

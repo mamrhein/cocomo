@@ -124,6 +124,11 @@ pub enum FsError {
     /// preserved so callers can report them.
     #[error("operation incomplete due to {} filesystem error(s)", errors.len())]
     Incomplete { errors: Vec<FsError> },
+
+    /// The operation was aborted because its cancellation token was
+    /// triggered by the caller.
+    #[error("operation cancelled")]
+    Cancelled,
 }
 
 // ---------------------------------------------------------------------------

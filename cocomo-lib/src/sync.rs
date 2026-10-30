@@ -217,6 +217,7 @@ where
                 right_path,
                 &compare_config,
                 Some(&cache),
+                None,
             )
             .await?
         }
@@ -229,6 +230,7 @@ where
                 right_path,
                 &compare_config,
                 Some(&cache),
+                None,
             )
             .await?
         }

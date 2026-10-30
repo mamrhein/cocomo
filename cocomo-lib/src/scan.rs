@@ -16,8 +16,13 @@
 
 use std::{collections::HashMap, mem, path::Path};
 
+use tokio_util::sync::CancellationToken;
+
 use crate::{
-    error::Result, fs::NodeFileSystem, identity::NodeId, meta::Metadata,
+    error::{FsError, Result},
+    fs::NodeFileSystem,
+    identity::NodeId,
+    meta::Metadata,
     node::Node,
 };
 
@@ -81,6 +86,7 @@ pub async fn scan_directory_node<N>(
     fs: &N,
     path: &Path,
     config: &ScanConfig,
+    cancel: Option<&CancellationToken>,
 ) -> Result<ScanResult>
 where
     N: NodeFileSystem<Nid = u64>,
@@ -115,6 +121,12 @@ where
     queue.push((root_id, String::new(), 0));
 
     while let Some((dir_id, rel_prefix, depth)) = queue.pop() {
+        // Abort promptly when the caller's cancellation token fires, so a
+        // long walk over a big tree does not run to completion just to be
+        // discarded.
+        if cancel.is_some_and(CancellationToken::is_cancelled) {
+            return Err(FsError::Cancelled);
+        }
         // Check max depth.
         if let Some(max) = config.max_depth
             && depth >= max
@@ -334,9 +346,10 @@ mod tests {
         let base = setup_test_dir().await;
         let fs = LocalFs::new("test");
 
-        let result = scan_directory_node(&fs, &base, &ScanConfig::default())
-            .await
-            .unwrap();
+        let result =
+            scan_directory_node(&fs, &base, &ScanConfig::default(), None)
+                .await
+                .unwrap();
 
         let names: Vec<&str> =
             result.entries.iter().map(|e| e.name.as_str()).collect();
@@ -352,9 +365,10 @@ mod tests {
         let base = setup_test_dir().await;
         let fs = LocalFs::new("test");
 
-        let result = scan_directory_node(&fs, &base, &ScanConfig::default())
-            .await
-            .unwrap();
+        let result =
+            scan_directory_node(&fs, &base, &ScanConfig::default(), None)
+                .await
+                .unwrap();
 
         let sub = result
             .entries
@@ -380,7 +394,9 @@ mod tests {
             max_depth: Some(1),
             ..Default::default()
         };
-        let result = scan_directory_node(&fs, &base, &config).await.unwrap();
+        let result = scan_directory_node(&fs, &base, &config, None)
+            .await
+            .unwrap();
 
         let sub = result
             .entries
@@ -399,7 +415,7 @@ mod tests {
         let fs = LocalFs::new("test");
         let path = Path::new("/nonexistent/cocomo_scan_xyz");
         let result =
-            scan_directory_node(&fs, path, &ScanConfig::default()).await;
+            scan_directory_node(&fs, path, &ScanConfig::default(), None).await;
         assert!(result.is_err());
     }
 
@@ -410,7 +426,7 @@ mod tests {
 
         let file_path = base.join("a.txt");
         let result =
-            scan_directory_node(&fs, &file_path, &ScanConfig::default())
+            scan_directory_node(&fs, &file_path, &ScanConfig::default(), None)
                 .await
                 .unwrap();
 
@@ -429,9 +445,10 @@ mod tests {
         fs_err::create_dir_all(&base).unwrap();
 
         let fs = LocalFs::new("test");
-        let result = scan_directory_node(&fs, &base, &ScanConfig::default())
-            .await
-            .unwrap();
+        let result =
+            scan_directory_node(&fs, &base, &ScanConfig::default(), None)
+                .await
+                .unwrap();
 
         assert!(result.entries.is_empty());
 
@@ -537,6 +554,7 @@ mod tests {
             &fs,
             Path::new("/data"),
             &ScanConfig::default(),
+            None,
         )
         .await;
 
@@ -561,6 +579,7 @@ mod tests {
             &fs,
             Path::new("/data"),
             &ScanConfig::default(),
+            None,
         )
         .await
         .unwrap();

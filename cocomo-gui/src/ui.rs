@@ -27,7 +27,7 @@ use gpui::{
     component::{
         ActiveTheme, Sizable as _, Theme, WindowExt as _,
         breadcrumb::{Breadcrumb, BreadcrumbItem},
-        button::{Button, ButtonVariants as _},
+        button::{Button, ButtonVariant, ButtonVariants as _},
         h_flex,
         input::{Input, InputEvent, InputState},
         menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenuItem},
@@ -45,11 +45,14 @@ use gpui::{
 
 use crate::{
     menus::{
-        CopyPathLeft, CopyPathRight, ReloadCompare, SaveSession,
+        CopyPathLeft, CopyPathRight, ReloadCompare, SaveSession, StopCompare,
         ToggleShowDifferent, ToggleShowOrphans, ToggleShowSame,
     },
     session_manager::GuiSessionManager,
-    state::{AppState, SortKey, StatusCategory, entry_endpoints},
+    state::{
+        AppState, BaseSide, SortKey, StatusCategory, entry_endpoints,
+        status_category,
+    },
 };
 
 // ---------------------------------------------------------------------------
@@ -69,6 +72,15 @@ actions!(
         SwapSides,
         CopyToLeft,
         CopyToRight,
+        MoveToLeft,
+        MoveToRight,
+        DeleteLeftSide,
+        DeleteRightSide,
+        SetBaseLeft,
+        SetBaseRight,
+        SetBaseBoth,
+        GoBack,
+        GoForward,
     ]
 );
 
@@ -109,9 +121,18 @@ pub fn folder_compare_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("f7", NextDifference, None),
         KeyBinding::new("cmd-[", PrevDifference, None),
         KeyBinding::new("shift-f7", PrevDifference, None),
-        // Reconcile a selected orphan toward each side.
+        // Reconcile the selected entry toward each side. The spec pins
+        // `cmd-r`/`ctrl-r` to copy-right and `cmd-l` to copy-left; reload
+        // lives on `cmd-shift-r` (registered with the menu bindings).
         KeyBinding::new("cmd-1", CopyToLeft, None),
         KeyBinding::new("cmd-2", CopyToRight, None),
+        KeyBinding::new("cmd-l", CopyToLeft, None),
+        KeyBinding::new("ctrl-l", CopyToLeft, None),
+        KeyBinding::new("cmd-r", CopyToRight, None),
+        KeyBinding::new("ctrl-r", CopyToRight, None),
+        // Step through the history of compared base-folder pairs.
+        KeyBinding::new("alt-left", GoBack, None),
+        KeyBinding::new("alt-right", GoForward, None),
     ]
 }
 
@@ -240,14 +261,26 @@ impl FolderCompareView {
                 }
             });
 
-        // Load cancellation arrives with the async-robustness phase.
-        let stop_btn = Button::new("row2_stop")
-            .icon(IconName::CircleStop)
-            .ghost()
-            .small()
-            .disabled(true)
-            .tooltip("Stop comparison (coming soon)")
-            .accessibility_label("Stop comparison");
+        // Stop is only offered while a scan or content pass is in
+        // flight; it aborts the task and keeps the displayed results.
+        let stop_btn = {
+            let loading = self.state.read(cx).is_loading();
+            Button::new("row2_stop")
+                .icon(IconName::CircleStop)
+                .ghost()
+                .small()
+                .disabled(!loading)
+                .tooltip("Stop comparison")
+                .accessibility_label("Stop comparison")
+                .on_click({
+                    let state = self.state.clone();
+                    move |_, _, cx| {
+                        state.update(cx, |state, cx| {
+                            state.stop(cx);
+                        });
+                    }
+                })
+        };
 
         // History dropdown: newest first; picking an entry makes it the
         // current pattern again.
@@ -465,6 +498,19 @@ impl FolderCompareView {
         });
     }
 
+    /// Handle the StopCompare action dispatched from the Session menu:
+    /// abort the in-flight comparison, keeping the displayed results.
+    fn handle_stop_compare(
+        &mut self,
+        _: &StopCompare,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.state.update(cx, |state, cx| {
+            state.stop(cx);
+        });
+    }
+
     /// Handle the SaveSession action dispatched from menus or toolbar.
     fn handle_save_session(
         &mut self,
@@ -587,30 +633,225 @@ impl FolderCompareView {
         });
     }
 
-    /// Handle copy-to-left: reconcile the selected orphan by copying it
+    /// Run the transfer `action` on the selected entry.
+    ///
+    /// Orphans transfer immediately; operations that overwrite an
+    /// existing entry or delete content first ask for confirmation in
+    /// an alert dialog, per the spec's overwrite rule.
+    fn run_transfer_action(
+        &mut self,
+        action: TransferAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(plan) = self.state.read(cx).transfer_plan(action) else {
+            self.state.update(cx, |state, cx| {
+                state.explain_blocked_transfer(cx);
+            });
+            return;
+        };
+        if !plan.confirm {
+            self.state
+                .update(cx, |state, cx| state.run_transfer(plan, cx));
+            return;
+        }
+        let name = plan.item.name.clone();
+        let verb = match action {
+            TransferAction::DeleteLeft | TransferAction::DeleteRight => {
+                "delete"
+            }
+            TransferAction::MoveLeft | TransferAction::MoveRight => "move",
+            _ => "copy",
+        };
+        let side = match action {
+            TransferAction::CopyLeft
+            | TransferAction::MoveLeft
+            | TransferAction::DeleteLeft => "left",
+            _ => "right",
+        };
+        let (title, description, ok_text, danger) = match verb {
+            "delete" => (
+                format!("Delete from the {side}?"),
+                format!(
+                    "\"{name}\" is removed from the {side} side. This cannot \
+                     be undone."
+                ),
+                "Delete",
+                true,
+            ),
+            "move" => (
+                format!("Move to the {side}?"),
+                if plan.confirm {
+                    format!(
+                        "\"{name}\" already exists on the {side} side and \
+                         will be replaced. The source copy is removed."
+                    )
+                } else {
+                    format!(
+                        "\"{name}\" is moved to the {side} side; the source \
+                         copy is removed."
+                    )
+                },
+                "Move",
+                false,
+            ),
+            _ => (
+                format!("Overwrite on the {side}?"),
+                format!(
+                    "\"{name}\" already exists on the {side} side and will \
+                     be replaced."
+                ),
+                "Replace",
+                false,
+            ),
+        };
+        let state = self.state.clone();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            // Clone per builder call: the builder is an `Fn` closure
+            // that may run on every layer rebuild.
+            let state = state.clone();
+            let plan = plan.clone();
+            let mut alert = alert
+                .confirm()
+                .title(title.clone())
+                .description(description.clone())
+                .ok_text(ok_text);
+            if danger {
+                alert = alert.ok_variant(ButtonVariant::Danger);
+            }
+            alert.on_ok(move |_, _, cx| {
+                state.update(cx, |state, cx| {
+                    state.run_transfer(plan.clone(), cx);
+                });
+                true
+            })
+        });
+    }
+
+    /// Handle copy-to-left: reconcile the selected entry by copying it
     /// from the right side to the left.
     fn handle_copy_to_left(
         &mut self,
         _: &CopyToLeft,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.state.update(cx, |state, cx| {
-            state.transfer_selected(TransferAction::CopyLeft, cx);
-        });
+        self.run_transfer_action(TransferAction::CopyLeft, window, cx);
     }
 
-    /// Handle copy-to-right: reconcile the selected orphan by copying it
+    /// Handle copy-to-right: reconcile the selected entry by copying it
     /// from the left side to the right.
     fn handle_copy_to_right(
         &mut self,
         _: &CopyToRight,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.run_transfer_action(TransferAction::CopyRight, window, cx);
+    }
+
+    /// Handle move-to-left: move the right entry to the left side.
+    fn handle_move_to_left(
+        &mut self,
+        _: &MoveToLeft,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.run_transfer_action(TransferAction::MoveLeft, window, cx);
+    }
+
+    /// Handle move-to-right: move the left entry to the right side.
+    fn handle_move_to_right(
+        &mut self,
+        _: &MoveToRight,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.run_transfer_action(TransferAction::MoveRight, window, cx);
+    }
+
+    /// Handle delete-left: remove the entry from the left side.
+    fn handle_delete_left(
+        &mut self,
+        _: &DeleteLeftSide,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.run_transfer_action(TransferAction::DeleteLeft, window, cx);
+    }
+
+    /// Handle delete-right: remove the entry from the right side.
+    fn handle_delete_right(
+        &mut self,
+        _: &DeleteRightSide,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.run_transfer_action(TransferAction::DeleteRight, window, cx);
+    }
+
+    /// Handle the set-base-folder actions: re-root the session at the
+    /// selected entry for the requested side(s).
+    fn handle_set_base(
+        &mut self,
+        side: BaseSide,
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.state.update(cx, |state, cx| {
-            state.transfer_selected(TransferAction::CopyRight, cx);
+            state.set_base_folder(side, cx);
         });
+    }
+
+    /// Handle set-base-left.
+    fn handle_set_base_left(
+        &mut self,
+        _: &SetBaseLeft,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.handle_set_base(BaseSide::Left, window, cx);
+    }
+
+    /// Handle set-base-right.
+    fn handle_set_base_right(
+        &mut self,
+        _: &SetBaseRight,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.handle_set_base(BaseSide::Right, window, cx);
+    }
+
+    /// Handle set-base-both.
+    fn handle_set_base_both(
+        &mut self,
+        _: &SetBaseBoth,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.handle_set_base(BaseSide::Both, window, cx);
+    }
+
+    /// Handle the back action: step to the previously compared
+    /// base-folder pair.
+    fn handle_go_back(
+        &mut self,
+        _: &GoBack,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.state.update(cx, |state, cx| state.go_back(cx));
+    }
+
+    /// Handle the forward action.
+    fn handle_go_forward(
+        &mut self,
+        _: &GoForward,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.state.update(cx, |state, cx| state.go_forward(cx));
     }
 
     /// Handle a display-filter toggle dispatched from the View menu or the
@@ -704,12 +945,22 @@ impl Render for FolderCompareView {
             .on_action(cx.listener(Self::handle_swap_sides))
             .on_action(cx.listener(Self::handle_copy_to_left))
             .on_action(cx.listener(Self::handle_copy_to_right))
+            .on_action(cx.listener(Self::handle_move_to_left))
+            .on_action(cx.listener(Self::handle_move_to_right))
+            .on_action(cx.listener(Self::handle_delete_left))
+            .on_action(cx.listener(Self::handle_delete_right))
+            .on_action(cx.listener(Self::handle_set_base_left))
+            .on_action(cx.listener(Self::handle_set_base_right))
+            .on_action(cx.listener(Self::handle_set_base_both))
+            .on_action(cx.listener(Self::handle_go_back))
+            .on_action(cx.listener(Self::handle_go_forward))
             // Display filters (View menu and toolbar filter dropdown).
             .on_action(cx.listener(Self::handle_toggle_show_same))
             .on_action(cx.listener(Self::handle_toggle_show_different))
             .on_action(cx.listener(Self::handle_toggle_show_orphans))
             // Menu-dispatched actions that need view context.
             .on_action(cx.listener(Self::handle_reload_compare))
+            .on_action(cx.listener(Self::handle_stop_compare))
             .on_action(cx.listener(Self::handle_save_session))
             // File/dir diff actions.
             .on_action(cx.listener(Self::handle_open_file_diff))
@@ -1225,6 +1476,13 @@ struct EntryRowData {
     /// `OpenFileDiff` takes an optional right endpoint, while its left
     /// endpoint is always present.
     has_right: bool,
+    /// Whether entry exists on left side (drives the context-menu
+    /// reconcile commands).
+    has_left: bool,
+    /// Whether the left side of the entry is a directory.
+    left_is_dir: bool,
+    /// Whether the right side of the entry is a directory.
+    right_is_dir: bool,
     /// Absolute left endpoint (comparison root joined with the side path).
     left_endpoint: Endpoint,
     /// Absolute right endpoint (comparison root joined with the side path).
@@ -1244,6 +1502,9 @@ impl EntryRowData {
         right_root: &Endpoint,
     ) -> Self {
         let has_right = entry.right.is_some();
+        let has_left = entry.left.is_some();
+        let left_is_dir = entry.left.as_ref().is_some_and(|l| l.is_dir);
+        let right_is_dir = entry.right.as_ref().is_some_and(|r| r.is_dir);
         let left_size = entry.left.as_ref().map(|l| l.size);
         let right_size = entry.right.as_ref().map(|r| r.size);
         let left_modified = entry
@@ -1270,6 +1531,9 @@ impl EntryRowData {
             left_modified,
             right_modified,
             has_right,
+            has_left,
+            left_is_dir,
+            right_is_dir,
             left_endpoint,
             right_endpoint,
         }
@@ -1321,7 +1585,10 @@ impl EntryRowData {
             right_size,
             left_modified,
             right_modified,
-            has_right: _,
+            has_right,
+            has_left,
+            left_is_dir,
+            right_is_dir,
             left_endpoint: _,
             right_endpoint: _,
         } = self;
@@ -1386,18 +1653,58 @@ impl EntryRowData {
                     .separator()
                     .menu("Copy left path", Box::new(CopyPathLeft))
                     .menu("Copy right path", Box::new(CopyPathRight));
-                // Reconcile an orphan by copying it toward the side that is
-                // missing it. A differing entry needs a confirmation flow
-                // that is not built yet, so it is not offered here.
-                match status {
-                    DirEntryStatus::RightOnly => menu
-                        .separator()
-                        .menu("Copy to left", Box::new(CopyToLeft)),
-                    DirEntryStatus::LeftOnly => menu
-                        .separator()
-                        .menu("Copy to right", Box::new(CopyToRight)),
-                    _ => menu,
+                // Reconcile commands follow the entry's shape: each is
+                // offered only when its source (or delete target)
+                // exists, and identical entries need none of them.
+                // Overwriting copies, moves, and deletes confirm in the
+                // handler before running.
+                let differs = status_category(&status) != StatusCategory::Same;
+                let mut menu = menu;
+                if differs {
+                    if has_right {
+                        menu = menu
+                            .separator()
+                            .menu("Copy to left", Box::new(CopyToLeft))
+                            .menu("Move to left", Box::new(MoveToLeft))
+                            .menu(
+                                "Delete from right",
+                                Box::new(DeleteRightSide),
+                            );
+                    }
+                    if has_left {
+                        menu = menu
+                            .menu("Copy to right", Box::new(CopyToRight))
+                            .menu("Move to right", Box::new(MoveToRight))
+                            .menu(
+                                "Delete from left",
+                                Box::new(DeleteLeftSide),
+                            );
+                    }
                 }
+                // Re-root the session at the selected directory, per
+                // side or for both sides at once.
+                if left_is_dir || right_is_dir {
+                    menu = menu.separator();
+                    if left_is_dir {
+                        menu = menu.menu(
+                            "Set as base folder (left)",
+                            Box::new(SetBaseLeft),
+                        );
+                    }
+                    if right_is_dir {
+                        menu = menu.menu(
+                            "Set as base folder (right)",
+                            Box::new(SetBaseRight),
+                        );
+                    }
+                    if left_is_dir && right_is_dir {
+                        menu = menu.menu(
+                            "Set as base folder (both)",
+                            Box::new(SetBaseBoth),
+                        );
+                    }
+                }
+                menu
             })
             // Status: dot carries the semantic color, the glyph keeps the
             // meaning independent of color (see the legend popover).

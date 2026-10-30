@@ -81,6 +81,7 @@ pub(crate) async fn compare(
             right.path(),
             &config,
             Some(&cache),
+            None,
         )
         .await?)
     } else {
@@ -91,6 +92,7 @@ pub(crate) async fn compare(
             right.path(),
             &config,
             Some(&cache),
+            None,
         )
         .await?)
     }

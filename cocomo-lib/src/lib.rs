@@ -93,7 +93,8 @@ pub mod webdav;
 // Re-exports for convenience.
 pub use compare::{
     CompareConfig, DirComparison, DirEntry, DirEntryStatus, EntryInfo,
-    compare_directories_node, compare_directories_pair_node,
+    compare_content_pair_node, compare_directories_node,
+    compare_directories_pair_node,
 };
 pub use error::{FsError, FsOperation, Result};
 pub use file::FsFile;
@@ -147,6 +148,9 @@ pub use text::{
     AlignmentMode, LineInfo, TextCompareSettings, TextDiff, TextDifference,
     Token, WhitespaceMode, compare_texts, lines_equal,
 };
+// Re-exported so callers can build cancellation tokens without depending
+// on `tokio-util` directly.
+pub use tokio_util::sync::CancellationToken;
 pub use transfer::{
     FsPair, TransferAction, TransferItem, TransferResult, execute_transfers,
     plan_transfers,
