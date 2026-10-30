@@ -1106,7 +1106,7 @@ mod tests {
         let config = CompareConfig::full();
 
         let result =
-            compare_directories_node(&fs, &left, &right, &config, None)
+            compare_directories_node(&fs, &left, &right, &config, None, None)
                 .await
                 .unwrap();
 
