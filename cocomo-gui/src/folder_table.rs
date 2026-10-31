@@ -25,7 +25,8 @@
 use cocomo_lib::{DirEntry, DirEntryStatus, Endpoint};
 use gpui::{
     AnyElement, App, ElementId, Entity, ExternalPaths, FontWeight, Hsla,
-    SharedString, TestSupportExt as _, Window,
+    Pixels, SharedString, TestSupportExt as _, Window,
+    base::ElementExt as _,
     component::{
         ActiveTheme, FocusableExt as _, Sizable as _, Theme,
         button::{Button, ButtonVariants as _},
@@ -38,7 +39,7 @@ use gpui::{
     },
     div,
     prelude::*,
-    rems,
+    px, rems,
 };
 
 use crate::{
@@ -69,6 +70,18 @@ const COL_NAME_R: &str = "name_r";
 const COL_SIZE_R: &str = "size_r";
 const COL_DATE_R: &str = "date_r";
 
+/// Index of the right side's Name column: the stretchable filler column
+/// that makes the row content fill the table's width.
+const RIGHT_NAME_IX: usize = 4;
+
+/// Width of the table's trailing empty column, mirrored by
+/// [`FolderTableDelegate::render_last_empty_col`] as its minimum.
+const LAST_EMPTY_COL: Pixels = px(12.);
+
+/// Comparison table row height, in pixels. Denser than the component
+/// library's `xsmall` (26 px) to fit more entries on screen.
+const ROW_HEIGHT: Pixels = px(24.);
+
 /// Render the folder comparison: the base-dir bar above the striped
 /// comparison table.
 ///
@@ -84,22 +97,40 @@ pub(crate) fn render_folder_table(
     cx: &mut App,
 ) -> AnyElement {
     let theme = cx.theme().clone();
+    // The base-dir bar's left half spans exactly the table's left group
+    // (Name, Size, Modified, status lane) so its right half lines up
+    // with the table's right group.
+    let left_half = table_state.read(cx).delegate().left_half_width();
+    let fill_table = table_state.clone();
 
     v_flex()
         .size_full()
         .min_h_0()
         .bg(theme.background)
         .child(render_base_dir_bar(
-            state, left_path, right_path, &theme, cx,
+            state, left_path, right_path, left_half, &theme, cx,
         ))
         .child(
             div()
                 .flex_1()
                 .min_h_0()
                 .relative()
+                // Stretch the right side's Name column to the available
+                // width. The hook runs every frame; `set_fill_width`
+                // only reports a change when the width actually moved,
+                // so a steady table is not repainted.
+                .on_prepaint(move |bounds, _, cx| {
+                    let avail = bounds.size.width;
+                    fill_table.update(cx, |table, cx| {
+                        if table.delegate_mut().set_fill_width(avail) {
+                            table.refresh(cx);
+                            cx.notify();
+                        }
+                    });
+                })
                 .child(
                     DataTable::new(table_state)
-                        .small()
+                        .with_size(ROW_HEIGHT)
                         .stripe(true)
                         .bordered(false)
                         .focus_ring(false),
@@ -112,32 +143,45 @@ pub(crate) fn render_folder_table(
 /// The base-dir bar above the table: the left path on the leading edge,
 /// the right path on the trailing edge, each editable and with its own
 /// history dropdown and new-folder command.
+///
+/// `left_width` is the table's left-group width; the left half of the
+/// bar takes it verbatim so the right half starts where the table's
+/// right side's Name column starts.
 fn render_base_dir_bar(
     state: &Entity<AppState>,
     left_path: &Entity<InputState>,
     right_path: &Entity<InputState>,
+    left_width: Pixels,
     theme: &Theme,
     cx: &mut App,
 ) -> AnyElement {
     h_flex()
         .items_center()
-        .gap_2()
-        .px_2()
-        .py_1()
         .bg(theme.muted)
         .border_b_1()
         .border_color(theme.border)
-        .child(path_cell(Side::Left, state, left_path, cx))
+        .child(path_cell(
+            Side::Left,
+            state,
+            left_path,
+            Some(left_width),
+            cx,
+        ))
         .child(div().h_full().w_px().bg(theme.border).flex_shrink_0())
-        .child(path_cell(Side::Right, state, right_path, cx))
+        .child(path_cell(Side::Right, state, right_path, None, cx))
         .into_any_element()
 }
 
 /// One editable side of the base-dir bar.
+///
+/// `width` fixes the cell's width (used for the left half, to align it
+/// with the table columns); `None` lets the cell fill the remaining
+/// space.
 fn path_cell(
     side: Side,
     state: &Entity<AppState>,
     path_input: &Entity<InputState>,
+    width: Option<Pixels>,
     cx: &mut App,
 ) -> AnyElement {
     let side_name = side_name(side);
@@ -184,10 +228,13 @@ fn path_cell(
     });
 
     h_flex()
-        .flex_1()
+        .when_some(width, |el, w| el.w(w).flex_shrink_0())
+        .when(width.is_none(), |el| el.flex_1())
         .min_w_0()
         .items_center()
         .gap_1()
+        .px_2()
+        .py_1()
         .child(
             div()
                 .flex_1()
@@ -325,6 +372,42 @@ impl FolderTableDelegate {
         let entry = state.entry_at(row_ix)?;
         Some(TableRow::new(row_ix, row, entry, state, &overrides))
     }
+
+    /// Width of the table's left half: the left side's `Name`, `Size`,
+    /// and `Modified` columns plus the status lane. The base-dir bar
+    /// uses it to align its right half with the table's right group.
+    pub(crate) fn left_half_width(&self) -> Pixels {
+        self.columns[..RIGHT_NAME_IX]
+            .iter()
+            .fold(px(0.), |sum, col| sum + col.width)
+    }
+
+    /// Stretch the right side's Name column so the row content fills
+    /// `avail`, leaving [`LAST_EMPTY_COL`] as trailing padding.
+    ///
+    /// Returns `true` only when the width actually changed, so the
+    /// per-frame measurement hook does not repaint a steady table.
+    fn set_fill_width(&mut self, avail: Pixels) -> bool {
+        let fixed =
+            self.columns
+                .iter()
+                .enumerate()
+                .fold(px(0.), |sum, (ix, col)| {
+                    if ix == RIGHT_NAME_IX {
+                        sum
+                    } else {
+                        sum + col.width
+                    }
+                });
+        let col = &mut self.columns[RIGHT_NAME_IX];
+        let want = (avail - fixed - LAST_EMPTY_COL).max(col.min_width);
+        if col.width != want {
+            col.width = want;
+            true
+        } else {
+            false
+        }
+    }
 }
 
 impl TableDelegate for FolderTableDelegate {
@@ -338,6 +421,17 @@ impl TableDelegate for FolderTableDelegate {
 
     fn column(&self, col_ix: usize, _: &App) -> Column {
         self.columns[col_ix].clone()
+    }
+
+    fn render_last_empty_col(
+        &mut self,
+        _: &mut Window,
+        _: &mut gpui::Context<TableState<Self>>,
+    ) -> impl IntoElement {
+        // Trailing filler: absorbs any rounding left by the stretched
+        // right Name column so row content always reaches the table's
+        // edge, and shrinks away when the columns overflow.
+        h_flex().flex_1().min_w(LAST_EMPTY_COL).h_full()
     }
 
     fn render_th(
@@ -386,11 +480,12 @@ impl TableDelegate for FolderTableDelegate {
             .map(|row| row.path().to_string())
             .unwrap_or_default();
         let is_selected = self.state.read(cx).selected_index() == row_ix;
-        div().id(ElementId::from(path)).bg(if is_selected {
-            cx.theme().list_active
-        } else {
-            cx.theme().background
-        })
+        // Only paint a background when selected. The table applies this
+        // style *after* its own stripe background, so setting a
+        // background unconditionally would erase the zebra stripes.
+        div()
+            .id(ElementId::from(path))
+            .when(is_selected, |this| this.bg(cx.theme().list_active))
     }
 
     fn render_td(
@@ -1270,5 +1365,50 @@ mod tests {
             assert_eq!(delegate.rows_count(cx), state.read(cx).entry_count());
             assert_eq!(delegate.columns_count(cx), 7);
         });
+    }
+
+    /// A delegate over an empty comparison, with a 16 px rem basis.
+    fn test_delegate(cx: &mut TestAppContext) -> FolderTableDelegate {
+        let state = cx.new(|cx| {
+            AppState::new(
+                Endpoint::local("/left"),
+                Endpoint::local("/right"),
+                "test".into(),
+                cx,
+            )
+        });
+        cx.update(|_cx| FolderTableDelegate::new(state, gpui::px(16.)))
+    }
+
+    #[gpui::test]
+    fn left_half_width_covers_the_left_group_and_status_lane(
+        cx: &mut TestAppContext,
+    ) {
+        let delegate = test_delegate(cx);
+        // Name (16) + Size (4.5) + Modified (7.5) + status (1.75) rems
+        // at a 16 px rem basis.
+        assert_eq!(delegate.left_half_width(), px(476.));
+    }
+
+    #[gpui::test]
+    fn set_fill_width_stretches_the_right_name_column(
+        cx: &mut TestAppContext,
+    ) {
+        let mut delegate = test_delegate(cx);
+        // The left group (476 px), the right Size and Modified columns
+        // (192 px), and the trailing filler (12 px) stay fixed; the
+        // right Name column takes the rest.
+        assert!(delegate.set_fill_width(px(1200.)));
+        assert_eq!(delegate.columns[RIGHT_NAME_IX].width, px(520.));
+        // An unchanged available width is a no-op, so the per-frame
+        // hook does not repaint the table.
+        assert!(!delegate.set_fill_width(px(1200.)));
+        // A too-narrow viewport clamps at the column's minimum and the
+        // table scrolls horizontally instead.
+        assert!(delegate.set_fill_width(px(200.)));
+        assert_eq!(
+            delegate.columns[RIGHT_NAME_IX].width,
+            delegate.columns[RIGHT_NAME_IX].min_width
+        );
     }
 }
