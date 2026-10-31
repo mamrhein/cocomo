@@ -26,7 +26,7 @@ use cocomo_lib::{
 use gpui::{App, Context, FocusHandle, SharedString};
 
 use crate::{
-    color::Side,
+    color::{Side, newer_side},
     log::{self, LogLevel},
 };
 
@@ -90,18 +90,185 @@ pub fn status_category(status: &DirEntryStatus) -> StatusCategory {
     }
 }
 
-/// Exclusive display mode driven by the shared toolbar's toggle group.
+/// A named display-filter combination offered by the toolbar's preset
+/// picker.
+///
+/// Each preset maps to exactly one [`DisplayFilters`] value and to a
+/// glyph in `resources/icons` that previews the combination: two columns
+/// of dots (left and right side) colored by entry state — red newer,
+/// gray older, blue orphan, hollow identical.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FilterMode {
+pub enum FilterPreset {
     /// Every category is visible.
     All,
-    /// Only entries that differ in any way (different or orphan).
-    Diffs,
+    /// Same and different entries, no orphans.
+    NoOrphans,
+    /// Different and orphan entries, no identical ones.
+    NoSame,
+    /// Only entries that exist on both sides and differ.
+    DiffNoOrphans,
     /// Only entries that match on both sides.
-    Same,
-    /// A combination the toggle group cannot express; no button reads as
-    /// selected.
-    Custom,
+    SameOnly,
+    /// Only entries that exist on one side.
+    OrphansOnly,
+    /// Only entries whose left side is the newer one.
+    LeftNewer,
+    /// Only entries whose right side is the newer one.
+    RightNewer,
+    /// Only entries that exist on the left side only.
+    LeftOrphans,
+    /// Only entries that exist on the right side only.
+    RightOrphans,
+    /// Left-newer entries plus left-only orphans.
+    LeftNewerAndOrphans,
+    /// Right-newer entries plus right-only orphans.
+    RightNewerAndOrphans,
+}
+
+impl FilterPreset {
+    /// Every preset in menu order.
+    pub const ALL: [Self; 12] = [
+        Self::All,
+        Self::NoOrphans,
+        Self::NoSame,
+        Self::DiffNoOrphans,
+        Self::SameOnly,
+        Self::OrphansOnly,
+        Self::LeftNewer,
+        Self::RightNewer,
+        Self::LeftOrphans,
+        Self::RightOrphans,
+        Self::LeftNewerAndOrphans,
+        Self::RightNewerAndOrphans,
+    ];
+
+    /// Label shown in the preset menu and on the toolbar trigger.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::All => "All entries",
+            Self::NoOrphans => "No orphans",
+            Self::NoSame => "No identical",
+            Self::DiffNoOrphans => "Differences only",
+            Self::SameOnly => "Identical only",
+            Self::OrphansOnly => "Orphans only",
+            Self::LeftNewer => "Left newer",
+            Self::RightNewer => "Right newer",
+            Self::LeftOrphans => "Left orphans",
+            Self::RightOrphans => "Right orphans",
+            Self::LeftNewerAndOrphans => "Left newer and orphans",
+            Self::RightNewerAndOrphans => "Right newer and orphans",
+        }
+    }
+
+    /// Asset path of the preset's two-column glyph, or `None` for
+    /// [`Self::All`], which has no custom icon.
+    pub fn icon_path(self) -> Option<&'static str> {
+        match self {
+            Self::All => None,
+            Self::NoOrphans => Some("icons/no-orphans.svg"),
+            Self::NoSame => Some("icons/no-same.svg"),
+            Self::DiffNoOrphans => Some("icons/diff-no-orphans.svg"),
+            Self::SameOnly => Some("icons/same-only.svg"),
+            Self::OrphansOnly => Some("icons/orphans-only.svg"),
+            Self::LeftNewer => Some("icons/left-newer.svg"),
+            Self::RightNewer => Some("icons/right-newer.svg"),
+            Self::LeftOrphans => Some("icons/left-orphans.svg"),
+            Self::RightOrphans => Some("icons/right-orphans.svg"),
+            Self::LeftNewerAndOrphans => {
+                Some("icons/left-newer-and-orphans.svg")
+            }
+            Self::RightNewerAndOrphans => {
+                Some("icons/right-newer-and-orphans.svg")
+            }
+        }
+    }
+
+    /// The display filters this preset selects.
+    pub fn filters(self) -> DisplayFilters {
+        match self {
+            Self::All => DisplayFilters::default(),
+            Self::NoOrphans => DisplayFilters {
+                show_same: true,
+                show_different: true,
+                show_orphans: false,
+                ..DisplayFilters::default()
+            },
+            Self::NoSame => DisplayFilters {
+                show_same: false,
+                show_different: true,
+                show_orphans: true,
+                ..DisplayFilters::default()
+            },
+            Self::DiffNoOrphans => DisplayFilters {
+                show_same: false,
+                show_different: true,
+                show_orphans: false,
+                ..DisplayFilters::default()
+            },
+            Self::SameOnly => DisplayFilters {
+                show_same: true,
+                show_different: false,
+                show_orphans: false,
+                ..DisplayFilters::default()
+            },
+            Self::OrphansOnly => DisplayFilters {
+                show_same: false,
+                show_different: false,
+                show_orphans: true,
+                ..DisplayFilters::default()
+            },
+            Self::LeftNewer => DisplayFilters {
+                show_same: false,
+                show_different: true,
+                show_orphans: false,
+                newer_side: Some(Side::Left),
+                ..DisplayFilters::default()
+            },
+            Self::RightNewer => DisplayFilters {
+                show_same: false,
+                show_different: true,
+                show_orphans: false,
+                newer_side: Some(Side::Right),
+                ..DisplayFilters::default()
+            },
+            Self::LeftOrphans => DisplayFilters {
+                show_same: false,
+                show_different: false,
+                show_orphans: true,
+                orphan_side: Some(Side::Left),
+                ..DisplayFilters::default()
+            },
+            Self::RightOrphans => DisplayFilters {
+                show_same: false,
+                show_different: false,
+                show_orphans: true,
+                orphan_side: Some(Side::Right),
+                ..DisplayFilters::default()
+            },
+            Self::LeftNewerAndOrphans => DisplayFilters {
+                show_same: false,
+                show_different: true,
+                show_orphans: true,
+                newer_side: Some(Side::Left),
+                orphan_side: Some(Side::Left),
+            },
+            Self::RightNewerAndOrphans => DisplayFilters {
+                show_same: false,
+                show_different: true,
+                show_orphans: true,
+                newer_side: Some(Side::Right),
+                orphan_side: Some(Side::Right),
+            },
+        }
+    }
+
+    /// The preset whose filters equal `filters`, or `None` when the
+    /// current combination is one the picker cannot express.
+    pub fn matching(filters: &DisplayFilters) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|preset| &preset.filters() == filters)
+    }
 }
 
 /// Which entry categories the table displays.
@@ -117,6 +284,11 @@ pub struct DisplayFilters {
     pub show_different: bool,
     /// Show entries that exist on only one side.
     pub show_orphans: bool,
+    /// Restrict differing entries to the given newer side (`None`: both
+    /// sides match).
+    pub newer_side: Option<Side>,
+    /// Restrict orphans to the given side (`None`: both sides match).
+    pub orphan_side: Option<Side>,
 }
 
 impl Default for DisplayFilters {
@@ -125,22 +297,44 @@ impl Default for DisplayFilters {
             show_same: true,
             show_different: true,
             show_orphans: true,
+            newer_side: None,
+            orphan_side: None,
         }
     }
 }
 
 impl DisplayFilters {
-    /// Whether every category is visible, i.e. no filtering is active.
-    pub fn all_visible(&self) -> bool {
-        self.show_same && self.show_different && self.show_orphans
-    }
-
     /// Whether entries of `category` appear in the table.
     pub fn shows(&self, category: StatusCategory) -> bool {
         match category {
             StatusCategory::Same => self.show_same,
             StatusCategory::Different => self.show_different,
             StatusCategory::Orphan => self.show_orphans,
+        }
+    }
+
+    /// Whether `entry` appears in the table under these filters.
+    ///
+    /// Beyond the coarse category, the directional presets narrow
+    /// differing entries by their newer side and orphans by the side
+    /// they exist on. A differing entry whose newer side cannot be
+    /// determined (equal or unparseable stamps) never matches a
+    /// directional preset.
+    pub fn shows_entry(&self, entry: &DirEntry) -> bool {
+        let category = status_category(&entry.status);
+        if !self.shows(category) {
+            return false;
+        }
+        match category {
+            StatusCategory::Same => true,
+            StatusCategory::Different => self
+                .newer_side
+                .is_none_or(|side| newer_side(entry) == Some(side)),
+            StatusCategory::Orphan => match self.orphan_side {
+                None => true,
+                Some(Side::Left) => entry.status == DirEntryStatus::LeftOnly,
+                Some(Side::Right) => entry.status == DirEntryStatus::RightOnly,
+            },
         }
     }
 }
@@ -162,7 +356,7 @@ fn compute_display_order(
     filters: &DisplayFilters,
 ) -> Vec<usize> {
     let mut order: Vec<usize> = (0..entries.len())
-        .filter(|&i| filters.shows(status_category(&entries[i].status)))
+        .filter(|&i| filters.shows_entry(&entries[i]))
         .collect();
     order.sort_by(|&a, &b| {
         let (ea, eb) = (&entries[a], &entries[b]);
@@ -2204,43 +2398,24 @@ impl AppState {
         cx.notify();
     }
 
-    /// The display mode the toolbar's exclusive toggle group shows.
-    pub fn filter_mode(&self) -> FilterMode {
-        let f = &self.filters;
-        if f.all_visible() {
-            FilterMode::All
-        } else if !f.show_same && f.show_different && f.show_orphans {
-            FilterMode::Diffs
-        } else if f.show_same && !f.show_different && !f.show_orphans {
-            FilterMode::Same
-        } else {
-            FilterMode::Custom
-        }
+    /// The preset the toolbar's picker shows for the current filters,
+    /// or `None` when the combination is custom (reachable through the
+    /// category toggles).
+    pub fn filter_preset(&self) -> Option<FilterPreset> {
+        FilterPreset::matching(&self.filters)
     }
 
-    /// Apply an exclusive display mode from the toolbar's toggle group.
+    /// Apply a display-filter preset from the toolbar's picker.
     ///
-    /// "Diffs" keeps both difference categories (different and orphan);
-    /// a [`FilterMode::Custom`] combination is left untouched.
-    pub fn set_filter_mode(
+    /// Selection follows the same entry across the change when it stays
+    /// visible (domain identity, not row index), matching the guidance
+    /// to preserve selection across filtering.
+    pub fn set_filter_preset(
         &mut self,
-        mode: FilterMode,
+        preset: FilterPreset,
         cx: &mut Context<Self>,
     ) {
-        let filters = match mode {
-            FilterMode::All => DisplayFilters::default(),
-            FilterMode::Diffs => DisplayFilters {
-                show_same: false,
-                show_different: true,
-                show_orphans: true,
-            },
-            FilterMode::Same => DisplayFilters {
-                show_same: true,
-                show_different: false,
-                show_orphans: false,
-            },
-            FilterMode::Custom => return,
-        };
+        let filters = preset.filters();
         if filters == self.filters {
             return;
         }
@@ -2694,12 +2869,99 @@ mod tests {
             show_same: false,
             show_different: true,
             show_orphans: true,
+            ..DisplayFilters::default()
         };
         let order =
             compute_display_order(&entries, SortKey::Name, false, &filters);
         assert_eq!(
             names_in_order(&entries, &order),
             ["bravo.txt", "charlie.txt", "delta.txt"]
+        );
+    }
+
+    #[test]
+    fn every_preset_round_trips_through_its_filter_state() {
+        for preset in FilterPreset::ALL {
+            assert_eq!(
+                FilterPreset::matching(&preset.filters()),
+                Some(preset),
+                "{} must match its own filters",
+                preset.label()
+            );
+        }
+    }
+
+    #[test]
+    fn directional_presets_narrow_by_newer_side() {
+        let entries = sample_entries();
+        // delta.txt is the only differing entry and its right side is
+        // newer, so the left-newer preset hides everything.
+        let order = compute_display_order(
+            &entries,
+            SortKey::Name,
+            false,
+            &FilterPreset::LeftNewer.filters(),
+        );
+        assert!(names_in_order(&entries, &order).is_empty());
+        let order = compute_display_order(
+            &entries,
+            SortKey::Name,
+            false,
+            &FilterPreset::RightNewer.filters(),
+        );
+        assert_eq!(names_in_order(&entries, &order), ["delta.txt"]);
+    }
+
+    #[test]
+    fn orphan_side_presets_narrow_by_side() {
+        let entries = sample_entries();
+        let order = compute_display_order(
+            &entries,
+            SortKey::Name,
+            false,
+            &FilterPreset::LeftOrphans.filters(),
+        );
+        assert_eq!(names_in_order(&entries, &order), ["charlie.txt"]);
+        let order = compute_display_order(
+            &entries,
+            SortKey::Name,
+            false,
+            &FilterPreset::RightOrphans.filters(),
+        );
+        assert_eq!(names_in_order(&entries, &order), ["bravo.txt"]);
+        let order = compute_display_order(
+            &entries,
+            SortKey::Name,
+            false,
+            &FilterPreset::OrphansOnly.filters(),
+        );
+        assert_eq!(
+            names_in_order(&entries, &order),
+            ["bravo.txt", "charlie.txt"]
+        );
+    }
+
+    #[test]
+    fn combined_presets_keep_newer_and_same_side_orphans() {
+        let entries = sample_entries();
+        // delta.txt is right-newer, so only the right-side combination
+        // shows it (alongside the right orphan).
+        let order = compute_display_order(
+            &entries,
+            SortKey::Name,
+            false,
+            &FilterPreset::LeftNewerAndOrphans.filters(),
+        );
+        assert_eq!(names_in_order(&entries, &order), ["charlie.txt"]);
+        let order = compute_display_order(
+            &entries,
+            SortKey::Name,
+            false,
+            &FilterPreset::RightNewerAndOrphans.filters(),
+        );
+        assert_eq!(
+            names_in_order(&entries, &order),
+            ["bravo.txt", "delta.txt"]
         );
     }
 
@@ -2828,7 +3090,9 @@ mod tests {
             state.toggle_filter(StatusCategory::Same, cx);
 
             assert_eq!(state.entry_count(), 3);
-            assert!(!state.filters().all_visible());
+            // Hiding the Same category from "All" lands exactly on the
+            // "No identical" preset.
+            assert_eq!(state.filter_preset(), Some(FilterPreset::NoSame));
             // The selected Same entry vanished; selection falls back to
             // the first visible row.
             assert_eq!(state.selected_index(), 0);
@@ -2845,7 +3109,42 @@ mod tests {
             state.toggle_filter(StatusCategory::Orphan, cx);
             state.toggle_filter(StatusCategory::Same, cx);
             assert_eq!(state.entry_count(), 4);
-            assert!(state.filters().all_visible());
+            assert_eq!(state.filter_preset(), Some(FilterPreset::All));
+        });
+    }
+
+    #[gpui::test]
+    fn set_filter_preset_applies_the_preset_and_keeps_selection(
+        cx: &mut TestAppContext,
+    ) {
+        let state = cx.new(|cx| {
+            let mut state = AppState::new(
+                Endpoint::local("/left"),
+                Endpoint::local("/right"),
+                "test".into(),
+                cx,
+            );
+            state.set_comparison_for_test(comparison(sample_entries()));
+            state
+        });
+
+        state.update(cx, |state, cx| {
+            assert_eq!(state.filter_preset(), Some(FilterPreset::All));
+            // Name ascending: delta.txt (Different, right newer) is the
+            // fourth row.
+            state.select_row(3, cx);
+            state.set_filter_preset(FilterPreset::RightNewer, cx);
+
+            assert_eq!(state.entry_count(), 1);
+            assert_eq!(state.filter_preset(), Some(FilterPreset::RightNewer));
+            // The selected entry stays visible and selected.
+            assert_eq!(state.selected_entry().unwrap().name, "delta.txt");
+
+            // A left-side preset hides the selection; index falls back.
+            state.set_filter_preset(FilterPreset::LeftOrphans, cx);
+            assert_eq!(state.entry_count(), 1);
+            assert_eq!(state.entry_at(0).unwrap().name, "charlie.txt");
+            assert_eq!(state.selected_index(), 0);
         });
     }
 
