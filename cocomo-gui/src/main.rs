@@ -19,7 +19,7 @@ mod cli;
 mod color;
 mod commands;
 mod file_formats;
-mod folder_panes;
+mod folder_table;
 mod fsops;
 mod home;
 mod log;

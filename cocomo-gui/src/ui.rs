@@ -17,8 +17,7 @@ use cocomo_lib::{DirEntryStatus, Endpoint, TransferAction};
 use gpui::{
     Action, Anchor, AnyElement, App, ClipboardItem, Context, Div, Entity,
     FocusHandle, Focusable, FontWeight, Hsla, KeyBinding, Render,
-    ScrollStrategy, SharedString, Subscription, UniformListScrollHandle,
-    Window, actions,
+    SharedString, Subscription, Window, actions,
     assets::IconName,
     base::Disableable as _,
     component::{
@@ -32,6 +31,7 @@ use gpui::{
         popover::Popover,
         spinner::Spinner,
         status_bar::StatusBar,
+        table::{TableEvent, TableState},
         toolbar::{Toolbar, ToolbarGroup},
         v_flex,
     },
@@ -41,6 +41,7 @@ use gpui::{
 
 use crate::{
     color::Side,
+    folder_table::FolderTableDelegate,
     log::{self, LogLevel},
     menus::{
         CopyPathLeft, CopyPathRight, ReloadCompare, SaveSession, StopCompare,
@@ -192,8 +193,16 @@ pub struct FolderCompareView {
     state: Entity<AppState>,
     /// Handle to the session manager.
     session_manager: Entity<GuiSessionManager>,
-    /// Scroll handle shared by both tree panes.
-    scroll_handle: UniformListScrollHandle,
+    /// State of the single comparison table.
+    ///
+    /// Created lazily on the first content render: the delegate needs
+    /// the window's rem size for its column widths.
+    table_state: Option<Entity<TableState<FolderTableDelegate>>>,
+    /// Subscription forwarding table events (clicks, double-clicks) to
+    /// [`AppState`].
+    _table_subscription: Option<Subscription>,
+    /// Subscription refreshing the table when the app state changes.
+    _state_subscription: Option<Subscription>,
     /// Editable name-filter combo in toolbar row 2.
     ///
     /// Created lazily on the first row-2 render: the row is rendered by
@@ -225,7 +234,9 @@ impl FolderCompareView {
         Self {
             state,
             session_manager,
-            scroll_handle: UniformListScrollHandle::new(),
+            table_state: None,
+            _table_subscription: None,
+            _state_subscription: None,
             filter_input: None,
             _filter_subscription: None,
             left_path_input: None,
@@ -707,12 +718,16 @@ impl FolderCompareView {
         }
     }
 
-    /// Scroll the list so the current selection is centered. Used after
-    /// difference walking, which can jump far from the visible range.
-    fn scroll_to_selection(&self, cx: &App) {
+    /// Scroll the table so the current selection is visible at the top.
+    /// Used after difference walking, which can jump far from the
+    /// visible range.
+    fn scroll_to_selection(&self, cx: &mut App) {
         let selected = self.state.read(cx).selected_index();
-        self.scroll_handle
-            .scroll_to_item(selected, ScrollStrategy::Center);
+        if let Some(table_state) = self.table_state.as_ref() {
+            table_state.update(cx, |table, cx| {
+                table.scroll_to_row(selected, cx);
+            });
+        }
     }
 
     /// Handle the next-difference action: jump to the following non-identical
@@ -1688,7 +1703,8 @@ impl FolderCompareView {
         v_flex().child(path_row).children(breadcrumb)
     }
 
-    /// Render the main content area: the two mirrored tree panes.
+    /// Render the main content area: the base-dir bar above the single
+    /// striped comparison table.
     fn render_content(
         &mut self,
         window: &mut Window,
@@ -1699,6 +1715,20 @@ impl FolderCompareView {
         // user is mid-edit in one of them.
         self.sync_path_input(&left_path, Side::Left, window, cx);
         self.sync_path_input(&right_path, Side::Right, window, cx);
+
+        let table_state = self.ensure_table_state(window, cx);
+        // Mirror the state's selection into the table so keyboard walking
+        // (which changes `AppState` directly) highlights the right row.
+        // `set_selected_row` echoes a `SelectRow` event; `select_row` is
+        // idempotent, so the echo settles after one round-trip.
+        let selected = self.state.read(cx).selected_index();
+        if selected < self.state.read(cx).entry_count()
+            && table_state.read(cx).selected_row() != Some(selected)
+        {
+            table_state.update(cx, |table, cx| {
+                table.set_selected_row(selected, cx);
+            });
+        }
 
         let focus_handle = self.focus_handle(cx);
         let theme = cx.theme().clone();
@@ -1717,14 +1747,102 @@ impl FolderCompareView {
                 theme.border
             })
             .bg(theme.background)
-            .child(crate::folder_panes::render_folder_panes(
+            .child(crate::folder_table::render_folder_table(
                 &self.state,
-                &self.scroll_handle,
-                &focus_handle,
+                &table_state,
                 &left_path,
                 &right_path,
                 cx,
             ))
+    }
+
+    /// Create the comparison-table state on first use, wiring its events
+    /// to [`AppState`] and refreshing it whenever the state changes.
+    fn ensure_table_state(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<TableState<FolderTableDelegate>> {
+        if self.table_state.is_none() {
+            let state = self.state.clone();
+            let table_state = cx.new(|cx| {
+                TableState::new(
+                    FolderTableDelegate::new(state, window.rem_size()),
+                    window,
+                    cx,
+                )
+                .row_selectable(true)
+                .col_selectable(false)
+                .cell_selectable(false)
+                .sortable(false)
+                .col_movable(false)
+                .loop_selection(false)
+            });
+            self._table_subscription =
+                Some(cx.subscribe(&table_state, |this, _, event, cx| {
+                    match event {
+                        TableEvent::SelectRow(row_ix) => {
+                            this.state.update(cx, |state, cx| {
+                                state.select_row(*row_ix, cx);
+                            });
+                        }
+                        TableEvent::DoubleClickedRow(row_ix) => {
+                            this.handle_row_double_click(*row_ix, cx);
+                        }
+                        TableEvent::RightClickedRow(Some(row_ix)) => {
+                            this.state.update(cx, |state, cx| {
+                                state.select_row(*row_ix, cx);
+                            });
+                        }
+                        _ => {}
+                    }
+                }));
+            self._state_subscription =
+                Some(cx.observe(&self.state, |this, _, cx| {
+                    if let Some(table) = this.table_state.as_ref() {
+                        table.update(cx, |table, cx| table.refresh(cx));
+                    }
+                }));
+            self.table_state = Some(table_state.clone());
+        }
+        self.table_state.clone().expect("created above")
+    }
+
+    /// Double-click on a row: directories expand or collapse in place;
+    /// files open their text diff. The nested directory comparison is
+    /// reached with Enter or the row menu's `Open`.
+    fn handle_row_double_click(&mut self, row_ix: usize, cx: &mut App) {
+        let is_dir = self.state.read(cx).entry_at(row_ix).is_some_and(|e| {
+            e.left.as_ref().is_some_and(|l| l.is_dir)
+                || e.right.as_ref().is_some_and(|r| r.is_dir)
+        });
+        if is_dir {
+            let path = self
+                .state
+                .read(cx)
+                .row_at(row_ix)
+                .map(|row| row.path().to_string());
+            if let Some(path) = path {
+                self.state.update(cx, |state, cx| {
+                    state.select_row(row_ix, cx);
+                    state.toggle_expanded(&path, cx);
+                });
+            }
+            return;
+        }
+        let action = self.state.update(cx, |state, cx| {
+            state.select_row(row_ix, cx);
+            let has_right =
+                state.selected_entry().is_some_and(|e| e.right.is_some());
+            let (left, right) = state.selected_endpoints()?;
+            Some(OpenFileDiff {
+                left_path: left,
+                right_path: has_right.then_some(right),
+            })
+        });
+        if let Some(action) = action {
+            cx.dispatch_action(&action);
+        }
     }
 
     /// Create the two path-field states on first use and subscribe their

@@ -168,8 +168,10 @@ pub fn side_role(entry: &DirEntry, side: Side, ignored: bool) -> ColorRole {
 ///
 /// The gutter icon is coarser than the row coloring: it marks *that*
 /// something differs (`~` content, `≠` name/type attributes, `=` same,
-/// `|` orphan, `*` filtered/ignored), leaving the important-vs-minor
-/// distinction to the colors.
+/// `*` filtered/ignored), leaving the important-vs-minor distinction to
+/// the colors. Orphans get no symbol; the row coloring already marks
+/// them, and a lone glyph on one side of the comparison table adds
+/// nothing.
 pub fn gutter_icon(entry: &DirEntry, ignored: bool) -> &'static str {
     if ignored {
         return "*";
@@ -179,7 +181,7 @@ pub fn gutter_icon(entry: &DirEntry, ignored: bool) -> &'static str {
     }
     match status_category(&entry.status) {
         crate::state::StatusCategory::Same => "=",
-        crate::state::StatusCategory::Orphan => "|",
+        crate::state::StatusCategory::Orphan => "",
         crate::state::StatusCategory::Different => "~",
     }
 }
@@ -329,7 +331,7 @@ mod tests {
             left: None,
             ..different.clone()
         };
-        assert_eq!(gutter_icon(&orphan, false), "|");
+        assert_eq!(gutter_icon(&orphan, false), "");
 
         let clash = DirEntry {
             name_conflict: true,

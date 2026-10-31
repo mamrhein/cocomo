@@ -2624,7 +2624,7 @@ impl gpui::Focusable for AppState {
 
 /// Format a file size in human-readable form for metadata displays.
 fn format_size_display(bytes: u64) -> String {
-    crate::folder_panes::format_size(bytes)
+    crate::folder_table::format_size(bytes)
 }
 
 /// Metadata of the selected entry, rendered by the Attributes modal.
