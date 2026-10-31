@@ -79,25 +79,13 @@ mod dir_compare {
             .success()
             .stdout(predicate::str::contains("<LEFT>"))
             .stdout(predicate::str::contains("<RIGHT>"))
-            .stdout(predicate::str::contains("--max-depth"));
+            .stdout(predicate::str::contains("--content"));
     }
 
     #[test]
     fn missing_arguments_fails() {
         cmd()
             .args(["dir", "compare"])
-            .assert()
-            .failure()
-            .stderr(predicate::str::contains("error:"));
-    }
-
-    #[test]
-    fn max_depth_invalid_fails() {
-        let left = "/tmp/left";
-        let right = "/tmp/right";
-        cmd()
-            .args(["dir", "compare", "--max-depth=abc"])
-            .args([left, right])
             .assert()
             .failure()
             .stderr(predicate::str::contains("error:"));

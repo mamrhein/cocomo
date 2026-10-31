@@ -104,17 +104,6 @@ pub struct DirCompareArgs {
     /// Compare file contents (activate content hashing).
     #[arg(short = 'c', long)]
     pub(crate) content: bool,
-    /// Maximum scan depth (default: 1). The value must be assigned with
-    /// `=` (e.g. `-m=2`, `--max-depth=2`); pass the flag without a value
-    /// to scan without depth limit.
-    #[arg(
-        short = 'm',
-        long,
-        num_args = 0..=1,
-        default_value = "1",
-        require_equals = true
-    )]
-    pub(crate) max_depth: Option<usize>,
     /// Output format for console display.
     #[arg(short = 'f', long, default_value = "text")]
     pub(crate) format: OutputFormat,
@@ -390,7 +379,6 @@ impl DirCompareArgs {
             left: "./left".to_string(),
             right: "./right".to_string(),
             content: false,
-            max_depth: Some(1),
             format: OutputFormat::Text,
             show_different: false,
             show_orphans: false,

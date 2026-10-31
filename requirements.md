@@ -786,13 +786,12 @@ Configuration for a synchronization operation:
 pub struct SyncRules {
     pub operation: SyncOperation,
     pub dry_run: bool,
-    pub max_depth: Option<usize>,
     pub compare_files: bool,
 }
 ```
 
-`max_depth` limits the recursive comparison depth. `compare_files` controls
-whether file contents are compared or only size/metadata.
+`compare_files` controls whether file contents are compared or only
+size/metadata.
 
 ### 6.4 Sync API
 

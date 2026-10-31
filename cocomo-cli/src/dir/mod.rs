@@ -67,12 +67,11 @@ pub(crate) async fn dir_compare<R: EndpointResolver>(
         &args.right,
         args.profile.as_deref(),
     )?;
-    let mut config = if args.content {
+    let config = if args.content {
         CompareConfig::full()
     } else {
         CompareConfig::meta_data_only()
     };
-    config.max_depth = args.max_depth;
 
     let comparison = match pair {
         EndpointPair::Shared(fs) => {
@@ -200,7 +199,6 @@ pub(crate) async fn dir_sync<R: EndpointResolver>(
     let rules = SyncRules {
         operation,
         dry_run: args.dry_run,
-        max_depth: None,
         compare_content: args.compare_files,
     };
 
