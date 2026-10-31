@@ -186,8 +186,6 @@ pub struct CompareConfig {
     pub compare_meta_data: bool,
     /// Follow symlinks during scan.
     pub follow_symlinks: bool,
-    /// Maximum scan depth.
-    pub max_depth: Option<usize>,
     /// Size tolerance ratio for "similar" classification (0.0–1.0).
     pub size_tolerance: f64,
 }
@@ -199,7 +197,6 @@ impl CompareConfig {
             compare_content: true,
             compare_meta_data: true,
             follow_symlinks: false,
-            max_depth: None,
             size_tolerance: 0.1,
         }
     }
@@ -210,7 +207,6 @@ impl CompareConfig {
             compare_content: false,
             compare_meta_data: true,
             follow_symlinks: false,
-            max_depth: None,
             size_tolerance: 0.1,
         }
     }
@@ -281,7 +277,6 @@ where
 {
     let scan_config = ScanConfig {
         follow_symlinks: config.follow_symlinks,
-        max_depth: config.max_depth,
     };
 
     let left_result =

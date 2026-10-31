@@ -52,13 +52,13 @@ impl ScanEntry {
 }
 
 /// Configuration for a directory scan.
+///
+/// The scan always walks the full tree; there is no depth limit.
 #[derive(Clone, Debug, Default)]
 pub struct ScanConfig {
     /// Follow symbolic links during traversal. Disabled by default to avoid
     /// unintended cycles and cross-filesystem traversal.
     pub follow_symlinks: bool,
-    /// Maximum recursion depth. `None` means unlimited.
-    pub max_depth: Option<usize>,
 }
 
 /// Result of a directory scan.
@@ -127,13 +127,6 @@ where
         if cancel.is_some_and(CancellationToken::is_cancelled) {
             return Err(FsError::Cancelled);
         }
-        // Check max depth.
-        if let Some(max) = config.max_depth
-            && depth >= max
-        {
-            continue;
-        }
-
         // Populate children via the node API.
         let dir_id_typed = crate::identity::DirId::<u64>::new(*dir_id.get());
         if let Err(e) = fs.read_dir_node(dir_id_typed).await {
@@ -229,6 +222,9 @@ where
     if !result.entries.is_empty() {
         let flat = mem::take(&mut result.entries);
         result.entries = build_tree(flat);
+        // Provider metadata carries no meaningful size for directories,
+        // so derive each directory's size from its contents.
+        derive_dir_sizes(&mut result.entries);
     }
 
     Ok(result)
@@ -257,6 +253,33 @@ fn scan_node_to_entry(
         meta,
         children: None,
     }
+}
+
+/// Derive the size of every directory entry as the sum of the sizes of
+/// its content items, recursively.
+///
+/// Runs bottom-up so a subdirectory's size is final before its parent
+/// sums it. Directories whose subtree could not be scanned (errors,
+/// cycle skips) contribute nothing; an unknown size is treated as zero
+/// rather than as a bogus provider-reported value.
+///
+/// Returns the total size of `entries`.
+fn derive_dir_sizes(entries: &mut [ScanEntry]) -> u64 {
+    let mut total = 0;
+    for entry in entries {
+        let size = if entry.is_dir() {
+            match entry.children.as_mut() {
+                Some(children) => derive_dir_sizes(children),
+                // An empty directory holds no content items.
+                None => 0,
+            }
+        } else {
+            entry.meta.size
+        };
+        entry.meta.size = size;
+        total += size;
+    }
+    total
 }
 
 /// Build a tree of `ScanEntry` nodes from a flat BFS-ordered list.
@@ -386,26 +409,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn node_scan_max_depth() {
+    async fn node_scan_derives_dir_sizes() {
         let base = setup_test_dir().await;
         let fs = LocalFs::new("test");
 
-        let config = ScanConfig {
-            max_depth: Some(1),
-            ..Default::default()
-        };
-        let result = scan_directory_node(&fs, &base, &config, None)
-            .await
-            .unwrap();
+        let result =
+            scan_directory_node(&fs, &base, &ScanConfig::default(), None)
+                .await
+                .unwrap();
 
         let sub = result
             .entries
             .iter()
             .find(|e| e.name == "sub")
             .expect("sub directory should exist");
-        assert!(
-            sub.children().is_none() || sub.children().unwrap().is_empty()
-        );
+        // The dir size is the sum of its contents: b.txt (5 bytes) plus
+        // `nested` (7 bytes, itself the size of c.txt).
+        assert_eq!(sub.meta.size, 12);
+        let nested = sub
+            .children()
+            .expect("sub should have children")
+            .iter()
+            .find(|e| e.name == "nested")
+            .expect("nested directory should exist");
+        assert_eq!(nested.meta.size, 7);
 
         fs_err::remove_dir_all(&base).ok();
     }

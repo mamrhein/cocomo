@@ -196,7 +196,6 @@ async fn plan_sync_session(
     let rules = SyncRules {
         operation,
         dry_run: true,
-        max_depth: None,
         compare_content,
     };
 
@@ -234,7 +233,6 @@ async fn execute_sync_session(
     let rules = SyncRules {
         operation,
         dry_run: false,
-        max_depth: None,
         compare_content,
     };
 

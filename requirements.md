@@ -416,6 +416,11 @@ filesystem. The walk is configured to:
 Per-entry traversal errors (e.g., permission denied) are reported individually
 rather than aborting the entire scan.
 
+The scan is not depth-limited and always covers the full tree. The CLI
+`-m` / `--max-depth` option restricts the depth of the _listed_ output only
+(tree, flat list, summary counts, and report); `-m` without a value lists
+without limit, the default lists the top level only.
+
 **Node-based scanning and comparison**: the library provides
 `scan_directory_node()` and `compare_directories_node()` functions that
 operate on the [`NodeFileSystem`] API. These resolve paths to node
@@ -786,13 +791,12 @@ Configuration for a synchronization operation:
 pub struct SyncRules {
     pub operation: SyncOperation,
     pub dry_run: bool,
-    pub max_depth: Option<usize>,
     pub compare_files: bool,
 }
 ```
 
-`max_depth` limits the recursive comparison depth. `compare_files` controls
-whether file contents are compared or only size/metadata.
+`compare_files` controls whether file contents are compared or only
+size/metadata.
 
 ### 6.4 Sync API
 
