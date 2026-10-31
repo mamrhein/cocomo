@@ -12,7 +12,7 @@
 //! Serializes a [`DirComparison`] into various output formats (text, CSV,
 //! JSON) based on [`ReportConfig`] filters.
 
-use std::fmt::Write;
+use std::{borrow::Cow, collections::HashMap, fmt::Write, sync::Arc};
 
 use crate::{
     compare::{DirComparison, DirEntry, DirEntryStatus},
@@ -54,6 +54,9 @@ pub struct ReportConfig {
     pub include_subdirectories: bool,
     /// Include detailed file metadata (size, modified, hash).
     pub include_file_details: bool,
+    /// Maximum depth of listed entries (1 = top level only).
+    /// `None` lists the full tree.
+    pub max_depth: Option<usize>,
 }
 
 impl ReportConfig {
@@ -65,6 +68,7 @@ impl ReportConfig {
             include_orphans: true,
             include_subdirectories: true,
             include_file_details: true,
+            max_depth: None,
         }
     }
 
@@ -76,6 +80,7 @@ impl ReportConfig {
             include_orphans: true,
             include_subdirectories: true,
             include_file_details: true,
+            max_depth: None,
         }
     }
 }
@@ -106,10 +111,59 @@ pub fn generate_report(
     format: ReportFormat,
     config: &ReportConfig,
 ) -> String {
+    // A depth limit restricts the listed entries; truncate a copy of the
+    // comparison so that the summary counts match the truncated listing.
+    let comparison = match config.max_depth {
+        Some(max_depth) => {
+            Cow::Owned(limit_comparison_depth(comparison, max_depth))
+        }
+        None => Cow::Borrowed(comparison),
+    };
     match format {
-        ReportFormat::Text => generate_text_report(comparison, config),
-        ReportFormat::Csv => generate_csv_report(comparison, config),
-        ReportFormat::Json => generate_json_report(comparison, config),
+        ReportFormat::Text => generate_text_report(&comparison, config),
+        ReportFormat::Csv => generate_csv_report(&comparison, config),
+        ReportFormat::Json => generate_json_report(&comparison, config),
+    }
+}
+
+/// Return a copy of `comparison` with entries deeper than `max_depth` (1 =
+/// top level only) removed and per-level counts recomputed accordingly.
+fn limit_comparison_depth(
+    comparison: &DirComparison,
+    max_depth: usize,
+) -> DirComparison {
+    if max_depth == 0 {
+        return DirComparison {
+            entries: Vec::new(),
+            counts: HashMap::new(),
+            errors: comparison.errors.clone(),
+        };
+    }
+    let entries: Vec<DirEntry> = comparison
+        .entries
+        .iter()
+        .map(|entry| {
+            let mut entry = entry.clone();
+            if max_depth > 1 {
+                if let Some(sub) = &entry.sub_entries {
+                    entry.sub_entries = Some(Arc::new(
+                        limit_comparison_depth(sub, max_depth - 1),
+                    ));
+                }
+            } else {
+                entry.sub_entries = None;
+            }
+            entry
+        })
+        .collect();
+    let mut counts: HashMap<DirEntryStatus, usize> = HashMap::new();
+    for entry in &entries {
+        *counts.entry(entry.status).or_insert(0) += 1;
+    }
+    DirComparison {
+        entries,
+        counts,
+        errors: comparison.errors.clone(),
     }
 }
 

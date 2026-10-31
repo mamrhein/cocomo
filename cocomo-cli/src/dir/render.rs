@@ -47,6 +47,12 @@ pub(super) fn render_tree_entries(
     args: &DirCompareArgs,
     name_col_width: usize,
 ) {
+    // The depth limit restricts the listed output only; the comparison
+    // always covers the full tree. Depth is 0-based at the top level.
+    if args.max_depth.is_some_and(|max| depth >= max) {
+        return;
+    }
+
     let mut visible: Vec<&DirEntry> = entries
         .iter()
         .filter(|e| should_show_in_tree(e, args))
@@ -173,11 +179,13 @@ fn render_comparison_tree(
     output: &mut dyn Write,
 ) {
     // An empty top level means nothing can be visible at deeper levels
-    // either, since recursion only descends into visible directories.
-    if !comparison
-        .entries
-        .iter()
-        .any(|e| should_show_in_tree(e, args))
+    // either, since recursion only descends into visible directories. A max
+    // depth of 0 lists nothing at all.
+    if args.max_depth.is_some_and(|max| max == 0)
+        || !comparison
+            .entries
+            .iter()
+            .any(|e| should_show_in_tree(e, args))
     {
         writeln!(output, "No matching entries.").unwrap();
         return;
@@ -396,6 +404,9 @@ mod tests {
         // Only nested entries carry tree indicators, so use a fixture with a
         // subdirectory.
         let comp = make_nested_comparison();
+        let mut args = test_args();
+        // Render the full tree, ignoring the default output depth limit.
+        args.max_depth = None;
         let mut buf = Vec::new();
         render_tree_entries_to_vec(
             &comp.entries,
@@ -403,7 +414,7 @@ mod tests {
             0,
             &mut buf,
             &Colorizer::new(ColorMode::Never),
-            &test_args(),
+            &args,
             40,
         );
         let output = String::from_utf8(buf).unwrap();
@@ -437,6 +448,53 @@ mod tests {
         assert!(!output.contains('\u{2514}')); // no └
         assert!(!output.contains('\u{2502}')); // no │
         assert!(output.starts_with("same.txt"));
+    }
+
+    #[test]
+    fn tree_rendering_respects_max_depth() {
+        // The max depth only restricts the listing; the underlying
+        // comparison data is identical in all cases.
+        let comp = make_nested_comparison();
+        let depth_output = |max_depth: Option<usize>| {
+            let mut args = test_args();
+            args.max_depth = max_depth;
+            let mut buf = Vec::new();
+            render_tree_entries_to_vec(
+                &comp.entries,
+                "",
+                0,
+                &mut buf,
+                &Colorizer::new(ColorMode::Never),
+                &args,
+                40,
+            );
+            String::from_utf8(buf).unwrap()
+        };
+        // Top level only: the sub/ directory row is listed, its children
+        // are not.
+        let top = depth_output(Some(1));
+        assert!(top.contains("sub/"));
+        assert!(top.contains("same.txt"));
+        assert!(!top.contains("diff.txt"));
+        assert!(!top.contains("only_left.txt"));
+        // Depth 2 also lists the children of sub/.
+        let two = depth_output(Some(2));
+        assert!(two.contains("diff.txt"));
+        assert!(two.contains("only_left.txt"));
+        // The fixture is two levels deep, so unlimited equals depth 2.
+        assert_eq!(depth_output(None), two);
+    }
+
+    #[test]
+    fn tree_rendering_max_depth_zero_lists_no_entries() {
+        let comp = make_nested_comparison();
+        let mut args = test_args();
+        args.max_depth = Some(0);
+        let mut buf = Vec::new();
+        render_comparison_tree_to_vec(&comp, &args, &mut buf);
+        let output = String::from_utf8(buf).unwrap();
+        assert!(output.contains("No matching entries."));
+        assert!(!output.contains("sub/"));
     }
 
     #[test]
@@ -495,6 +553,9 @@ mod tests {
             counts: HashMap::new(),
             errors: vec![],
         };
+        let mut args = test_args();
+        // Render the full tree, ignoring the default output depth limit.
+        args.max_depth = None;
         let mut buf = Vec::new();
         render_tree_entries_to_vec(
             &comp.entries,
@@ -502,7 +563,7 @@ mod tests {
             0,
             &mut buf,
             &Colorizer::new(ColorMode::Never),
-            &test_args(),
+            &args,
             40,
         );
         let output = String::from_utf8(buf).unwrap();

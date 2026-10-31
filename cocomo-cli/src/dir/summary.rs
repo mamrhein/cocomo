@@ -63,6 +63,9 @@ impl Summary {
 /// [`render_tree_entries`]. When `false` (CSV, JSON), all subdirectories are
 /// always visited, so that children of filtered-out directories are still
 /// counted if they pass the filter themselves.
+///
+/// `args.max_depth` (1-based, the top level being depth 1) restricts which
+/// entries are collected; the comparison itself always covers the full tree.
 pub(super) fn collect_and_count(
     entries: &[DirEntry],
     args: &DirCompareArgs,
@@ -72,6 +75,7 @@ pub(super) fn collect_and_count(
     let mut by_status = HashMap::new();
     collect_and_count_into(
         entries,
+        1,
         args,
         use_tree_filter,
         &mut visible,
@@ -80,14 +84,23 @@ pub(super) fn collect_and_count(
     (visible, Summary { by_status })
 }
 
-/// Recursive worker for [`collect_and_count`].
+/// Recursive worker for [`collect_and_count`]. `depth` is the 1-based depth
+/// of `entries` in the tree.
 pub(super) fn collect_and_count_into(
     entries: &[DirEntry],
+    depth: usize,
     args: &DirCompareArgs,
     use_tree_filter: bool,
     visible: &mut Vec<DirEntry>,
     by_status: &mut HashMap<DirEntryStatus, usize>,
 ) {
+    // Entries deeper than the max output depth are neither collected nor
+    // counted.
+    if args.max_depth.is_some_and(|max| depth > max) {
+        return;
+    }
+    let descend = args.max_depth.is_none_or(|max| depth < max);
+
     for entry in entries {
         let is_visible = if use_tree_filter {
             should_show_in_tree(entry, args)
@@ -104,12 +117,14 @@ pub(super) fn collect_and_count_into(
         // Tree mode: only descend into visible directories (matching
         // render_tree_entries). Flat mode: always descend, since children
         // are shown independently of parent visibility.
-        if let Some(sub) = &entry.sub_entries
+        if descend
+            && let Some(sub) = &entry.sub_entries
             && (!use_tree_filter
                 || (is_visible && super::filter::is_dir_entry(entry)))
         {
             collect_and_count_into(
                 &sub.entries,
+                depth + 1,
                 args,
                 use_tree_filter,
                 visible,
@@ -326,8 +341,10 @@ mod tests {
         // The summary should count entries at all levels, not just the first
         // level of the compared directories.
         let comp = make_nested_comparison();
-        let (visible, summary) =
-            collect_and_count(&comp.entries, &test_args(), false);
+        let mut args = test_args();
+        // Count the full tree, ignoring the default output depth limit.
+        args.max_depth = None;
+        let (visible, summary) = collect_and_count(&comp.entries, &args, false);
         // Root level: 1 dir + 1 file = 2 entries
         // Sub-level (sub/): 1 same + 1 diff + 1 left_only = 3 entries
         // Total: 5
@@ -343,7 +360,9 @@ mod tests {
         // In tree mode, directories are always shown but children of filtered
         // directories are not counted.
         let comp = make_nested_comparison();
-        let args = test_args();
+        let mut args = test_args();
+        // Count the full tree, ignoring the default output depth limit.
+        args.max_depth = None;
         let (visible, summary) = collect_and_count(&comp.entries, &args, true);
         // Root level: 1 dir + 1 file = 2 entries (all visible with default
         // args) Sub-level (sub/): 3 entries
@@ -373,12 +392,39 @@ mod tests {
         let comp = make_nested_comparison_with_hidden();
         let mut args = test_args();
         args.excl_hidden = true;
+        // Count the full tree, ignoring the default output depth limit.
+        args.max_depth = None;
         let (_visible, summary) =
             collect_and_count(&comp.entries, &args, false);
         // Root: sub/ (Same) + visible.txt (Same) + .hidden_dir/ (filtered out)
         // .hidden_dir/child.txt (passes name filter, counted)
         assert_eq!(summary.total(), 3); // sub, visible.txt, child.txt
         assert_eq!(summary.same_count(), 3);
+    }
+
+    #[test]
+    fn summary_respects_max_depth() {
+        // The default output depth of 1 counts only the top level; a deeper
+        // limit or none counts the nested children as well.
+        let comp = make_nested_comparison();
+        let mut args = test_args();
+        args.max_depth = Some(1);
+        let (visible, summary) = collect_and_count(&comp.entries, &args, false);
+        // Root level only: the sub/ directory row + same.txt.
+        assert_eq!(visible.len(), 2);
+        assert_eq!(summary.total(), 2);
+
+        args.max_depth = Some(2);
+        let (_, summary) = collect_and_count(&comp.entries, &args, false);
+        assert_eq!(summary.total(), 5);
+
+        // The same holds for the tree filter mode.
+        args.max_depth = Some(1);
+        let (_, summary) = collect_and_count(&comp.entries, &args, true);
+        assert_eq!(summary.total(), 2);
+        args.max_depth = None;
+        let (_, summary) = collect_and_count(&comp.entries, &args, true);
+        assert_eq!(summary.total(), 5);
     }
 
     #[test]

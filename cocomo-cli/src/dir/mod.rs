@@ -161,6 +161,7 @@ pub(super) fn build_report_config(args: &DirCompareArgs) -> ReportConfig {
         include_orphans,
         include_subdirectories: true,
         include_file_details: true,
+        max_depth: args.max_depth,
     }
 }
 

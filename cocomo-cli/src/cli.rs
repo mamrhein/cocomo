@@ -101,6 +101,11 @@ pub struct DirCompareArgs {
     pub(crate) left: String,
     /// Right directory path or URL (e.g. `ftp://host/pub/src`).
     pub(crate) right: String,
+    /// Maximum depth of listed entries (0 = none, unlimited with `-m` and no
+    /// value). Restricts the output only; the scan and comparison always
+    /// cover the full tree.
+    #[arg(short = 'm', long, num_args = 0..=1, default_value = "1", require_equals = true)]
+    pub(crate) max_depth: Option<usize>,
     /// Compare file contents (activate content hashing).
     #[arg(short = 'c', long)]
     pub(crate) content: bool,
@@ -377,7 +382,8 @@ impl DirCompareArgs {
     pub(crate) fn test_defaults() -> Self {
         Self {
             left: "./left".to_string(),
-            right: "./right".to_string(),
+            right: "right".to_string(),
+            max_depth: Some(1),
             content: false,
             format: OutputFormat::Text,
             show_different: false,

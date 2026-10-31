@@ -447,6 +447,8 @@ impl ReportDraft {
             include_orphans: self.include_orphans,
             include_subdirectories: self.include_subdirectories,
             include_file_details: self.include_file_details,
+            // The TUI report always covers the full tree.
+            max_depth: None,
         }
     }
 }

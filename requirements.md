@@ -416,6 +416,11 @@ filesystem. The walk is configured to:
 Per-entry traversal errors (e.g., permission denied) are reported individually
 rather than aborting the entire scan.
 
+The scan is not depth-limited and always covers the full tree. The CLI
+`-m` / `--max-depth` option restricts the depth of the _listed_ output only
+(tree, flat list, summary counts, and report); `-m` without a value lists
+without limit, the default lists the top level only.
+
 **Node-based scanning and comparison**: the library provides
 `scan_directory_node()` and `compare_directories_node()` functions that
 operate on the [`NodeFileSystem`] API. These resolve paths to node
