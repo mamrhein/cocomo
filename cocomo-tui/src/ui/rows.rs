@@ -110,6 +110,9 @@ pub(super) fn dir_rows(rows: &[DirRow], theme: &CocomoTheme) -> Vec<CellRow> {
                         row.tree_prefix, display_name
                     )),
                     TableCell::new(left_meta),
+                    // The status color rides on the cell style: the
+                    // themed wrapper composes the selection background
+                    // under it, so the fg survives on the selected row.
                     TableCell::new(entry.status.symbol()).style(status_style),
                     TableCell::new(right_meta),
                 ]),
@@ -285,6 +288,69 @@ mod tests {
     use cocomo_lib::{DirEntry, DirEntryStatus, EntryInfo};
 
     use super::*;
+
+    #[test]
+    fn selected_row_keeps_the_cell_foreground() {
+        use ratatui_kit::{
+            ratatui::{
+                layout::Constraint,
+                style::{Color, Modifier},
+            },
+            test_util::render_frames,
+        };
+
+        use super::super::{
+            session_table::SessionTable, theme::cocomo_palette,
+        };
+
+        let palette = cocomo_palette();
+        let theme = CocomoTheme::default();
+        let style = theme.status_style(DirEntryStatus::Different);
+        let rows = vec![
+            CellRow {
+                index: 0,
+                cells: Arc::from(vec![TableCell::new("alpha").style(style)]),
+            },
+            CellRow {
+                index: 1,
+                cells: Arc::from(vec![TableCell::new("beta").style(style)]),
+            },
+        ];
+        let buf = render_frames(
+            element!(PaletteProvider(palette: palette) {
+                SessionTable(
+                    selected: Some(0),
+                    selection_range: None,
+                    title: "t".to_string(),
+                    columns: vec![TableColumn::new(
+                        "name",
+                        Constraint::Fill(1),
+                    )],
+                    rows: rows,
+                    render_row: None,
+                    empty_message: Line::default(),
+                    on_select: Handler::default(),
+                    on_extend: Handler::default(),
+                )
+            }),
+            40,
+            10,
+            1,
+        );
+        // Body rows start after the block border and the header row.
+        let selected = &buf[(1, 2)];
+        assert_eq!(selected.symbol(), "a");
+        // The selection marks the row by background while the cell's own
+        // foreground (and its bold) survive.
+        assert_eq!(selected.fg, palette.error);
+        assert_eq!(selected.bg, palette.selection);
+        assert!(selected.modifier.contains(Modifier::BOLD));
+        // The unselected row keeps its foreground and no background.
+        let plain = &buf[(1, 3)];
+        assert_eq!(plain.symbol(), "b");
+        assert_eq!(plain.fg, palette.error);
+        assert_eq!(plain.bg, Color::Reset);
+    }
 
     fn file_entry(name: &str) -> DirEntry {
         DirEntry {

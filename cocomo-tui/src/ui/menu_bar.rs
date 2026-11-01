@@ -464,10 +464,10 @@ mod tests {
         // session: dimmed label, no pointer.
         assert_eq!(buf[(rect.x + 3, rect.y + 1)].symbol(), "o");
         assert_eq!(cell(3, 1).fg, Some(cocomo_palette().fg_dim));
-        assert!(!cell(1, 1).add_modifier.contains(Modifier::REVERSED));
+        assert_ne!(cell(1, 1).bg, Some(cocomo_palette().selection));
         // The current row carries the pointer and the highlight style.
         assert_eq!(buf[(rect.x + 1, rect.y + 2)].symbol(), "\u{25b8}");
-        assert!(cell(3, 2).add_modifier.contains(Modifier::REVERSED));
+        assert_eq!(cell(3, 2).bg, Some(cocomo_palette().selection));
         assert_eq!(buf[(rect.x + 3, rect.y + 2)].symbol(), "s");
         // The box is drawn closed on the right, i.e. it is wide enough for
         // its longest label.

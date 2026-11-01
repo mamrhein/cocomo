@@ -46,11 +46,14 @@ pub(super) struct CocomoTheme {
     pub border: Style,
     /// Yellow bold style for panel titles and table headers.
     pub title: Style,
-    /// Reverse-video style for the selected table row.
+    /// Selection-background style for the selected table row. Style it
+    /// with the background only: the native table paints this style *over*
+    /// the already-rendered row, so a foreground (even `Reset`) would
+    /// overwrite the colors the cells bring themselves.
     pub highlight: Style,
-    /// Plain selection-background style for the rows a drag selection
-    /// spans between its anchor and the cursor (the cursor row itself keeps
-    /// the stronger `highlight`).
+    /// Selection-background style for the rows a drag selection spans
+    /// between its anchor and the cursor (same background as `highlight`,
+    /// so a dragged range reads as one continuous selection).
     pub range: Style,
     /// Bold style for the row under the mouse pointer.
     pub hover: Style,
@@ -134,9 +137,7 @@ impl ComponentTheme for CocomoTheme {
             title: Style::new()
                 .fg(palette.accent)
                 .add_modifier(Modifier::BOLD),
-            highlight: Style::new()
-                .bg(palette.selection)
-                .add_modifier(Modifier::REVERSED),
+            highlight: Style::new().bg(palette.selection),
             range: Style::new().bg(palette.selection),
             hover: Style::new().add_modifier(Modifier::BOLD),
             brand: Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
@@ -259,6 +260,11 @@ mod tests {
         assert_eq!(theme.title.fg, Some(Color::Yellow));
         assert_eq!(theme.border.fg, Some(Color::Gray));
         assert_eq!(theme.highlight.bg, Some(Color::DarkGray));
+        // The selection marks the row by background only: the table paints
+        // the highlight over the rendered row, so a foreground there would
+        // overwrite each cell's own color.
+        assert_eq!(theme.highlight.fg, None);
+        assert!(!theme.highlight.add_modifier.contains(Modifier::REVERSED));
         // The semantically classifiable statuses follow the palette.
         assert_eq!(
             theme.status_style(DirEntryStatus::Similar).fg,
