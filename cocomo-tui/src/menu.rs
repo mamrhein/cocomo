@@ -179,11 +179,6 @@ pub const MENUS: &[MenuDef] = &[
         accel: 'v',
         items: &[
             MenuItemDef {
-                label: "hide identical",
-                cmd: Cmd::ToggleHideSame,
-                requires_dir: true,
-            },
-            MenuItemDef {
                 label: "expand directory",
                 cmd: Cmd::ExpandDir,
                 requires_dir: true,
@@ -203,11 +198,6 @@ pub const MENUS: &[MenuDef] = &[
                 cmd: Cmd::CollapseAllDirs,
                 requires_dir: true,
             },
-            MenuItemDef {
-                label: "settings",
-                cmd: Cmd::OpenSettings,
-                requires_dir: true,
-            },
         ],
     },
     MenuDef {
@@ -217,6 +207,11 @@ pub const MENUS: &[MenuDef] = &[
             MenuItemDef {
                 label: "open filter panel",
                 cmd: Cmd::OpenFilterPanel,
+                requires_dir: true,
+            },
+            MenuItemDef {
+                label: "hide identical",
+                cmd: Cmd::ToggleHideSame,
                 requires_dir: true,
             },
             MenuItemDef {
@@ -382,6 +377,28 @@ mod tests {
                 "View menu misses the {cmd:?} item",
             );
         }
+    }
+
+    #[test]
+    fn hide_identical_lives_in_the_filter_menu() {
+        let view = MENUS
+            .iter()
+            .find(|m| m.title == "View")
+            .expect("no View menu");
+        assert!(
+            !view.items.iter().any(|i| i.cmd == Cmd::ToggleHideSame),
+            "View menu still lists the {:?} item",
+            Cmd::ToggleHideSame,
+        );
+        let filter = MENUS
+            .iter()
+            .find(|m| m.title == "Filter")
+            .expect("no Filter menu");
+        assert!(
+            filter.items.iter().any(|i| i.cmd == Cmd::ToggleHideSame),
+            "Filter menu misses the {:?} item",
+            Cmd::ToggleHideSame,
+        );
     }
 
     #[test]

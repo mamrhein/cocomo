@@ -1756,8 +1756,9 @@ mod tests {
     #[test]
     fn confirm_menu_item_runs_the_dir_command_and_closes_the_dropdown() {
         APP_STATE.set(dir_app_state());
-        open_menu(menu_index("View"));
-        // The first View item hides identical entries.
+        open_menu(menu_index("Filter"));
+        // The second Filter item hides identical entries.
+        move_menu_item(1);
         assert_eq!(confirm_menu_item(), MenuOutcome::Handled);
         let state = APP_STATE.state();
         let app = state.read();

@@ -2020,7 +2020,7 @@ mod tests {
     #[test]
     fn run_menu_command_executes_session_commands() {
         let mut session = dir_session();
-        // `View` toggles hiding identical entries and resets the cursor.
+        // `Filter` toggles hiding identical entries and resets the cursor.
         session.ui.table_state.select(Some(2));
         let action = run_menu_command(&mut session, Cmd::ToggleHideSame);
         assert!(matches!(action, SessionAction::None));
