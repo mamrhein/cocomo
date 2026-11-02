@@ -45,9 +45,9 @@ pub fn diff_line_numbers_by_side(
 /// difference group starts. These are the targets for n/N navigation.
 ///
 /// Text sessions group their differing lines into blocks; directory
-/// sessions treat every entry that is not identical (`Same` /
-/// `SameBinary`) as its own group, so n/N step through the differing
-/// entries one by one.
+/// sessions treat every entry whose status carries a non-equal bit
+/// (anything outside `DirEntryStatus::EQUAL`) as its own group, so n/N
+/// step through the differing entries one by one.
 pub fn diff_group_starts(session: &SessionView) -> Vec<usize> {
     match &session.content {
         SessionContent::Dir(_) => session
@@ -55,10 +55,12 @@ pub fn diff_group_starts(session: &SessionView) -> Vec<usize> {
             .iter()
             .enumerate()
             .filter(|(_, row)| {
-                !matches!(
-                    row.entry.status,
-                    DirEntryStatus::Same | DirEntryStatus::SameBinary
-                )
+                // A group counts as a difference when it carries any
+                // non-equal bit.
+                !row.entry
+                    .status
+                    .intersection(!DirEntryStatus::EQUAL)
+                    .is_empty()
             })
             .map(|(i, _)| i)
             .collect(),

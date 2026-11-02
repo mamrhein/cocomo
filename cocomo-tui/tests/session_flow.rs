@@ -52,7 +52,7 @@ fn dir_session() -> SessionView {
         entries: vec![
             DirEntry {
                 name: "sub".into(),
-                status: DirEntryStatus::Different,
+                status: DirEntryStatus::LeftNewer,
                 left: Some(EntryInfo {
                     name: "sub".into(),
                     path: "sub".into(),
@@ -71,7 +71,7 @@ fn dir_session() -> SessionView {
             },
             DirEntry {
                 name: "file.txt".into(),
-                status: DirEntryStatus::LeftOnly,
+                status: DirEntryStatus::LeftOrphan,
                 left: Some(EntryInfo {
                     name: "file.txt".into(),
                     path: "file.txt".into(),
@@ -99,7 +99,7 @@ fn tree_session() -> SessionView {
     );
     let file = |name: &str, path: &str| DirEntry {
         name: name.into(),
-        status: DirEntryStatus::LeftOnly,
+        status: DirEntryStatus::LeftOrphan,
         left: Some(EntryInfo {
             name: name.into(),
             path: path.into(),
@@ -115,7 +115,7 @@ fn tree_session() -> SessionView {
         entries: vec![
             DirEntry {
                 name: "sub".into(),
-                status: DirEntryStatus::Different,
+                status: DirEntryStatus::LeftNewer,
                 left: Some(EntryInfo {
                     name: "sub".into(),
                     path: "sub".into(),

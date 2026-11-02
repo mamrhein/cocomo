@@ -86,20 +86,23 @@ impl ReportConfig {
 }
 
 /// Check whether an entry should be included based on the config.
+///
+/// Inclusion is a mask intersection: the enabled config roles form a
+/// mask, and an entry matches when its status bitmap carries a bit the
+/// report wants to see. Aggregated directory bitmaps match through the
+/// bits of their subtree.
 fn entry_matches(entry: &DirEntry, config: &ReportConfig) -> bool {
-    match entry.status {
-        DirEntryStatus::Same | DirEntryStatus::SameBinary => {
-            config.include_same
-        }
-        DirEntryStatus::Different | DirEntryStatus::Similar => {
-            config.include_different
-        }
-        DirEntryStatus::LeftOnly
-        | DirEntryStatus::RightOnly
-        | DirEntryStatus::CenterOnly => config.include_orphans,
-        // Always include merge/conflict entries.
-        DirEntryStatus::Mergeable | DirEntryStatus::Conflict => true,
+    let mut mask = DirEntryStatus::empty();
+    if config.include_same {
+        mask |= DirEntryStatus::EQUAL;
     }
+    if config.include_different {
+        mask |= DirEntryStatus::DIFFERENT;
+    }
+    if config.include_orphans {
+        mask |= DirEntryStatus::ORPHAN;
+    }
+    entry.status.intersects(mask)
 }
 
 /// Generate a human-readable report string from a comparison result.
@@ -234,7 +237,7 @@ fn writeln_entry_text(
     entry: &DirEntry,
     config: &ReportConfig,
 ) {
-    let status_sym = entry.status.symbol();
+    let status_sym = entry.status.symbol().0;
     let name = &entry.name;
 
     if config.include_file_details {
@@ -530,9 +533,9 @@ mod tests {
     fn config_all_includes_everything() {
         let config = ReportConfig::all();
         let comparison = make_comparison(vec![
-            make_entry("a.txt", DirEntryStatus::Same, 100, Some(100)),
-            make_entry("b.txt", DirEntryStatus::Different, 100, Some(200)),
-            make_entry("c.txt", DirEntryStatus::LeftOnly, 50, None),
+            make_entry("a.txt", DirEntryStatus::Equal, 100, Some(100)),
+            make_entry("b.txt", DirEntryStatus::LeftNewer, 100, Some(200)),
+            make_entry("c.txt", DirEntryStatus::LeftOrphan, 50, None),
         ]);
 
         let report = generate_report(&comparison, ReportFormat::Csv, &config);
@@ -545,9 +548,9 @@ mod tests {
     fn config_differences_only_excludes_same() {
         let config = ReportConfig::differences_only();
         let comparison = make_comparison(vec![
-            make_entry("a.txt", DirEntryStatus::Same, 100, Some(100)),
-            make_entry("b.txt", DirEntryStatus::Different, 100, Some(200)),
-            make_entry("c.txt", DirEntryStatus::RightOnly, 0, Some(50)),
+            make_entry("a.txt", DirEntryStatus::Equal, 100, Some(100)),
+            make_entry("b.txt", DirEntryStatus::LeftNewer, 100, Some(200)),
+            make_entry("c.txt", DirEntryStatus::RightOrphan, 0, Some(50)),
         ]);
 
         let report = generate_report(&comparison, ReportFormat::Csv, &config);
@@ -559,8 +562,8 @@ mod tests {
     #[test]
     fn json_report_contains_summary() {
         let comparison = make_comparison(vec![
-            make_entry("a.txt", DirEntryStatus::Same, 100, Some(100)),
-            make_entry("b.txt", DirEntryStatus::Different, 100, Some(200)),
+            make_entry("a.txt", DirEntryStatus::Equal, 100, Some(100)),
+            make_entry("b.txt", DirEntryStatus::LeftNewer, 100, Some(200)),
         ]);
         let config = ReportConfig::all();
 
@@ -577,7 +580,7 @@ mod tests {
     fn csv_escapes_comma_in_name() {
         let mut entry = make_entry(
             "file,with,commas.txt",
-            DirEntryStatus::Different,
+            DirEntryStatus::LeftNewer,
             100,
             Some(200),
         );

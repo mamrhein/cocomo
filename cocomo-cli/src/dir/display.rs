@@ -10,7 +10,7 @@
 use std::io::IsTerminal;
 
 use chrono::DateTime;
-use cocomo_lib::compare::DirEntryStatus;
+use cocomo_lib::compare::StatusColor;
 
 use crate::cli::ColorMode;
 
@@ -18,8 +18,9 @@ use crate::cli::ColorMode;
 // Display helpers
 // ---------------------------------------------------------------------------
 
-/// Conditionally render text with ANSI color escape codes based on the entry
-/// status. When colors are disabled, returns the text unchanged.
+/// Conditionally render text with ANSI color escape codes based on the
+/// status color role. When colors are disabled, returns the text
+/// unchanged.
 pub(super) struct Colorizer {
     active: bool,
 }
@@ -41,29 +42,25 @@ impl Colorizer {
         self.active
     }
 
-    /// Wrap `text` with ANSI codes appropriate for the given status.
-    pub(super) fn colorize(
-        &self,
-        text: &str,
-        status: DirEntryStatus,
-    ) -> String {
+    /// Wrap `text` with ANSI codes appropriate for the given color role.
+    ///
+    /// The role is resolved from a status bitmap via the lib's
+    /// `DirEntryStatus::symbol`.
+    pub(super) fn colorize(&self, text: &str, role: StatusColor) -> String {
         if !self.active {
             return text.to_string();
         }
-        let code = color_code(status);
+        let code = color_code(role);
         format!("\x1b[{code}m{text}\x1b[0m")
     }
 }
 
-/// Return the ANSI color code for a given comparison status.
-pub(super) fn color_code(status: DirEntryStatus) -> &'static str {
-    match status {
-        DirEntryStatus::Same | DirEntryStatus::SameBinary => "32", // green
-        DirEntryStatus::Similar | DirEntryStatus::Different => "33", // yellow
-        DirEntryStatus::LeftOnly | DirEntryStatus::CenterOnly => "36", // cyan
-        DirEntryStatus::RightOnly => "35",                         // magenta
-        DirEntryStatus::Mergeable => "34",                         // blue
-        DirEntryStatus::Conflict => "31",                          // red
+/// Return the ANSI color code for a status color role.
+pub(super) fn color_code(role: StatusColor) -> &'static str {
+    match role {
+        StatusColor::Equal => "90", // bright black (grey)
+        StatusColor::Different => "31", // red
+        StatusColor::Orphan => "34", // blue
     }
 }
 
@@ -122,7 +119,7 @@ pub(crate) fn format_size(size: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use cocomo_lib::compare::DirEntryStatus;
+    use cocomo_lib::compare::{DirEntryStatus, StatusColor};
 
     use super::{Colorizer, color_code, format_modified, truncate_name};
     use crate::cli::ColorMode;
@@ -131,44 +128,57 @@ mod tests {
     fn colorizer_never_strips_codes() {
         let c = Colorizer::new(ColorMode::Never);
         assert!(!c.is_active());
-        assert_eq!(c.colorize("=", DirEntryStatus::Same), "=");
+        assert_eq!(c.colorize("=", StatusColor::Equal), "=");
     }
 
     #[test]
     fn colorizer_always_adds_codes() {
         let c = Colorizer::new(ColorMode::Always);
         assert!(c.is_active());
-        let result = c.colorize("=", DirEntryStatus::Same);
-        assert!(result.contains("\x1b[32m"));
+        let result = c.colorize("=", StatusColor::Equal);
+        assert!(result.contains("\x1b[90m"));
         assert!(result.ends_with("\x1b[0m"));
     }
 
     #[test]
     fn colorizer_respects_all_status_codes() {
         let c = Colorizer::new(ColorMode::Always);
-        assert_eq!(color_code(DirEntryStatus::Same), "32");
-        assert_eq!(color_code(DirEntryStatus::SameBinary), "32");
-        assert_eq!(color_code(DirEntryStatus::Similar), "33");
-        assert_eq!(color_code(DirEntryStatus::Different), "33");
-        assert_eq!(color_code(DirEntryStatus::LeftOnly), "36");
-        assert_eq!(color_code(DirEntryStatus::RightOnly), "35");
-        assert_eq!(color_code(DirEntryStatus::Mergeable), "34");
-        assert_eq!(color_code(DirEntryStatus::Conflict), "31");
-        assert_eq!(color_code(DirEntryStatus::CenterOnly), "36");
+        assert_eq!(color_code(StatusColor::Equal), "90");
+        assert_eq!(color_code(StatusColor::Different), "31");
+        assert_eq!(color_code(StatusColor::Orphan), "34");
         // Verify the colored output contains the code.
+        assert!(c.colorize("!", StatusColor::Different).contains("\x1b[31m"));
+    }
+
+    #[test]
+    fn colorizer_color_for_orphan_role() {
+        let c = Colorizer::new(ColorMode::Always);
         assert!(
-            c.colorize("X", DirEntryStatus::Conflict)
-                .contains("\x1b[31m")
+            c.colorize("\u{25C0}", StatusColor::Orphan)
+                .contains("\x1b[34m")
         );
     }
 
     #[test]
-    fn colorizer_color_for_center_only() {
-        let c = Colorizer::new(ColorMode::Always);
-        assert!(
-            c.colorize("|", DirEntryStatus::CenterOnly)
-                .contains("\x1b[36m")
-        );
+    fn color_code_follows_status_symbol_role() {
+        // Every status bitmap must colorize via the role its `symbol()`
+        // resolves to.
+        let cases = [
+            (DirEntryStatus::Same, StatusColor::Equal),
+            (DirEntryStatus::Equal, StatusColor::Equal),
+            (DirEntryStatus::LeftNewer, StatusColor::Different),
+            (DirEntryStatus::RightNewer, StatusColor::Different),
+            (DirEntryStatus::DIFFERENT, StatusColor::Different),
+            (
+                DirEntryStatus::Equal | DirEntryStatus::LeftOrphan,
+                StatusColor::Different,
+            ),
+            (DirEntryStatus::LeftOrphan, StatusColor::Orphan),
+            (DirEntryStatus::RightOrphan, StatusColor::Orphan),
+        ];
+        for (status, role) in cases {
+            assert_eq!(status.symbol().1, role, "role mismatch: {status}");
+        }
     }
 
     #[test]

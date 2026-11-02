@@ -39,29 +39,36 @@ pub(super) fn matches_name_filter(
     true
 }
 
+/// Return the status show-mask derived from the `--show-different` and
+/// `--show-orphans` flags. The mask is the set of status bits to show;
+/// when neither flag is set, every status is shown.
+pub(super) fn show_mask(args: &DirCompareArgs) -> DirEntryStatus {
+    let mut mask = DirEntryStatus::empty();
+    if args.show_different {
+        mask |= DirEntryStatus::DIFFERENT;
+    }
+    if args.show_orphans {
+        mask |= DirEntryStatus::ORPHAN;
+    }
+    if mask.is_empty() {
+        DirEntryStatus::all()
+    } else {
+        mask
+    }
+}
+
 /// Check whether an entry passes the status display filters:
 /// `--show-different` and `--show-orphans`.
+///
+/// An entry is shown when its status bitmap carries at least one bit of
+/// the show-mask; for directories this reads the aggregated bitmap, so a
+/// dir survives a differences-only filter exactly when its subtree
+/// contains differences.
 pub(super) fn matches_status_filter(
     entry: &DirEntry,
     args: &DirCompareArgs,
 ) -> bool {
-    if args.show_different && args.show_orphans {
-        return true;
-    }
-
-    if args.show_different {
-        matches!(
-            entry.status,
-            DirEntryStatus::Different | DirEntryStatus::Similar
-        )
-    } else if args.show_orphans {
-        matches!(
-            entry.status,
-            DirEntryStatus::LeftOnly | DirEntryStatus::RightOnly
-        )
-    } else {
-        true
-    }
+    entry.status.intersects(show_mask(args))
 }
 
 /// Check whether an entry should be shown in CSV or JSON output.
@@ -98,13 +105,16 @@ pub(super) fn is_dir_entry(entry: &DirEntry) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use cocomo_lib::compare::{DirEntry, DirEntryStatus, EntryInfo};
+    use cocomo_lib::compare::{
+        DirComparison, DirEntry, DirEntryStatus, EntryInfo,
+    };
 
     use super::{
         super::test_helpers::{
             make_dir_entry, make_hidden_file_entry, make_test_comparison,
         },
-        is_dir_entry, matches_name_filter, should_show_in_tree,
+        is_dir_entry, matches_name_filter, matches_status_filter,
+        should_show_in_tree, show_mask,
     };
     use crate::cli::DirCompareArgs;
 
@@ -112,6 +122,11 @@ mod tests {
     /// for unit tests that need an args instance.
     fn test_args() -> DirCompareArgs {
         DirCompareArgs::test_defaults()
+    }
+
+    /// Look up a fixture entry by name.
+    fn entry_named<'a>(comp: &'a DirComparison, name: &str) -> &'a DirEntry {
+        comp.entries.iter().find(|e| e.name == name).unwrap()
     }
 
     #[test]
@@ -134,7 +149,7 @@ mod tests {
         };
         let entry = DirEntry {
             name: "mydir".to_string(),
-            status: DirEntryStatus::LeftOnly,
+            status: DirEntryStatus::LeftOrphan,
             left: Some(dir_info),
             right: None,
             center: None,
@@ -201,16 +216,127 @@ mod tests {
         let dir_entry = make_dir_entry();
         let mut args = test_args();
         args.show_different = true;
-        // A directory with LeftOnly status should be shown in tree mode even
-        // though LeftOnly is not a "different" status.
+        // A directory with LeftOrphan status should be shown in tree mode
+        // even though LeftOrphan is not a difference status.
         assert!(should_show_in_tree(&dir_entry, &args));
+    }
+
+    #[test]
+    fn status_filter_without_flags_shows_every_status() {
+        let comp = make_test_comparison();
+        let args = test_args();
+        assert_eq!(show_mask(&args), DirEntryStatus::all());
+        for entry in &comp.entries {
+            assert!(matches_status_filter(entry, &args), "{}", entry.name);
+        }
+    }
+
+    #[test]
+    fn status_filter_show_different_keeps_only_differences() {
+        let comp = make_test_comparison();
+        let mut args = test_args();
+        args.show_different = true;
+        assert!(matches_status_filter(entry_named(&comp, "diff.txt"), &args));
+        assert!(!matches_status_filter(
+            entry_named(&comp, "same.txt"),
+            &args
+        ));
+        assert!(!matches_status_filter(
+            entry_named(&comp, "only_left.txt"),
+            &args
+        ));
+        assert!(!matches_status_filter(
+            entry_named(&comp, "only_right.txt"),
+            &args
+        ));
+    }
+
+    #[test]
+    fn status_filter_show_orphans_keeps_only_orphans() {
+        let comp = make_test_comparison();
+        let mut args = test_args();
+        args.show_orphans = true;
+        assert!(matches_status_filter(
+            entry_named(&comp, "only_left.txt"),
+            &args
+        ));
+        assert!(matches_status_filter(
+            entry_named(&comp, "only_right.txt"),
+            &args
+        ));
+        assert!(!matches_status_filter(
+            entry_named(&comp, "same.txt"),
+            &args
+        ));
+        assert!(!matches_status_filter(
+            entry_named(&comp, "diff.txt"),
+            &args
+        ));
+    }
+
+    #[test]
+    fn status_filter_both_flags_show_differences_and_orphans() {
+        // With both flags the mask is the union of the DIFFERENT and
+        // ORPHAN bits; equal entries stay hidden.
+        let comp = make_test_comparison();
+        let mut args = test_args();
+        args.show_different = true;
+        args.show_orphans = true;
+        assert_eq!(
+            show_mask(&args),
+            DirEntryStatus::DIFFERENT | DirEntryStatus::ORPHAN
+        );
+        assert!(matches_status_filter(entry_named(&comp, "diff.txt"), &args));
+        assert!(matches_status_filter(
+            entry_named(&comp, "only_left.txt"),
+            &args
+        ));
+        assert!(!matches_status_filter(
+            entry_named(&comp, "same.txt"),
+            &args
+        ));
+    }
+
+    #[test]
+    fn status_filter_matches_aggregated_dir_bitmaps() {
+        // A dir whose aggregated bitmap mixes an equal base with an
+        // orphan child survives the orphan filter.
+        let dir_entry = DirEntry {
+            name: "sub".to_string(),
+            status: DirEntryStatus::Equal | DirEntryStatus::LeftOrphan,
+            left: Some(EntryInfo {
+                name: "sub".to_string(),
+                path: "sub".to_string(),
+                size: 4096,
+                modified: "2024-03-15 14:30".to_string(),
+                is_dir: true,
+                hash: None,
+            }),
+            right: Some(EntryInfo {
+                name: "sub".to_string(),
+                path: "sub".to_string(),
+                size: 4096,
+                modified: "2024-03-15 14:30".to_string(),
+                is_dir: true,
+                hash: None,
+            }),
+            center: None,
+            sub_entries: None,
+            name_conflict: false,
+        };
+        let mut args = test_args();
+        args.show_orphans = true;
+        assert!(matches_status_filter(&dir_entry, &args));
+        args.show_orphans = false;
+        args.show_different = true;
+        assert!(!matches_status_filter(&dir_entry, &args));
     }
 
     #[test]
     fn should_show_in_tree_excludes_hidden_dirs() {
         let hidden_dir = DirEntry {
             name: ".git".to_string(),
-            status: DirEntryStatus::LeftOnly,
+            status: DirEntryStatus::LeftOrphan,
             left: Some(EntryInfo {
                 name: ".git".to_string(),
                 path: ".git".to_string(),

@@ -59,16 +59,16 @@ pub(super) fn make_test_comparison() -> DirComparison {
     };
 
     let mut counts = HashMap::new();
-    counts.insert(DirEntryStatus::Same, 1);
-    counts.insert(DirEntryStatus::Different, 1);
-    counts.insert(DirEntryStatus::LeftOnly, 1);
-    counts.insert(DirEntryStatus::RightOnly, 1);
+    counts.insert(DirEntryStatus::Equal, 1);
+    counts.insert(DirEntryStatus::DIFFERENT, 1);
+    counts.insert(DirEntryStatus::LeftOrphan, 1);
+    counts.insert(DirEntryStatus::RightOrphan, 1);
 
     DirComparison {
         entries: vec![
             DirEntry {
                 name: "same.txt".to_string(),
-                status: DirEntryStatus::Same,
+                status: DirEntryStatus::Equal,
                 left: Some(same.clone()),
                 right: Some(same),
                 center: None,
@@ -77,7 +77,8 @@ pub(super) fn make_test_comparison() -> DirComparison {
             },
             DirEntry {
                 name: "diff.txt".to_string(),
-                status: DirEntryStatus::Different,
+                // Differing content with equal modification dates.
+                status: DirEntryStatus::DIFFERENT,
                 left: Some(diff.clone()),
                 right: Some(diff_right),
                 center: None,
@@ -86,7 +87,7 @@ pub(super) fn make_test_comparison() -> DirComparison {
             },
             DirEntry {
                 name: "only_left.txt".to_string(),
-                status: DirEntryStatus::LeftOnly,
+                status: DirEntryStatus::LeftOrphan,
                 left: Some(left_only),
                 right: None,
                 center: None,
@@ -95,7 +96,7 @@ pub(super) fn make_test_comparison() -> DirComparison {
             },
             DirEntry {
                 name: "only_right.txt".to_string(),
-                status: DirEntryStatus::RightOnly,
+                status: DirEntryStatus::RightOrphan,
                 left: None,
                 right: Some(right_only),
                 center: None,
@@ -112,7 +113,7 @@ pub(super) fn make_test_comparison() -> DirComparison {
 pub(super) fn make_hidden_file_entry() -> DirEntry {
     DirEntry {
         name: ".hidden.txt".to_string(),
-        status: DirEntryStatus::Same,
+        status: DirEntryStatus::Equal,
         left: Some(EntryInfo {
             name: ".hidden.txt".to_string(),
             path: ".hidden.txt".to_string(),
@@ -139,7 +140,7 @@ pub(super) fn make_hidden_file_entry() -> DirEntry {
 pub(super) fn make_dir_entry() -> DirEntry {
     DirEntry {
         name: "mydir".to_string(),
-        status: DirEntryStatus::LeftOnly,
+        status: DirEntryStatus::LeftOrphan,
         left: Some(EntryInfo {
             name: "mydir".to_string(),
             path: "mydir".to_string(),
@@ -204,7 +205,7 @@ pub(super) fn make_nested_comparison() -> DirComparison {
         entries: vec![
             DirEntry {
                 name: "same.txt".to_string(),
-                status: DirEntryStatus::Same,
+                status: DirEntryStatus::Equal,
                 left: Some(sub_same.clone()),
                 right: Some(sub_same),
                 center: None,
@@ -213,7 +214,8 @@ pub(super) fn make_nested_comparison() -> DirComparison {
             },
             DirEntry {
                 name: "diff.txt".to_string(),
-                status: DirEntryStatus::Different,
+                // Differing content with equal modification dates.
+                status: DirEntryStatus::DIFFERENT,
                 left: Some(sub_diff_left),
                 right: Some(sub_diff_right),
                 center: None,
@@ -222,7 +224,7 @@ pub(super) fn make_nested_comparison() -> DirComparison {
             },
             DirEntry {
                 name: "only_left.txt".to_string(),
-                status: DirEntryStatus::LeftOnly,
+                status: DirEntryStatus::LeftOrphan,
                 left: Some(sub_left_only),
                 right: None,
                 center: None,
@@ -247,7 +249,8 @@ pub(super) fn make_nested_comparison() -> DirComparison {
         entries: vec![
             DirEntry {
                 name: "sub".to_string(),
-                status: DirEntryStatus::Same,
+                // Base bitmap of a shared directory.
+                status: DirEntryStatus::Equal,
                 left: Some(dir_info.clone()),
                 right: Some(dir_info.clone()),
                 center: None,
@@ -256,7 +259,7 @@ pub(super) fn make_nested_comparison() -> DirComparison {
             },
             DirEntry {
                 name: "same.txt".to_string(),
-                status: DirEntryStatus::Same,
+                status: DirEntryStatus::Equal,
                 left: Some(same.clone()),
                 right: Some(same),
                 center: None,
@@ -308,7 +311,7 @@ pub(super) fn make_nested_comparison_with_hidden() -> DirComparison {
     let hidden_sub = DirComparison {
         entries: vec![DirEntry {
             name: "child.txt".to_string(),
-            status: DirEntryStatus::Same,
+            status: DirEntryStatus::Equal,
             left: Some(child_file),
             right: Some(EntryInfo {
                 name: "child.txt".to_string(),
@@ -335,7 +338,8 @@ pub(super) fn make_nested_comparison_with_hidden() -> DirComparison {
         entries: vec![
             DirEntry {
                 name: ".hidden_dir".to_string(),
-                status: DirEntryStatus::Same,
+                // Base bitmap of a shared directory.
+                status: DirEntryStatus::Equal,
                 left: Some(hidden_dir),
                 right: Some(EntryInfo {
                     name: ".hidden_dir".to_string(),
@@ -351,7 +355,8 @@ pub(super) fn make_nested_comparison_with_hidden() -> DirComparison {
             },
             DirEntry {
                 name: "sub".to_string(),
-                status: DirEntryStatus::Same,
+                // Base bitmap of a shared directory.
+                status: DirEntryStatus::Equal,
                 left: Some(visible_dir),
                 right: Some(EntryInfo {
                     name: "sub".to_string(),
@@ -367,7 +372,7 @@ pub(super) fn make_nested_comparison_with_hidden() -> DirComparison {
             },
             DirEntry {
                 name: "visible.txt".to_string(),
-                status: DirEntryStatus::Same,
+                status: DirEntryStatus::Equal,
                 left: Some(visible_file),
                 right: Some(EntryInfo {
                     name: "visible.txt".to_string(),

@@ -357,7 +357,7 @@ fn entry_lines(entry: &DirEntry, theme: &CocomoTheme) -> Vec<Line<'static>> {
         Line::from(vec![
             meta(entry.left.as_ref(), theme.left_name),
             Span::styled(
-                format!(" {} ", entry.status.symbol()),
+                format!(" {} ", entry.status.symbol().0),
                 theme.status_style(entry.status),
             ),
             meta(entry.right.as_ref(), theme.right_name),

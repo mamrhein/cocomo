@@ -938,8 +938,7 @@ fn build_row_menu(
     window: &mut Window,
     cx: &mut gpui::Context<TableState<FolderTableDelegate>>,
 ) -> PopupMenu {
-    let differs = row.status != DirEntryStatus::Same
-        && row.status != DirEntryStatus::SameBinary;
+    let differs = !row.status.intersection(!DirEntryStatus::EQUAL).is_empty();
     let mut menu = menu
         .menu("Open", row.open_action())
         .menu("Quick Compare", Box::new(QuickCompare));
@@ -1139,7 +1138,7 @@ mod tests {
     ) {
         let entry = entry(
             "orphan.txt",
-            DirEntryStatus::LeftOnly,
+            DirEntryStatus::LeftOrphan,
             Some(info("orphan.txt", false)),
             None,
         );
@@ -1167,7 +1166,7 @@ mod tests {
     fn open_action_opens_file_diff_with_both_sides(cx: &mut TestAppContext) {
         let entry = entry(
             "a.txt",
-            DirEntryStatus::Different,
+            DirEntryStatus::DIFFERENT,
             Some(info("a.txt", false)),
             Some(info("a.txt", false)),
         );
@@ -1182,7 +1181,7 @@ mod tests {
     fn open_action_omits_missing_right_side(cx: &mut TestAppContext) {
         let entry = entry(
             "only-left.txt",
-            DirEntryStatus::LeftOnly,
+            DirEntryStatus::LeftOrphan,
             Some(info("only-left.txt", false)),
             None,
         );
@@ -1200,7 +1199,7 @@ mod tests {
         let mut right = info("a.txt", false);
         right.size = 20;
         let entry =
-            entry("a.txt", DirEntryStatus::Different, Some(left), Some(right));
+            entry("a.txt", DirEntryStatus::DIFFERENT, Some(left), Some(right));
         let data = row(&entry, cx);
         assert_eq!(data.left_size, Some(10));
         assert_eq!(data.right_size, Some(20));
@@ -1210,7 +1209,7 @@ mod tests {
     fn table_row_marks_the_absent_side_of_an_orphan(cx: &mut TestAppContext) {
         let entry = entry(
             "orphan.txt",
-            DirEntryStatus::LeftOnly,
+            DirEntryStatus::LeftOrphan,
             Some(info("orphan.txt", false)),
             None,
         );
@@ -1221,26 +1220,26 @@ mod tests {
 
     #[gpui::test]
     fn orphan_rows_have_no_status_symbol(cx: &mut TestAppContext) {
-        let left_only = entry(
+        let left_orphan = entry(
             "orphan.txt",
-            DirEntryStatus::LeftOnly,
+            DirEntryStatus::LeftOrphan,
             Some(info("orphan.txt", false)),
             None,
         );
-        assert_eq!(row(&left_only, cx).status_symbol, "");
+        assert_eq!(row(&left_orphan, cx).status_symbol, "");
 
-        let right_only = entry(
+        let right_orphan = entry(
             "orphan.txt",
-            DirEntryStatus::RightOnly,
+            DirEntryStatus::RightOrphan,
             None,
             Some(info("orphan.txt", false)),
         );
-        assert_eq!(row(&right_only, cx).status_symbol, "");
+        assert_eq!(row(&right_orphan, cx).status_symbol, "");
 
         // A matched difference still carries its glyph.
         let different = entry(
             "a.txt",
-            DirEntryStatus::Different,
+            DirEntryStatus::DIFFERENT,
             Some(info("a.txt", false)),
             Some(info("a.txt", false)),
         );

@@ -26,7 +26,7 @@ use cocomo_lib::{
 use gpui::{App, Context, FocusHandle, SharedString};
 
 use crate::{
-    color::{Side, newer_side},
+    color::Side,
     log::{self, LogLevel},
 };
 
@@ -61,7 +61,9 @@ pub enum SortKey {
 
 /// Coarse category an entry belongs to for display filtering.
 ///
-/// The three categories partition every [`DirEntryStatus`], so the filter
+/// The three categories cover every [`DirEntryStatus`] bitmap; because an
+/// aggregated directory bitmap can match more than one mask, the category
+/// is resolved by precedence (see [`status_category`]) so the filter
 /// toggles and the status-bar summary counts always agree on where an
 /// entry is counted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -75,18 +77,18 @@ pub enum StatusCategory {
 }
 
 /// Map an entry status to its display-filter category.
+///
+/// A status bitmap can intersect several masks (an aggregated directory
+/// carries, e.g., `Equal | LeftOrphan`), so the most informative category
+/// wins with precedence Different > Orphan > Same: a state the user can
+/// act on outranks one-sided content, which in turn outranks equality.
 pub fn status_category(status: &DirEntryStatus) -> StatusCategory {
-    match status {
-        DirEntryStatus::Same | DirEntryStatus::SameBinary => {
-            StatusCategory::Same
-        }
-        DirEntryStatus::Similar
-        | DirEntryStatus::Different
-        | DirEntryStatus::Mergeable
-        | DirEntryStatus::Conflict => StatusCategory::Different,
-        DirEntryStatus::LeftOnly
-        | DirEntryStatus::RightOnly
-        | DirEntryStatus::CenterOnly => StatusCategory::Orphan,
+    if status.intersects(DirEntryStatus::DIFFERENT) {
+        StatusCategory::Different
+    } else if status.intersects(DirEntryStatus::ORPHAN) {
+        StatusCategory::Orphan
+    } else {
+        StatusCategory::Same
     }
 }
 
@@ -185,81 +187,25 @@ impl FilterPreset {
 
     /// The display filters this preset selects.
     pub fn filters(self) -> DisplayFilters {
-        match self {
-            Self::All => DisplayFilters::default(),
-            Self::NoOrphans => DisplayFilters {
-                show_same: true,
-                show_different: true,
-                show_orphans: false,
-                ..DisplayFilters::default()
-            },
-            Self::NoSame => DisplayFilters {
-                show_same: false,
-                show_different: true,
-                show_orphans: true,
-                ..DisplayFilters::default()
-            },
-            Self::DiffNoOrphans => DisplayFilters {
-                show_same: false,
-                show_different: true,
-                show_orphans: false,
-                ..DisplayFilters::default()
-            },
-            Self::SameOnly => DisplayFilters {
-                show_same: true,
-                show_different: false,
-                show_orphans: false,
-                ..DisplayFilters::default()
-            },
-            Self::OrphansOnly => DisplayFilters {
-                show_same: false,
-                show_different: false,
-                show_orphans: true,
-                ..DisplayFilters::default()
-            },
-            Self::LeftNewer => DisplayFilters {
-                show_same: false,
-                show_different: true,
-                show_orphans: false,
-                newer_side: Some(Side::Left),
-                ..DisplayFilters::default()
-            },
-            Self::RightNewer => DisplayFilters {
-                show_same: false,
-                show_different: true,
-                show_orphans: false,
-                newer_side: Some(Side::Right),
-                ..DisplayFilters::default()
-            },
-            Self::LeftOrphans => DisplayFilters {
-                show_same: false,
-                show_different: false,
-                show_orphans: true,
-                orphan_side: Some(Side::Left),
-                ..DisplayFilters::default()
-            },
-            Self::RightOrphans => DisplayFilters {
-                show_same: false,
-                show_different: false,
-                show_orphans: true,
-                orphan_side: Some(Side::Right),
-                ..DisplayFilters::default()
-            },
-            Self::LeftNewerAndOrphans => DisplayFilters {
-                show_same: false,
-                show_different: true,
-                show_orphans: true,
-                newer_side: Some(Side::Left),
-                orphan_side: Some(Side::Left),
-            },
-            Self::RightNewerAndOrphans => DisplayFilters {
-                show_same: false,
-                show_different: true,
-                show_orphans: true,
-                newer_side: Some(Side::Right),
-                orphan_side: Some(Side::Right),
-            },
-        }
+        let show_statuses = match self {
+            Self::All => DirEntryStatus::all(),
+            Self::NoOrphans => DirEntryStatus::all() ^ DirEntryStatus::ORPHAN,
+            Self::NoSame => DirEntryStatus::all() ^ DirEntryStatus::EQUAL,
+            Self::DiffNoOrphans => DirEntryStatus::DIFFERENT,
+            Self::SameOnly => DirEntryStatus::EQUAL,
+            Self::OrphansOnly => DirEntryStatus::ORPHAN,
+            Self::LeftNewer => DirEntryStatus::LeftNewer,
+            Self::RightNewer => DirEntryStatus::RightNewer,
+            Self::LeftOrphans => DirEntryStatus::LeftOrphan,
+            Self::RightOrphans => DirEntryStatus::RightOrphan,
+            Self::LeftNewerAndOrphans => {
+                DirEntryStatus::LeftNewer | DirEntryStatus::LeftOrphan
+            }
+            Self::RightNewerAndOrphans => {
+                DirEntryStatus::RightNewer | DirEntryStatus::RightOrphan
+            }
+        };
+        DisplayFilters { show_statuses }
     }
 
     /// The preset whose filters equal `filters`, or `None` when the
@@ -271,71 +217,35 @@ impl FilterPreset {
     }
 }
 
-/// Which entry categories the table displays.
+/// Which entry statuses the table displays.
 ///
-/// Filters are display-only: the underlying comparison and the summary
-/// counts of hidden categories stay intact, so toggling a filter is
-/// always reversible without re-comparing.
+/// The mask is the set of status bits to show; an entry is visible when
+/// its status bitmap intersects the mask. Filters are display-only: the
+/// underlying comparison and the summary counts of hidden categories stay
+/// intact, so toggling a filter is always reversible without
+/// re-comparing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DisplayFilters {
-    /// Show entries that match on both sides.
-    pub show_same: bool,
-    /// Show entries that exist on both sides but differ.
-    pub show_different: bool,
-    /// Show entries that exist on only one side.
-    pub show_orphans: bool,
-    /// Restrict differing entries to the given newer side (`None`: both
-    /// sides match).
-    pub newer_side: Option<Side>,
-    /// Restrict orphans to the given side (`None`: both sides match).
-    pub orphan_side: Option<Side>,
+    /// The set of status bits to show.
+    pub show_statuses: DirEntryStatus,
 }
 
 impl Default for DisplayFilters {
     fn default() -> Self {
         Self {
-            show_same: true,
-            show_different: true,
-            show_orphans: true,
-            newer_side: None,
-            orphan_side: None,
+            show_statuses: DirEntryStatus::all(),
         }
     }
 }
 
 impl DisplayFilters {
-    /// Whether entries of `category` appear in the table.
-    pub fn shows(&self, category: StatusCategory) -> bool {
-        match category {
-            StatusCategory::Same => self.show_same,
-            StatusCategory::Different => self.show_different,
-            StatusCategory::Orphan => self.show_orphans,
-        }
-    }
-
     /// Whether `entry` appears in the table under these filters.
     ///
-    /// Beyond the coarse category, the directional presets narrow
-    /// differing entries by their newer side and orphans by the side
-    /// they exist on. A differing entry whose newer side cannot be
-    /// determined (equal or unparseable stamps) never matches a
-    /// directional preset.
+    /// For directory entries this reads the aggregated bitmap, so a dir
+    /// survives a "differences only" filter exactly when its subtree
+    /// carries a shown status bit.
     pub fn shows_entry(&self, entry: &DirEntry) -> bool {
-        let category = status_category(&entry.status);
-        if !self.shows(category) {
-            return false;
-        }
-        match category {
-            StatusCategory::Same => true,
-            StatusCategory::Different => self
-                .newer_side
-                .is_none_or(|side| newer_side(entry) == Some(side)),
-            StatusCategory::Orphan => match self.orphan_side {
-                None => true,
-                Some(Side::Left) => entry.status == DirEntryStatus::LeftOnly,
-                Some(Side::Right) => entry.status == DirEntryStatus::RightOnly,
-            },
-        }
+        !entry.status.intersection(self.show_statuses).is_empty()
     }
 }
 
@@ -696,10 +606,11 @@ fn collect_sync_items(
             continue;
         }
         let is_dir = entry_is_dir(entry);
-        let differs = !matches!(
-            entry.status,
-            DirEntryStatus::Same | DirEntryStatus::SameBinary
-        );
+        // A two-sided directory is never copied as a whole: its aggregated
+        // bitmap carries the subtree's bits, but the subtree walk below
+        // syncs the differing children individually.
+        let differs =
+            !is_dir && entry.status.intersects(DirEntryStatus::DIFFERENT);
         let to_right = matches!(
             kind,
             SyncKind::UpdateRight
@@ -712,7 +623,9 @@ fn collect_sync_items(
         );
         if to_right {
             match (&entry.left, &entry.right) {
-                (Some(l), Some(r)) if differs && newer_to_right(l, r) => {
+                (Some(l), Some(_))
+                    if differs && left_is_source(&entry.status) =>
+                {
                     items.push(TransferItem::new(
                         TransferAction::CopyRight,
                         entry.name.clone(),
@@ -731,7 +644,9 @@ fn collect_sync_items(
         }
         if to_left {
             match (&entry.left, &entry.right) {
-                (Some(l), Some(r)) if differs && !newer_to_right(l, r) => {
+                (Some(_), Some(r))
+                    if differs && !left_is_source(&entry.status) =>
+                {
                     items.push(TransferItem::new(
                         TransferAction::CopyLeft,
                         entry.name.clone(),
@@ -779,20 +694,14 @@ fn collect_sync_items(
 /// Whether the left side of a differing pair is the newer source when
 /// syncing toward the right.
 ///
-/// With a determinable newer side, only that direction syncs; without
-/// one (equal or unparseable stamps) the left is taken as the source so
-/// an update run still converges.
-fn newer_to_right(
-    left: &cocomo_lib::EntryInfo,
-    right: &cocomo_lib::EntryInfo,
-) -> bool {
-    match (
-        crate::color::parse_modified(&left.modified),
-        crate::color::parse_modified(&right.modified),
-    ) {
-        (Some(l), Some(r)) => l >= r,
-        _ => true,
-    }
+/// The newer bits carry the comparison's verdict: only an entry whose
+/// right side alone is newer syncs toward the left. Every other
+/// difference (including the exact `DIFFERENT` combination of equal
+/// dates) keeps the left as the source so an update run still
+/// converges.
+fn left_is_source(status: &DirEntryStatus) -> bool {
+    !status.contains(DirEntryStatus::RightNewer)
+        || status.contains(DirEntryStatus::LeftNewer)
 }
 
 /// A transfer the UI can run on the selected entry, with the labels and
@@ -863,15 +772,10 @@ pub(crate) fn transfer_plan_for(
             "Deleting from right…",
             "Deleted from the right",
         ),
-        // 3-way merge actions belong to the merge view.
-        TransferAction::CopyCenter => return None,
     };
-    // Identical entries need no reconciliation; copying them would only
-    // rewrite equal content.
-    if matches!(
-        entry.status,
-        DirEntryStatus::Same | DirEntryStatus::SameBinary
-    ) {
+    // Entries equal on both sides need no reconciliation; copying them
+    // would only rewrite equal content.
+    if entry.status.intersection(!DirEntryStatus::EQUAL).is_empty() {
         return None;
     }
     Some(TransferPlan {
@@ -2384,11 +2288,12 @@ impl AppState {
         category: StatusCategory,
         cx: &mut Context<Self>,
     ) {
-        match category {
-            StatusCategory::Same => self.filters.show_same ^= true,
-            StatusCategory::Different => self.filters.show_different ^= true,
-            StatusCategory::Orphan => self.filters.show_orphans ^= true,
-        }
+        let mask = match category {
+            StatusCategory::Same => DirEntryStatus::EQUAL,
+            StatusCategory::Different => DirEntryStatus::DIFFERENT,
+            StatusCategory::Orphan => DirEntryStatus::ORPHAN,
+        };
+        self.filters.show_statuses ^= mask;
         let selected_name = self.selected_entry().map(|e| e.name.clone());
         self.recompute_display_order();
         self.selected_index = selected_name
@@ -2756,7 +2661,7 @@ mod tests {
         vec![
             entry(
                 "delta.txt",
-                DirEntryStatus::Different,
+                DirEntryStatus::RightNewer,
                 Some(info("delta.txt", 300, "2026-01-03T10:00:00+00:00")),
                 Some(info("delta.txt", 400, "2026-01-04T10:00:00+00:00")),
             ),
@@ -2768,13 +2673,13 @@ mod tests {
             ),
             entry(
                 "charlie.txt",
-                DirEntryStatus::LeftOnly,
+                DirEntryStatus::LeftOrphan,
                 Some(info("charlie.txt", 200, "2026-01-02T10:00:00+00:00")),
                 None,
             ),
             entry(
                 "bravo.txt",
-                DirEntryStatus::RightOnly,
+                DirEntryStatus::RightOrphan,
                 None,
                 Some(info("bravo.txt", 500, "2026-01-05T10:00:00+00:00")),
             ),
@@ -2815,7 +2720,8 @@ mod tests {
             false,
             &DisplayFilters::default(),
         );
-        // DirEntryStatus order: Same < Different < LeftOnly < RightOnly.
+        // DirEntryStatus order follows the raw bits: Same < RightNewer
+        // < LeftOrphan < RightOrphan.
         assert_eq!(
             names_in_order(&entries, &asc),
             ["Alpha.txt", "delta.txt", "charlie.txt", "bravo.txt"]
@@ -2866,10 +2772,7 @@ mod tests {
     fn filters_exclude_hidden_categories_from_the_display_order() {
         let entries = sample_entries();
         let filters = DisplayFilters {
-            show_same: false,
-            show_different: true,
-            show_orphans: true,
-            ..DisplayFilters::default()
+            show_statuses: DirEntryStatus::all() ^ DirEntryStatus::EQUAL,
         };
         let order =
             compute_display_order(&entries, SortKey::Name, false, &filters);
@@ -3130,8 +3033,7 @@ mod tests {
 
         state.update(cx, |state, cx| {
             assert_eq!(state.filter_preset(), Some(FilterPreset::All));
-            // Name ascending: delta.txt (Different, right newer) is the
-            // fourth row.
+            // Name ascending: delta.txt (RightNewer) is the fourth row.
             state.select_row(3, cx);
             state.set_filter_preset(FilterPreset::RightNewer, cx);
 
@@ -3164,8 +3066,8 @@ mod tests {
         });
 
         state.update(cx, |state, cx| {
-            // Name ascending: Alpha.txt (Same), bravo.txt (RightOnly),
-            // charlie.txt (LeftOnly), delta.txt (Different).
+            // Name ascending: Alpha.txt (Same), bravo.txt (RightOrphan),
+            // charlie.txt (LeftOrphan), delta.txt (RightNewer).
             state.select_row(0, cx);
 
             state.select_next_difference(cx);
@@ -3222,7 +3124,7 @@ mod tests {
         });
         state.update(cx, |state, cx| {
             state.toggle_filter(StatusCategory::Orphan, cx);
-            // Visible: Alpha.txt (Same), delta.txt (Different).
+            // Visible: Alpha.txt (Same), delta.txt (RightNewer).
             state.select_row(0, cx);
             state.select_next_difference(cx);
             assert_eq!(state.selected_entry().unwrap().name, "delta.txt");
@@ -3311,7 +3213,7 @@ mod tests {
         // A missing side falls back to the entry name.
         let orphan = entry(
             "only.txt",
-            DirEntryStatus::LeftOnly,
+            DirEntryStatus::LeftOrphan,
             Some(info("only.txt", 1, "")),
             None,
         );
@@ -3321,38 +3223,39 @@ mod tests {
 
     #[test]
     fn transfer_plan_maps_orphans_without_confirmation() {
-        let right_only = entry(
+        let right_orphan = entry(
             "new.txt",
-            DirEntryStatus::RightOnly,
+            DirEntryStatus::RightOrphan,
             None,
             Some(info("nested/new.txt", 7, "")),
         );
-        let plan =
-            transfer_plan_for(&right_only, TransferAction::CopyLeft).unwrap();
+        let plan = transfer_plan_for(&right_orphan, TransferAction::CopyLeft)
+            .unwrap();
         assert_eq!(plan.item.action, TransferAction::CopyLeft);
         assert_eq!(plan.item.name, "new.txt");
         assert_eq!(plan.item.rel_path, "nested/new.txt");
         assert!(!plan.confirm);
 
-        let left_only = entry(
+        let left_orphan = entry(
             "old.txt",
-            DirEntryStatus::LeftOnly,
+            DirEntryStatus::LeftOrphan,
             Some(info("old.txt", 3, "")),
             None,
         );
-        let plan =
-            transfer_plan_for(&left_only, TransferAction::CopyRight).unwrap();
+        let plan = transfer_plan_for(&left_orphan, TransferAction::CopyRight)
+            .unwrap();
         assert_eq!(plan.item.action, TransferAction::CopyRight);
         assert_eq!(plan.item.rel_path, "old.txt");
         assert!(!plan.confirm);
 
         // The reverse directions have no source on the missing side.
         assert!(
-            transfer_plan_for(&right_only, TransferAction::CopyRight)
+            transfer_plan_for(&right_orphan, TransferAction::CopyRight)
                 .is_none()
         );
         assert!(
-            transfer_plan_for(&left_only, TransferAction::CopyLeft).is_none()
+            transfer_plan_for(&left_orphan, TransferAction::CopyLeft)
+                .is_none()
         );
     }
 
@@ -3360,7 +3263,7 @@ mod tests {
     fn transfer_plan_offers_overwrite_copies_for_differing_entries() {
         let different = entry(
             "both.txt",
-            DirEntryStatus::Different,
+            DirEntryStatus::DIFFERENT,
             Some(info("both.txt", 1, "")),
             Some(info("both.txt", 2, "")),
         );
@@ -3406,7 +3309,7 @@ mod tests {
         // their orphan statuses would map to a copy direction.
         let mut file_half = entry(
             "notes",
-            DirEntryStatus::LeftOnly,
+            DirEntryStatus::LeftOrphan,
             Some(info("notes", 4, "")),
             None,
         );
@@ -3417,7 +3320,7 @@ mod tests {
 
         let mut dir_half = entry(
             "notes",
-            DirEntryStatus::RightOnly,
+            DirEntryStatus::RightOrphan,
             None,
             Some(info("notes", 4096, "")),
         );
@@ -3443,7 +3346,7 @@ mod tests {
         });
 
         state.update(cx, |state, _cx| {
-            // Name ascending: row 2 is charlie.txt (LeftOnly). Asking to
+            // Name ascending: row 2 is charlie.txt (LeftOrphan). Asking to
             // copy it to the left has no plan, so nothing can run in the
             // wrong direction.
             state.select_row(2, _cx);
@@ -3552,7 +3455,7 @@ mod tests {
                 ),
                 entry(
                     "lonely",
-                    DirEntryStatus::LeftOnly,
+                    DirEntryStatus::LeftOrphan,
                     Some(dir_info("lonely")),
                     None,
                 ),
@@ -3767,20 +3670,20 @@ mod tests {
     fn sync_plan_collects_items_over_the_whole_tree() {
         let sub = comparison(vec![entry(
             "sub/new.txt",
-            DirEntryStatus::RightOnly,
+            DirEntryStatus::RightOrphan,
             None,
             Some(info("sub/new.txt", 1, "")),
         )]);
         let root = comparison(vec![
             entry(
                 "only-left.txt",
-                DirEntryStatus::LeftOnly,
+                DirEntryStatus::LeftOrphan,
                 Some(info("only-left.txt", 1, "")),
                 None,
             ),
             entry(
                 "only-right.txt",
-                DirEntryStatus::RightOnly,
+                DirEntryStatus::RightOrphan,
                 None,
                 Some(info("only-right.txt", 1, "")),
             ),
@@ -3838,13 +3741,13 @@ mod tests {
                 ),
                 entry(
                     "b.txt",
-                    DirEntryStatus::Different,
+                    DirEntryStatus::DIFFERENT,
                     Some(info("b.txt", 1, "")),
                     Some(info("b.txt", 2, "")),
                 ),
                 entry(
                     "c.txt",
-                    DirEntryStatus::LeftOnly,
+                    DirEntryStatus::LeftOrphan,
                     Some(info("c.txt", 1, "")),
                     None,
                 ),

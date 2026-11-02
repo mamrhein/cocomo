@@ -44,7 +44,16 @@ use crate::{
 };
 
 /// Row labels of the status checkbox list, in display order.
-const STATUS_ITEMS: [&str; 3] = ["Same", "Different", "Orphans"];
+///
+/// Each label leads with the glyphs the table shows for its group, so the
+/// panel doubles as the status legend: `≡` same, `=` equal content,
+/// `▶`/`◀` newer side, `?` differing with equal dates, `!` aggregated
+/// directory.
+const STATUS_ITEMS: [&str; 3] = [
+    "\u{2261}/=   equal",
+    "\u{25b6}\u{25c0}?!  different",
+    "\u{25b6}\u{25c0}   orphans",
+];
 
 /// Filter panel modal rendered above the active session.
 #[component]
@@ -194,9 +203,9 @@ pub(super) fn FilterPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             items.iter().any(|i| i == label)
                         };
                         set_filter_panel_statuses(
-                            has("Same"),
-                            has("Different"),
-                            has("Orphans"),
+                            has(STATUS_ITEMS[0]),
+                            has(STATUS_ITEMS[1]),
+                            has(STATUS_ITEMS[2]),
                         );
                     }),
                     active: draft.focus == FilterFocus::Statuses,

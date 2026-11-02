@@ -108,9 +108,7 @@ pub(super) fn DirCompareView(
                     s.core.id,
                     d.comparison_revision,
                     d.tree_revision,
-                    d.display.show_same,
-                    d.display.show_different,
-                    d.display.show_orphans,
+                    d.display.show_statuses,
                     s.ui.name_filter.as_ref().map(|f| f.pattern.clone()),
                 )),
                 d.sync.as_ref().map(|_| (s.core.id, d.sync_revision)),
@@ -168,7 +166,7 @@ pub(super) fn DirCompareView(
     let sync_active = dir.sync.is_some();
     let sync_planned = matches!(dir.sync, Some(SyncStage::Planned(_)));
     let mode = session.ui.mode.clone();
-    let show_same = dir.display.show_same;
+    let show_same = dir.shows_equal();
     let name_filter =
         session.ui.name_filter.as_ref().map(|f| f.pattern.clone());
     let left_path_str = session.core.left.display().to_string();

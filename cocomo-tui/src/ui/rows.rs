@@ -113,7 +113,8 @@ pub(super) fn dir_rows(rows: &[DirRow], theme: &CocomoTheme) -> Vec<CellRow> {
                     // The status color rides on the cell style: the
                     // themed wrapper composes the selection background
                     // under it, so the fg survives on the selected row.
-                    TableCell::new(entry.status.symbol()).style(status_style),
+                    TableCell::new(entry.status.symbol().0)
+                        .style(status_style),
                     TableCell::new(right_meta),
                 ]),
             }
@@ -305,7 +306,7 @@ mod tests {
 
         let palette = cocomo_palette();
         let theme = CocomoTheme::default();
-        let style = theme.status_style(DirEntryStatus::Different);
+        let style = theme.status_style(DirEntryStatus::LeftNewer);
         let rows = vec![
             CellRow {
                 index: 0,

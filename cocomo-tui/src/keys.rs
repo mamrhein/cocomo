@@ -29,7 +29,7 @@
 
 use std::path::PathBuf;
 
-use cocomo_lib::SyncOperation;
+use cocomo_lib::{DirEntryStatus, SyncOperation};
 use ratatui_kit::{
     components::{
         ShortcutInfo, ShortcutInfoSection,
@@ -48,6 +48,7 @@ use crate::{
         FilterDraft, FilterFocus, NamePattern, ReportDraft, ReportFocus,
         ReportSelection, SessionAction, SessionContent, SessionMode,
         SessionView, StatusFilter, TransferChoice, TransferOp,
+        show_statuses_from_groups,
     },
 };
 
@@ -1033,9 +1034,10 @@ fn execute(cmd: Cmd, session: &mut SessionView) -> SessionAction {
             // panel always shows the effective state.
             let mut draft = FilterDraft::default();
             if let Some(dir) = session.dir() {
-                draft.show_same = dir.display.show_same;
-                draft.show_different = dir.display.show_different;
-                draft.show_orphans = dir.display.show_orphans;
+                let show = dir.display.show_statuses;
+                draft.show_same = StatusFilter::Same.is_shown(show);
+                draft.show_different = StatusFilter::Different.is_shown(show);
+                draft.show_orphans = StatusFilter::Orphans.is_shown(show);
             }
             draft.name_filter_on = session.ui.name_filter.is_some();
             if let Some(filter) = &session.ui.name_filter {
@@ -1049,7 +1051,7 @@ fn execute(cmd: Cmd, session: &mut SessionView) -> SessionAction {
         }
         Cmd::ToggleHideSame => {
             if let Some(dir) = session.dir_mut() {
-                dir.display.show_same = !dir.display.show_same;
+                dir.display.show_statuses ^= DirEntryStatus::EQUAL;
             }
             session.set_cursor(Some(0));
             SessionAction::None
@@ -1092,12 +1094,7 @@ fn execute(cmd: Cmd, session: &mut SessionView) -> SessionAction {
         }
         Cmd::ToggleStatusFilter(status) => {
             if let Some(dir) = session.dir_mut() {
-                let show = match status {
-                    StatusFilter::Same => &mut dir.display.show_same,
-                    StatusFilter::Different => &mut dir.display.show_different,
-                    StatusFilter::Orphans => &mut dir.display.show_orphans,
-                };
-                *show = !*show;
+                dir.display.show_statuses ^= status.mask();
             }
             session.set_cursor(Some(0));
             SessionAction::None
@@ -1621,9 +1618,8 @@ fn apply_filter_draft(session: &mut SessionView) -> SessionAction {
     session.ui.name_filter = name_filter;
     let (show_same, show_different, show_orphans) = statuses;
     if let Some(dir) = session.dir_mut() {
-        dir.display.show_same = show_same;
-        dir.display.show_different = show_different;
-        dir.display.show_orphans = show_orphans;
+        dir.display.show_statuses =
+            show_statuses_from_groups(show_same, show_different, show_orphans);
     }
     session.ui.mode = SessionMode::Normal;
     session.set_cursor(Some(0));
@@ -1770,7 +1766,7 @@ mod tests {
         let entries = (0..3)
             .map(|i| DirEntry {
                 name: format!("entry{i}"),
-                status: DirEntryStatus::Different,
+                status: DirEntryStatus::LeftNewer,
                 left: None,
                 right: None,
                 center: None,
@@ -1822,14 +1818,19 @@ mod tests {
         );
         session.set_comparison(Some(DirComparison {
             entries: vec![
-                entry("left-only.txt", DirEntryStatus::LeftOnly, true, false),
+                entry(
+                    "left-only.txt",
+                    DirEntryStatus::LeftOrphan,
+                    true,
+                    false,
+                ),
                 entry(
                     "right-only.txt",
-                    DirEntryStatus::RightOnly,
+                    DirEntryStatus::RightOrphan,
                     false,
                     true,
                 ),
-                entry("both.txt", DirEntryStatus::Different, true, true),
+                entry("both.txt", DirEntryStatus::LeftNewer, true, true),
             ],
             ..Default::default()
         }));
@@ -1841,7 +1842,7 @@ mod tests {
     fn dir_session_with_tree() -> SessionView {
         let file = |name: &str, path: &str| DirEntry {
             name: name.into(),
-            status: DirEntryStatus::Different,
+            status: DirEntryStatus::LeftNewer,
             left: Some(EntryInfo {
                 name: name.into(),
                 path: path.into(),
@@ -1900,7 +1901,7 @@ mod tests {
             entries: vec![
                 DirEntry {
                     name: "sub".into(),
-                    status: DirEntryStatus::Different,
+                    status: DirEntryStatus::LeftNewer,
                     left: Some(EntryInfo {
                         name: "sub".into(),
                         path: "sub".into(),
@@ -1919,7 +1920,7 @@ mod tests {
                 },
                 DirEntry {
                     name: "orphan.txt".into(),
-                    status: DirEntryStatus::LeftOnly,
+                    status: DirEntryStatus::LeftOrphan,
                     left: Some(EntryInfo {
                         name: "orphan.txt".into(),
                         path: "orphan.txt".into(),
@@ -2024,7 +2025,7 @@ mod tests {
         session.ui.table_state.select(Some(2));
         let action = run_menu_command(&mut session, Cmd::ToggleHideSame);
         assert!(matches!(action, SessionAction::None));
-        assert!(!session.dir().unwrap().display.show_same);
+        assert!(!session.dir().unwrap().shows_equal());
         assert_eq!(session.ui.table_state.selected(), Some(0));
 
         // `Sessions` opens the browser and asks for the saved list.
@@ -2058,13 +2059,14 @@ mod tests {
             &mut session,
             Cmd::ToggleStatusFilter(StatusFilter::Same),
         );
-        assert!(!session.dir().unwrap().display.show_same);
+        assert!(!session.dir().unwrap().shows_equal());
         run_menu_command(
             &mut session,
             Cmd::ToggleStatusFilter(StatusFilter::Orphans),
         );
-        assert!(!session.dir().unwrap().display.show_orphans);
-        assert!(session.dir().unwrap().display.show_different);
+        let show = session.dir().unwrap().display.show_statuses;
+        assert!(!StatusFilter::Orphans.is_shown(show));
+        assert!(StatusFilter::Different.is_shown(show));
         // Like the other filter toggles, the cursor resets.
         assert_eq!(session.ui.table_state.selected(), Some(0));
     }
@@ -2362,7 +2364,7 @@ mod tests {
             entries: vec![
                 DirEntry {
                     name: "a".into(),
-                    status: DirEntryStatus::Same,
+                    status: DirEntryStatus::Equal,
                     left: None,
                     right: None,
                     center: None,
@@ -2371,7 +2373,7 @@ mod tests {
                 },
                 DirEntry {
                     name: "b".into(),
-                    status: DirEntryStatus::Different,
+                    status: DirEntryStatus::LeftNewer,
                     left: None,
                     right: None,
                     center: None,
@@ -2380,7 +2382,7 @@ mod tests {
                 },
                 DirEntry {
                     name: "c".into(),
-                    status: DirEntryStatus::SameBinary,
+                    status: DirEntryStatus::Equal,
                     left: None,
                     right: None,
                     center: None,
@@ -2389,7 +2391,7 @@ mod tests {
                 },
                 DirEntry {
                     name: "d".into(),
-                    status: DirEntryStatus::LeftOnly,
+                    status: DirEntryStatus::LeftOrphan,
                     left: None,
                     right: None,
                     center: None,

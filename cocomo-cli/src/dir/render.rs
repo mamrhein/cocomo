@@ -118,8 +118,8 @@ pub(super) fn render_tree_entries(
             })
             .unwrap_or_default();
 
-        let status_sym =
-            colorizer.colorize(entry.status.symbol(), entry.status);
+        let (symbol, role) = entry.status.symbol();
+        let status_sym = colorizer.colorize(symbol, role);
 
         let row = format!(
             "{}{}{:<3$} {left_meta:<4$} {status_sym} {right_meta:<4$}",
@@ -285,11 +285,13 @@ pub(super) fn print_comparison_csv(entries: &[DirEntry]) {
             .map(|r| format_modified(&r.modified))
             .unwrap_or_default();
 
-        // Escape fields that may contain commas.
+        // Escape fields that may contain commas. The status bitmap's
+        // `Display` joins multiple variant names with commas, so it must
+        // be escaped as well.
         let name = escape_csv_field(&entry.name);
         println!(
             "{},{},{},{},{},{},{}",
-            entry.status,
+            escape_csv_field(&entry.status.to_string()),
             name,
             is_dir,
             left_size,
@@ -518,7 +520,7 @@ mod tests {
         };
         let file = |name: &str| DirEntry {
             name: name.to_string(),
-            status: DirEntryStatus::Same,
+            status: DirEntryStatus::Equal,
             left: Some(info(name, false)),
             right: Some(info(name, false)),
             center: None,
@@ -527,7 +529,7 @@ mod tests {
         };
         let dir = |name: &str, children: Vec<DirEntry>| DirEntry {
             name: name.to_string(),
-            status: DirEntryStatus::Same,
+            status: DirEntryStatus::Equal,
             left: Some(info(name, true)),
             right: Some(info(name, true)),
             center: None,
@@ -592,8 +594,9 @@ mod tests {
             40,
         );
         let output = String::from_utf8(buf).unwrap();
-        assert!(output.contains("\x1b[32m")); // green for Same
-        assert!(output.contains("\x1b[35m")); // magenta for RightOnly
+        assert!(output.contains("\x1b[90m")); // grey for Equal
+        assert!(output.contains("\x1b[31m")); // red for the differing entry
+        assert!(output.contains("\x1b[34m")); // blue for the orphan entries
     }
 
     #[test]

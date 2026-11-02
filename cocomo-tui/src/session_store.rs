@@ -15,7 +15,8 @@
 //! stays here.
 
 use cocomo_lib::{
-    ProviderRef, SessionConfig, SessionSettings, SessionType as LibSessionType,
+    DirEntryStatus, ProviderRef, SessionConfig, SessionSettings,
+    SessionType as LibSessionType,
 };
 
 use crate::state::SessionView;
@@ -52,9 +53,15 @@ pub(crate) fn session_to_config(
             ignore_whitespace: false,
             skip_blank_lines: false,
             skip_comments: false,
-            show_same: dir.display.show_same,
-            show_different: dir.display.show_different,
-            show_orphans: dir.display.show_orphans,
+            show_same: dir.shows_equal(),
+            show_different: dir
+                .display
+                .show_statuses
+                .intersects(DirEntryStatus::DIFFERENT),
+            show_orphans: dir
+                .display
+                .show_statuses
+                .intersects(DirEntryStatus::ORPHAN),
             ..SessionSettings::default()
         },
     })

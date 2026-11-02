@@ -238,7 +238,7 @@ mod dir_compare {
     fn format_csv() {
         let dir = create_test_dirs();
         cmd()
-            .args(["dir", "compare", "--format", "csv"])
+            .args(["dir", "compare", "--format", "csv", "--no-summary"])
             .args([
                 dir.path().join("left").to_str().unwrap(),
                 dir.path().join("right").to_str().unwrap(),
@@ -248,8 +248,10 @@ mod dir_compare {
             .stdout(predicate::str::contains(
                 "status,name,is_dir,left_size,right_size",
             ))
-            .stdout(predicate::str::contains("same"))
-            .stdout(predicate::str::contains("different"));
+            .stdout(predicate::str::contains("equal"))
+            .stdout(predicate::str::contains("newer"))
+            .stdout(predicate::str::contains("left_orphan"))
+            .stdout(predicate::str::contains("right_orphan"));
     }
 
     #[test]
@@ -292,8 +294,8 @@ mod dir_compare {
             ])
             .assert()
             .code(1)
-            .stdout(predicate::str::contains("!"))
             .stdout(predicate::str::contains("diff.txt"))
+            .stdout(predicate::str::contains("same.txt").not())
             .stdout(predicate::str::contains("only_left").not());
     }
 
@@ -308,8 +310,11 @@ mod dir_compare {
             ])
             .assert()
             .code(1)
-            .stdout(predicate::str::contains("<"))
-            .stdout(predicate::str::contains(">"));
+            // Orphan symbols: right-pointing triangle for a left orphan,
+            // left-pointing triangle for a right orphan.
+            .stdout(predicate::str::contains("\u{25B6}"))
+            .stdout(predicate::str::contains("\u{25C0}"))
+            .stdout(predicate::str::contains("same.txt").not());
     }
 
     #[test]
@@ -331,7 +336,11 @@ mod dir_compare {
             .stdout(predicate::str::contains("top_orphan"))
             .stdout(predicate::str::contains("inner"))
             .stdout(predicate::str::contains("g.txt"))
-            .stdout(predicate::str::contains("6 orphans"));
+            // The six orphan nodes plus the shared `sub/` directory,
+            // whose aggregated bitmap carries `Equal | LeftOrphan` from
+            // its orphaned subtree and therefore intersects the orphan
+            // mask.
+            .stdout(predicate::str::contains("7 orphans"));
     }
 
     #[test]
@@ -356,7 +365,9 @@ mod dir_compare {
     }
 
     #[test]
-    fn both_filters_shows_all() {
+    fn both_filters_show_differences_and_orphans() {
+        // With both flags the show-mask is DIFFERENT | ORPHAN, so equal
+        // entries stay hidden.
         let dir = create_test_dirs();
         cmd()
             .args(["dir", "compare", "--show-different", "--show-orphans"])
@@ -366,8 +377,9 @@ mod dir_compare {
             ])
             .assert()
             .code(1)
-            .stdout(predicate::str::contains("same"))
-            .stdout(predicate::str::contains("only_left"));
+            .stdout(predicate::str::contains("diff.txt"))
+            .stdout(predicate::str::contains("only_left"))
+            .stdout(predicate::str::contains("same.txt").not());
     }
 
     #[test]
@@ -496,8 +508,8 @@ mod dir_compare {
             ])
             .assert()
             .code(1)
-            // Green for Same status.
-            .stdout(predicate::str::contains("\x1b[32m"))
+            // Bright black (grey) for Equal status.
+            .stdout(predicate::str::contains("\x1b[90m"))
             // Reset code.
             .stdout(predicate::str::contains("\x1b[0m"));
     }
@@ -541,7 +553,7 @@ mod dir_compare {
             ])
             .assert()
             .code(1)
-            .stdout(predicate::str::contains("\x1b[32m")) // green for Same
+            .stdout(predicate::str::contains("\x1b[90m")) // grey for Equal
             .stdout(predicate::str::contains("\u{251c}")); // ├
     }
 
@@ -635,9 +647,9 @@ mod dir_compare {
             ])
             .assert()
             .code(1)
-            // The test dirs have 1 same, 1 different, 2 orphans.
-            .stdout(predicate::str::contains("same"))
-            .stdout(predicate::str::contains("different"));
+            // The test dirs have 1 equal, 1 differing, 2 orphan entries.
+            .stdout(predicate::str::contains("equal"))
+            .stdout(predicate::str::contains("left_orphan"));
     }
 
     #[test]

@@ -623,7 +623,7 @@ mod render_tests {
         session.set_comparison(Some(DirComparison {
             entries: vec![DirEntry {
                 name: "both.txt".into(),
-                status: DirEntryStatus::Different,
+                status: DirEntryStatus::LeftNewer,
                 left: Some(info("both.txt")),
                 right: Some(info("both.txt")),
                 center: None,

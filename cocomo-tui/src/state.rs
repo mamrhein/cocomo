@@ -24,8 +24,8 @@ use std::{
 };
 
 use cocomo_lib::{
-    DirComparison, DirEntry, Endpoint, Grammar, LineInfo, SyncOperation,
-    SyncResult, TextDiff, TransferAction, TransferItem,
+    DirComparison, DirEntry, DirEntryStatus, Endpoint, Grammar, LineInfo,
+    SyncOperation, SyncResult, TextDiff, TransferAction, TransferItem,
     filter::DisplayFilters,
     report::{ReportConfig, ReportFormat},
 };
@@ -467,6 +467,42 @@ pub enum StatusFilter {
     Orphans,
 }
 
+impl StatusFilter {
+    /// The show-mask bits this toggle controls.
+    pub fn mask(self) -> DirEntryStatus {
+        match self {
+            Self::Same => DirEntryStatus::EQUAL,
+            Self::Different => DirEntryStatus::DIFFERENT,
+            Self::Orphans => DirEntryStatus::ORPHAN,
+        }
+    }
+
+    /// Whether the given show-mask currently displays this status group.
+    pub fn is_shown(self, show_statuses: DirEntryStatus) -> bool {
+        show_statuses.intersects(self.mask())
+    }
+}
+
+/// Combine the three status-group toggles into a display show-mask.
+///
+/// The filter panel and the persisted session settings express the display
+/// filters as one boolean per group, so the mask is always a union of whole
+/// groups; this is the inverse of [`StatusFilter::is_shown`].
+pub fn show_statuses_from_groups(
+    show_same: bool,
+    show_different: bool,
+    show_orphans: bool,
+) -> DirEntryStatus {
+    [
+        (StatusFilter::Same, show_same),
+        (StatusFilter::Different, show_different),
+        (StatusFilter::Orphans, show_orphans),
+    ]
+    .into_iter()
+    .filter_map(|(filter, shown)| shown.then_some(filter.mask()))
+    .fold(DirEntryStatus::empty(), |mask, bits| mask | bits)
+}
+
 /// A toggleable entry of the settings modal (`,`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SettingItem {
@@ -615,13 +651,21 @@ pub struct DirView {
     pub tree_revision: u64,
     /// Compare file contents (vs. meta data only).
     pub compare_content: bool,
-    /// Which entry statuses the tree displays (the `F` toggle flips
-    /// `show_same`).
+    /// Which entry statuses the tree displays (the `F` toggle flips the
+    /// `EQUAL` bits of the show-mask).
     pub display: DisplayFilters,
     /// Sync workflow stage, or `None` when no sync is planned or executed.
     pub sync: Option<SyncStage>,
     /// Sync operation currently configured.
     pub sync_operation: SyncOperation,
+}
+
+impl DirView {
+    /// Whether entries that compare equal currently pass the display
+    /// filters (the inverse of the `F` "hide identical" toggle).
+    pub fn shows_equal(&self) -> bool {
+        StatusFilter::Same.is_shown(self.display.show_statuses)
+    }
 }
 
 /// The lifecycle stage of a sync operation.
@@ -1475,15 +1519,16 @@ mod tests {
     fn nested_tree() -> Vec<DirEntry> {
         let a1 = dir_entry(
             "a1",
-            DirEntryStatus::Different,
-            Some(comparison(&[("deep.txt", DirEntryStatus::Same)])),
+            DirEntryStatus::LeftNewer,
+            Some(comparison(&[("deep.txt", DirEntryStatus::Equal)])),
         );
-        let mut a_sub = comparison(&[("b.txt", DirEntryStatus::Same)]);
+        let mut a_sub = comparison(&[("b.txt", DirEntryStatus::Equal)]);
         a_sub.entries.insert(0, a1);
         let mut entries =
-            vec![dir_entry("a", DirEntryStatus::Different, Some(a_sub))];
-        entries
-            .extend(comparison(&[("top2.txt", DirEntryStatus::Same)]).entries);
+            vec![dir_entry("a", DirEntryStatus::LeftNewer, Some(a_sub))];
+        entries.extend(
+            comparison(&[("top2.txt", DirEntryStatus::Equal)]).entries,
+        );
         entries
     }
 
@@ -1493,7 +1538,7 @@ mod tests {
         session.ui.table_state.select(Some(7));
         session.set_comparison(Some(comparison(&[(
             "a",
-            DirEntryStatus::Different,
+            DirEntryStatus::LeftNewer,
         )])));
         assert!(session.dir().unwrap().comparison.is_some());
         assert_eq!(session.ui.table_state.selected(), Some(0));
@@ -1509,18 +1554,18 @@ mod tests {
     fn set_comparison_keeping_selection_stays_on_the_entry() {
         let mut session = dir_session();
         session.set_comparison(Some(comparison(&[
-            ("a", DirEntryStatus::LeftOnly),
-            ("b", DirEntryStatus::Different),
-            ("c", DirEntryStatus::RightOnly),
+            ("a", DirEntryStatus::LeftOrphan),
+            ("b", DirEntryStatus::LeftNewer),
+            ("c", DirEntryStatus::RightOrphan),
         ])));
         session.set_cursor(Some(1));
 
         // After the transfer the entry is still there, only its status
         // changed, so the selection follows it instead of jumping to row 0.
         session.set_comparison_keeping_selection(comparison(&[
-            ("a", DirEntryStatus::LeftOnly),
-            ("b", DirEntryStatus::Same),
-            ("c", DirEntryStatus::RightOnly),
+            ("a", DirEntryStatus::LeftOrphan),
+            ("b", DirEntryStatus::Equal),
+            ("c", DirEntryStatus::RightOrphan),
         ]));
         assert_eq!(session.ui.table_state.selected(), Some(1));
         assert_eq!(session.selected_row().unwrap().entry.name, "b");
@@ -1530,19 +1575,24 @@ mod tests {
     fn set_comparison_keeping_selection_tracks_a_moved_row() {
         let mut session = dir_session();
         session.set_comparison(Some(comparison(&[
-            ("a", DirEntryStatus::LeftOnly),
-            ("b", DirEntryStatus::Different),
-            ("c", DirEntryStatus::RightOnly),
+            ("a", DirEntryStatus::LeftOrphan),
+            ("b", DirEntryStatus::LeftNewer),
+            ("c", DirEntryStatus::RightOrphan),
         ])));
         session.set_cursor(Some(2));
 
         // The entry above the selection disappears from the view (here by
         // being filtered out), shifting the selected entry up one row.
-        session.dir_mut().unwrap().display.show_same = false;
+        session
+            .dir_mut()
+            .unwrap()
+            .display
+            .show_statuses
+            .remove(DirEntryStatus::EQUAL);
         session.set_comparison_keeping_selection(comparison(&[
-            ("a", DirEntryStatus::Same),
-            ("b", DirEntryStatus::Different),
-            ("c", DirEntryStatus::RightOnly),
+            ("a", DirEntryStatus::Equal),
+            ("b", DirEntryStatus::LeftNewer),
+            ("c", DirEntryStatus::RightOrphan),
         ]));
         assert_eq!(session.ui.table_state.selected(), Some(1));
         assert_eq!(session.selected_row().unwrap().entry.name, "c");
@@ -1552,8 +1602,8 @@ mod tests {
     fn set_comparison_keeping_selection_falls_back_when_entry_is_gone() {
         let mut session = dir_session();
         session.set_comparison(Some(comparison(&[
-            ("a", DirEntryStatus::Different),
-            ("b", DirEntryStatus::LeftOnly),
+            ("a", DirEntryStatus::LeftNewer),
+            ("b", DirEntryStatus::LeftOrphan),
         ])));
         session.set_cursor(Some(1));
         session.ui.selection_anchor = Some(0);
@@ -1562,8 +1612,8 @@ mod tests {
         // selection falls back to the first row and the stale drag anchor
         // is dropped.
         session.set_comparison_keeping_selection(comparison(&[
-            ("a", DirEntryStatus::Different),
-            ("c", DirEntryStatus::RightOnly),
+            ("a", DirEntryStatus::LeftNewer),
+            ("c", DirEntryStatus::RightOrphan),
         ]));
         assert_eq!(session.ui.table_state.selected(), Some(0));
         assert_eq!(session.ui.selection_anchor, None);
@@ -1595,7 +1645,7 @@ mod tests {
         // `set_comparison` is a no-op on a text session.
         text.set_comparison(Some(comparison(&[(
             "a",
-            DirEntryStatus::Different,
+            DirEntryStatus::LeftNewer,
         )])));
         assert!(text.dir().is_none());
     }
@@ -1620,13 +1670,18 @@ mod tests {
     fn visible_rows_applies_display_and_name_filters() {
         let mut session = dir_session();
         session.set_comparison(Some(comparison(&[
-            ("alpha", DirEntryStatus::Same),
-            ("Beta", DirEntryStatus::Different),
-            ("gamma", DirEntryStatus::LeftOnly),
+            ("alpha", DirEntryStatus::Equal),
+            ("Beta", DirEntryStatus::LeftNewer),
+            ("gamma", DirEntryStatus::LeftOrphan),
         ])));
         assert_eq!(session.visible_rows().len(), 3);
 
-        session.dir_mut().unwrap().display.show_same = false;
+        session
+            .dir_mut()
+            .unwrap()
+            .display
+            .show_statuses
+            .remove(DirEntryStatus::EQUAL);
         assert_eq!(session.visible_rows().len(), 2);
 
         // The name filter is a case-insensitive regex and combines with
@@ -1643,11 +1698,11 @@ mod tests {
     #[test]
     fn visible_rows_flatten_expanded_directories() {
         let mut session = dir_session();
-        let sub = comparison(&[("child.txt", DirEntryStatus::Same)]);
+        let sub = comparison(&[("child.txt", DirEntryStatus::Equal)]);
         session.set_comparison(Some(DirComparison {
             entries: vec![dir_entry(
                 "sub",
-                DirEntryStatus::Different,
+                DirEntryStatus::LeftNewer,
                 Some(sub),
             )],
             ..Default::default()
@@ -1740,19 +1795,24 @@ mod tests {
     fn filters_apply_at_every_depth() {
         let mut session = dir_session();
         let sub = comparison(&[
-            ("keep.txt", DirEntryStatus::Different),
-            ("drop.txt", DirEntryStatus::Same),
+            ("keep.txt", DirEntryStatus::LeftNewer),
+            ("drop.txt", DirEntryStatus::Equal),
         ]);
         session.set_comparison(Some(DirComparison {
             entries: vec![dir_entry(
                 "sub",
-                DirEntryStatus::Different,
+                DirEntryStatus::LeftNewer,
                 Some(sub),
             )],
             ..Default::default()
         }));
         session.dir_mut().unwrap().expanded.insert("sub".into());
-        session.dir_mut().unwrap().display.show_same = false;
+        session
+            .dir_mut()
+            .unwrap()
+            .display
+            .show_statuses
+            .remove(DirEntryStatus::EQUAL);
 
         let names: Vec<&str> = session
             .visible_rows()
@@ -1769,11 +1829,11 @@ mod tests {
     #[test]
     fn row_index_of_finds_the_row_for_a_path() {
         let mut session = dir_session();
-        let sub = comparison(&[("child.txt", DirEntryStatus::Same)]);
+        let sub = comparison(&[("child.txt", DirEntryStatus::Equal)]);
         session.set_comparison(Some(DirComparison {
             entries: vec![dir_entry(
                 "sub",
-                DirEntryStatus::Different,
+                DirEntryStatus::LeftNewer,
                 Some(sub),
             )],
             ..Default::default()
@@ -1791,11 +1851,16 @@ mod tests {
         let mut session = dir_session();
         assert_eq!(session.row_count(), 0);
         session.set_comparison(Some(comparison(&[
-            ("a", DirEntryStatus::Same),
-            ("b", DirEntryStatus::Different),
+            ("a", DirEntryStatus::Equal),
+            ("b", DirEntryStatus::LeftNewer),
         ])));
         assert_eq!(session.row_count(), 2);
-        session.dir_mut().unwrap().display.show_same = false;
+        session
+            .dir_mut()
+            .unwrap()
+            .display
+            .show_statuses
+            .remove(DirEntryStatus::EQUAL);
         assert_eq!(session.row_count(), 1);
     }
 
@@ -1883,9 +1948,9 @@ mod tests {
     fn find_row_matching_wraps_and_ignores_case() {
         let mut session = dir_session();
         session.set_comparison(Some(comparison(&[
-            ("Alpha", DirEntryStatus::Same),
-            ("beta.txt", DirEntryStatus::Different),
-            ("gamma", DirEntryStatus::Same),
+            ("Alpha", DirEntryStatus::Equal),
+            ("beta.txt", DirEntryStatus::LeftNewer),
+            ("gamma", DirEntryStatus::Equal),
         ])));
 
         // Case-insensitive substring match, starting strictly after the
@@ -2177,13 +2242,13 @@ mod tests {
             entries: vec![
                 entry_with_sides(
                     "only-left",
-                    DirEntryStatus::LeftOnly,
+                    DirEntryStatus::LeftOrphan,
                     true,
                     false,
                 ),
                 entry_with_sides(
                     "both",
-                    DirEntryStatus::Different,
+                    DirEntryStatus::LeftNewer,
                     true,
                     true,
                 ),
@@ -2218,7 +2283,7 @@ mod tests {
         let mut session = dir_session();
         session.set_comparison(Some(comparison(&[(
             "a",
-            DirEntryStatus::Different,
+            DirEntryStatus::LeftNewer,
         )])));
         assert!(session.transfer_target().is_none());
     }
@@ -2233,7 +2298,7 @@ mod tests {
         session.set_comparison(Some(DirComparison {
             entries: vec![entry_with_sides(
                 "a",
-                DirEntryStatus::Different,
+                DirEntryStatus::LeftNewer,
                 true,
                 true,
             )],
@@ -2277,7 +2342,7 @@ mod tests {
         session.ui.selection_anchor = Some(0);
         session.set_comparison(Some(comparison(&[(
             "a",
-            DirEntryStatus::Different,
+            DirEntryStatus::LeftNewer,
         )])));
         assert_eq!(session.ui.selection_anchor, None);
 
@@ -2291,19 +2356,19 @@ mod tests {
         let mut session = dir_session();
         session.set_comparison(Some(DirComparison {
             entries: vec![
-                entry_with_sides("a", DirEntryStatus::LeftOnly, true, false),
+                entry_with_sides("a", DirEntryStatus::LeftOrphan, true, false),
                 // An entry on neither side (the `comparison()` shape) is
                 // skipped by the range expansion.
                 DirEntry {
                     name: "ghost".into(),
-                    status: DirEntryStatus::Different,
+                    status: DirEntryStatus::LeftNewer,
                     left: None,
                     right: None,
                     center: None,
                     sub_entries: None,
                     name_conflict: false,
                 },
-                entry_with_sides("c", DirEntryStatus::Different, true, true),
+                entry_with_sides("c", DirEntryStatus::LeftNewer, true, true),
             ],
             ..Default::default()
         }));
@@ -2335,7 +2400,7 @@ mod tests {
         session.set_comparison(Some(DirComparison {
             entries: vec![entry_with_sides(
                 "a",
-                DirEntryStatus::Different,
+                DirEntryStatus::LeftNewer,
                 true,
                 true,
             )],

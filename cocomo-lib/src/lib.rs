@@ -94,7 +94,7 @@ pub mod webdav;
 // Re-exports for convenience.
 pub use compare::{
     CompareConfig, DirComparison, DirEntry, DirEntryStatus, EntryInfo,
-    compare_content_pair_node, compare_directories_node,
+    StatusColor, compare_content_pair_node, compare_directories_node,
     compare_directories_pair_node,
 };
 pub use error::{FsError, FsOperation, Result};

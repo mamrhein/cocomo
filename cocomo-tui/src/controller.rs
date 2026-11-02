@@ -29,11 +29,11 @@ use std::{
 };
 
 use cocomo_lib::{
-    CompareConfig, ContentCache, DirComparison, Endpoint, FsError, FsPair,
-    Grammar, LineInfo, NodeFileSystem, NullPrompter, Prompter, Provider,
-    SessionConfig, SyncOperation, SyncResult, SyncRules, TextCompareSettings,
-    compare_texts, default_session_dir, execute_transfers,
-    list_saved_sessions, report::generate_report,
+    CompareConfig, ContentCache, DirComparison, DirEntryStatus, Endpoint,
+    FsError, FsPair, Grammar, LineInfo, NodeFileSystem, NullPrompter,
+    Prompter, Provider, SessionConfig, SyncOperation, SyncResult, SyncRules,
+    TextCompareSettings, compare_texts, default_session_dir,
+    execute_transfers, list_saved_sessions, report::generate_report,
 };
 use ratatui_kit::crossterm::event::KeyEvent;
 
@@ -45,6 +45,7 @@ use crate::{
     state::{
         APP_STATE, AppState, NamePattern, SessionAction, SessionContent,
         SessionMode, SessionView, SettingItem, SyncStage, TransferChoice,
+        show_statuses_from_groups,
     },
 };
 
@@ -300,9 +301,11 @@ async fn create_session_from_config(
 
     // Restore the display filters.
     if let Some(dir) = session.dir_mut() {
-        dir.display.show_same = config.settings.show_same;
-        dir.display.show_different = config.settings.show_different;
-        dir.display.show_orphans = config.settings.show_orphans;
+        dir.display.show_statuses = show_statuses_from_groups(
+            config.settings.show_same,
+            config.settings.show_different,
+            config.settings.show_orphans,
+        );
     }
     // Restore the name filter; a saved pattern that no longer compiles is
     // skipped with a warning instead of failing the whole load.
@@ -1077,7 +1080,7 @@ pub(crate) fn toggle_setting(item: SettingItem) {
                 dir.compare_content = !dir.compare_content;
             }
             SettingItem::HideSame => {
-                dir.display.show_same = !dir.display.show_same;
+                dir.display.show_statuses ^= DirEntryStatus::EQUAL;
                 session.ui.table_state.select(Some(0));
             }
             SettingItem::SyncOperation => {
@@ -1763,7 +1766,7 @@ mod tests {
         let state = APP_STATE.state();
         let app = state.read();
         assert_eq!(app.menu, None);
-        assert!(!app.active().unwrap().dir().unwrap().display.show_same);
+        assert!(!app.active().unwrap().dir().unwrap().shows_equal());
     }
 
     #[test]
