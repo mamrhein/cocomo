@@ -415,8 +415,8 @@ impl TransferSnapshot {
 /// What a transfer task must write back: a fresh comparison for a dir
 /// session, fresh diff content for a text session.
 enum PostTransfer {
-    Dir(DirComparison),
-    Text(SessionContent),
+    Dir(Box<DirComparison>),
+    Text(Box<SessionContent>),
 }
 
 /// Apply a synchronous mutation to the session with the given id under a
@@ -778,12 +778,12 @@ pub(crate) fn process_session_action(action: SessionAction) {
                             snapshot.compare_content,
                         )
                         .await?;
-                        Ok(PostTransfer::Dir(comparison))
+                        Ok(PostTransfer::Dir(Box::new(comparison)))
                     } else {
                         let session =
                             run_text_comparison(snapshot.left, snapshot.right)
                                 .await?;
-                        Ok(PostTransfer::Text(session.content))
+                        Ok(PostTransfer::Text(Box::new(session.content)))
                     }
                 },
                 move |app, post| {
@@ -797,10 +797,10 @@ pub(crate) fn process_session_action(action: SessionAction) {
                             // usually still present after the re-compare,
                             // only with a new status.
                             session
-                                .set_comparison_keeping_selection(comparison);
+                                .set_comparison_keeping_selection(*comparison);
                         }
                         PostTransfer::Text(content) => {
-                            session.content = content;
+                            session.content = *content;
                             // The transferred file may have lost lines (or
                             // vanished), so drop the drag anchor and keep
                             // the selection in range.
