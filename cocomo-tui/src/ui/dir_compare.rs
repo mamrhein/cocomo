@@ -9,6 +9,7 @@
 
 //! Directory comparison view component.
 
+use cocomo_lib::{DirEntryStatus, filter::DisplayFilters};
 use ratatui_kit::{
     crossterm::event::{Event, KeyCode, KeyEventKind},
     prelude::*,
@@ -33,7 +34,7 @@ use crate::{
         set_mode_buffer, submit_command, submit_save_name, submit_search,
     },
     keys::{self, KeyScope},
-    state::{APP_STATE, SessionMode, SyncStage},
+    state::{APP_STATE, SessionMode, StatusFilter, SyncStage},
 };
 
 /// Directory comparison view using ratatui-kit's `Table` component.
@@ -109,6 +110,7 @@ pub(super) fn DirCompareView(
                     d.comparison_revision,
                     d.tree_revision,
                     d.display.show_statuses,
+                    d.display.show_hidden,
                     s.ui.name_filter.as_ref().map(|f| f.pattern.clone()),
                 )),
                 d.sync.as_ref().map(|_| (s.core.id, d.sync_revision)),
@@ -167,6 +169,7 @@ pub(super) fn DirCompareView(
     let sync_planned = matches!(dir.sync, Some(SyncStage::Planned(_)));
     let mode = session.ui.mode.clone();
     let show_same = dir.shows_equal();
+    let display = dir.display.clone();
     let name_filter =
         session.ui.name_filter.as_ref().map(|f| f.pattern.clone());
     let left_path_str = session.core.left.display().to_string();
@@ -203,23 +206,9 @@ pub(super) fn DirCompareView(
                 theme.sync_status,
             ))
         } else {
-            let stats = comparison_stats;
-            let filter_info = name_filter
-                .as_ref()
-                .map(|f| format!("*{f}*"))
-                .unwrap_or_else(|| "No filter".to_string());
-            let display = if show_same {
-                "Showing all"
-            } else {
-                "Hiding identical"
-            };
-            Line::from(vec![
-                Span::raw(stats.unwrap_or_else(|| "No data".to_string())),
-                Span::raw("  |  "),
-                Span::raw(filter_info),
-                Span::raw("  |  "),
-                Span::raw(display),
-            ])
+            Line::from(Span::raw(
+                comparison_stats.unwrap_or_else(|| "No data".to_string()),
+            ))
         };
 
     // A running background task takes the front of the status bar, so the
@@ -231,13 +220,10 @@ pub(super) fn DirCompareView(
         status_bar_line = Line::from(spans);
     }
 
-    // When the help bar is hidden, hint at the toggle key in the status bar
-    // so the binding stays discoverable without spending a row on it.
-    if !show_help {
-        status_bar_line
-            .spans
-            .push(Span::styled("  ? help", theme.dim));
-    }
+    // The shown filter states render as the table's state-column glyphs,
+    // right-aligned in the same row (hidden first, then the status groups
+    // in panel order).
+    let filter_line = filter_symbols(&display, &theme);
 
     // -- Build help bar lines ------------------------------------------------
     // Mode-specific hints stay hand-written (they fit a single line); the
@@ -403,7 +389,7 @@ pub(super) fn DirCompareView(
                     }),
                 )
             } else {
-                StatusBar(line: status_bar_line)
+                StatusBar(line: status_bar_line, right: Some(filter_line))
             }
             // Help bar: only rendered when toggled on (`?`), so the main
             // view area keeps the rows by default.
@@ -412,4 +398,54 @@ pub(super) fn DirCompareView(
             }
         }
     )
+}
+
+/// The right-aligned filter indicator: the state-column glyph of every
+/// shown filter state, in checkbox-panel order.
+///
+/// Hidden items have no state-column glyph; they are indicated by a dim
+/// `.` while hidden entries are visible. The equal pair renders under its
+/// single umbrella checkbox; the newer and orphan sides render under their
+/// own checkboxes, reusing [`DirEntryStatus::symbol`] and the themed
+/// status colors so the indicator and the table column never disagree.
+fn filter_symbols(
+    display: &DisplayFilters,
+    theme: &CocomoTheme,
+) -> Line<'static> {
+    let mask = display.show_statuses;
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    if display.show_hidden {
+        spans.push(Span::styled(".", theme.dim));
+    }
+    let equal = StatusFilter::Equal.is_shown(mask);
+    let states: [(DirEntryStatus, bool); 6] = [
+        (DirEntryStatus::Same, equal),
+        (DirEntryStatus::Equal, equal),
+        (
+            DirEntryStatus::LeftNewer,
+            StatusFilter::LeftNewer.is_shown(mask),
+        ),
+        (
+            DirEntryStatus::RightNewer,
+            StatusFilter::RightNewer.is_shown(mask),
+        ),
+        (
+            DirEntryStatus::LeftOrphan,
+            StatusFilter::LeftOnly.is_shown(mask),
+        ),
+        (
+            DirEntryStatus::RightOrphan,
+            StatusFilter::RightOnly.is_shown(mask),
+        ),
+    ];
+    for (state, shown) in states {
+        if shown {
+            let (glyph, _) = state.symbol();
+            spans.push(Span::styled(
+                glyph.to_string(),
+                theme.status_style(state),
+            ));
+        }
+    }
+    Line::from(spans)
 }

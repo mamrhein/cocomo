@@ -44,8 +44,8 @@ use crate::{
     session_store::session_to_config,
     state::{
         APP_STATE, AppState, NamePattern, SessionAction, SessionContent,
-        SessionMode, SessionView, SettingItem, SyncStage, TransferChoice,
-        show_statuses_from_groups,
+        SessionMode, SessionView, SettingItem, StatusFilter, SyncStage,
+        TransferChoice,
     },
 };
 
@@ -299,13 +299,17 @@ async fn create_session_from_config(
     let mut session = SessionView::new_dir_compare(left, right, compare_files);
     session.set_comparison(Some(comparison));
 
-    // Restore the display filters.
+    // Restore the display filters; unknown bit names in a hand-edited
+    // session file are skipped, leaving those groups hidden.
     if let Some(dir) = session.dir_mut() {
-        dir.display.show_statuses = show_statuses_from_groups(
-            config.settings.show_same,
-            config.settings.show_different,
-            config.settings.show_orphans,
-        );
+        let mut mask = DirEntryStatus::empty();
+        for name in &config.settings.show_statuses {
+            if let Some(bit) = DirEntryStatus::from_bit_name(name) {
+                mask |= bit;
+            }
+        }
+        dir.display.show_statuses = mask;
+        dir.display.show_hidden = config.settings.show_hidden;
     }
     // Restore the name filter; a saved pattern that no longer compiles is
     // skipped with a warning instead of failing the whole load.
@@ -1080,32 +1084,14 @@ pub(crate) fn toggle_setting(item: SettingItem) {
                 dir.compare_content = !dir.compare_content;
             }
             SettingItem::HideSame => {
-                dir.display.show_statuses ^= DirEntryStatus::EQUAL;
+                dir.display.show_statuses =
+                    StatusFilter::Equal.toggle(dir.display.show_statuses);
                 session.ui.table_state.select(Some(0));
             }
             SettingItem::SyncOperation => {
                 dir.sync_operation = cycle_sync_op(&dir.sync_operation, 1);
             }
         }
-    }
-}
-
-/// Record the status checkboxes of the open filter panel draft.
-///
-/// Called by the panel's `MultiSelect` whenever a checkbox is toggled; the
-/// draft (not the session) changes, so the table behind the modal keeps
-/// its current appearance until the draft is applied.
-pub(crate) fn set_filter_panel_statuses(
-    show_same: bool,
-    show_different: bool,
-    show_orphans: bool,
-) {
-    if let Some(session) = APP_STATE.state().write().active_mut()
-        && let SessionMode::FilterPanel { draft } = &mut session.ui.mode
-    {
-        draft.show_same = show_same;
-        draft.show_different = show_different;
-        draft.show_orphans = show_orphans;
     }
 }
 
@@ -1760,8 +1746,8 @@ mod tests {
     fn confirm_menu_item_runs_the_dir_command_and_closes_the_dropdown() {
         APP_STATE.set(dir_app_state());
         open_menu(menu_index("Filter"));
-        // The second Filter item hides identical entries.
-        move_menu_item(1);
+        // The third Filter item toggles the equal group.
+        move_menu_item(2);
         assert_eq!(confirm_menu_item(), MenuOutcome::Handled);
         let state = APP_STATE.state();
         let app = state.read();

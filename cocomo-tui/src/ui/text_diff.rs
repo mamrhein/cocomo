@@ -16,7 +16,7 @@ use ratatui_kit::{
     prelude::*,
     ratatui::{
         layout::{Constraint, Direction},
-        text::{Line, Span},
+        text::Line,
     },
 };
 
@@ -175,14 +175,6 @@ pub(super) fn TextCompareView(
         let mut spans = busy_indicator(busy_tick, label, theme.sync_status);
         spans.append(&mut status_bar_line.spans);
         status_bar_line = Line::from(spans);
-    }
-
-    // When the help bar is hidden, hint at the toggle key so the binding
-    // stays discoverable without spending a row on it.
-    if !show_help {
-        status_bar_line
-            .spans
-            .push(Span::styled("  ? help", theme.dim));
     }
 
     // Build help bar lines from the keymap, wrapped to the terminal width,

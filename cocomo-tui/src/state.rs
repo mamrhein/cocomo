@@ -333,16 +333,15 @@ pub enum FilterFocus {
     /// The regex pattern field.
     #[default]
     Pattern,
-    /// The name-filter enable toggle.
-    NameToggle,
-    /// The status checkboxes.
+    /// The "Show items:" checkbox list.
     Statuses,
 }
 
 /// Draft state of the filter panel modal (`f`).
 ///
-/// All fields are primitives so the draft can be `PartialEq` (neither a
-/// compiled `Regex` nor [`DisplayFilters`] is comparable). The panel
+/// The fields stay `PartialEq` (neither a compiled `Regex` nor
+/// [`DisplayFilters`] is comparable); `statuses` and `show_hidden` mirror
+/// the two [`DisplayFilters`] fields they will replace on apply. The panel
 /// applies the draft to the session on `Enter`; an invalid regex keeps the
 /// panel open with [`Self::error`] set.
 #[derive(Clone, Debug, PartialEq)]
@@ -351,16 +350,15 @@ pub struct FilterDraft {
     pub pattern: String,
     /// Cursor position within [`Self::pattern`] (character index).
     pub cursor: usize,
-    /// Whether the name pattern filters entries at all.
-    pub name_filter_on: bool,
-    /// Show identical entries.
-    pub show_same: bool,
-    /// Show differing entries.
-    pub show_different: bool,
-    /// Show orphan entries.
-    pub show_orphans: bool,
+    /// Draft of `DisplayFilters::show_statuses`.
+    pub statuses: DirEntryStatus,
+    /// Draft of `DisplayFilters::show_hidden`.
+    pub show_hidden: bool,
     /// Which section owns the keys.
     pub focus: FilterFocus,
+    /// Index of the highlighted checkbox row (into [`FilterRow::ALL`])
+    /// while [`FilterFocus::Statuses`] owns the keys.
+    pub selected: usize,
     /// Validation message shown in the panel (e.g. an invalid regex).
     pub error: Option<String>,
 }
@@ -370,13 +368,40 @@ impl Default for FilterDraft {
         Self {
             pattern: String::new(),
             cursor: 0,
-            name_filter_on: true,
-            show_same: true,
-            show_different: true,
-            show_orphans: true,
+            statuses: DirEntryStatus::all(),
+            show_hidden: true,
             focus: FilterFocus::default(),
+            selected: 0,
             error: None,
         }
+    }
+}
+
+impl FilterDraft {
+    /// Whether the checkbox of `row` is checked in this draft.
+    pub fn row_shown(&self, row: FilterRow) -> bool {
+        match row {
+            FilterRow::Hidden => self.show_hidden,
+            FilterRow::Status(filter) => filter.is_shown(self.statuses),
+        }
+    }
+
+    /// Toggle the checkbox of `row`, keeping the umbrella and sub-checkbox
+    /// groups consistent (see [`StatusFilter::toggle`]).
+    pub fn toggle_row(&mut self, row: FilterRow) {
+        match row {
+            FilterRow::Hidden => self.show_hidden = !self.show_hidden,
+            FilterRow::Status(filter) => {
+                self.statuses = filter.toggle(self.statuses);
+            }
+        }
+    }
+
+    /// Move the checkbox cursor by `delta`, wrapping at both ends.
+    pub fn move_cursor(&mut self, delta: isize) {
+        let len = FilterRow::ALL.len();
+        self.selected =
+            (self.selected as isize + delta).rem_euclid(len as isize) as usize;
     }
 }
 
@@ -455,52 +480,121 @@ impl ReportDraft {
 
 /// The entry-status class a visibility toggle affects.
 ///
-/// Used by [`crate::keys::Cmd::ToggleStatusFilter`] so a single command can
-/// target any of the three display-filter groups.
+/// Used by [`crate::keys::Cmd::ToggleStatusFilter`] and the filter panel's
+/// checkbox rows so a single command can target any status group or
+/// single-side class. Umbrella targets (`Equal`, `Different`, `Orphans`)
+/// cover two bits; the sub-targets address one side each.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StatusFilter {
-    /// Entries that compare equal.
-    Same,
-    /// Entries that differ between the sides.
+    /// Entries that are identical or compare equal (umbrella over both
+    /// equal bits).
+    Equal,
+    /// Entries that differ, either side newer (umbrella over both
+    /// direction bits).
     Different,
-    /// Entries that only exist on one side.
+    /// The left side has the newer modification date.
+    LeftNewer,
+    /// The right side has the newer modification date.
+    RightNewer,
+    /// Entries that exist on only one side (umbrella over both orphan
+    /// bits).
     Orphans,
+    /// Entries that exist only on the left side.
+    LeftOnly,
+    /// Entries that exist only on the right side.
+    RightOnly,
 }
 
 impl StatusFilter {
     /// The show-mask bits this toggle controls.
     pub fn mask(self) -> DirEntryStatus {
         match self {
-            Self::Same => DirEntryStatus::EQUAL,
+            Self::Equal => DirEntryStatus::EQUAL,
             Self::Different => DirEntryStatus::DIFFERENT,
+            Self::LeftNewer => DirEntryStatus::LeftNewer,
+            Self::RightNewer => DirEntryStatus::RightNewer,
             Self::Orphans => DirEntryStatus::ORPHAN,
+            Self::LeftOnly => DirEntryStatus::LeftOrphan,
+            Self::RightOnly => DirEntryStatus::RightOrphan,
         }
     }
 
     /// Whether the given show-mask currently displays this status group.
+    ///
+    /// Uses `contains` (not `intersects`) so a partial umbrella — one sub
+    /// bit shown, its sibling hidden — reads as unchecked: the umbrella
+    /// checkbox is checked exactly when all of its bits are in the mask.
     pub fn is_shown(self, show_statuses: DirEntryStatus) -> bool {
-        show_statuses.intersects(self.mask())
+        show_statuses.contains(self.mask())
+    }
+
+    /// The show-mask after toggling this checkbox.
+    ///
+    /// An umbrella target sets or clears both of its sub-bits together;
+    /// a single-side target flips its one bit, after which the umbrella
+    /// checkbox state falls out of the AND over its children automatically
+    /// (it is derived through [`Self::is_shown`], never stored).
+    pub fn toggle(self, show_statuses: DirEntryStatus) -> DirEntryStatus {
+        if self.is_shown(show_statuses) {
+            show_statuses.difference(self.mask())
+        } else {
+            show_statuses.union(self.mask())
+        }
     }
 }
 
-/// Combine the three status-group toggles into a display show-mask.
+/// A checkbox row of the filter panel's "Show items:" list.
 ///
-/// The filter panel and the persisted session settings express the display
-/// filters as one boolean per group, so the mask is always a union of whole
-/// groups; this is the inverse of [`StatusFilter::is_shown`].
-pub fn show_statuses_from_groups(
-    show_same: bool,
-    show_different: bool,
-    show_orphans: bool,
-) -> DirEntryStatus {
-    [
-        (StatusFilter::Same, show_same),
-        (StatusFilter::Different, show_different),
-        (StatusFilter::Orphans, show_orphans),
-    ]
-    .into_iter()
-    .filter_map(|(filter, shown)| shown.then_some(filter.mask()))
-    .fold(DirEntryStatus::empty(), |mask, bits| mask | bits)
+/// The rows are the draft's checkbox view over the show-mask: one for the
+/// hidden group plus one per [`StatusFilter`] target, in panel and menu
+/// order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FilterRow {
+    /// The hidden (dot-prefixed) entries toggle; not a status bit.
+    Hidden,
+    /// A status-class checkbox.
+    Status(StatusFilter),
+}
+
+impl FilterRow {
+    /// Every checkbox row in panel and menu order.
+    pub const ALL: [Self; 8] = [
+        Self::Hidden,
+        Self::Status(StatusFilter::Equal),
+        Self::Status(StatusFilter::Different),
+        Self::Status(StatusFilter::LeftNewer),
+        Self::Status(StatusFilter::RightNewer),
+        Self::Status(StatusFilter::Orphans),
+        Self::Status(StatusFilter::LeftOnly),
+        Self::Status(StatusFilter::RightOnly),
+    ];
+
+    /// The row's checkbox label, as in the design sketch.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Hidden => "hidden",
+            Self::Status(StatusFilter::Equal) => "same / equal",
+            Self::Status(StatusFilter::Different) => "different",
+            Self::Status(StatusFilter::LeftNewer) => "left newer",
+            Self::Status(StatusFilter::RightNewer) => "right newer",
+            Self::Status(StatusFilter::Orphans) => "orphan",
+            Self::Status(StatusFilter::LeftOnly) => "left-only",
+            Self::Status(StatusFilter::RightOnly) => "right-only",
+        }
+    }
+
+    /// Whether the row is a sub-checkbox indented under its umbrella row.
+    pub fn is_child(self) -> bool {
+        matches!(
+            self,
+            Self::Status(
+                StatusFilter::LeftNewer
+                    | StatusFilter::RightNewer
+                    | StatusFilter::LeftOnly
+                    | StatusFilter::RightOnly
+            )
+        )
+    }
 }
 
 /// A toggleable entry of the settings modal (`,`).
@@ -651,8 +745,8 @@ pub struct DirView {
     pub tree_revision: u64,
     /// Compare file contents (vs. meta data only).
     pub compare_content: bool,
-    /// Which entry statuses the tree displays (the `F` toggle flips the
-    /// `EQUAL` bits of the show-mask).
+    /// Which entry statuses and hidden entries the tree displays (driven
+    /// by the filter panel, the Filter menu and the digit toggles).
     pub display: DisplayFilters,
     /// Sync workflow stage, or `None` when no sync is planned or executed.
     pub sync: Option<SyncStage>,
@@ -662,9 +756,15 @@ pub struct DirView {
 
 impl DirView {
     /// Whether entries that compare equal currently pass the display
-    /// filters (the inverse of the `F` "hide identical" toggle).
+    /// filters (the state of the filter panel's "same / equal" checkbox).
     pub fn shows_equal(&self) -> bool {
-        StatusFilter::Same.is_shown(self.display.show_statuses)
+        StatusFilter::Equal.is_shown(self.display.show_statuses)
+    }
+
+    /// Whether hidden (dot-prefixed) entries currently pass the display
+    /// filters (the state of the filter panel's "hidden" checkbox).
+    pub fn shows_hidden(&self) -> bool {
+        self.display.show_hidden
     }
 }
 
@@ -1041,6 +1141,14 @@ impl SessionView {
     fn entry_visible(&self, dir: &DirView, entry: &DirEntry) -> bool {
         // Hide entries whose status is switched off in the display filters.
         if !dir.display.should_show(&entry.status) {
+            return false;
+        }
+
+        // Hide dot-prefixed entries while the hidden group is switched
+        // off. The check runs per entry while walking the tree, so a
+        // hidden directory hides its whole subtree with it (like the name
+        // filter, and the CLI's `--excl-hidden`).
+        if !dir.display.show_hidden && entry.name.starts_with('.') {
             return false;
         }
 
@@ -1693,6 +1801,95 @@ mod tests {
             .map(|r| r.entry.name.as_str())
             .collect();
         assert_eq!(names, ["Beta"]);
+    }
+
+    #[test]
+    fn visible_rows_hide_dot_entries_when_show_hidden_is_off() {
+        let mut session = dir_session();
+        let sub = comparison(&[("inner.txt", DirEntryStatus::Equal)]);
+        session.set_comparison(Some(DirComparison {
+            entries: vec![
+                dir_entry(".cache", DirEntryStatus::Equal, Some(sub)),
+                dir_entry(".dotfile", DirEntryStatus::Equal, None),
+                dir_entry("plain.txt", DirEntryStatus::Equal, None),
+            ],
+            ..Default::default()
+        }));
+        assert_eq!(session.visible_rows().len(), 3);
+
+        session.dir_mut().unwrap().display.show_hidden = false;
+        let names: Vec<&str> = session
+            .visible_rows()
+            .iter()
+            .map(|r| r.entry.name.as_str())
+            .collect();
+        assert_eq!(names, ["plain.txt"]);
+
+        // A hidden directory hides its whole subtree even when expanded.
+        session.dir_mut().unwrap().expanded.insert(".cache".into());
+        let names: Vec<&str> = session
+            .visible_rows()
+            .iter()
+            .map(|r| r.entry.name.as_str())
+            .collect();
+        assert_eq!(names, ["plain.txt"]);
+    }
+
+    #[test]
+    fn status_filter_umbrella_is_and_of_its_subs() {
+        // A partial umbrella reads as unchecked; only the full bit pair
+        // reads as shown.
+        let partial = DirEntryStatus::all() - DirEntryStatus::RightNewer;
+        assert!(!StatusFilter::Different.is_shown(partial));
+        assert!(StatusFilter::LeftNewer.is_shown(partial));
+        assert!(!StatusFilter::RightNewer.is_shown(partial));
+        assert!(StatusFilter::Equal.is_shown(partial));
+
+        // Toggling the umbrella sets/clears both sub-bits at once.
+        let off = StatusFilter::Different.toggle(DirEntryStatus::all());
+        assert!(!StatusFilter::LeftNewer.is_shown(off));
+        assert!(!StatusFilter::RightNewer.is_shown(off));
+        assert_eq!(StatusFilter::Different.toggle(off), DirEntryStatus::all());
+
+        // Toggling a sub-bit flips one bit; the umbrella state falls out
+        // of the AND over the children.
+        let one_off = StatusFilter::RightNewer.toggle(DirEntryStatus::all());
+        assert!(StatusFilter::LeftNewer.is_shown(one_off));
+        assert!(
+            !StatusFilter::Orphans
+                .toggle(DirEntryStatus::all())
+                .intersects(DirEntryStatus::ORPHAN)
+        );
+    }
+
+    #[test]
+    fn filter_draft_rows_toggle_the_draft_consistently() {
+        let mut draft = FilterDraft::default();
+        assert!(draft.row_shown(FilterRow::Hidden));
+        for row in FilterRow::ALL {
+            assert!(draft.row_shown(row), "row {row:?} starts shown");
+        }
+
+        // The hidden row toggles the draft's hidden flag.
+        draft.toggle_row(FilterRow::Hidden);
+        assert!(!draft.show_hidden);
+
+        // A sub-checkbox clears one bit and drags its umbrella's checked
+        // state down with it (derived through `is_shown`).
+        draft.toggle_row(FilterRow::Status(StatusFilter::RightOnly));
+        assert!(!draft.row_shown(FilterRow::Status(StatusFilter::Orphans)));
+        assert!(draft.row_shown(FilterRow::Status(StatusFilter::LeftOnly)));
+
+        // Toggling the umbrella back on sets both sub-checkboxes.
+        draft.toggle_row(FilterRow::Status(StatusFilter::Orphans));
+        assert!(draft.row_shown(FilterRow::Status(StatusFilter::Orphans)));
+        assert!(draft.row_shown(FilterRow::Status(StatusFilter::RightOnly)));
+
+        // The cursor wraps at both ends of the row list.
+        draft.move_cursor(-1);
+        assert_eq!(draft.selected, FilterRow::ALL.len() - 1);
+        draft.move_cursor(1);
+        assert_eq!(draft.selected, 0);
     }
 
     #[test]

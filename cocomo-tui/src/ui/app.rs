@@ -195,12 +195,22 @@ pub(crate) fn App(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // While a dropdown is open its input layer blocks every handler below
     // (keys and mouse), exactly like a modal blocks the shell. Read the
     // state the layer and its handler need before registering them.
-    let (open_menu, dir_active) = {
+    let (open_menu, dir_active, display) = {
         let app = app_state.read();
-        (app.menu, app.active().is_some_and(|s| s.content.is_dir()))
+        (
+            app.menu,
+            app.active().is_some_and(|s| s.content.is_dir()),
+            app.active()
+                .and_then(|s| s.dir())
+                .map(|d| d.display.clone()),
+        )
     };
-    let dropdown = open_menu
-        .map(|menu| (menu, dropdown_rect(&menu_titles, menu, BAR_ORIGIN)));
+    let dropdown = open_menu.map(|menu| {
+        (
+            menu,
+            dropdown_rect(&menu_titles, menu, BAR_ORIGIN, display.as_ref()),
+        )
+    });
     let menu_layer = hooks.use_input_layer(open_menu.is_some(), true);
     {
         let titles = menu_titles.clone();
@@ -464,6 +474,7 @@ pub(crate) fn App(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     menu: Some(menu),
                     rect: rect,
                     dir_active: dir_active,
+                    display: display.clone(),
                 )
             }
         }
@@ -838,7 +849,7 @@ mod menu_mouse_tests {
         // "Help" is the last menu and its single item toggles the help bar.
         let help = MENUS.len() - 1;
         let menu = MenuState::open(help).unwrap();
-        let rect = dropdown_rect(&titles, menu, BAR_ORIGIN);
+        let rect = dropdown_rect(&titles, menu, BAR_ORIGIN, None);
         let dropdown = Some((menu, rect));
         APP_STATE.state().write().menu = Some(menu);
         menu_mouse(
@@ -859,7 +870,7 @@ mod menu_mouse_tests {
         // The quit row of the Sessions menu hands the exit request to the
         // shell instead of running a command.
         let menu = MenuState::open(0).unwrap();
-        let rect = dropdown_rect(&titles, menu, BAR_ORIGIN);
+        let rect = dropdown_rect(&titles, menu, BAR_ORIGIN, None);
         let dropdown = Some((menu, rect));
         APP_STATE.set(AppState::new());
         APP_STATE.state().write().menu = Some(menu);
@@ -885,7 +896,7 @@ mod menu_mouse_tests {
         let mut exit = || exits += 1;
         APP_STATE.set(AppState::new());
         let menu = MenuState::open(0).unwrap();
-        let rect = dropdown_rect(&titles, menu, BAR_ORIGIN);
+        let rect = dropdown_rect(&titles, menu, BAR_ORIGIN, None);
         let dropdown = Some((menu, rect));
         APP_STATE.state().write().menu = Some(menu);
         // The top border row is not an item, and neither is the area right

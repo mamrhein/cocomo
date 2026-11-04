@@ -92,28 +92,39 @@ pub struct OtherFilters {
 
 /// Display filters that toggle visibility without affecting comparison
 /// results.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct DisplayFilters {
     /// The set of status bits to show. An entry is visible when its
     /// status bitmap intersects this mask.
     pub show_statuses: DirEntryStatus,
+    /// Show hidden (dot-prefixed) entries.
+    pub show_hidden: bool,
     /// Show ignored lines in text diff (suppress content filters).
     pub suppress_content_filters: bool,
+}
+
+/// Show everything: every status bit and hidden entries.
+impl Default for DisplayFilters {
+    fn default() -> Self {
+        Self {
+            show_statuses: DirEntryStatus::all(),
+            show_hidden: true,
+            suppress_content_filters: false,
+        }
+    }
 }
 
 impl DisplayFilters {
     /// Create default display filters that show all items.
     pub fn all() -> Self {
-        Self {
-            show_statuses: DirEntryStatus::all(),
-            suppress_content_filters: false,
-        }
+        Self::default()
     }
 
     /// Create display filters that hide identical entries.
     pub fn differences_only() -> Self {
         Self {
             show_statuses: DirEntryStatus::all() ^ DirEntryStatus::EQUAL,
+            show_hidden: true,
             suppress_content_filters: false,
         }
     }
@@ -416,6 +427,7 @@ mod tests {
     #[test]
     fn display_filters_show_all() {
         let df = DisplayFilters::all();
+        assert!(df.show_hidden);
         assert!(df.should_show(&DirEntryStatus::Same));
         assert!(df.should_show(&DirEntryStatus::Equal));
         assert!(df.should_show(&DirEntryStatus::LeftNewer));
@@ -432,6 +444,7 @@ mod tests {
     #[test]
     fn display_filters_differences_only() {
         let df = DisplayFilters::differences_only();
+        assert!(df.show_hidden);
         assert!(!df.should_show(&DirEntryStatus::Same));
         assert!(!df.should_show(&DirEntryStatus::Equal));
         assert!(df.should_show(&DirEntryStatus::LeftNewer));

@@ -104,7 +104,7 @@ impl DirEntryStatus {
     }
 
     /// snake_case variant name of a single-bit status.
-    fn bit_name(&self) -> &'static str {
+    pub fn bit_name(&self) -> &'static str {
         if *self == Self::Same {
             "same"
         } else if *self == Self::Equal {
@@ -120,6 +120,35 @@ impl DirEntryStatus {
         } else {
             "unknown"
         }
+    }
+
+    /// The single-bit status for a snake_case variant name, `None` for an
+    /// unknown name.
+    ///
+    /// The inverse of [`Self::bit_name`]; together they let serialized
+    /// settings round-trip through human-readable bit names.
+    pub fn from_bit_name(name: &str) -> Option<Self> {
+        match name {
+            "same" => Some(Self::Same),
+            "equal" => Some(Self::Equal),
+            "left_newer" => Some(Self::LeftNewer),
+            "right_newer" => Some(Self::RightNewer),
+            "left_orphan" => Some(Self::LeftOrphan),
+            "right_orphan" => Some(Self::RightOrphan),
+            _ => None,
+        }
+    }
+
+    /// The bit names of every variant, in bit order.
+    pub fn all_bit_names() -> [&'static str; 6] {
+        [
+            "same",
+            "equal",
+            "left_newer",
+            "right_newer",
+            "left_orphan",
+            "right_orphan",
+        ]
     }
 }
 

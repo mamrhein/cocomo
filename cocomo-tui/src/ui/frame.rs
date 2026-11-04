@@ -27,7 +27,7 @@ use std::time::Duration;
 use ratatui_kit::{
     prelude::*,
     ratatui::{
-        layout::Constraint,
+        layout::{Constraint, Direction},
         style::{Modifier, Style},
         text::{Line, Span, Text as RataText},
     },
@@ -179,16 +179,38 @@ pub(super) const COMMAND_PLACEHOLDER: &str =
 pub(super) struct BarProps {
     /// The single content line of the bar.
     pub(super) line: Line<'static>,
+    /// Optional line right-aligned on the same row (e.g. the filter
+    /// symbols); `None` lets the content line span the whole bar.
+    pub(super) right: Option<Line<'static>>,
 }
 
 /// One-line status bar at the bottom of a comparison view.
+///
+/// With a [`BarProps::right`] line the row splits horizontally: the left
+/// content fills the remaining width and the right line keeps its own
+/// width at the right edge of the same row.
 #[component]
 pub(super) fn StatusBar(props: &BarProps) -> impl Into<AnyElement<'static>> {
+    let Some(right) = props.right.clone() else {
+        return element!(
+            View(height: Constraint::Length(1)) {
+                Text(text: props.line.clone())
+            }
+        )
+        .into_any();
+    };
+    let right_width = right.width() as u16;
     element!(
-        View(height: Constraint::Length(1)) {
-            Text(text: props.line.clone())
+        View(height: Constraint::Length(1), flex_direction: Direction::Horizontal) {
+            View(width: Constraint::Fill(1)) {
+                Text(text: props.line.clone())
+            }
+            View(width: Constraint::Length(right_width)) {
+                Text(text: right)
+            }
         }
     )
+    .into_any()
 }
 
 /// Props for [`HelpBar`].
@@ -214,7 +236,7 @@ pub(super) fn HelpBar(props: &HelpBarProps) -> impl Into<AnyElement<'static>> {
 
 #[cfg(test)]
 mod tests {
-    use ratatui_kit::ratatui::style::Color;
+    use ratatui_kit::{ratatui::style::Color, test_util::render_frames};
 
     use super::*;
 
@@ -302,5 +324,29 @@ mod tests {
             let x = tabs_item_x(&items, index, 3).unwrap();
             assert_eq!(tabs_hit_item(x, &items, 3), Some(index));
         }
+    }
+
+    #[test]
+    fn status_bar_right_line_sits_at_the_right_edge() {
+        let buf = render_frames(
+            element!(View(height: Constraint::Length(1)) {
+                StatusBar(
+                    line: Line::from("Total: 3"),
+                    right: Some(Line::from("\u{2261}=")),
+                )
+            }),
+            40,
+            1,
+            1,
+        );
+        let row = |y: u16| {
+            (0..40)
+                .map(|x| buf[(x, y)].symbol().to_string())
+                .collect::<String>()
+        };
+        let line = row(0);
+        assert!(line.starts_with("Total: 3"), "unexpected bar: {line}");
+        // The two symbols occupy the last two cells of the same row.
+        assert!(line.ends_with("\u{2261}="), "unexpected bar: {line}");
     }
 }

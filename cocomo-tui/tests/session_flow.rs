@@ -366,15 +366,14 @@ fn filter_panel_flow_from_open_to_applied_filter() {
         Some(SessionAction::None)
     );
     assert!(
-        matches!(&session.ui.mode, SessionMode::FilterPanel { draft } if draft.show_same)
+        matches!(&session.ui.mode, SessionMode::FilterPanel { draft }
+            if draft.statuses == DirEntryStatus::all() && draft.show_hidden)
     );
 
-    // Type a regex, enable the name filter, and apply.
+    // Type a regex and apply; any non-empty pattern is compiled.
     for c in "file".chars() {
         press(&mut session, KeyCode::Char(c));
     }
-    press(&mut session, KeyCode::Tab); // focus the name-filter toggle
-    press(&mut session, KeyCode::Char(' ')); // enable it
     assert_eq!(
         press(&mut session, KeyCode::Enter),
         Some(SessionAction::None)

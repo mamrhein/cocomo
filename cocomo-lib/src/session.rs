@@ -168,15 +168,14 @@ pub struct SessionSettings {
     /// Skip comment lines in text comparison.
     #[serde(default)]
     pub skip_comments: bool,
-    /// Show identical entries in the comparison view.
+    /// Show hidden (dot-prefixed) entries in the comparison view.
     #[serde(default = "default_true")]
-    pub show_same: bool,
-    /// Show different entries.
-    #[serde(default = "default_true")]
-    pub show_different: bool,
-    /// Show orphan entries (exist on one side only).
-    #[serde(default = "default_true")]
-    pub show_orphans: bool,
+    pub show_hidden: bool,
+    /// Names of the shown `DirEntryStatus` bits (`same`, `equal`,
+    /// `left_newer`, `right_newer`, `left_orphan`, `right_orphan`) so the
+    /// TOML stays human-readable; see [`DirEntryStatus::bit_name`].
+    #[serde(default = "default_all_statuses")]
+    pub show_statuses: Vec<String>,
     /// Entry names marked as ignored by the user. Ignored entries stay
     /// visible in the comparison but are rendered neutral and excluded
     /// from synchronization planning.
@@ -196,9 +195,8 @@ impl Default for SessionSettings {
             ignore_whitespace: false,
             skip_blank_lines: false,
             skip_comments: false,
-            show_same: true,
-            show_different: true,
-            show_orphans: true,
+            show_hidden: true,
+            show_statuses: default_all_statuses(),
             ignored: Vec::new(),
             color_overrides: ColorOverrides::default(),
         }
@@ -230,6 +228,15 @@ pub struct ColorOverrides {
 
 fn default_true() -> bool {
     true
+}
+
+/// The show-all default of [`SessionSettings::show_statuses`]: every
+/// status bit name, so a session file without the entry displays
+/// everything.
+fn default_all_statuses() -> Vec<String> {
+    crate::compare::DirEntryStatus::all_bit_names()
+        .map(str::to_string)
+        .to_vec()
 }
 
 impl SessionConfig {
@@ -663,6 +670,7 @@ impl SessionManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::compare::DirEntryStatus;
 
     #[test]
     fn session_type_display() {
@@ -725,8 +733,11 @@ mod tests {
         assert!(settings.compare_files);
         assert!(settings.compare_structure);
         assert!(!settings.ignore_whitespace);
-        assert!(settings.show_same);
-        assert!(settings.show_orphans);
+        assert!(settings.show_hidden);
+        assert_eq!(
+            settings.show_statuses,
+            DirEntryStatus::all_bit_names().map(str::to_string).to_vec()
+        );
     }
 
     #[test]
@@ -746,14 +757,69 @@ mod tests {
             settings: SessionSettings {
                 name_filter: vec!["*.rs".to_string(), "*.toml".to_string()],
                 ignore_whitespace: true,
-                show_same: false,
+                show_statuses: vec![
+                    "left_newer".to_string(),
+                    "right_newer".to_string(),
+                ],
                 ..SessionSettings::default()
             },
         };
 
         let toml_str = config.to_toml().unwrap();
         assert!(toml_str.contains("ignore_whitespace = true"));
-        assert!(toml_str.contains("show_same = false"));
+        assert!(toml_str.contains("left_newer"));
+        assert!(toml_str.contains("right_newer"));
+    }
+
+    #[test]
+    fn show_statuses_round_trip() {
+        let config = SessionConfig {
+            name: "Masked".to_string(),
+            session_type: SessionType::DirCompare,
+            left: ProviderRef {
+                provider: "local".to_string(),
+                path: PathBuf::from("/x"),
+            },
+            right: ProviderRef {
+                provider: "local".to_string(),
+                path: PathBuf::from("/y"),
+            },
+            center: None,
+            settings: SessionSettings {
+                show_hidden: false,
+                show_statuses: vec![
+                    "equal".to_string(),
+                    "left_orphan".to_string(),
+                ],
+                ..SessionSettings::default()
+            },
+        };
+
+        let loaded =
+            SessionConfig::from_toml(&config.to_toml().unwrap()).unwrap();
+        assert!(!loaded.settings.show_hidden);
+        assert_eq!(
+            loaded.settings.show_statuses,
+            vec!["equal".to_string(), "left_orphan".to_string()]
+        );
+    }
+
+    #[test]
+    fn legacy_show_flags_deserialize_to_show_all() {
+        // Pre-redesign session files carry `show_same`/`show_different`/
+        // `show_orphans`; the unknown fields are ignored and the new ones
+        // fall back to the show-all defaults.
+        let toml_str = "name = \"Legacy\"\ntype = \
+                        \"DirCompare\"\n[left]\nprovider = \"local\"\npath = \
+                        \"/x\"\n[right]\nprovider = \"local\"\npath = \
+                        \"/y\"\n[settings]\nshow_same = \
+                        false\nshow_different = false\nshow_orphans = false\n";
+        let loaded = SessionConfig::from_toml(toml_str).unwrap();
+        assert!(loaded.settings.show_hidden);
+        assert_eq!(
+            loaded.settings.show_statuses,
+            DirEntryStatus::all_bit_names().map(str::to_string).to_vec()
+        );
     }
 
     #[test]

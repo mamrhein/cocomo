@@ -15,8 +15,7 @@
 //! stays here.
 
 use cocomo_lib::{
-    DirEntryStatus, ProviderRef, SessionConfig, SessionSettings,
-    SessionType as LibSessionType,
+    ProviderRef, SessionConfig, SessionSettings, SessionType as LibSessionType,
 };
 
 use crate::state::SessionView;
@@ -53,15 +52,15 @@ pub(crate) fn session_to_config(
             ignore_whitespace: false,
             skip_blank_lines: false,
             skip_comments: false,
-            show_same: dir.shows_equal(),
-            show_different: dir
+            show_hidden: dir.display.show_hidden,
+            // The shown status bits by name, so the TOML stays
+            // human-readable like the old coarse booleans.
+            show_statuses: dir
                 .display
                 .show_statuses
-                .intersects(DirEntryStatus::DIFFERENT),
-            show_orphans: dir
-                .display
-                .show_statuses
-                .intersects(DirEntryStatus::ORPHAN),
+                .iter()
+                .map(|bit| bit.bit_name().to_string())
+                .collect(),
             ..SessionSettings::default()
         },
     })
