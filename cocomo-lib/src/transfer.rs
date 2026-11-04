@@ -45,8 +45,6 @@ pub enum TransferAction {
     CopyLeft,
     /// Copy to the right side (from the left).
     CopyRight,
-    /// Copy from center to both left and right (3-way merge).
-    CopyCenter,
     /// Delete from the left side.
     DeleteLeft,
     /// Delete from the right side.
@@ -65,7 +63,6 @@ impl TransferAction {
             // the data flow in the opposite direction.
             TransferAction::CopyLeft => "copy right → left",
             TransferAction::CopyRight => "copy left → right",
-            TransferAction::CopyCenter => "copy center → both",
             TransferAction::DeleteLeft => "delete left",
             TransferAction::DeleteRight => "delete right",
             TransferAction::MoveLeft => "move right → left",
@@ -73,16 +70,21 @@ impl TransferAction {
         }
     }
 
-    /// Return the status variants that this action applies to.
-    pub fn applicable_statuses(&self) -> &[DirEntryStatus] {
+    /// Return the status mask this action applies to.
+    ///
+    /// The variant names the destination side, so one-sided actions apply
+    /// to entries orphaned on the *other* side. Membership is tested as a
+    /// mask intersection on the entry's status bitmap; for directory rows
+    /// the aggregated bitmap matches through the bits of its subtree, and
+    /// the collection walk expands such directories into per-child items.
+    pub fn applicable_statuses(&self) -> DirEntryStatus {
         match self {
-            TransferAction::CopyLeft => &[DirEntryStatus::RightOnly],
-            TransferAction::CopyRight => &[DirEntryStatus::LeftOnly],
-            TransferAction::CopyCenter => &[DirEntryStatus::CenterOnly],
-            TransferAction::DeleteLeft => &[DirEntryStatus::LeftOnly],
-            TransferAction::DeleteRight => &[DirEntryStatus::RightOnly],
-            TransferAction::MoveLeft => &[DirEntryStatus::RightOnly],
-            TransferAction::MoveRight => &[DirEntryStatus::LeftOnly],
+            TransferAction::CopyLeft => DirEntryStatus::RightOrphan,
+            TransferAction::CopyRight => DirEntryStatus::LeftOrphan,
+            TransferAction::DeleteLeft => DirEntryStatus::LeftOrphan,
+            TransferAction::DeleteRight => DirEntryStatus::RightOrphan,
+            TransferAction::MoveLeft => DirEntryStatus::RightOrphan,
+            TransferAction::MoveRight => DirEntryStatus::LeftOrphan,
         }
     }
 }
@@ -190,7 +192,7 @@ fn collect_transfer_items(
         if entry.name_conflict {
             continue;
         }
-        if applicable.contains(&entry.status) {
+        if applicable.intersects(entry.status) {
             let is_dir = entry
                 .left
                 .as_ref()
@@ -347,7 +349,6 @@ where
                 copy_entry(fs, left_path, rel, item.is_dir, fs, right_path)
                     .await
             }
-            TransferAction::CopyCenter => Err(center_copy_error(item)),
             TransferAction::DeleteLeft => {
                 delete_entry(fs, left_path, rel, item.is_dir).await
             }
@@ -394,7 +395,6 @@ where
                 )
                 .await
             }
-            TransferAction::CopyCenter => Err(center_copy_error(item)),
             TransferAction::DeleteLeft => {
                 delete_entry(left_fs, left_path, rel, item.is_dir).await
             }
@@ -450,15 +450,6 @@ fn rel_components(rel: &str) -> Vec<&str> {
     rel.split(std::path::is_separator)
         .filter(|c| !c.is_empty())
         .collect()
-}
-
-/// The error for center copies, which need a 3-way comparison.
-fn center_copy_error(item: &TransferItem) -> FsError {
-    FsError::InvalidArgument {
-        operation: FsOperation::Copy,
-        path: item.rel_path.clone().into(),
-        message: "center copy requires 3-way comparison".into(),
-    }
 }
 
 /// Stream a source file's content into an already created destination
@@ -825,17 +816,38 @@ mod tests {
         assert!(
             TransferAction::CopyLeft
                 .applicable_statuses()
-                .contains(&DirEntryStatus::RightOnly)
+                .intersects(DirEntryStatus::RightOrphan)
+        );
+        assert!(
+            TransferAction::CopyRight
+                .applicable_statuses()
+                .intersects(DirEntryStatus::LeftOrphan)
         );
         assert!(
             TransferAction::DeleteLeft
                 .applicable_statuses()
-                .contains(&DirEntryStatus::LeftOnly)
+                .intersects(DirEntryStatus::LeftOrphan)
         );
         assert!(
-            TransferAction::CopyCenter
+            TransferAction::DeleteRight
                 .applicable_statuses()
-                .contains(&DirEntryStatus::CenterOnly)
+                .intersects(DirEntryStatus::RightOrphan)
+        );
+        // An aggregated directory bitmap matches through any of its bits;
+        // the collection walk expands such dirs into per-child items.
+        assert!(
+            TransferAction::CopyRight.applicable_statuses().intersects(
+                DirEntryStatus::Equal | DirEntryStatus::LeftOrphan
+            )
+        );
+        // Equal and newer-side bits never match a one-sided action.
+        assert!(
+            TransferAction::CopyRight
+                .applicable_statuses()
+                .intersection(
+                    DirEntryStatus::EQUAL | DirEntryStatus::DIFFERENT
+                )
+                .is_empty()
         );
     }
 
@@ -872,7 +884,7 @@ mod tests {
             entries: vec![
                 DirEntry {
                     name: "right_file.txt".to_string(),
-                    status: DirEntryStatus::RightOnly,
+                    status: DirEntryStatus::RightOrphan,
                     left: None,
                     right: Some(EntryInfo {
                         name: "right_file.txt".to_string(),
@@ -924,7 +936,7 @@ mod tests {
         let comparison = DirComparison {
             entries: vec![DirEntry {
                 name: "left_only.txt".to_string(),
-                status: DirEntryStatus::LeftOnly,
+                status: DirEntryStatus::LeftOrphan,
                 left: Some(EntryInfo {
                     name: "left_only.txt".to_string(),
                     path: "/left/left_only.txt".to_string(),
@@ -953,9 +965,9 @@ mod tests {
         let clash = |name: &str, is_left: bool, is_dir: bool| DirEntry {
             name: name.to_string(),
             status: if is_left {
-                DirEntryStatus::LeftOnly
+                DirEntryStatus::LeftOrphan
             } else {
-                DirEntryStatus::RightOnly
+                DirEntryStatus::RightOrphan
             },
             left: is_left.then(|| EntryInfo {
                 name: name.to_string(),
@@ -1003,7 +1015,7 @@ mod tests {
         let sub_comparison = Arc::new(DirComparison {
             entries: vec![DirEntry {
                 name: "nested.txt".to_string(),
-                status: DirEntryStatus::LeftOnly,
+                status: DirEntryStatus::LeftOrphan,
                 left: Some(EntryInfo {
                     name: "nested.txt".to_string(),
                     path: "/left/sub/nested.txt".to_string(),
@@ -1024,7 +1036,7 @@ mod tests {
             entries: vec![
                 DirEntry {
                     name: "left.txt".to_string(),
-                    status: DirEntryStatus::LeftOnly,
+                    status: DirEntryStatus::LeftOrphan,
                     left: Some(EntryInfo {
                         name: "left.txt".to_string(),
                         path: "/left/left.txt".to_string(),
@@ -1040,7 +1052,7 @@ mod tests {
                 },
                 DirEntry {
                     name: "sub".to_string(),
-                    status: DirEntryStatus::LeftOnly,
+                    status: DirEntryStatus::LeftOrphan,
                     left: Some(EntryInfo {
                         name: "sub".to_string(),
                         path: "/left/sub".to_string(),

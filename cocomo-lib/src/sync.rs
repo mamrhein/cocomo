@@ -202,7 +202,6 @@ where
         compare_content: rules.compare_content,
         compare_meta_data: true,
         follow_symlinks: false,
-        size_tolerance: 0.1,
     };
 
     let comparison = match pair {
@@ -403,13 +402,14 @@ enum MirrorDir {
 ///
 /// An orphan directory is planned as a single recursive operation on the
 /// directory itself; its compared sub-entries carry the full subtree and
-/// must not be expanded into duplicate per-child operations.
+/// must not be expanded into duplicate per-child operations. Only a row
+/// with a missing side is an orphan: a shared directory aggregates orphan
+/// bits of its subtree but is still planned per child.
 fn is_orphan_dir(entry: &DirEntry) -> bool {
-    matches!(
-        entry.status,
-        DirEntryStatus::LeftOnly | DirEntryStatus::RightOnly
-    ) && (entry.left.as_ref().is_some_and(|l| l.is_dir)
-        || entry.right.as_ref().is_some_and(|r| r.is_dir))
+    entry.status.intersects(DirEntryStatus::ORPHAN)
+        && (entry.left.is_none() || entry.right.is_none())
+        && (entry.left.as_ref().is_some_and(|l| l.is_dir)
+            || entry.right.as_ref().is_some_and(|r| r.is_dir))
 }
 
 /// Return `true` when the entry is a name clash that must be skipped.
@@ -445,89 +445,91 @@ fn collect_mirror_items(
         if skip_name_conflict(entry, conflicts) {
             continue;
         }
-        match entry.status {
-            DirEntryStatus::LeftOnly => {
-                if direction == MirrorDir::Right {
-                    // Copy left → right.
-                    items.push(TransferItem::new(
-                        TransferAction::CopyRight,
-                        entry.name.clone(),
-                        entry.left.as_ref().is_some_and(|l| l.is_dir),
-                        entry
-                            .left
-                            .as_ref()
-                            .map(|l| l.path.clone())
-                            .unwrap_or_default(),
-                    ));
-                } else {
-                    // Delete from left.
-                    items.push(TransferItem::new(
-                        TransferAction::DeleteLeft,
-                        entry.name.clone(),
-                        entry.left.as_ref().is_some_and(|l| l.is_dir),
-                        entry
-                            .left
-                            .as_ref()
-                            .map(|l| l.path.clone())
-                            .unwrap_or_default(),
-                    ));
-                }
+        // Orphan branches require a missing side: a shared directory
+        // aggregates the orphan bits of its subtree but is handled per
+        // child via the recursion below.
+        if entry.right.is_none()
+            && entry.status.intersects(DirEntryStatus::LeftOrphan)
+        {
+            if direction == MirrorDir::Right {
+                // Copy left → right.
+                items.push(TransferItem::new(
+                    TransferAction::CopyRight,
+                    entry.name.clone(),
+                    entry.left.as_ref().is_some_and(|l| l.is_dir),
+                    entry
+                        .left
+                        .as_ref()
+                        .map(|l| l.path.clone())
+                        .unwrap_or_default(),
+                ));
+            } else {
+                // Delete from left.
+                items.push(TransferItem::new(
+                    TransferAction::DeleteLeft,
+                    entry.name.clone(),
+                    entry.left.as_ref().is_some_and(|l| l.is_dir),
+                    entry
+                        .left
+                        .as_ref()
+                        .map(|l| l.path.clone())
+                        .unwrap_or_default(),
+                ));
             }
-            DirEntryStatus::RightOnly => {
-                if direction == MirrorDir::Left {
-                    // Copy right → left.
-                    items.push(TransferItem::new(
-                        TransferAction::CopyLeft,
-                        entry.name.clone(),
-                        entry.right.as_ref().is_some_and(|r| r.is_dir),
-                        entry
-                            .right
-                            .as_ref()
-                            .map(|r| r.path.clone())
-                            .unwrap_or_default(),
-                    ));
-                } else {
-                    // Delete from right.
-                    items.push(TransferItem::new(
-                        TransferAction::DeleteRight,
-                        entry.name.clone(),
-                        entry.right.as_ref().is_some_and(|r| r.is_dir),
-                        entry
-                            .right
-                            .as_ref()
-                            .map(|r| r.path.clone())
-                            .unwrap_or_default(),
-                    ));
-                }
+        } else if entry.left.is_none()
+            && entry.status.intersects(DirEntryStatus::RightOrphan)
+        {
+            if direction == MirrorDir::Left {
+                // Copy right → left.
+                items.push(TransferItem::new(
+                    TransferAction::CopyLeft,
+                    entry.name.clone(),
+                    entry.right.as_ref().is_some_and(|r| r.is_dir),
+                    entry
+                        .right
+                        .as_ref()
+                        .map(|r| r.path.clone())
+                        .unwrap_or_default(),
+                ));
+            } else {
+                // Delete from right.
+                items.push(TransferItem::new(
+                    TransferAction::DeleteRight,
+                    entry.name.clone(),
+                    entry.right.as_ref().is_some_and(|r| r.is_dir),
+                    entry
+                        .right
+                        .as_ref()
+                        .map(|r| r.path.clone())
+                        .unwrap_or_default(),
+                ));
             }
-            DirEntryStatus::Different | DirEntryStatus::Similar => {
-                if direction == MirrorDir::Right {
-                    // Copy left → right (overwrite).
-                    items.push(TransferItem::new(
-                        TransferAction::CopyRight,
-                        entry.name.clone(),
-                        entry.left.as_ref().is_some_and(|l| l.is_dir),
-                        entry
-                            .left
-                            .as_ref()
-                            .map(|l| l.path.clone())
-                            .unwrap_or_default(),
-                    ));
-                } else {
-                    // Copy right → left (overwrite).
-                    items.push(TransferItem::new(
-                        TransferAction::CopyLeft,
-                        entry.name.clone(),
-                        entry.right.as_ref().is_some_and(|r| r.is_dir),
-                        entry
-                            .right
-                            .as_ref()
-                            .map(|r| r.path.clone())
-                            .unwrap_or_default(),
-                    ));
-                }
+        } else if entry.status.intersects(DirEntryStatus::DIFFERENT) {
+            if direction == MirrorDir::Right {
+                // Copy left → right (overwrite).
+                items.push(TransferItem::new(
+                    TransferAction::CopyRight,
+                    entry.name.clone(),
+                    entry.left.as_ref().is_some_and(|l| l.is_dir),
+                    entry
+                        .left
+                        .as_ref()
+                        .map(|l| l.path.clone())
+                        .unwrap_or_default(),
+                ));
+            } else {
+                // Copy right → left (overwrite).
+                items.push(TransferItem::new(
+                    TransferAction::CopyLeft,
+                    entry.name.clone(),
+                    entry.right.as_ref().is_some_and(|r| r.is_dir),
+                    entry
+                        .right
+                        .as_ref()
+                        .map(|r| r.path.clone())
+                        .unwrap_or_default(),
+                ));
             }
-            _ => {}
         }
 
         // Recurse into sub-directories. An orphan directory is already
@@ -559,61 +561,62 @@ fn collect_copy_items(
         if skip_name_conflict(entry, conflicts) {
             continue;
         }
-        match entry.status {
-            DirEntryStatus::LeftOnly => {
-                if direction == CopyDir::ToRight {
-                    items.push(TransferItem::new(
-                        TransferAction::CopyRight,
-                        entry.name.clone(),
-                        entry.left.as_ref().is_some_and(|l| l.is_dir),
-                        entry
-                            .left
-                            .as_ref()
-                            .map(|l| l.path.clone())
-                            .unwrap_or_default(),
-                    ));
-                }
+        // Orphan branches require a missing side; shared directories
+        // aggregating orphan bits are handled per child via recursion.
+        if entry.right.is_none()
+            && entry.status.intersects(DirEntryStatus::LeftOrphan)
+        {
+            if direction == CopyDir::ToRight {
+                items.push(TransferItem::new(
+                    TransferAction::CopyRight,
+                    entry.name.clone(),
+                    entry.left.as_ref().is_some_and(|l| l.is_dir),
+                    entry
+                        .left
+                        .as_ref()
+                        .map(|l| l.path.clone())
+                        .unwrap_or_default(),
+                ));
             }
-            DirEntryStatus::RightOnly => {
-                if direction == CopyDir::ToLeft {
-                    items.push(TransferItem::new(
-                        TransferAction::CopyLeft,
-                        entry.name.clone(),
-                        entry.right.as_ref().is_some_and(|r| r.is_dir),
-                        entry
-                            .right
-                            .as_ref()
-                            .map(|r| r.path.clone())
-                            .unwrap_or_default(),
-                    ));
-                }
+        } else if entry.left.is_none()
+            && entry.status.intersects(DirEntryStatus::RightOrphan)
+        {
+            if direction == CopyDir::ToLeft {
+                items.push(TransferItem::new(
+                    TransferAction::CopyLeft,
+                    entry.name.clone(),
+                    entry.right.as_ref().is_some_and(|r| r.is_dir),
+                    entry
+                        .right
+                        .as_ref()
+                        .map(|r| r.path.clone())
+                        .unwrap_or_default(),
+                ));
             }
-            DirEntryStatus::Different | DirEntryStatus::Similar => {
-                if direction == CopyDir::ToRight {
-                    items.push(TransferItem::new(
-                        TransferAction::CopyRight,
-                        entry.name.clone(),
-                        entry.left.as_ref().is_some_and(|l| l.is_dir),
-                        entry
-                            .left
-                            .as_ref()
-                            .map(|l| l.path.clone())
-                            .unwrap_or_default(),
-                    ));
-                } else {
-                    items.push(TransferItem::new(
-                        TransferAction::CopyLeft,
-                        entry.name.clone(),
-                        entry.right.as_ref().is_some_and(|r| r.is_dir),
-                        entry
-                            .right
-                            .as_ref()
-                            .map(|r| r.path.clone())
-                            .unwrap_or_default(),
-                    ));
-                }
+        } else if entry.status.intersects(DirEntryStatus::DIFFERENT) {
+            if direction == CopyDir::ToRight {
+                items.push(TransferItem::new(
+                    TransferAction::CopyRight,
+                    entry.name.clone(),
+                    entry.left.as_ref().is_some_and(|l| l.is_dir),
+                    entry
+                        .left
+                        .as_ref()
+                        .map(|l| l.path.clone())
+                        .unwrap_or_default(),
+                ));
+            } else {
+                items.push(TransferItem::new(
+                    TransferAction::CopyLeft,
+                    entry.name.clone(),
+                    entry.right.as_ref().is_some_and(|r| r.is_dir),
+                    entry
+                        .right
+                        .as_ref()
+                        .map(|r| r.path.clone())
+                        .unwrap_or_default(),
+                ));
             }
-            _ => {}
         }
 
         if !is_orphan_dir(entry)
@@ -625,6 +628,12 @@ fn collect_copy_items(
 }
 
 /// Collect update-newer items.
+///
+/// The direction comes from the status bits: a pair whose bitmap carries
+/// exactly `LeftNewer` (respectively `RightNewer`) is updated in the
+/// corresponding direction. The combined `DIFFERENT` bitmap (differing
+/// content with equal dates) has no direction and is skipped, and
+/// directory rows are left to their descendants.
 fn collect_update_newer_items(
     comparison: &DirComparison,
     items: &mut Vec<TransferItem>,
@@ -634,33 +643,32 @@ fn collect_update_newer_items(
         if skip_name_conflict(entry, conflicts) {
             continue;
         }
-        if matches!(
-            entry.status,
-            DirEntryStatus::Different | DirEntryStatus::Similar
-        ) && let (Some(left), Some(right)) = (&entry.left, &entry.right)
-        {
-            // Compare modification times.
-            let left_time = parse_mtime(&left.modified);
-            let right_time = parse_mtime(&right.modified);
-
-            if left_time > right_time {
-                // Left is newer.
-                items.push(TransferItem::new(
-                    TransferAction::CopyRight,
-                    entry.name.clone(),
-                    left.is_dir,
-                    left.path.clone(),
-                ));
-            } else if right_time > left_time {
-                // Right is newer.
-                items.push(TransferItem::new(
-                    TransferAction::CopyLeft,
-                    entry.name.clone(),
-                    right.is_dir,
-                    right.path.clone(),
-                ));
+        let is_dir = entry.left.as_ref().is_some_and(|l| l.is_dir)
+            || entry.right.as_ref().is_some_and(|r| r.is_dir);
+        if !is_dir {
+            let newer = entry.status.intersection(DirEntryStatus::DIFFERENT);
+            if newer == DirEntryStatus::LeftNewer {
+                // Left is newer: copy left → right.
+                if let Some(left) = &entry.left {
+                    items.push(TransferItem::new(
+                        TransferAction::CopyRight,
+                        entry.name.clone(),
+                        left.is_dir,
+                        left.path.clone(),
+                    ));
+                }
+            } else if newer == DirEntryStatus::RightNewer {
+                // Right is newer: copy right → left.
+                if let Some(right) = &entry.right {
+                    items.push(TransferItem::new(
+                        TransferAction::CopyLeft,
+                        entry.name.clone(),
+                        right.is_dir,
+                        right.path.clone(),
+                    ));
+                }
             }
-            // If equal, skip.
+            // The combined `DIFFERENT` bitmap (equal dates) stays skipped.
         }
 
         if let Some(ref sub) = entry.sub_entries {
@@ -679,32 +687,34 @@ fn collect_orphan_delete_items(
         if skip_name_conflict(entry, conflicts) {
             continue;
         }
-        match entry.status {
-            DirEntryStatus::LeftOnly => {
-                items.push(TransferItem::new(
-                    TransferAction::DeleteLeft,
-                    entry.name.clone(),
-                    entry.left.as_ref().is_some_and(|l| l.is_dir),
-                    entry
-                        .left
-                        .as_ref()
-                        .map(|l| l.path.clone())
-                        .unwrap_or_default(),
-                ));
-            }
-            DirEntryStatus::RightOnly => {
-                items.push(TransferItem::new(
-                    TransferAction::DeleteRight,
-                    entry.name.clone(),
-                    entry.right.as_ref().is_some_and(|r| r.is_dir),
-                    entry
-                        .right
-                        .as_ref()
-                        .map(|r| r.path.clone())
-                        .unwrap_or_default(),
-                ));
-            }
-            _ => {}
+        // Only rows with a missing side are orphans; shared directories
+        // aggregating orphan bits of their subtree are deleted per child.
+        if entry.right.is_none()
+            && entry.status.intersects(DirEntryStatus::LeftOrphan)
+        {
+            items.push(TransferItem::new(
+                TransferAction::DeleteLeft,
+                entry.name.clone(),
+                entry.left.as_ref().is_some_and(|l| l.is_dir),
+                entry
+                    .left
+                    .as_ref()
+                    .map(|l| l.path.clone())
+                    .unwrap_or_default(),
+            ));
+        } else if entry.left.is_none()
+            && entry.status.intersects(DirEntryStatus::RightOrphan)
+        {
+            items.push(TransferItem::new(
+                TransferAction::DeleteRight,
+                entry.name.clone(),
+                entry.right.as_ref().is_some_and(|r| r.is_dir),
+                entry
+                    .right
+                    .as_ref()
+                    .map(|r| r.path.clone())
+                    .unwrap_or_default(),
+            ));
         }
 
         // An orphan directory is deleted as one recursive operation; do not
@@ -715,12 +725,6 @@ fn collect_orphan_delete_items(
             collect_orphan_delete_items(sub, items, conflicts);
         }
     }
-}
-
-/// Parse modification time from RFC3339 string into a comparable value.
-/// Returns a string for lexicographic comparison (sufficient for ordering).
-fn parse_mtime(mtime_str: &str) -> &str {
-    mtime_str
 }
 
 // ---------------------------------------------------------------------------
@@ -861,7 +865,7 @@ mod tests {
             entries: vec![
                 DirEntry {
                     name: "left_only.txt".to_string(),
-                    status: DirEntryStatus::LeftOnly,
+                    status: DirEntryStatus::LeftOrphan,
                     left: Some(EntryInfo {
                         name: "left_only.txt".to_string(),
                         path: "/left/left_only.txt".to_string(),
@@ -924,7 +928,7 @@ mod tests {
             entries: vec![
                 DirEntry {
                     name: "left_only.txt".to_string(),
-                    status: DirEntryStatus::LeftOnly,
+                    status: DirEntryStatus::LeftOrphan,
                     left: Some(EntryInfo {
                         name: "left_only.txt".to_string(),
                         path: "/left/left_only.txt".to_string(),
@@ -940,7 +944,7 @@ mod tests {
                 },
                 DirEntry {
                     name: "right_only.txt".to_string(),
-                    status: DirEntryStatus::RightOnly,
+                    status: DirEntryStatus::RightOrphan,
                     left: None,
                     right: Some(EntryInfo {
                         name: "right_only.txt".to_string(),
@@ -985,7 +989,7 @@ mod tests {
             entries: vec![
                 DirEntry {
                     name: "notes".to_string(),
-                    status: DirEntryStatus::LeftOnly,
+                    status: DirEntryStatus::LeftOrphan,
                     left: Some(clash_info("notes", "/left/notes", false)),
                     right: None,
                     center: None,
@@ -994,7 +998,7 @@ mod tests {
                 },
                 DirEntry {
                     name: "notes".to_string(),
-                    status: DirEntryStatus::RightOnly,
+                    status: DirEntryStatus::RightOrphan,
                     left: None,
                     right: Some(clash_info("notes", "/right/notes", true)),
                     center: None,
@@ -1003,7 +1007,7 @@ mod tests {
                     sub_entries: Some(std::sync::Arc::new(DirComparison {
                         entries: vec![DirEntry {
                             name: "inner.txt".to_string(),
-                            status: DirEntryStatus::RightOnly,
+                            status: DirEntryStatus::RightOrphan,
                             left: None,
                             right: Some(clash_info(
                                 "inner.txt",
@@ -1020,7 +1024,7 @@ mod tests {
                 },
                 DirEntry {
                     name: "solo.txt".to_string(),
-                    status: DirEntryStatus::LeftOnly,
+                    status: DirEntryStatus::LeftOrphan,
                     left: Some(clash_info(
                         "solo.txt",
                         "/left/solo.txt",

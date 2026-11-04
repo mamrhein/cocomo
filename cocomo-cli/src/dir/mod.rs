@@ -143,17 +143,13 @@ pub(crate) async fn dir_compare<R: EndpointResolver>(
 }
 
 pub(super) fn build_report_config(args: &DirCompareArgs) -> ReportConfig {
-    // Derive report config from the CLI filter flags.
-    let (include_same, include_different, include_orphans) =
-        if args.show_different && args.show_orphans {
-            (true, true, true)
-        } else if args.show_different {
-            (false, true, false)
-        } else if args.show_orphans {
-            (false, false, true)
-        } else {
-            (true, true, true)
-        };
+    // Derive report config from the CLI filter flags, mirroring the
+    // display show-mask semantics: the flags select the status roles to
+    // include; no flag includes everything, both flags include
+    // differences and orphans but not equal entries.
+    let include_same = !args.show_different && !args.show_orphans;
+    let include_different = args.show_different || !args.show_orphans;
+    let include_orphans = args.show_orphans || !args.show_different;
 
     ReportConfig {
         include_same,

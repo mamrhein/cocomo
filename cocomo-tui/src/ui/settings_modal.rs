@@ -66,7 +66,7 @@ pub(super) fn SettingsModal(
                 )
                 .hint(on_off(dir.is_some_and(|d| d.compare_content))),
                 OptionItem::new(SettingItem::HideSame, "Hide identical")
-                    .hint(on_off(dir.is_some_and(|d| !d.display.show_same))),
+                    .hint(on_off(dir.is_some_and(|d| !d.shows_equal()))),
                 OptionItem::new(SettingItem::SyncOperation, "Sync operation")
                     .hint(
                         dir.map(|d| d.sync_operation.label())

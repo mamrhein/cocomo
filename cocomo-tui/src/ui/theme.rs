@@ -18,7 +18,7 @@
 //! inherits the whole scheme by reading the theme instead of hardcoding
 //! styles.
 
-use cocomo_lib::{DirEntryStatus, Importance, TransferAction};
+use cocomo_lib::{DirEntryStatus, Importance, StatusColor, TransferAction};
 use ratatui_kit::{
     prelude::*,
     ratatui::style::{Color, Modifier, Style},
@@ -46,11 +46,14 @@ pub(super) struct CocomoTheme {
     pub border: Style,
     /// Yellow bold style for panel titles and table headers.
     pub title: Style,
-    /// Reverse-video style for the selected table row.
+    /// Selection-background style for the selected table row. Style it
+    /// with the background only: the native table paints this style *over*
+    /// the already-rendered row, so a foreground (even `Reset`) would
+    /// overwrite the colors the cells bring themselves.
     pub highlight: Style,
-    /// Plain selection-background style for the rows a drag selection
-    /// spans between its anchor and the cursor (the cursor row itself keeps
-    /// the stronger `highlight`).
+    /// Selection-background style for the rows a drag selection spans
+    /// between its anchor and the cursor (same background as `highlight`,
+    /// so a dragged range reads as one continuous selection).
     pub range: Style,
     /// Bold style for the row under the mouse pointer.
     pub hover: Style,
@@ -73,8 +76,6 @@ pub(super) struct CocomoTheme {
     pub right_name: Style,
     /// Color of copy transfer actions.
     pub transfer_copy: Color,
-    /// Color of center-copy transfer actions.
-    pub transfer_copy_center: Color,
     /// Color of delete transfer actions.
     pub transfer_delete: Color,
     /// Color of move transfer actions.
@@ -85,44 +86,27 @@ pub(super) struct CocomoTheme {
 
 /// Status colors for directory entries.
 ///
-/// The semantically classifiable statuses derive from the [`Palette`], so a
-/// palette swap recolors them; the comparison endpoints and the structural
-/// conflicts have no palette counterpart and stay fixed across themes.
+/// The three roles mirror [`StatusColor`] in `cocomo-lib`: every status
+/// bitmap resolves to exactly one of them through `DirEntryStatus::symbol`
+/// (the color component), so a cell never has to know which bits it carries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct StatusColors {
-    /// Gray for identical entries.
-    pub same: Color,
-    /// Yellow for similar (not identical) entries.
-    pub similar: Color,
-    /// Red for entries with differing content.
+    /// Gray for identical or equal entries.
+    pub equal: Color,
+    /// Red for entries that differ between the sides.
     pub different: Color,
-    /// Cyan for entries only on the left side.
-    pub left_only: Color,
-    /// Magenta for entries only on the right side.
-    pub right_only: Color,
-    /// White for entries that exist only in the center.
-    pub center_only: Color,
-    /// Green for entries that can be merged cleanly.
-    pub mergeable: Color,
-    /// Magenta-violet for entries with a merge conflict.
-    pub conflict: Color,
+    /// Blue for entries that only exist on one side.
+    pub orphan: Color,
 }
 
 impl StatusColors {
     fn from_palette(palette: &Palette) -> Self {
         Self {
-            same: Color::Gray,
-            similar: palette.warning,
+            equal: Color::Gray,
             different: palette.error,
-            mergeable: palette.success,
-            // The endpoints are symmetric, so they keep the fixed
-            // cyan/magenta pair instead of half-deriving from the palette
-            // (the app palette sets `accent` to the same yellow as
-            // `warning`, which would collide with `similar`).
-            left_only: Color::Cyan,
-            right_only: Color::Magenta,
-            center_only: Color::White,
-            conflict: Color::Rgb(255, 0, 255),
+            // Orphans are one-sided endpoints, not an error state, so they
+            // get a fixed blue instead of a palette role.
+            orphan: Color::Blue,
         }
     }
 }
@@ -134,9 +118,7 @@ impl ComponentTheme for CocomoTheme {
             title: Style::new()
                 .fg(palette.accent)
                 .add_modifier(Modifier::BOLD),
-            highlight: Style::new()
-                .bg(palette.selection)
-                .add_modifier(Modifier::REVERSED),
+            highlight: Style::new().bg(palette.selection),
             range: Style::new().bg(palette.selection),
             hover: Style::new().add_modifier(Modifier::BOLD),
             brand: Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
@@ -158,7 +140,6 @@ impl ComponentTheme for CocomoTheme {
                 .fg(Color::Magenta)
                 .add_modifier(Modifier::BOLD),
             transfer_copy: palette.success,
-            transfer_copy_center: palette.warning,
             transfer_delete: palette.error,
             transfer_move: Color::Magenta,
             status: StatusColors::from_palette(palette),
@@ -173,22 +154,16 @@ impl Default for CocomoTheme {
 }
 
 impl CocomoTheme {
-    /// Return the bold status style for a directory entry status.
+    /// Return the bold status style for a directory entry status bitmap.
     ///
-    /// Every status is visually distinct except `Same` and `SameBinary`,
-    /// which intentionally share a color.
+    /// The color follows the role the library resolves via
+    /// [`DirEntryStatus::symbol`], so every bitmap (including aggregated
+    /// directory ones) maps to exactly one of the three [`StatusColors`].
     pub fn status_style(&self, status: DirEntryStatus) -> Style {
-        let color = match status {
-            DirEntryStatus::Same | DirEntryStatus::SameBinary => {
-                self.status.same
-            }
-            DirEntryStatus::Similar => self.status.similar,
-            DirEntryStatus::Different => self.status.different,
-            DirEntryStatus::LeftOnly => self.status.left_only,
-            DirEntryStatus::RightOnly => self.status.right_only,
-            DirEntryStatus::CenterOnly => self.status.center_only,
-            DirEntryStatus::Mergeable => self.status.mergeable,
-            DirEntryStatus::Conflict => self.status.conflict,
+        let color = match status.symbol().1 {
+            StatusColor::Equal => self.status.equal,
+            StatusColor::Different => self.status.different,
+            StatusColor::Orphan => self.status.orphan,
         };
         Style::new().fg(color).add_modifier(Modifier::BOLD)
     }
@@ -202,7 +177,6 @@ impl CocomoTheme {
             TransferAction::CopyLeft | TransferAction::CopyRight => {
                 self.transfer_copy
             }
-            TransferAction::CopyCenter => self.transfer_copy_center,
             TransferAction::DeleteLeft | TransferAction::DeleteRight => {
                 self.transfer_delete
             }
@@ -228,28 +202,36 @@ mod tests {
     use super::*;
 
     #[test]
-    fn status_style_distinguishes_all_statuses() {
+    fn status_style_maps_the_three_color_roles() {
         let theme = CocomoTheme::default();
-        let statuses = [
-            DirEntryStatus::Same,
-            DirEntryStatus::SameBinary,
-            DirEntryStatus::Similar,
-            DirEntryStatus::Different,
-            DirEntryStatus::LeftOnly,
-            DirEntryStatus::RightOnly,
-            DirEntryStatus::CenterOnly,
-            DirEntryStatus::Mergeable,
-            DirEntryStatus::Conflict,
-        ];
-        let mut styles: Vec<Style> = statuses
-            .iter()
-            .copied()
-            .map(|s| theme.status_style(s))
-            .collect();
-        // `Same` and `SameBinary` intentionally share a color; every other
-        // status must be visually distinct.
-        styles.dedup();
-        assert_eq!(styles.len(), statuses.len() - 1);
+        for status in [DirEntryStatus::Same, DirEntryStatus::Equal] {
+            assert_eq!(
+                theme.status_style(status).fg,
+                Some(theme.status.equal)
+            );
+        }
+        for status in [
+            DirEntryStatus::LeftNewer,
+            DirEntryStatus::RightNewer,
+            DirEntryStatus::DIFFERENT,
+            DirEntryStatus::Equal.union(DirEntryStatus::LeftOrphan),
+        ] {
+            assert_eq!(
+                theme.status_style(status).fg,
+                Some(theme.status.different)
+            );
+        }
+        for status in [DirEntryStatus::LeftOrphan, DirEntryStatus::RightOrphan]
+        {
+            assert_eq!(
+                theme.status_style(status).fg,
+                Some(theme.status.orphan)
+            );
+        }
+        // The three roles are visually distinct from each other.
+        assert_ne!(theme.status.equal, theme.status.different);
+        assert_ne!(theme.status.different, theme.status.orphan);
+        assert_ne!(theme.status.equal, theme.status.orphan);
     }
 
     #[test]
@@ -259,18 +241,15 @@ mod tests {
         assert_eq!(theme.title.fg, Some(Color::Yellow));
         assert_eq!(theme.border.fg, Some(Color::Gray));
         assert_eq!(theme.highlight.bg, Some(Color::DarkGray));
-        // The semantically classifiable statuses follow the palette.
+        // The selection marks the row by background only: the table paints
+        // the highlight over the rendered row, so a foreground there would
+        // overwrite each cell's own color.
+        assert_eq!(theme.highlight.fg, None);
+        assert!(!theme.highlight.add_modifier.contains(Modifier::REVERSED));
+        // The Different role follows the palette's error color.
         assert_eq!(
-            theme.status_style(DirEntryStatus::Similar).fg,
-            Some(palette.warning)
-        );
-        assert_eq!(
-            theme.status_style(DirEntryStatus::Different).fg,
+            theme.status_style(DirEntryStatus::LeftNewer).fg,
             Some(palette.error)
-        );
-        assert_eq!(
-            theme.status_style(DirEntryStatus::Mergeable).fg,
-            Some(palette.success)
         );
     }
 }

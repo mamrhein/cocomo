@@ -52,9 +52,15 @@ pub(crate) fn session_to_config(
             ignore_whitespace: false,
             skip_blank_lines: false,
             skip_comments: false,
-            show_same: dir.display.show_same,
-            show_different: dir.display.show_different,
-            show_orphans: dir.display.show_orphans,
+            show_hidden: dir.display.show_hidden,
+            // The shown status bits by name, so the TOML stays
+            // human-readable like the old coarse booleans.
+            show_statuses: dir
+                .display
+                .show_statuses
+                .iter()
+                .map(|bit| bit.bit_name().to_string())
+                .collect(),
             ..SessionSettings::default()
         },
     })

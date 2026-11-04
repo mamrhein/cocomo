@@ -30,20 +30,30 @@ impl Summary {
         self.by_status.values().sum()
     }
 
-    /// Return the number of visible same entries (same + same binary).
+    /// Return the number of visible entries whose status bitmap
+    /// intersects `mask`.
+    fn count_matching(&self, mask: DirEntryStatus) -> usize {
+        self.by_status
+            .iter()
+            .filter(|(status, _)| status.intersects(mask))
+            .map(|(_, count)| *count)
+            .sum()
+    }
+
+    /// Return the number of visible entries whose sides are identical or
+    /// equal.
     pub(super) fn same_count(&self) -> usize {
-        self.get(DirEntryStatus::Same) + self.get(DirEntryStatus::SameBinary)
+        self.count_matching(DirEntryStatus::EQUAL)
     }
 
-    /// Return the number of visible different entries (different + similar).
+    /// Return the number of visible entries whose sides differ.
     pub(super) fn different_count(&self) -> usize {
-        self.get(DirEntryStatus::Different) + self.get(DirEntryStatus::Similar)
+        self.count_matching(DirEntryStatus::DIFFERENT)
     }
 
-    /// Return the number of visible orphan entries (left only + right only).
+    /// Return the number of visible orphan entries.
     pub(super) fn orphan_count(&self) -> usize {
-        self.get(DirEntryStatus::LeftOnly)
-            + self.get(DirEntryStatus::RightOnly)
+        self.count_matching(DirEntryStatus::ORPHAN)
     }
 
     /// Return the count for a specific status, or zero if absent.
@@ -183,7 +193,10 @@ pub(super) fn print_full_summary_to(
         "Status", "Count", "% of total"
     )
     .unwrap();
-    for status in all_statuses() {
+    let mut statuses: Vec<DirEntryStatus> =
+        summary.by_status.keys().copied().collect();
+    statuses.sort();
+    for status in statuses {
         let count = summary.get(status);
         if count > 0 {
             let pct = if total > 0 {
@@ -214,21 +227,6 @@ pub(super) fn print_full_summary_to(
     writeln!(output, "{}", total_line).unwrap();
 }
 
-/// All `DirEntryStatus` variants in a stable display order.
-pub(super) fn all_statuses() -> [DirEntryStatus; 9] {
-    [
-        DirEntryStatus::Same,
-        DirEntryStatus::SameBinary,
-        DirEntryStatus::Similar,
-        DirEntryStatus::Different,
-        DirEntryStatus::LeftOnly,
-        DirEntryStatus::RightOnly,
-        DirEntryStatus::CenterOnly,
-        DirEntryStatus::Mergeable,
-        DirEntryStatus::Conflict,
-    ]
-}
-
 /// Wrapper around [`print_summary_to`] that writes to a `Vec<u8>` buffer,
 /// enabling unit testing of summary output without touching stdout.
 #[cfg(test)]
@@ -247,7 +245,7 @@ mod tests {
             make_nested_comparison, make_nested_comparison_with_hidden,
             make_test_comparison,
         },
-        all_statuses, collect_and_count, print_summary_to_vec,
+        collect_and_count, print_summary_to_vec,
     };
     use crate::cli::{DirCompareArgs, SummaryMode};
 
@@ -283,8 +281,8 @@ mod tests {
         assert!(output.contains("Summary breakdown:"));
         assert!(output.contains("Status"));
         assert!(output.contains("Count"));
-        // "same" should appear with count 1 and 25.0%.
-        assert!(output.contains("same"));
+        // "equal" should appear with count 1 and 25.0%.
+        assert!(output.contains("equal"));
         assert!(output.contains("25.0%"));
         // "Total" row should appear with 100.0%.
         assert!(output.contains("Total"));
@@ -298,22 +296,21 @@ mod tests {
         let mut buf = Vec::new();
         print_summary_to_vec(&summary, SummaryMode::Full, &mut buf);
         let output = String::from_utf8(buf).unwrap();
-        // "conflict" has count 0, should not appear.
-        assert!(!output.contains("conflict"));
-        // "mergeable" has count 0, should not appear.
-        assert!(!output.contains("mergeable"));
+        // The fixture carries no `Same` bit, so "same" must not appear as a
+        // status row.
+        assert!(!output.contains("same"));
     }
 
     #[test]
     fn summary_reflects_show_different_filter() {
-        // With --show-different, only Different + Similar entries should be
-        // counted in the summary.
+        // With --show-different, only entries carrying a newer-side bit
+        // should be counted in the summary.
         let comp = make_test_comparison();
         let mut args = test_args();
         args.show_different = true;
         let (visible, summary) =
             collect_and_count(&comp.entries, &args, false);
-        assert_eq!(visible.len(), 1); // only diff.txt (Different)
+        assert_eq!(visible.len(), 1); // only diff.txt (DIFFERENT)
         assert_eq!(summary.total(), 1);
         assert_eq!(summary.same_count(), 0);
         assert_eq!(summary.different_count(), 1);
@@ -322,8 +319,8 @@ mod tests {
 
     #[test]
     fn summary_reflects_show_orphans_filter() {
-        // With --show-orphans, only LeftOnly + RightOnly entries should be
-        // counted.
+        // With --show-orphans, only entries carrying an orphan bit should
+        // be counted.
         let comp = make_test_comparison();
         let mut args = test_args();
         args.show_orphans = true;
@@ -344,9 +341,10 @@ mod tests {
         let mut args = test_args();
         // Count the full tree, ignoring the default output depth limit.
         args.max_depth = None;
-        let (visible, summary) = collect_and_count(&comp.entries, &args, false);
+        let (visible, summary) =
+            collect_and_count(&comp.entries, &args, false);
         // Root level: 1 dir + 1 file = 2 entries
-        // Sub-level (sub/): 1 same + 1 diff + 1 left_only = 3 entries
+        // Sub-level (sub/): 1 equal + 1 diff + 1 left orphan = 3 entries
         // Total: 5
         assert_eq!(visible.len(), 5);
         assert_eq!(summary.total(), 5);
@@ -379,7 +377,7 @@ mod tests {
         let mut args = test_args();
         args.excl_hidden = true;
         let (visible, summary) = collect_and_count(&comp.entries, &args, true);
-        // Root: sub/ (visible, Same) + visible.txt (visible, Same) = 2
+        // Root: sub/ (visible, Equal) + visible.txt (visible, Equal) = 2
         // .hidden_dir/ is filtered out, so its children are not counted.
         assert!(!visible.iter().any(|e| e.name.starts_with('.')));
         assert_eq!(summary.total(), 2);
@@ -396,8 +394,8 @@ mod tests {
         args.max_depth = None;
         let (_visible, summary) =
             collect_and_count(&comp.entries, &args, false);
-        // Root: sub/ (Same) + visible.txt (Same) + .hidden_dir/ (filtered out)
-        // .hidden_dir/child.txt (passes name filter, counted)
+        // Root: sub/ (Equal) + visible.txt (Equal) + .hidden_dir/ (filtered
+        // out) .hidden_dir/child.txt (passes name filter, counted)
         assert_eq!(summary.total(), 3); // sub, visible.txt, child.txt
         assert_eq!(summary.same_count(), 3);
     }
@@ -409,7 +407,8 @@ mod tests {
         let comp = make_nested_comparison();
         let mut args = test_args();
         args.max_depth = Some(1);
-        let (visible, summary) = collect_and_count(&comp.entries, &args, false);
+        let (visible, summary) =
+            collect_and_count(&comp.entries, &args, false);
         // Root level only: the sub/ directory row + same.txt.
         assert_eq!(visible.len(), 2);
         assert_eq!(summary.total(), 2);
@@ -428,14 +427,35 @@ mod tests {
     }
 
     #[test]
-    fn all_statuses_returns_all_variants() {
-        let statuses = all_statuses();
-        assert_eq!(statuses.len(), 9);
-        // Verify no duplicates.
-        for i in 0..statuses.len() {
-            for j in (i + 1)..statuses.len() {
-                assert_ne!(statuses[i], statuses[j]);
-            }
+    fn summary_full_table_lists_each_status_bitmap_once() {
+        // The full breakdown iterates the observed exact bitmaps, sorted
+        // by their raw value; each appears in exactly one row.
+        let comp = make_test_comparison();
+        let (_, summary) =
+            collect_and_count(&comp.entries, &test_args(), false);
+        let mut buf = Vec::new();
+        print_summary_to_vec(&summary, SummaryMode::Full, &mut buf);
+        let output = String::from_utf8(buf).unwrap();
+        for status_name in [
+            "equal",
+            "left_newer,right_newer",
+            "left_orphan",
+            "right_orphan",
+        ] {
+            assert!(
+                output.contains(status_name),
+                "missing status row: {status_name}"
+            );
         }
+        // Every visible entry is counted in exactly one row.
+        let row_count = output
+            .lines()
+            .filter(|line| {
+                ["equal", "left_newer", "left_orphan", "right_orphan"]
+                    .iter()
+                    .any(|name| line.trim_start().starts_with(name))
+            })
+            .count();
+        assert_eq!(row_count, summary.total());
     }
 }

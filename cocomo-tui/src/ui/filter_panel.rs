@@ -10,21 +10,24 @@
 //! Filter panel modal: the `f` entry point for all view filters.
 //!
 //! The panel edits a [`FilterDraft`] held by the active session: a
-//! case-insensitive regex name filter (with an enable toggle) and the
-//! same/different/orphans display checkboxes. `Tab` cycles which section
-//! owns the keys; the focused section is marked with a `>` pointer.
-//! `Enter` applies the draft to the session and closes the panel; an
-//! invalid regex keeps it open and shows the compiler message instead.
+//! case-insensitive regex name pattern and the "Show items:" checkbox
+//! list (hidden, same/equal, different with its newer-side subs, orphan
+//! with its side subs). `Tab` cycles which section owns the keys; while
+//! the pattern has focus its label carries the `>` pointer, while the
+//! checkbox list has focus the pointer marks the selected row. `Space`
+//! toggles that checkbox, `j`/`k` move the row cursor (the panel's key
+//! handling lives in [`crate::keys`]). `Enter` applies the draft to the
+//! session and closes the panel; an invalid regex keeps it open and shows
+//! the compiler message instead.
 //!
 //! Like `TransferDialog` the component lives in the App shell and reads
 //! the active session, so one implementation serves every dir tab. It
 //! owns an exclusive input layer while open and registers its handler in
-//! that layer with `EventPriority::High`, so the panel sees `Esc`/`Tab`/
-//! `Enter`/`Space` before the child widgets; keys the focused child owns
-//! (text editing, the status list's `Space`/`j`/`k`) are reported as
-//! unbound and reach the child through the shared layer.
-
-use std::collections::HashSet;
+//! that layer with `EventPriority::High`, so the panel sees its keys
+//! before the child widgets; the only child that needs keys is the
+//! pattern `Input` (rendering the buffer and cursor), and unowned keys
+//! are reported as unclaimed so it still gets them through the shared
+//! layer.
 
 use ratatui_kit::{
     crossterm::event::{Event, KeyEventKind},
@@ -39,12 +42,9 @@ use ratatui_kit::{
 
 use super::{frame::hint_line, theme::CocomoTheme};
 use crate::{
-    controller::{dispatch_filter_panel_key, set_filter_panel_statuses},
-    state::{APP_STATE, FilterDraft, FilterFocus, SessionMode},
+    controller::dispatch_filter_panel_key,
+    state::{APP_STATE, FilterDraft, FilterFocus, FilterRow, SessionMode},
 };
-
-/// Row labels of the status checkbox list, in display order.
-const STATUS_ITEMS: [&str; 3] = ["Same", "Different", "Orphans"];
 
 /// Filter panel modal rendered above the active session.
 #[component]
@@ -62,7 +62,7 @@ pub(super) fn FilterPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let open = draft.is_some();
 
     // All hooks must run on every frame, open or not, so the layer and the
-    // checkbox state are minted unconditionally.
+    // handler are minted unconditionally.
     let layer = hooks.use_input_layer(open, true);
     hooks.use_event_handler(
         EventScope::Layer(layer),
@@ -75,8 +75,8 @@ pub(super) fn FilterPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 return EventResult::Ignored;
             }
 
-            // The panel owns `Esc`/`Tab`/`Enter`/`Space` (via the keymap);
-            // an unowned key stays unclaimed here so the focused child
+            // The panel owns its keys (via the keymap and the focused
+            // section); an unowned key stays unclaimed here so the child
             // widget in the same layer still gets it.
             if dispatch_filter_panel_key(key) {
                 EventResult::Consumed
@@ -84,32 +84,6 @@ pub(super) fn FilterPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 EventResult::Ignored
             }
         },
-    );
-
-    // The status checkboxes live in the draft as plain bools; the
-    // `MultiSelect` wants a `HashSet<usize>`, so mirror the draft into a
-    // local state. The effect re-seeds on draft changes with
-    // `write_no_update`, so the mirror never feeds a redraw loop back.
-    let (seed_same, seed_different, seed_orphans) = draft
-        .as_ref()
-        .map(|d| (d.show_same, d.show_different, d.show_orphans))
-        .unwrap_or((true, true, true));
-    let statuses = hooks.use_state(HashSet::<usize>::default);
-    hooks.use_effect(
-        move || {
-            let mut set = statuses.write_no_update();
-            set.clear();
-            if seed_same {
-                set.insert(0);
-            }
-            if seed_different {
-                set.insert(1);
-            }
-            if seed_orphans {
-                set.insert(2);
-            }
-        },
-        (seed_same, seed_different, seed_orphans),
     );
 
     let Some(draft) = draft else {
@@ -121,27 +95,15 @@ pub(super) fn FilterPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     };
 
     // Flatten the draft into render values.
-    let status_items: Vec<String> =
-        STATUS_ITEMS.iter().map(|s| s.to_string()).collect();
     let pattern_label = focus_line(
-        "Name pattern (regex)",
+        "Name pattern:",
         draft.focus == FilterFocus::Pattern,
         &theme,
     );
     let input =
         tui_input::Input::new(draft.pattern.clone()).with_cursor(draft.cursor);
-    let toggle_line = Line::from(vec![
-        focus_marker(draft.focus == FilterFocus::NameToggle, &theme),
-        Span::styled(
-            if draft.name_filter_on { "[x] " } else { "[ ] " },
-            if draft.name_filter_on {
-                theme.title
-            } else {
-                theme.dim
-            },
-        ),
-        Span::raw("name filter enabled"),
-    ]);
+    let rows =
+        checkbox_rows(&draft, draft.focus == FilterFocus::Statuses, &theme);
     let error_line = draft.error.as_ref().map(|e| {
         Line::from(Span::styled(
             e.clone(),
@@ -150,9 +112,10 @@ pub(super) fn FilterPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 .add_modifier(Modifier::BOLD),
         ))
     });
-    // Two border rows plus the padding, the pattern label, the input, the
-    // toggle, and the framed status list (three rows plus its border).
-    let height = 14 + u16::from(error_line.is_some());
+    // Two border rows plus the padding, the pattern label, the input, a
+    // blank, the section header, a blank, and the nine checkbox rows
+    // (eight checkboxes and the separator after the hidden row).
+    let height = 18 + u16::from(error_line.is_some());
 
     element!(
         Modal(
@@ -185,25 +148,12 @@ pub(super) fn FilterPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     placeholder: "regex, e.g. \\.rs$".to_string(),
                     hide_cursor: draft.focus != FilterFocus::Pattern,
                 )
-                Text(text: toggle_line)
-                MultiSelect<String>(
-                    items: status_items,
-                    selected: statuses,
-                    on_change: Handler::from(move |items: Vec<String>| {
-                        let has = |label: &str| {
-                            items.iter().any(|i| i == label)
-                        };
-                        set_filter_panel_statuses(
-                            has("Same"),
-                            has("Different"),
-                            has("Orphans"),
-                        );
-                    }),
-                    active: draft.focus == FilterFocus::Statuses,
-                    default_index: Some(0),
-                    top_title: Some(Line::from(" Statuses ").style(theme.dim)),
-                    height: Constraint::Length(5),
-                )
+                Text(text: Line::from(""))
+                Text(text: Line::from(Span::styled("Show items:", theme.dim)))
+                Text(text: Line::from(""))
+                for (index, line) in rows.into_iter().enumerate() {
+                    Text(key: index, text: line)
+                }
                 if let Some(line) = error_line {
                     Text(text: line)
                 }
@@ -211,6 +161,50 @@ pub(super) fn FilterPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         }
     )
     .into_any()
+}
+
+/// The "Show items:" checkbox rows in display order.
+///
+/// Blank separator rows separate the hidden toggle from the status groups.
+/// Checkbox rows lead with the focus pointer (only while the section has
+/// focus and the row is selected), sub-checkboxes are indented under their
+/// umbrella, and the `[x]`/`[ ]` box reads the draft directly — the draft
+/// is the single source of truth for the check state.
+fn checkbox_rows(
+    draft: &FilterDraft,
+    active: bool,
+    theme: &CocomoTheme,
+) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    for row in FilterRow::ALL {
+        lines.push(checkbox_line(row, draft, active, theme));
+        if row == FilterRow::Hidden {
+            // Separator between the hidden group and the status groups.
+            lines.push(Line::from(""));
+        }
+    }
+    lines
+}
+
+/// Render one checkbox line: pointer, indentation, box and label.
+fn checkbox_line(
+    row: FilterRow,
+    draft: &FilterDraft,
+    active: bool,
+    theme: &CocomoTheme,
+) -> Line<'static> {
+    let selected = active && FilterRow::ALL[draft.selected] == row;
+    let indent = if row.is_child() { "    " } else { "" };
+    let checked = draft.row_shown(row);
+    Line::from(vec![
+        focus_marker(selected, theme),
+        Span::raw(indent),
+        Span::styled(
+            if checked { "[x] " } else { "[ ] " },
+            if checked { theme.title } else { theme.dim },
+        ),
+        Span::raw(row.label()),
+    ])
 }
 
 /// A section label with a `>` pointer while the section has focus.
@@ -229,5 +223,94 @@ fn focus_marker(focused: bool, theme: &CocomoTheme) -> Span<'static> {
         Span::styled("> ", theme.title)
     } else {
         Span::styled("  ", theme.dim)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use cocomo_lib::{DirEntryStatus, Endpoint};
+    use ratatui_kit::{ratatui::buffer::Buffer, test_util::render_frames};
+
+    use super::*;
+    use crate::{
+        state::{AppState, SessionView},
+        ui::theme::cocomo_palette,
+    };
+
+    /// A dir session whose only content is the given open filter panel.
+    fn app_with_draft(draft: FilterDraft) -> AppState {
+        let mut session = SessionView::new_dir_compare(
+            Endpoint::local("/left"),
+            Endpoint::local("/right"),
+            false,
+        );
+        session.ui.mode = SessionMode::FilterPanel {
+            draft: Box::new(draft),
+        };
+        let mut app = AppState::new();
+        app.add_session(session);
+        app
+    }
+
+    /// Render the open panel into a buffer sized to its fixed layout.
+    fn render(draft: FilterDraft) -> Buffer {
+        APP_STATE.set(app_with_draft(draft));
+        render_frames(
+            element!(PaletteProvider(palette: cocomo_palette()) {
+                FilterPanel()
+            }),
+            60,
+            20,
+            1,
+        )
+    }
+
+    /// First content column inside the panel (border plus padding).
+    const X: u16 = 2;
+    /// First content row inside the panel (border plus padding).
+    const Y0: u16 = 3;
+
+    #[test]
+    fn checkbox_rows_show_the_draft_state_and_cursor() {
+        let draft = FilterDraft {
+            focus: FilterFocus::Statuses,
+            show_hidden: false,
+            statuses: DirEntryStatus::all() - DirEntryStatus::EQUAL,
+            selected: 2,
+            ..FilterDraft::default()
+        };
+        let buf = render(draft);
+
+        // Pattern label, input, blank, section header, blank, then the
+        // hidden row; `selected` 2 addresses the "different" row.
+        let hidden_y = Y0 + 5;
+        let different_y = hidden_y + 3;
+        assert_eq!(buf[(X, different_y)].symbol(), ">");
+        // Unselected rows pad instead.
+        assert_eq!(buf[(X, hidden_y)].symbol(), " ");
+        // The hidden checkbox is unchecked, the different one checked.
+        assert_eq!(buf[(X + 2, hidden_y)].symbol(), "[");
+        assert_eq!(buf[(X + 3, hidden_y)].symbol(), " ");
+        assert_eq!(buf[(X + 3, different_y)].symbol(), "x");
+        // A blank separator row sits between hidden and the status group.
+        assert_eq!(buf[(X + 2, hidden_y + 1)].symbol(), " ");
+        // The sub-checkboxes are indented under their umbrellas.
+        let left_newer_y = hidden_y + 4;
+        assert_eq!(buf[(X + 6, left_newer_y)].symbol(), "[");
+        assert_eq!(buf[(X + 7, left_newer_y)].symbol(), "x");
+    }
+
+    #[test]
+    fn pattern_focus_hides_the_row_pointer() {
+        let draft = FilterDraft {
+            focus: FilterFocus::Pattern,
+            ..FilterDraft::default()
+        };
+        let buf = render(draft);
+        // The pattern label carries the pointer instead of any row.
+        assert_eq!(buf[(X, Y0)].symbol(), ">");
+        let hidden_y = Y0 + 5;
+        assert_eq!(buf[(X, hidden_y)].symbol(), " ");
+        assert_eq!(buf[(X, hidden_y + 3)].symbol(), " ");
     }
 }

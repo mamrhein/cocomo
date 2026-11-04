@@ -31,10 +31,9 @@ const MAX_ITEM_LINES: usize = 5;
 /// The actions the totals are grouped by, in display order: copies, moves,
 /// then deletes, each pointing right-to-left-last so the dominant
 /// left → right direction reads first.
-const ACTION_ORDER: [TransferAction; 7] = [
+const ACTION_ORDER: [TransferAction; 6] = [
     TransferAction::CopyRight,
     TransferAction::CopyLeft,
-    TransferAction::CopyCenter,
     TransferAction::MoveRight,
     TransferAction::MoveLeft,
     TransferAction::DeleteRight,

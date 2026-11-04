@@ -16,6 +16,7 @@
 //! [`dropdown_hit_item`]), so the rendered layout and the mouse hit-testing
 //! in the App shell cannot drift apart.
 
+use cocomo_lib::filter::DisplayFilters;
 use ratatui_kit::{
     crossterm::event::MouseButton,
     prelude::*,
@@ -34,7 +35,7 @@ use super::{
 };
 use crate::{
     keys::key_hint,
-    menu::{MenuDef, MenuItemDef, MenuState},
+    menu::{MenuDef, MenuItemDef, MenuState, item_label},
 };
 
 /// Width of the `" | "` divider between menu items.
@@ -67,11 +68,19 @@ pub(super) fn menu_title(menu: &MenuDef) -> Line<'static> {
 }
 
 /// Column widths of the label and key-hint parts of `def`'s dropdown.
-fn content_widths(def: &MenuDef) -> (u16, u16) {
+///
+/// Labels are measured through [`item_label`] because visibility toggles
+/// render a state-dependent `show`/`hide` prefix; `display` is the active
+/// session's filter state (`None` without a directory session).
+fn content_widths(
+    def: &MenuDef,
+    display: Option<&DisplayFilters>,
+) -> (u16, u16) {
     let mut label_width = 0u16;
     let mut hint_width = 0u16;
     for item in def.items {
-        label_width = label_width.max(item.label.chars().count() as u16);
+        label_width =
+            label_width.max(item_label(item, display).chars().count() as u16);
         if let Some(hint) = key_hint(item.cmd) {
             hint_width = hint_width.max(hint.chars().count() as u16);
         }
@@ -83,17 +92,19 @@ fn content_widths(def: &MenuDef) -> (u16, u16) {
 ///
 /// `bar_origin` is the screen position of the menu bar's first cell; the
 /// dropdown is anchored under its title's text (one cell past the tab's
-/// left padding) and opens directly below the bar. An unknown menu yields
-/// [`Rect::ZERO`].
+/// left padding) and opens directly below the bar. `display` is the active
+/// session's filter state, needed to size the state-dependent Filter
+/// labels. An unknown menu yields [`Rect::ZERO`].
 pub(super) fn dropdown_rect(
     titles: &[Line<'static>],
     menu: MenuState,
     bar_origin: Position,
+    display: Option<&DisplayFilters>,
 ) -> Rect {
     let Some(def) = menu.menu() else {
         return Rect::ZERO;
     };
-    let (label_width, hint_width) = content_widths(def);
+    let (label_width, hint_width) = content_widths(def, display);
     // The hint column only exists when at least one item has a hint, and
     // is separated from the labels by two cells. The row itself is
     // `▸ label… hint `, the box adds two border columns.
@@ -201,6 +212,10 @@ pub(super) struct MenuDropdownProps {
     /// Whether the active session is a directory comparison. Items that
     /// require one are rendered dimmed while it is not.
     pub(super) dir_active: bool,
+    /// The active session's display filters, used to resolve the
+    /// state-dependent `show`/`hide` labels (`None` without a directory
+    /// session).
+    pub(super) display: Option<DisplayFilters>,
 }
 
 /// Dropdown listing the items of the open menu.
@@ -223,7 +238,8 @@ pub(super) fn MenuDropdown(
     let Some(def) = menu.menu() else {
         return element!(Fragment).into_any();
     };
-    let (label_width, hint_width) = content_widths(def);
+    let (label_width, hint_width) =
+        content_widths(def, props.display.as_ref());
     let rect = props.rect;
     element!(
         Positioned(
@@ -242,6 +258,7 @@ pub(super) fn MenuDropdown(
                         key: index,
                         text: dropdown_row(
                             item,
+                            &item_label(item, props.display.as_ref()),
                             index == menu.item,
                             label_width,
                             hint_width,
@@ -259,11 +276,15 @@ pub(super) fn MenuDropdown(
 /// Render one dropdown row: selection pointer, label padded to the common
 /// width, and the command's key hint right-aligned in its own column.
 ///
+/// `label` is the resolved [`item_label`] of `item`, so toggle rows show
+/// their state-dependent `show`/`hide` prefix.
+///
 /// The hint is underlined on top of its dim bold style: the key code must
 /// also read on terminals without color, matching the underlined
 /// accelerators of [`menu_title`] and [`super::option_list::OptionList`].
 fn dropdown_row(
     item: &MenuItemDef,
+    label: &str,
     current: bool,
     label_width: u16,
     hint_width: u16,
@@ -271,7 +292,7 @@ fn dropdown_row(
     theme: CocomoTheme,
 ) -> Line<'static> {
     let label_pad = " ".repeat(
-        label_width.saturating_sub(item.label.chars().count() as u16) as usize,
+        label_width.saturating_sub(label.chars().count() as u16) as usize,
     );
     // Directory-only items are dimmed on a text session (or the welcome
     // screen); confirming one stays a no-op, mirroring the controller.
@@ -283,7 +304,7 @@ fn dropdown_row(
     let mut spans = vec![
         Span::raw(if current { "\u{25b8}" } else { " " }),
         Span::raw(" "),
-        Span::styled(format!("{}{label_pad}", item.label), label_style),
+        Span::styled(format!("{label}{label_pad}"), label_style),
     ];
     if hint_width > 0 {
         let hint = key_hint(item.cmd).unwrap_or_default();
@@ -385,7 +406,7 @@ mod tests {
         let items = titles();
         for (index, def) in MENUS.iter().enumerate() {
             let menu = MenuState::open(index).unwrap();
-            let rect = dropdown_rect(&items, menu, BAR_ORIGIN);
+            let rect = dropdown_rect(&items, menu, BAR_ORIGIN, None);
             let title_x =
                 tabs_item_x(&items, index, DIVIDER_WIDTH).unwrap() + 1;
             assert_eq!(rect.x, title_x, "menu {}", def.title);
@@ -440,7 +461,10 @@ mod tests {
             bar_index: MENUS.len(),
             item: 0,
         };
-        assert_eq!(dropdown_rect(&items, unknown, BAR_ORIGIN), Rect::ZERO);
+        assert_eq!(
+            dropdown_rect(&items, unknown, BAR_ORIGIN, None),
+            Rect::ZERO
+        );
     }
 
     #[test]
@@ -450,10 +474,15 @@ mod tests {
             bar_index: menu_index("Sessions"),
             item: 1,
         };
-        let rect = dropdown_rect(&items, menu, BAR_ORIGIN);
+        let rect = dropdown_rect(&items, menu, BAR_ORIGIN, None);
         let buf = render_frames(
             element!(PaletteProvider(palette: cocomo_palette()) {
-                MenuDropdown(menu: Some(menu), rect: rect, dir_active: false)
+                MenuDropdown(
+                    menu: Some(menu),
+                    rect: rect,
+                    dir_active: false,
+                    display: None,
+                )
             }),
             100,
             20,
@@ -464,10 +493,10 @@ mod tests {
         // session: dimmed label, no pointer.
         assert_eq!(buf[(rect.x + 3, rect.y + 1)].symbol(), "o");
         assert_eq!(cell(3, 1).fg, Some(cocomo_palette().fg_dim));
-        assert!(!cell(1, 1).add_modifier.contains(Modifier::REVERSED));
+        assert_ne!(cell(1, 1).bg, Some(cocomo_palette().selection));
         // The current row carries the pointer and the highlight style.
         assert_eq!(buf[(rect.x + 1, rect.y + 2)].symbol(), "\u{25b8}");
-        assert!(cell(3, 2).add_modifier.contains(Modifier::REVERSED));
+        assert_eq!(cell(3, 2).bg, Some(cocomo_palette().selection));
         assert_eq!(buf[(rect.x + 3, rect.y + 2)].symbol(), "s");
         // The box is drawn closed on the right, i.e. it is wide enough for
         // its longest label.
@@ -494,6 +523,7 @@ mod tests {
         let theme = CocomoTheme::default();
         let row = dropdown_row(
             item,
+            item.label,
             false,
             20,
             hint.chars().count() as u16,

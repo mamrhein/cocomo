@@ -29,7 +29,7 @@
 
 use std::path::PathBuf;
 
-use cocomo_lib::SyncOperation;
+use cocomo_lib::{DirEntryStatus, SyncOperation};
 use ratatui_kit::{
     components::{
         ShortcutInfo, ShortcutInfoSection,
@@ -45,9 +45,9 @@ use ratatui_kit::{
 use crate::{
     diff_model::diff_group_starts,
     state::{
-        FilterDraft, FilterFocus, NamePattern, ReportDraft, ReportFocus,
-        ReportSelection, SessionAction, SessionContent, SessionMode,
-        SessionView, StatusFilter, TransferChoice, TransferOp,
+        FilterDraft, FilterFocus, FilterRow, NamePattern, ReportDraft,
+        ReportFocus, ReportSelection, SessionAction, SessionContent,
+        SessionMode, SessionView, StatusFilter, TransferChoice, TransferOp,
     },
 };
 
@@ -133,8 +133,11 @@ pub enum Cmd {
     LastRow,
     /// Open the filter panel modal (`f`).
     OpenFilterPanel,
-    /// Toggle hiding identical entries.
-    ToggleHideSame,
+    /// Toggle the visibility of hidden (dot-prefixed) entries.
+    ToggleHidden,
+    /// Show every status class and hidden entries (Filter menu "show
+    /// all").
+    ShowAllFilters,
     /// Toggle content comparison.
     ToggleCompareContent,
     /// Plan the sync (dry-run), then confirm its execution (`S`).
@@ -209,7 +212,8 @@ pub enum Cmd {
     PanelFocusNext,
     /// Apply the filter panel draft (`Enter`).
     PanelApply,
-    /// Toggle the filter panel's name-filter enable flag (`Space`).
+    /// Toggle the selected checkbox of the filter panel's "Show items:"
+    /// list (`Space`).
     PanelToggle,
     /// Close the session browser and enter save mode to create a new
     /// session (`n`).
@@ -317,11 +321,67 @@ const KEYMAP: &[KeyBinding] = &[
         help: Some(("f", "filter")),
     },
     KeyBinding {
+        key: KeyCode::Char('1'),
+        modifiers: NONE,
+        scope: KeyScope::DirNormal,
+        cmd: Cmd::ToggleHidden,
+        help: Some(("1", "hidden")),
+    },
+    KeyBinding {
+        key: KeyCode::Char('2'),
+        modifiers: NONE,
+        scope: KeyScope::DirNormal,
+        cmd: Cmd::ToggleStatusFilter(StatusFilter::Equal),
+        help: Some(("2", "equal")),
+    },
+    KeyBinding {
+        key: KeyCode::Char('3'),
+        modifiers: NONE,
+        scope: KeyScope::DirNormal,
+        cmd: Cmd::ToggleStatusFilter(StatusFilter::Different),
+        help: Some(("3", "different")),
+    },
+    KeyBinding {
+        key: KeyCode::Char('4'),
+        modifiers: NONE,
+        scope: KeyScope::DirNormal,
+        cmd: Cmd::ToggleStatusFilter(StatusFilter::LeftNewer),
+        help: Some(("4", "left newer")),
+    },
+    KeyBinding {
+        key: KeyCode::Char('5'),
+        modifiers: NONE,
+        scope: KeyScope::DirNormal,
+        cmd: Cmd::ToggleStatusFilter(StatusFilter::RightNewer),
+        help: Some(("5", "right newer")),
+    },
+    KeyBinding {
+        key: KeyCode::Char('6'),
+        modifiers: NONE,
+        scope: KeyScope::DirNormal,
+        cmd: Cmd::ToggleStatusFilter(StatusFilter::Orphans),
+        help: Some(("6", "orphans")),
+    },
+    KeyBinding {
+        key: KeyCode::Char('7'),
+        modifiers: NONE,
+        scope: KeyScope::DirNormal,
+        cmd: Cmd::ToggleStatusFilter(StatusFilter::LeftOnly),
+        help: Some(("7", "left only")),
+    },
+    KeyBinding {
+        key: KeyCode::Char('8'),
+        modifiers: NONE,
+        scope: KeyScope::DirNormal,
+        cmd: Cmd::ToggleStatusFilter(StatusFilter::RightOnly),
+        help: Some(("8", "right only")),
+    },
+    KeyBinding {
         key: KeyCode::Char('F'),
         modifiers: NONE,
         scope: KeyScope::DirNormal,
-        cmd: Cmd::ToggleHideSame,
-        help: Some(("F", "hide same")),
+        cmd: Cmd::ShowAllFilters,
+        help: Some(("F", "show all")),
     },
     KeyBinding {
         key: KeyCode::Char('C'),
@@ -1033,11 +1093,9 @@ fn execute(cmd: Cmd, session: &mut SessionView) -> SessionAction {
             // panel always shows the effective state.
             let mut draft = FilterDraft::default();
             if let Some(dir) = session.dir() {
-                draft.show_same = dir.display.show_same;
-                draft.show_different = dir.display.show_different;
-                draft.show_orphans = dir.display.show_orphans;
+                draft.statuses = dir.display.show_statuses;
+                draft.show_hidden = dir.display.show_hidden;
             }
-            draft.name_filter_on = session.ui.name_filter.is_some();
             if let Some(filter) = &session.ui.name_filter {
                 draft.pattern = filter.pattern.clone();
                 draft.cursor = filter.pattern.chars().count();
@@ -1047,9 +1105,17 @@ fn execute(cmd: Cmd, session: &mut SessionView) -> SessionAction {
             };
             SessionAction::None
         }
-        Cmd::ToggleHideSame => {
+        Cmd::ToggleHidden => {
             if let Some(dir) = session.dir_mut() {
-                dir.display.show_same = !dir.display.show_same;
+                dir.display.show_hidden = !dir.display.show_hidden;
+            }
+            session.set_cursor(Some(0));
+            SessionAction::None
+        }
+        Cmd::ShowAllFilters => {
+            if let Some(dir) = session.dir_mut() {
+                dir.display.show_statuses = DirEntryStatus::all();
+                dir.display.show_hidden = true;
             }
             session.set_cursor(Some(0));
             SessionAction::None
@@ -1092,12 +1158,11 @@ fn execute(cmd: Cmd, session: &mut SessionView) -> SessionAction {
         }
         Cmd::ToggleStatusFilter(status) => {
             if let Some(dir) = session.dir_mut() {
-                let show = match status {
-                    StatusFilter::Same => &mut dir.display.show_same,
-                    StatusFilter::Different => &mut dir.display.show_different,
-                    StatusFilter::Orphans => &mut dir.display.show_orphans,
-                };
-                *show = !*show;
+                // Menu items behave exactly like the panel checkboxes:
+                // umbrella toggles flip both sub-bits, sub toggles flip
+                // one and the umbrella state falls out of the AND rule.
+                dir.display.show_statuses =
+                    status.toggle(dir.display.show_statuses);
             }
             session.set_cursor(Some(0));
             SessionAction::None
@@ -1442,12 +1507,12 @@ pub fn dialog_choice(
 
 /// Handle a key for the open filter panel modal.
 ///
-/// The panel owns `Esc` (close), `Tab` (focus), `Enter` (apply) and
-/// `Space` (name-filter toggle) through the [`KeyScope::FilterPanel`]
-/// bindings; everything else reaches the focused section: printable keys
-/// edit the pattern buffer while it has focus, and `Space`/`j`/`k` pass
-/// through to the status `MultiSelect` while it has focus (returning
-/// `None` lets the child in the same input layer see the key).
+/// The panel owns `Esc` (close), `Tab` (focus) and `Enter` (apply) through
+/// the [`KeyScope::FilterPanel`] bindings; everything else reaches the
+/// focused section: printable keys edit the pattern buffer while it has
+/// focus, and while the checkbox list has focus the panel itself owns
+/// `Space` (toggle the selected row) and `Up`/`Down`/`j`/`k` (move the row
+/// cursor).
 fn handle_filter_panel_key(
     session: &mut SessionView,
     key: KeyEvent,
@@ -1457,12 +1522,6 @@ fn handle_filter_panel_key(
         _ => return None,
     };
     if let Some(cmd) = lookup(KeyScope::FilterPanel, key) {
-        // While the status list has focus, `Space` toggles its rows; the
-        // `MultiSelect` child must see the key, so the panel does not
-        // claim the toggle.
-        if cmd == Cmd::PanelToggle && focus == FilterFocus::Statuses {
-            return None;
-        }
         return Some(match cmd {
             Cmd::PanelClose => {
                 session.ui.mode = SessionMode::Normal;
@@ -1477,10 +1536,14 @@ fn handle_filter_panel_key(
                 SessionAction::None
             }
             Cmd::PanelToggle => {
-                if let SessionMode::FilterPanel { draft } =
-                    &mut session.ui.mode
+                // `Space` toggles the highlighted checkbox; it only has a
+                // meaning while the checkbox section has focus.
+                if focus == FilterFocus::Statuses
+                    && let SessionMode::FilterPanel { draft } =
+                        &mut session.ui.mode
                 {
-                    draft.name_filter_on = !draft.name_filter_on;
+                    draft.toggle_row(FilterRow::ALL[draft.selected]);
+                    draft.error = None;
                 }
                 SessionAction::None
             }
@@ -1494,6 +1557,19 @@ fn handle_filter_panel_key(
         && edit_text(&mut draft.pattern, &mut draft.cursor, key)
     {
         draft.error = None;
+        return Some(SessionAction::None);
+    }
+    // While the checkbox list has focus, the list keys move the row
+    // cursor.
+    let delta = match key.code {
+        KeyCode::Down | KeyCode::Char('j') => 1,
+        KeyCode::Up | KeyCode::Char('k') => -1,
+        _ => return None,
+    };
+    if focus == FilterFocus::Statuses
+        && let SessionMode::FilterPanel { draft } = &mut session.ui.mode
+    {
+        draft.move_cursor(delta);
         return Some(SessionAction::None);
     }
     None
@@ -1593,18 +1669,11 @@ fn handle_report_key(
 /// An invalid regex keeps the panel open and surfaces the compiler
 /// message in the draft instead of silently dropping the filter.
 fn apply_filter_draft(session: &mut SessionView) -> SessionAction {
-    let (compiled, statuses) = match &session.ui.mode {
+    let (compiled, statuses, show_hidden) = match &session.ui.mode {
         SessionMode::FilterPanel { draft } => {
-            let compiled = if draft.name_filter_on && !draft.pattern.is_empty()
-            {
-                Some(NamePattern::new(&draft.pattern))
-            } else {
-                None
-            };
-            (
-                compiled,
-                (draft.show_same, draft.show_different, draft.show_orphans),
-            )
+            let compiled = (!draft.pattern.is_empty())
+                .then(|| NamePattern::new(&draft.pattern));
+            (compiled, draft.statuses, draft.show_hidden)
         }
         _ => return SessionAction::None,
     };
@@ -1619,11 +1688,9 @@ fn apply_filter_draft(session: &mut SessionView) -> SessionAction {
         None => None,
     };
     session.ui.name_filter = name_filter;
-    let (show_same, show_different, show_orphans) = statuses;
     if let Some(dir) = session.dir_mut() {
-        dir.display.show_same = show_same;
-        dir.display.show_different = show_different;
-        dir.display.show_orphans = show_orphans;
+        dir.display.show_statuses = statuses;
+        dir.display.show_hidden = show_hidden;
     }
     session.ui.mode = SessionMode::Normal;
     session.set_cursor(Some(0));
@@ -1669,8 +1736,7 @@ fn generate_report_action(session: &mut SessionView) -> SessionAction {
 /// Move the filter panel focus to the next section.
 fn next_filter_focus(focus: FilterFocus) -> FilterFocus {
     match focus {
-        FilterFocus::Pattern => FilterFocus::NameToggle,
-        FilterFocus::NameToggle => FilterFocus::Statuses,
+        FilterFocus::Pattern => FilterFocus::Statuses,
         FilterFocus::Statuses => FilterFocus::Pattern,
     }
 }
@@ -1770,7 +1836,7 @@ mod tests {
         let entries = (0..3)
             .map(|i| DirEntry {
                 name: format!("entry{i}"),
-                status: DirEntryStatus::Different,
+                status: DirEntryStatus::LeftNewer,
                 left: None,
                 right: None,
                 center: None,
@@ -1822,14 +1888,19 @@ mod tests {
         );
         session.set_comparison(Some(DirComparison {
             entries: vec![
-                entry("left-only.txt", DirEntryStatus::LeftOnly, true, false),
+                entry(
+                    "left-only.txt",
+                    DirEntryStatus::LeftOrphan,
+                    true,
+                    false,
+                ),
                 entry(
                     "right-only.txt",
-                    DirEntryStatus::RightOnly,
+                    DirEntryStatus::RightOrphan,
                     false,
                     true,
                 ),
-                entry("both.txt", DirEntryStatus::Different, true, true),
+                entry("both.txt", DirEntryStatus::LeftNewer, true, true),
             ],
             ..Default::default()
         }));
@@ -1841,7 +1912,7 @@ mod tests {
     fn dir_session_with_tree() -> SessionView {
         let file = |name: &str, path: &str| DirEntry {
             name: name.into(),
-            status: DirEntryStatus::Different,
+            status: DirEntryStatus::LeftNewer,
             left: Some(EntryInfo {
                 name: name.into(),
                 path: path.into(),
@@ -1900,7 +1971,7 @@ mod tests {
             entries: vec![
                 DirEntry {
                     name: "sub".into(),
-                    status: DirEntryStatus::Different,
+                    status: DirEntryStatus::LeftNewer,
                     left: Some(EntryInfo {
                         name: "sub".into(),
                         path: "sub".into(),
@@ -1919,7 +1990,7 @@ mod tests {
                 },
                 DirEntry {
                     name: "orphan.txt".into(),
-                    status: DirEntryStatus::LeftOnly,
+                    status: DirEntryStatus::LeftOrphan,
                     left: Some(EntryInfo {
                         name: "orphan.txt".into(),
                         path: "orphan.txt".into(),
@@ -2020,11 +2091,15 @@ mod tests {
     #[test]
     fn run_menu_command_executes_session_commands() {
         let mut session = dir_session();
-        // `View` toggles hiding identical entries and resets the cursor.
+        // `Filter`'s equal toggle hides identical entries and resets the
+        // cursor.
         session.ui.table_state.select(Some(2));
-        let action = run_menu_command(&mut session, Cmd::ToggleHideSame);
+        let action = run_menu_command(
+            &mut session,
+            Cmd::ToggleStatusFilter(StatusFilter::Equal),
+        );
         assert!(matches!(action, SessionAction::None));
-        assert!(!session.dir().unwrap().display.show_same);
+        assert!(!session.dir().unwrap().shows_equal());
         assert_eq!(session.ui.table_state.selected(), Some(0));
 
         // `Sessions` opens the browser and asks for the saved list.
@@ -2056,17 +2131,108 @@ mod tests {
         session.ui.table_state.select(Some(2));
         run_menu_command(
             &mut session,
-            Cmd::ToggleStatusFilter(StatusFilter::Same),
+            Cmd::ToggleStatusFilter(StatusFilter::Equal),
         );
-        assert!(!session.dir().unwrap().display.show_same);
+        assert!(!session.dir().unwrap().shows_equal());
         run_menu_command(
             &mut session,
             Cmd::ToggleStatusFilter(StatusFilter::Orphans),
         );
-        assert!(!session.dir().unwrap().display.show_orphans);
-        assert!(session.dir().unwrap().display.show_different);
+        let show = session.dir().unwrap().display.show_statuses;
+        assert!(!StatusFilter::Orphans.is_shown(show));
+        assert!(StatusFilter::Different.is_shown(show));
         // Like the other filter toggles, the cursor resets.
         assert_eq!(session.ui.table_state.selected(), Some(0));
+    }
+
+    #[test]
+    fn umbrella_toggle_flips_both_sub_bits() {
+        let mut session = dir_session();
+        // Toggling the different umbrella clears both direction bits.
+        run_menu_command(
+            &mut session,
+            Cmd::ToggleStatusFilter(StatusFilter::Different),
+        );
+        let show = session.dir().unwrap().display.show_statuses;
+        assert!(!show.intersects(DirEntryStatus::DIFFERENT));
+
+        // A sub toggle flips one bit; its umbrella reads unchecked while
+        // the sibling bit survives.
+        run_menu_command(
+            &mut session,
+            Cmd::ToggleStatusFilter(StatusFilter::LeftNewer),
+        );
+        let show = session.dir().unwrap().display.show_statuses;
+        assert!(StatusFilter::LeftNewer.is_shown(show));
+        assert!(!StatusFilter::RightNewer.is_shown(show));
+        assert!(!StatusFilter::Different.is_shown(show));
+    }
+
+    #[test]
+    fn toggle_hidden_flips_the_hidden_group() {
+        let mut session = dir_session();
+        run_menu_command(&mut session, Cmd::ToggleHidden);
+        assert!(!session.dir().unwrap().shows_hidden());
+        run_menu_command(&mut session, Cmd::ToggleHidden);
+        assert!(session.dir().unwrap().shows_hidden());
+    }
+
+    #[test]
+    fn show_all_filters_restores_every_group() {
+        let mut session = dir_session();
+        run_menu_command(&mut session, Cmd::ToggleHidden);
+        run_menu_command(
+            &mut session,
+            Cmd::ToggleStatusFilter(StatusFilter::Orphans),
+        );
+        run_menu_command(&mut session, Cmd::ShowAllFilters);
+        let dir = session.dir().unwrap();
+        assert_eq!(dir.display.show_statuses, DirEntryStatus::all());
+        assert!(dir.display.show_hidden);
+    }
+
+    #[test]
+    fn filter_toggle_digits_and_show_all_are_bound_in_dir_scope() {
+        // The digit bindings mirror the panel and menu order exactly.
+        let cases = [
+            (KeyCode::Char('1'), Cmd::ToggleHidden),
+            (
+                KeyCode::Char('2'),
+                Cmd::ToggleStatusFilter(StatusFilter::Equal),
+            ),
+            (
+                KeyCode::Char('3'),
+                Cmd::ToggleStatusFilter(StatusFilter::Different),
+            ),
+            (
+                KeyCode::Char('4'),
+                Cmd::ToggleStatusFilter(StatusFilter::LeftNewer),
+            ),
+            (
+                KeyCode::Char('5'),
+                Cmd::ToggleStatusFilter(StatusFilter::RightNewer),
+            ),
+            (
+                KeyCode::Char('6'),
+                Cmd::ToggleStatusFilter(StatusFilter::Orphans),
+            ),
+            (
+                KeyCode::Char('7'),
+                Cmd::ToggleStatusFilter(StatusFilter::LeftOnly),
+            ),
+            (
+                KeyCode::Char('8'),
+                Cmd::ToggleStatusFilter(StatusFilter::RightOnly),
+            ),
+            (KeyCode::Char('F'), Cmd::ShowAllFilters),
+        ];
+        for (code, cmd) in cases {
+            assert_eq!(
+                lookup(KeyScope::DirNormal, key(code)),
+                Some(cmd),
+                "key {code:?}",
+            );
+        }
     }
 
     #[test]
@@ -2362,7 +2528,7 @@ mod tests {
             entries: vec![
                 DirEntry {
                     name: "a".into(),
-                    status: DirEntryStatus::Same,
+                    status: DirEntryStatus::Equal,
                     left: None,
                     right: None,
                     center: None,
@@ -2371,7 +2537,7 @@ mod tests {
                 },
                 DirEntry {
                     name: "b".into(),
-                    status: DirEntryStatus::Different,
+                    status: DirEntryStatus::LeftNewer,
                     left: None,
                     right: None,
                     center: None,
@@ -2380,7 +2546,7 @@ mod tests {
                 },
                 DirEntry {
                     name: "c".into(),
-                    status: DirEntryStatus::SameBinary,
+                    status: DirEntryStatus::Equal,
                     left: None,
                     right: None,
                     center: None,
@@ -2389,7 +2555,7 @@ mod tests {
                 },
                 DirEntry {
                     name: "d".into(),
-                    status: DirEntryStatus::LeftOnly,
+                    status: DirEntryStatus::LeftOrphan,
                     left: None,
                     right: None,
                     center: None,
@@ -2753,21 +2919,21 @@ mod tests {
             panic!("expected FilterPanel mode");
         };
         // The draft mirrors the session's current display filters.
-        assert!(draft.show_same);
-        assert!(!draft.name_filter_on);
+        assert_eq!(draft.statuses, DirEntryStatus::all());
+        assert!(draft.show_hidden);
 
         // Typing edits the pattern buffer while it has focus.
         for c in "\\.txt".chars() {
             press(&mut session, KeyCode::Char(c));
         }
-        // `Tab` moves the focus to the name-filter toggle, where typing no
+        // `Tab` moves the focus to the checkbox list, where typing no
         // longer edits the buffer.
         assert_eq!(
             press(&mut session, KeyCode::Tab),
             Some(SessionAction::None)
         );
         press(&mut session, KeyCode::Char('z'));
-        // `Space` toggles the name filter on.
+        // `Space` toggles the selected (hidden) checkbox.
         assert_eq!(
             press(&mut session, KeyCode::Char(' ')),
             Some(SessionAction::None)
@@ -2778,6 +2944,7 @@ mod tests {
             Some(SessionAction::None)
         );
         assert_eq!(session.ui.mode, SessionMode::Normal);
+        // The pattern is compiled without an enable toggle.
         assert_eq!(session.ui.name_filter.as_ref().unwrap().pattern, "\\.txt");
         assert!(
             session
@@ -2788,6 +2955,8 @@ mod tests {
                 .is_match("file.txt")
         );
         assert!(!session.ui.name_filter.as_ref().unwrap().is_match("sub"));
+        // The checkbox change lands in the session's display filters.
+        assert!(!session.dir().unwrap().shows_hidden());
     }
 
     #[test]
@@ -2795,9 +2964,7 @@ mod tests {
         let mut session = dir_session();
         press(&mut session, KeyCode::Char('f'));
         press(&mut session, KeyCode::Char('('));
-        // The pattern is only compiled once the name filter is enabled.
-        press(&mut session, KeyCode::Tab);
-        press(&mut session, KeyCode::Char(' '));
+        // Any non-empty pattern is compiled on apply.
         assert_eq!(
             press(&mut session, KeyCode::Enter),
             Some(SessionAction::None)
@@ -2810,22 +2977,56 @@ mod tests {
     }
 
     #[test]
-    fn filter_panel_passes_list_keys_to_the_status_multiselect() {
+    fn filter_panel_owns_the_checkbox_list_keys() {
         let mut session = dir_session();
         press(&mut session, KeyCode::Char('f'));
-        // Focus: Pattern -> NameToggle -> Statuses.
+        // Focus: Pattern -> Statuses.
         press(&mut session, KeyCode::Tab);
-        press(&mut session, KeyCode::Tab);
-        // While the status list has focus, `Space` and `j` belong to the
-        // child component, so the handler reports them unbound.
-        assert_eq!(press(&mut session, KeyCode::Char(' ')), None);
-        assert_eq!(press(&mut session, KeyCode::Char('j')), None);
+        // `j`/`k` and the arrows move the row cursor.
+        press(&mut session, KeyCode::Char('j'));
+        assert_eq!(selected_row(&session), 1);
+        press(&mut session, KeyCode::Down);
+        assert_eq!(selected_row(&session), 2);
+        press(&mut session, KeyCode::Char('k'));
+        assert_eq!(selected_row(&session), 1);
+        press(&mut session, KeyCode::Up);
+        assert_eq!(selected_row(&session), 0);
+        // `Space` toggles the highlighted row (hidden) through the draft.
+        press(&mut session, KeyCode::Char(' '));
+        {
+            let SessionMode::FilterPanel { draft } = &session.ui.mode else {
+                panic!("panel must stay open");
+            };
+            assert!(!draft.show_hidden);
+        }
+        // Down to the "same / equal" row; `Space` clears both equal bits.
+        press(&mut session, KeyCode::Char('j'));
+        press(&mut session, KeyCode::Char(' '));
+        {
+            let SessionMode::FilterPanel { draft } = &session.ui.mode else {
+                panic!("panel must stay open");
+            };
+            assert!(!draft.statuses.intersects(DirEntryStatus::EQUAL));
+        }
         // `Enter` still applies from the list section.
         assert_eq!(
             press(&mut session, KeyCode::Enter),
             Some(SessionAction::None)
         );
         assert_eq!(session.ui.mode, SessionMode::Normal);
+        assert_eq!(
+            session.dir().unwrap().display.show_statuses,
+            DirEntryStatus::all() - DirEntryStatus::EQUAL
+        );
+        assert!(!session.dir().unwrap().shows_hidden());
+    }
+
+    /// The selected checkbox row of the open filter panel draft.
+    fn selected_row(session: &SessionView) -> usize {
+        let SessionMode::FilterPanel { draft } = &session.ui.mode else {
+            panic!("expected FilterPanel mode");
+        };
+        draft.selected
     }
 
     #[test]

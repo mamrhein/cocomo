@@ -19,14 +19,16 @@
 //! unit-testable without a terminal. The controller is the only caller
 //! that applies them to the global atom.
 
-use cocomo_lib::SyncOperation;
+use cocomo_lib::{SyncOperation, filter::DisplayFilters};
 
 use crate::{keys::Cmd, state::StatusFilter};
 
 /// A leaf entry of a dropdown menu.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MenuItemDef {
-    /// Label shown in the dropdown.
+    /// Label shown in the dropdown. Toggle items store only their noun
+    /// phrase ("equal items"); [`item_label`] prefixes it with the current
+    /// `show`/`hide` verb.
     pub label: &'static str,
     /// Command run when the item is confirmed. This is the same command
     /// the keyboard counterpart executes, so both entry points share one
@@ -179,11 +181,6 @@ pub const MENUS: &[MenuDef] = &[
         accel: 'v',
         items: &[
             MenuItemDef {
-                label: "hide identical",
-                cmd: Cmd::ToggleHideSame,
-                requires_dir: true,
-            },
-            MenuItemDef {
                 label: "expand directory",
                 cmd: Cmd::ExpandDir,
                 requires_dir: true,
@@ -203,11 +200,6 @@ pub const MENUS: &[MenuDef] = &[
                 cmd: Cmd::CollapseAllDirs,
                 requires_dir: true,
             },
-            MenuItemDef {
-                label: "settings",
-                cmd: Cmd::OpenSettings,
-                requires_dir: true,
-            },
         ],
     },
     MenuDef {
@@ -220,23 +212,48 @@ pub const MENUS: &[MenuDef] = &[
                 requires_dir: true,
             },
             MenuItemDef {
-                label: "toggle same entries",
-                cmd: Cmd::ToggleStatusFilter(StatusFilter::Same),
+                label: "hidden items",
+                cmd: Cmd::ToggleHidden,
                 requires_dir: true,
             },
             MenuItemDef {
-                label: "toggle different entries",
+                label: "equal items",
+                cmd: Cmd::ToggleStatusFilter(StatusFilter::Equal),
+                requires_dir: true,
+            },
+            MenuItemDef {
+                label: "different items",
                 cmd: Cmd::ToggleStatusFilter(StatusFilter::Different),
                 requires_dir: true,
             },
             MenuItemDef {
-                label: "toggle orphan entries",
+                label: "left newer items",
+                cmd: Cmd::ToggleStatusFilter(StatusFilter::LeftNewer),
+                requires_dir: true,
+            },
+            MenuItemDef {
+                label: "right newer items",
+                cmd: Cmd::ToggleStatusFilter(StatusFilter::RightNewer),
+                requires_dir: true,
+            },
+            MenuItemDef {
+                label: "orphan items",
                 cmd: Cmd::ToggleStatusFilter(StatusFilter::Orphans),
                 requires_dir: true,
             },
             MenuItemDef {
-                label: "clear filter",
-                cmd: Cmd::Cancel,
+                label: "left-only items",
+                cmd: Cmd::ToggleStatusFilter(StatusFilter::LeftOnly),
+                requires_dir: true,
+            },
+            MenuItemDef {
+                label: "right-only items",
+                cmd: Cmd::ToggleStatusFilter(StatusFilter::RightOnly),
+                requires_dir: true,
+            },
+            MenuItemDef {
+                label: "show all",
+                cmd: Cmd::ShowAllFilters,
                 requires_dir: true,
             },
         ],
@@ -262,6 +279,29 @@ pub const MENUS: &[MenuDef] = &[
 /// Number of menus on the bar.
 pub fn count() -> usize {
     MENUS.len()
+}
+
+/// The dropdown label of `item`, resolved against the active session's
+/// display filters.
+///
+/// Visibility toggle items read `show …` while their group is filtered
+/// out and `hide …` while it is shown (a partial umbrella — one sub-bit
+/// shown, its sibling hidden — counts as filtered out). Every other item
+/// renders its static label. Without a directory session (`display` is
+/// `None`) the toggles advertise `show …`, matching their dimmed
+/// no-op state.
+pub fn item_label(
+    item: &MenuItemDef,
+    display: Option<&DisplayFilters>,
+) -> String {
+    let shown = match item.cmd {
+        Cmd::ToggleHidden => display.is_some_and(|d| d.show_hidden),
+        Cmd::ToggleStatusFilter(filter) => {
+            display.is_some_and(|d| filter.is_shown(d.show_statuses))
+        }
+        _ => return item.label.to_string(),
+    };
+    format!("{} {}", if shown { "hide" } else { "show" }, item.label)
 }
 
 /// Return the menu with the given bar index, if it exists.
@@ -320,6 +360,8 @@ impl MenuState {
 
 #[cfg(test)]
 mod tests {
+    use cocomo_lib::DirEntryStatus;
+
     use super::*;
 
     #[test]
@@ -382,6 +424,70 @@ mod tests {
                 "View menu misses the {cmd:?} item",
             );
         }
+    }
+
+    #[test]
+    fn filter_menu_lists_every_visibility_command() {
+        let filter = MENUS
+            .iter()
+            .find(|m| m.title == "Filter")
+            .expect("no Filter menu");
+        for cmd in [
+            Cmd::OpenFilterPanel,
+            Cmd::ToggleHidden,
+            Cmd::ToggleStatusFilter(StatusFilter::Equal),
+            Cmd::ToggleStatusFilter(StatusFilter::Different),
+            Cmd::ToggleStatusFilter(StatusFilter::LeftNewer),
+            Cmd::ToggleStatusFilter(StatusFilter::RightNewer),
+            Cmd::ToggleStatusFilter(StatusFilter::Orphans),
+            Cmd::ToggleStatusFilter(StatusFilter::LeftOnly),
+            Cmd::ToggleStatusFilter(StatusFilter::RightOnly),
+            Cmd::ShowAllFilters,
+        ] {
+            assert!(
+                filter.items.iter().any(|i| i.cmd == cmd),
+                "Filter menu misses the {cmd:?} item",
+            );
+        }
+    }
+
+    #[test]
+    fn filter_items_switch_between_show_and_hide() {
+        let filter = MENUS
+            .iter()
+            .find(|m| m.title == "Filter")
+            .expect("no Filter menu");
+        let item = |cmd| filter.items.iter().find(|i| i.cmd == cmd).unwrap();
+        let hidden = item(Cmd::ToggleHidden);
+        let different = item(Cmd::ToggleStatusFilter(StatusFilter::Different));
+
+        // Shown groups offer "hide …", hidden ones "show …".
+        let all = DisplayFilters::all();
+        assert_eq!(item_label(hidden, Some(&all)), "hide hidden items");
+        assert_eq!(item_label(different, Some(&all)), "hide different items");
+        let off = DisplayFilters {
+            show_statuses: DirEntryStatus::all(),
+            show_hidden: false,
+            suppress_content_filters: false,
+        };
+        assert_eq!(item_label(hidden, Some(&off)), "show hidden items");
+
+        // A partial umbrella reads unchecked, so the item offers "show".
+        let partial = DisplayFilters {
+            show_statuses: DirEntryStatus::all() - DirEntryStatus::RightNewer,
+            show_hidden: true,
+            suppress_content_filters: false,
+        };
+        assert_eq!(
+            item_label(different, Some(&partial)),
+            "show different items"
+        );
+
+        // Static items keep their label; without a session the toggles
+        // advertise "show".
+        let open = item(Cmd::OpenFilterPanel);
+        assert_eq!(item_label(open, None), "open filter panel");
+        assert_eq!(item_label(hidden, None), "show hidden items");
     }
 
     #[test]

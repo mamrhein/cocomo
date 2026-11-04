@@ -19,12 +19,13 @@ use crate::cli::SortField;
 
 /// Compare two entries by the given sort field. Ordering is descending for
 /// size and modified time (largest/newest first), ascending otherwise.
+/// Status sorts by the raw bitmap value (`DirEntryStatus` derives `Ord`).
 fn compare_entries(a: &DirEntry, b: &DirEntry, sort: SortField) -> Ordering {
     match sort {
         SortField::Name => a.name.cmp(&b.name),
         SortField::Size => entry_size(b).cmp(&entry_size(a)),
         SortField::Modified => entry_modified(b).cmp(&entry_modified(a)),
-        SortField::Status => a.status.to_string().cmp(&b.status.to_string()),
+        SortField::Status => a.status.cmp(&b.status),
     }
 }
 
@@ -80,12 +81,12 @@ mod tests {
             is_dir: false,
             hash: None,
         };
-        let left = if status != DirEntryStatus::RightOnly {
+        let left = if !status.contains(DirEntryStatus::RightOrphan) {
             Some(info(size, modified))
         } else {
             None
         };
-        let right = if status != DirEntryStatus::LeftOnly {
+        let right = if !status.contains(DirEntryStatus::LeftOrphan) {
             Some(info(size, modified))
         } else {
             None
@@ -104,8 +105,8 @@ mod tests {
     #[test]
     fn sort_entries_by_name_orders_alphabetically() {
         let mut entries = vec![
-            make_entry("zebra.txt", DirEntryStatus::Different, 10, ""),
-            make_entry("apple.txt", DirEntryStatus::Same, 5, ""),
+            make_entry("zebra.txt", DirEntryStatus::LeftNewer, 10, ""),
+            make_entry("apple.txt", DirEntryStatus::Equal, 5, ""),
         ];
         sort_entries(&mut entries, SortField::Name);
         assert_eq!(entries[0].name, "apple.txt");
@@ -115,8 +116,8 @@ mod tests {
     #[test]
     fn sort_entries_by_size_largest_first() {
         let mut entries = vec![
-            make_entry("small.txt", DirEntryStatus::Same, 10, ""),
-            make_entry("large.txt", DirEntryStatus::Same, 1000, ""),
+            make_entry("small.txt", DirEntryStatus::Equal, 10, ""),
+            make_entry("large.txt", DirEntryStatus::Equal, 1000, ""),
         ];
         sort_entries(&mut entries, SortField::Size);
         assert_eq!(entries[0].name, "large.txt");
@@ -124,22 +125,24 @@ mod tests {
     }
 
     #[test]
-    fn sort_entries_by_status_groups_like_items() {
+    fn sort_entries_by_status_orders_by_raw_bits() {
         let mut entries = vec![
-            make_entry("right_only.txt", DirEntryStatus::RightOnly, 5, ""),
-            make_entry("same.txt", DirEntryStatus::Same, 5, ""),
+            make_entry("left_orphan.txt", DirEntryStatus::LeftOrphan, 5, ""),
+            make_entry("right_newer.txt", DirEntryStatus::RightNewer, 5, ""),
         ];
         sort_entries(&mut entries, SortField::Status);
-        // Display names: "right only" < "same" alphabetically (r < s).
-        assert_eq!(entries[0].status, DirEntryStatus::RightOnly);
-        assert_eq!(entries[1].status, DirEntryStatus::Same);
+        // Ordering follows the raw bits (RightNewer = 1<<3 before
+        // LeftOrphan = 1<<4), unlike the Display names ("left_orphan" <
+        // "right_newer").
+        assert_eq!(entries[0].status, DirEntryStatus::RightNewer);
+        assert_eq!(entries[1].status, DirEntryStatus::LeftOrphan);
     }
 
     #[test]
     fn sort_entries_by_modified_newest_first() {
         let mut entries = vec![
-            make_entry("old.txt", DirEntryStatus::Same, 5, "2024-01-01"),
-            make_entry("new.txt", DirEntryStatus::Same, 5, "2024-06-01"),
+            make_entry("old.txt", DirEntryStatus::Equal, 5, "2024-01-01"),
+            make_entry("new.txt", DirEntryStatus::Equal, 5, "2024-06-01"),
         ];
         sort_entries(&mut entries, SortField::Modified);
         assert_eq!(entries[0].name, "new.txt");
@@ -147,11 +150,11 @@ mod tests {
     }
 
     #[test]
-    fn sort_entries_by_name_with_left_only_uses_name() {
+    fn sort_entries_by_name_with_left_orphan_uses_name() {
         // Entries with only a left side should still sort by name.
         let mut entries = vec![
-            make_entry("zzz.txt", DirEntryStatus::LeftOnly, 5, ""),
-            make_entry("aaa.txt", DirEntryStatus::LeftOnly, 5, ""),
+            make_entry("zzz.txt", DirEntryStatus::LeftOrphan, 5, ""),
+            make_entry("aaa.txt", DirEntryStatus::LeftOrphan, 5, ""),
         ];
         sort_entries(&mut entries, SortField::Name);
         assert_eq!(entries[0].name, "aaa.txt");
@@ -162,8 +165,8 @@ mod tests {
     fn sort_entries_by_size_with_only_right_side() {
         // Entries with only a right side should use the right size.
         let mut entries = vec![
-            make_entry("small.txt", DirEntryStatus::RightOnly, 10, ""),
-            make_entry("large.txt", DirEntryStatus::RightOnly, 1000, ""),
+            make_entry("small.txt", DirEntryStatus::RightOrphan, 10, ""),
+            make_entry("large.txt", DirEntryStatus::RightOrphan, 1000, ""),
         ];
         sort_entries(&mut entries, SortField::Size);
         assert_eq!(entries[0].name, "large.txt");

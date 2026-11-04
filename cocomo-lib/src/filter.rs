@@ -92,62 +92,52 @@ pub struct OtherFilters {
 
 /// Display filters that toggle visibility without affecting comparison
 /// results.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct DisplayFilters {
-    /// Show entries that are the same on both sides.
-    pub show_same: bool,
-    /// Show entries that differ between sides.
-    pub show_different: bool,
-    /// Show orphan entries (present on only one side).
-    pub show_orphans: bool,
-    /// Show mergeable entries.
-    pub show_mergeable: bool,
-    /// Show conflicting entries.
-    pub show_conflicts: bool,
+    /// The set of status bits to show. An entry is visible when its
+    /// status bitmap intersects this mask.
+    pub show_statuses: DirEntryStatus,
+    /// Show hidden (dot-prefixed) entries.
+    pub show_hidden: bool,
     /// Show ignored lines in text diff (suppress content filters).
     pub suppress_content_filters: bool,
+}
+
+/// Show everything: every status bit and hidden entries.
+impl Default for DisplayFilters {
+    fn default() -> Self {
+        Self {
+            show_statuses: DirEntryStatus::all(),
+            show_hidden: true,
+            suppress_content_filters: false,
+        }
+    }
 }
 
 impl DisplayFilters {
     /// Create default display filters that show all items.
     pub fn all() -> Self {
-        Self {
-            show_same: true,
-            show_different: true,
-            show_orphans: true,
-            show_mergeable: true,
-            show_conflicts: true,
-            suppress_content_filters: false,
-        }
+        Self::default()
     }
 
     /// Create display filters that hide identical entries.
     pub fn differences_only() -> Self {
         Self {
-            show_same: false,
-            show_different: true,
-            show_orphans: true,
-            show_mergeable: true,
-            show_conflicts: true,
+            show_statuses: DirEntryStatus::all() ^ DirEntryStatus::EQUAL,
+            show_hidden: true,
             suppress_content_filters: false,
         }
     }
 
     /// Return `true` if an entry with the given status should be visible.
+    ///
+    /// The show mask denotes the set of statuses to show; an entry is
+    /// excluded when it carries no status bit the filter wants to see.
+    /// For directory entries this acts on the aggregated bitmap, so a dir
+    /// survives a "show different only" filter exactly when its subtree
+    /// contains differences.
     pub fn should_show(&self, status: &DirEntryStatus) -> bool {
-        match status {
-            DirEntryStatus::Same | DirEntryStatus::SameBinary => {
-                self.show_same
-            }
-            DirEntryStatus::Different | DirEntryStatus::Similar => {
-                self.show_different
-            }
-            DirEntryStatus::LeftOnly
-            | DirEntryStatus::RightOnly
-            | DirEntryStatus::CenterOnly => self.show_orphans,
-            DirEntryStatus::Mergeable => self.show_mergeable,
-            DirEntryStatus::Conflict => self.show_conflicts,
-        }
+        !status.intersection(self.show_statuses).is_empty()
     }
 }
 
@@ -437,20 +427,37 @@ mod tests {
     #[test]
     fn display_filters_show_all() {
         let df = DisplayFilters::all();
+        assert!(df.show_hidden);
         assert!(df.should_show(&DirEntryStatus::Same));
-        assert!(df.should_show(&DirEntryStatus::Different));
-        assert!(df.should_show(&DirEntryStatus::LeftOnly));
-        assert!(df.should_show(&DirEntryStatus::RightOnly));
-        assert!(df.should_show(&DirEntryStatus::Conflict));
+        assert!(df.should_show(&DirEntryStatus::Equal));
+        assert!(df.should_show(&DirEntryStatus::LeftNewer));
+        assert!(df.should_show(&DirEntryStatus::RightNewer));
+        assert!(df.should_show(&DirEntryStatus::LeftOrphan));
+        assert!(df.should_show(&DirEntryStatus::RightOrphan));
+        assert!(df.should_show(&DirEntryStatus::DIFFERENT));
+        // An aggregated dir bitmap is visible through any of its bits.
+        assert!(df.should_show(
+            &(DirEntryStatus::Equal | DirEntryStatus::LeftNewer)
+        ));
     }
 
     #[test]
     fn display_filters_differences_only() {
         let df = DisplayFilters::differences_only();
+        assert!(df.show_hidden);
         assert!(!df.should_show(&DirEntryStatus::Same));
-        assert!(df.should_show(&DirEntryStatus::Different));
-        assert!(df.should_show(&DirEntryStatus::LeftOnly));
-        assert!(df.should_show(&DirEntryStatus::RightOnly));
+        assert!(!df.should_show(&DirEntryStatus::Equal));
+        assert!(df.should_show(&DirEntryStatus::LeftNewer));
+        assert!(df.should_show(&DirEntryStatus::RightNewer));
+        assert!(df.should_show(&DirEntryStatus::DIFFERENT));
+        assert!(df.should_show(&DirEntryStatus::LeftOrphan));
+        assert!(df.should_show(&DirEntryStatus::RightOrphan));
+        // A dir aggregating `Equal` plus a difference bit survives the
+        // filter because its bitmap intersects the show mask.
+        assert!(df.should_show(
+            &(DirEntryStatus::Equal | DirEntryStatus::LeftNewer)
+        ));
+        assert!(!df.should_show(&DirEntryStatus::EQUAL));
     }
 
     #[test]
@@ -511,8 +518,8 @@ mod tests {
         let display = DisplayFilters::differences_only();
         let fs = FilterSet::new(&[], OtherFilters::default(), display);
 
-        assert!(!fs.passes("same.txt", &DirEntryStatus::Same));
-        assert!(fs.passes("diff.txt", &DirEntryStatus::Different));
+        assert!(!fs.passes("same.txt", &DirEntryStatus::Equal));
+        assert!(fs.passes("diff.txt", &DirEntryStatus::LeftNewer));
     }
 
     #[test]

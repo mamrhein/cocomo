@@ -8,12 +8,16 @@
 // $Revision$
 
 //! Shared table scaffolding: the session-selection mirror and the themed
-//! `Table` wrapper used by the directory comparison view.
+//! table wrapper used by the directory comparison view.
 //!
-//! The wrapper also windows the rows: ratatui-kit's `Table` has no scroll
-//! offset (it renders from the top of its area and clips at the bottom),
-//! so the component slices out the viewport itself and keeps the selection
-//! inside it.
+//! The wrapper renders the native Ratatui `Table` (bridged with the
+//! framework's `stateful` adapter): unlike ratatui-kit's own `Table`
+//! component, the native widget composes each cell's own style, so the
+//! selection can mark a row by background while its foreground survives.
+//!
+//! The wrapper also windows the rows: it slices out the viewport itself
+//! and keeps the selection inside it, pinning the widget's own scroll
+//! offset to the top of the slice.
 //!
 //! Mouse support lives here too: clicking a row selects it, dragging
 //! extends the selection to a contiguous range, and the row under the
@@ -21,31 +25,41 @@
 //! only maps pointer positions to row indices and calls the `on_select`
 //! / `on_extend` handlers.
 
-use std::sync::Arc;
-
 use ratatui_kit::{
     crossterm::event::MouseButton,
     prelude::*,
     ratatui::{
         layout::{Alignment, Constraint, Position},
-        style::Styled,
-        symbols,
+        style::{Style, Styled},
         text::{Line, Span},
-        widgets::{Block, Borders},
+        widgets::{
+            Block, Borders, Cell as NativeCell, HighlightSpacing,
+            Row as NativeRow, Table as NativeTable,
+            TableState as NativeTableState,
+        },
     },
 };
 
 use super::{mouse_enabled, rows::CellRow, theme::CocomoTheme};
 
+/// Map a framework cell alignment to the native widget's alignment.
+fn to_alignment(alignment: TableCellAlignment) -> Alignment {
+    match alignment {
+        TableCellAlignment::Left => Alignment::Left,
+        TableCellAlignment::Center => Alignment::Center,
+        TableCellAlignment::Right => Alignment::Right,
+    }
+}
+
 /// Mirror the session-owned table selection into a component-local
-/// `State<TableState>` for the `Table` component.
+/// `State<NativeTableState>` for the native `Table` widget.
 ///
 /// The session (`SessionView::table_state`) is the single owner of the
 /// selection: key handling and async completions mutate it under the
-/// `APP_STATE` write lock. The `Table` component, however, only accepts a
-/// reactive `State` handle, so each view mirrors the owner's value into
-/// this handle on every render — the session value always wins, and the
-/// handle exists purely to feed the widget.
+/// `APP_STATE` write lock. The widget, however, only accepts a reactive
+/// `State` handle, so each view mirrors the owner's value into this handle
+/// on every render — the session value always wins, and the handle exists
+/// purely to feed the widget.
 ///
 /// `write_no_update` is deliberate: the atom write that changed the
 /// selection already woke the subscribed component, so the mirror must
@@ -53,10 +67,17 @@ use super::{mouse_enabled, rows::CellRow, theme::CocomoTheme};
 fn use_session_table_state(
     hooks: &mut Hooks<'_, '_>,
     selected: Option<usize>,
-) -> State<TableState> {
-    let table_state = hooks.use_state(TableState::default);
-    if table_state.read().selected() != selected {
-        table_state.write_no_update().select(selected);
+) -> State<NativeTableState> {
+    let table_state = hooks.use_state(NativeTableState::default);
+    let mut mirror = table_state.write_no_update();
+    if mirror.selected() != selected {
+        mirror.select(selected);
+    }
+    // The wrapper windows the rows itself; the native widget would try to
+    // scroll its own offset to reveal the selection, which would shift the
+    // already-sliced window, so the offset is pinned to the slice top.
+    if mirror.offset() != 0 {
+        *mirror.offset_mut() = 0;
     }
     table_state
 }
@@ -64,8 +85,8 @@ fn use_session_table_state(
 /// Rows the table spends above the first body row: the block's top and
 /// bottom border plus the single header row.
 ///
-/// The header separator renders zero rows under [`TableBorderMode::None`],
-/// so it costs nothing here.
+/// The native table renders no header separator by default, so it costs
+/// nothing here.
 const CHROME_ROWS: u16 = 3;
 
 /// Rows between the top of the component's draw area and the first body
@@ -191,8 +212,9 @@ pub(super) fn SessionTable(
     let area = hooks.use_previous_size();
 
     // Slice the rows to the viewport and make the selection relative to
-    // the slice; `TableWrapMode::Truncate` below guarantees one row is
-    // exactly one line, which keeps this math exact.
+    // the slice; the one-line row height set below guarantees one row is
+    // exactly one line (long content is truncated), which keeps this math
+    // exact.
     let total = props.rows.len();
     let offset =
         window_offset(total, body_height, scroll_offset.get(), props.selected);
@@ -211,7 +233,10 @@ pub(super) fn SessionTable(
     };
     let rows = props.rows[offset..offset + visible].to_vec();
     let selected = props.selected.map(|index| index.saturating_sub(offset));
-    let table_state = use_session_table_state(&mut hooks, selected);
+    // Fall back to the first row while the session has no selection yet,
+    // mirroring the `default_index` the framework table used to apply.
+    let table_state =
+        use_session_table_state(&mut hooks, selected.or(Some(0)));
 
     // Hover tracking for the row under the pointer. The hook self-gates on
     // the framework's mouse capture, so it is inert in offscreen tests.
@@ -227,8 +252,8 @@ pub(super) fn SessionTable(
     // establishes the implicit pointer capture, so `Drag` events keep
     // arriving even while the pointer leaves the table. Registration is
     // gated on the app's mouse-capture flag (stable for the process, so
-    // the hook order stays consistent); the framework's own `Table`
-    // handlers stay inert because the table is rendered `active: false`.
+    // the hook order stays consistent); the native widget itself handles
+    // no input, so the pointer hooks are the only hit-testing.
     if mouse_enabled() {
         let mut on_select = props.on_select.take();
         let mut on_extend = props.on_extend.take();
@@ -275,16 +300,25 @@ pub(super) fn SessionTable(
         .into_any();
     }
 
-    // Wrap the view's renderer to paint the drag-range and hover rows:
-    // the `Table` widget only marks the selected row itself, so the extra
-    // rows of a range and the hovered row get their cell styles patched
-    // here (the rows carry their absolute index for exactly this).
+    // Convert the view's pre-rendered rows to native widget rows, painting
+    // the drag-range and hover rows on the way: the native `Table` only
+    // marks the selected row itself, so the extra rows of a range and the
+    // hovered row get their cell styles patched here (the rows carry their
+    // absolute index for exactly this).
     let base_renderer = props.render_row.clone();
     let range = props.selection_range;
     let range_style = theme.range;
     let hover_style = theme.hover;
-    let render_row: RenderTableRow<CellRow> =
-        Arc::new(move |row: &CellRow, is_selected: bool| {
+    let selected_index = props.selected;
+    let column_alignments: Vec<Alignment> = props
+        .columns
+        .iter()
+        .map(|column| to_alignment(column.alignment))
+        .collect();
+    let native_rows: Vec<NativeRow<'static>> = rows
+        .iter()
+        .map(|row| {
+            let is_selected = selected_index == Some(row.index);
             let mut cells = match &base_renderer {
                 Some(render) => render(row, is_selected),
                 None => row.cells(),
@@ -299,49 +333,65 @@ pub(super) fn SessionTable(
                     cell.style = cell.style.patch(patch);
                 }
             }
-            cells
-        });
+            let cells = cells
+                .into_iter()
+                .enumerate()
+                .map(|(column, cell)| {
+                    // The cell's own style (and any style left on its
+                    // line) rides on the native `Cell`, so the renderer
+                    // composes the row highlight *under* it while the
+                    // span styles keep their precedence on top.
+                    let mut line = cell.line;
+                    let style = cell.style.patch(line.style);
+                    line.style = Style::default();
+                    line.alignment = cell
+                        .alignment
+                        .map(to_alignment)
+                        .or_else(|| column_alignments.get(column).copied());
+                    NativeCell::new(line).style(style)
+                })
+                .collect::<Vec<_>>();
+            // One row, one line: long names are truncated instead of
+            // wrapped, which is what keeps the windowing math above
+            // (one row per viewport line) exact.
+            NativeRow::new(cells).height(1)
+        })
+        .collect();
+
+    let header = NativeRow::new(
+        props
+            .columns
+            .iter()
+            .map(|column| {
+                NativeCell::new(column.header.clone()).style(theme.title)
+            })
+            .collect::<Vec<_>>(),
+    )
+    .height(1);
+    let widths: Vec<Constraint> =
+        props.columns.iter().map(|column| column.width).collect();
 
     let block = Block::default()
         .borders(Borders::ALL)
         .title(Span::styled(format!(" {} ", props.title), theme.title))
         .border_style(theme.border);
 
+    let table = NativeTable::new(native_rows, widths)
+        .header(header)
+        .block(block)
+        .column_spacing(1)
+        // The selection-background `highlight_style` already marks the
+        // selected row, so no symbol is drawn and no leading gutter is
+        // reserved: the first column sits flush against the block border
+        // and the columns never shift between selected and unselected.
+        .highlight_symbol(Span::raw(""))
+        .highlight_spacing(HighlightSpacing::Never)
+        .row_highlight_style(theme.highlight);
+
     element!(
-        Table<CellRow>(
-            height: Constraint::Fill(1),
-            state: Some(table_state),
-            active: false,
-            default_index: Some(0),
-            columns: props.columns.clone(),
-            rows,
-            render_row: Some(render_row),
-            block: Some(block),
-            // The block already draws the outer border; the table must not
-            // draw its own. With `Outer`, ratatui-kit 0.12 reserves (n-1)
-            // cells for inter-column separators in the border lines but
-            // writes none in the content rows, so the rows' right border
-            // ends short of the panel's right edge. `None` keeps the
-            // layout math and the rendered rows consistent, filling the
-            // block's inner width exactly.
-            border_mode: TableBorderMode::None,
-            // One row, one line: long names are truncated instead of
-            // wrapped, which is what keeps the windowing math above
-            // (one row per viewport line) exact.
-            wrap_mode: TableWrapMode::Truncate,
-            highlight_style: theme.highlight,
-            highlight_symbol: Some(symbols::block::FULL),
-            // No reserved leading gutter: the reversed `highlight_style`
-            // already marks the selected row, so the first column can sit
-            // flush against the border.
-            highlight_spacing: HighlightSpacing::Never,
-            // Zero cell padding: columns are separated only by
-            // `column_spacing` (one char) and the outer columns hug the
-            // block border.
-            cell_padding: 0u16,
-            column_spacing: 1u16,
-            header_style: theme.title,
-        )
+        View(height: Constraint::Fill(1)) {
+            stateful(table, table_state)
+        }
     )
     .into_any()
 }

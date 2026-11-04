@@ -13,7 +13,7 @@
 //! status indicators, sortable entry columns, navigation, and entry
 //! rendering.
 
-use cocomo_lib::{DirEntryStatus, Endpoint, TransferAction};
+use cocomo_lib::{DirEntryStatus, Endpoint, StatusColor, TransferAction};
 use gpui::{
     Action, Anchor, AnyElement, App, ClipboardItem, Context, Div, Entity,
     FocusHandle, Focusable, FontWeight, Hsla, KeyBinding, Render,
@@ -2006,11 +2006,9 @@ fn status_lane() -> Div {
 enum StatusRole {
     /// Entry matches on both sides.
     Success,
-    /// Entry differs in a way that may still be benign.
-    Warning,
     /// Entry differs or cannot be reconciled.
     Danger,
-    /// Entry exists on only one side, or needs a three-way decision.
+    /// Entry exists on only one side.
     Info,
 }
 
@@ -2019,7 +2017,6 @@ impl StatusRole {
     fn color(self, theme: &Theme) -> Hsla {
         match self {
             Self::Success => theme.success,
-            Self::Warning => theme.warning,
             Self::Danger => theme.danger,
             Self::Info => theme.info,
         }
@@ -2027,34 +2024,20 @@ impl StatusRole {
 }
 
 /// Map an entry status to its semantic color role.
+///
+/// Delegates to the lib's [`StatusColor`] so the GUI and the other frontends
+/// agree on which statuses are equal, different, or orphaned.
 fn status_role(status: &DirEntryStatus) -> StatusRole {
-    match status {
-        DirEntryStatus::Same | DirEntryStatus::SameBinary => {
-            StatusRole::Success
-        }
-        DirEntryStatus::Similar => StatusRole::Warning,
-        DirEntryStatus::Different | DirEntryStatus::Conflict => {
-            StatusRole::Danger
-        }
-        DirEntryStatus::LeftOnly
-        | DirEntryStatus::RightOnly
-        | DirEntryStatus::CenterOnly
-        | DirEntryStatus::Mergeable => StatusRole::Info,
+    match status.symbol().1 {
+        StatusColor::Equal => StatusRole::Success,
+        StatusColor::Different => StatusRole::Danger,
+        StatusColor::Orphan => StatusRole::Info,
     }
 }
 
 /// Get the status indicator character for an entry.
 fn status_indicator(status: &DirEntryStatus) -> &'static str {
-    match status {
-        DirEntryStatus::Same | DirEntryStatus::SameBinary => "=",
-        DirEntryStatus::Similar => "~",
-        DirEntryStatus::Different => "!",
-        DirEntryStatus::LeftOnly => "<",
-        DirEntryStatus::RightOnly => ">",
-        DirEntryStatus::CenterOnly => "^",
-        DirEntryStatus::Mergeable => "M",
-        DirEntryStatus::Conflict => "C",
-    }
+    status.symbol().0
 }
 
 /// Compact display for an RFC 3339 modification timestamp.
@@ -2075,53 +2058,31 @@ pub(crate) fn format_modified(modified: &str) -> String {
 
 /// Legend rows for the status markers, in status sort order.
 ///
-/// Every [`DirEntryStatus`] value the table can show appears here, so the
-/// dot and glyph are never a color-only or cryptic-symbol-only cue.
-const STATUS_LEGEND: [(DirEntryStatus, &str, &str); 9] = [
+/// Every single-bit [`DirEntryStatus`] the table can show appears here, so
+/// the dot and glyph are never a color-only or cryptic-symbol-only cue.
+/// Aggregated multi-bit statuses resolve to the `!` marker.
+const STATUS_LEGEND: [(DirEntryStatus, &str, &str); 6] = [
+    (DirEntryStatus::Same, "Same", "Identical node on both sides"),
+    (DirEntryStatus::Equal, "Equal", "Equal size and content"),
     (
-        DirEntryStatus::Same,
-        "Same",
-        "Text files with equal content",
+        DirEntryStatus::LeftNewer,
+        "Left newer",
+        "Content differs, left side is newer",
     ),
     (
-        DirEntryStatus::SameBinary,
-        "Same (binary)",
-        "Binary files with equal content",
+        DirEntryStatus::RightNewer,
+        "Right newer",
+        "Content differs, right side is newer",
     ),
     (
-        DirEntryStatus::Similar,
-        "Similar",
-        "Same name, size within tolerance, content differs",
-    ),
-    (
-        DirEntryStatus::Different,
-        "Different",
-        "Same name, different content",
-    ),
-    (
-        DirEntryStatus::LeftOnly,
-        "Left only",
+        DirEntryStatus::LeftOrphan,
+        "Left orphan",
         "Exists only on the left side",
     ),
     (
-        DirEntryStatus::RightOnly,
-        "Right only",
+        DirEntryStatus::RightOrphan,
+        "Right orphan",
         "Exists only on the right side",
-    ),
-    (
-        DirEntryStatus::CenterOnly,
-        "Center only",
-        "Exists only on the center side (3-way)",
-    ),
-    (
-        DirEntryStatus::Mergeable,
-        "Mergeable",
-        "Non-conflicting changes on both sides",
-    ),
-    (
-        DirEntryStatus::Conflict,
-        "Conflict",
-        "Conflicting changes in a 3-way merge",
     ),
 ];
 
@@ -2329,7 +2290,7 @@ mod tests {
     ) -> DirEntry {
         DirEntry {
             name: name.to_string(),
-            status: DirEntryStatus::Different,
+            status: DirEntryStatus::DIFFERENT,
             left,
             right,
             center: None,
@@ -2341,20 +2302,29 @@ mod tests {
     #[test]
     fn status_role_maps_every_status() {
         assert_eq!(status_role(&DirEntryStatus::Same), StatusRole::Success);
+        assert_eq!(status_role(&DirEntryStatus::Equal), StatusRole::Success);
         assert_eq!(
-            status_role(&DirEntryStatus::SameBinary),
-            StatusRole::Success
-        );
-        assert_eq!(status_role(&DirEntryStatus::Similar), StatusRole::Warning);
-        assert_eq!(
-            status_role(&DirEntryStatus::Different),
+            status_role(&DirEntryStatus::LeftNewer),
             StatusRole::Danger
         );
-        assert_eq!(status_role(&DirEntryStatus::Conflict), StatusRole::Danger);
-        assert_eq!(status_role(&DirEntryStatus::LeftOnly), StatusRole::Info);
-        assert_eq!(status_role(&DirEntryStatus::RightOnly), StatusRole::Info);
-        assert_eq!(status_role(&DirEntryStatus::CenterOnly), StatusRole::Info);
-        assert_eq!(status_role(&DirEntryStatus::Mergeable), StatusRole::Info);
+        assert_eq!(
+            status_role(&DirEntryStatus::RightNewer),
+            StatusRole::Danger
+        );
+        assert_eq!(
+            status_role(&DirEntryStatus::DIFFERENT),
+            StatusRole::Danger
+        );
+        assert_eq!(status_role(&DirEntryStatus::LeftOrphan), StatusRole::Info);
+        assert_eq!(
+            status_role(&DirEntryStatus::RightOrphan),
+            StatusRole::Info
+        );
+        // An aggregated directory bitmap is a difference, not an orphan.
+        assert_eq!(
+            status_role(&(DirEntryStatus::Equal | DirEntryStatus::LeftOrphan)),
+            StatusRole::Danger
+        );
     }
 
     #[test]
@@ -2372,14 +2342,11 @@ mod tests {
     fn status_legend_documents_every_status() {
         let all = [
             DirEntryStatus::Same,
-            DirEntryStatus::SameBinary,
-            DirEntryStatus::Similar,
-            DirEntryStatus::Different,
-            DirEntryStatus::LeftOnly,
-            DirEntryStatus::RightOnly,
-            DirEntryStatus::CenterOnly,
-            DirEntryStatus::Mergeable,
-            DirEntryStatus::Conflict,
+            DirEntryStatus::Equal,
+            DirEntryStatus::LeftNewer,
+            DirEntryStatus::RightNewer,
+            DirEntryStatus::LeftOrphan,
+            DirEntryStatus::RightOrphan,
         ];
         for status in all {
             assert!(
@@ -2597,7 +2564,12 @@ mod tests {
 
         cx.update(|cx| {
             let state = state.read(cx);
-            assert!(!state.filters().show_same);
+            assert!(
+                !state
+                    .filters()
+                    .show_statuses
+                    .intersects(DirEntryStatus::EQUAL)
+            );
             assert_eq!(state.entry_count(), 1);
             assert_eq!(state.entry_at(0).unwrap().name, "b.txt");
         });

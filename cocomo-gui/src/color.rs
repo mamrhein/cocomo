@@ -18,7 +18,6 @@
 //! overrides from [`ColorOverrides`] taking precedence (the personalization
 //! hook of spec section 7.1).
 
-use chrono::{DateTime, FixedOffset};
 use cocomo_lib::{ColorOverrides, DirEntry, DirEntryStatus};
 use gpui::{App, Hsla, Rgba};
 
@@ -101,38 +100,28 @@ pub fn merge_overrides(session: &ColorOverrides, cx: &App) -> ColorOverrides {
     }
 }
 
-/// Parse an RFC 3339 modification stamp into a comparable timestamp.
+/// The side the status marks as newer, if any.
 ///
-/// Provider metadata stores `modified` as an RFC 3339 string; offsets can
-/// differ between sides, so the stamps must be parsed rather than
-/// compared lexically. Anything unparseable yields `None`, which callers
-/// treat as "no newer side".
-pub fn parse_modified(modified: &str) -> Option<DateTime<FixedOffset>> {
-    DateTime::parse_from_rfc3339(modified).ok()
-}
-
-/// The side whose modification time is strictly newer, if any.
-///
-/// Equal or unparseable stamps yield `None`: the coloring then treats both
-/// sides alike instead of guessing a newer one.
-pub fn newer_side(entry: &DirEntry) -> Option<Side> {
-    let left = entry.left.as_ref()?.modified.as_str();
-    let right = entry.right.as_ref()?.modified.as_str();
-    let left = parse_modified(left)?;
-    let right = parse_modified(right)?;
-    match left.cmp(&right) {
-        std::cmp::Ordering::Greater => Some(Side::Left),
-        std::cmp::Ordering::Less => Some(Side::Right),
-        std::cmp::Ordering::Equal => None,
+/// The `LeftNewer`/`RightNewer` bits carry the comparison's verdict, so no
+/// timestamp parsing is needed here. The exact `DIFFERENT` combination
+/// (differing content with equal dates) and every equal or orphan bitmap
+/// yield `None`: the coloring then treats both sides alike.
+pub fn newer_side(status: &DirEntryStatus) -> Option<Side> {
+    let left_newer = status.contains(DirEntryStatus::LeftNewer);
+    let right_newer = status.contains(DirEntryStatus::RightNewer);
+    match (left_newer, right_newer) {
+        (true, false) => Some(Side::Left),
+        (false, true) => Some(Side::Right),
+        _ => None,
     }
 }
 
 /// Color role for `side` of `entry`.
 ///
 /// Ignored entries are neutral on both sides. Orphans color the existing
-/// side blue. Differences color the newer side by severity and the older
-/// side gray; without a determinable newer side both sides take the
-/// severity color.
+/// side blue. Differences color the newer side red and the older side
+/// gray; without a determinable newer side both sides take the severity
+/// color.
 pub fn side_role(entry: &DirEntry, side: Side, ignored: bool) -> ColorRole {
     if ignored {
         return ColorRole::Neutral;
@@ -151,14 +140,10 @@ pub fn side_role(entry: &DirEntry, side: Side, ignored: bool) -> ColorRole {
             }
         }
         crate::state::StatusCategory::Different => {
-            let severity = match entry.status {
-                DirEntryStatus::Similar => ColorRole::Minor,
-                _ => ColorRole::Important,
-            };
-            match newer_side(entry) {
-                Some(newer) if newer == side => severity,
+            match newer_side(&entry.status) {
+                Some(newer) if newer == side => ColorRole::Important,
                 Some(_) => ColorRole::OtherSide,
-                None => severity,
+                None => ColorRole::Important,
             }
         }
     }
@@ -220,80 +205,67 @@ mod tests {
     }
 
     #[test]
-    fn newer_side_compares_parsed_timestamps() {
-        let entry = make_entry(
-            DirEntryStatus::Different,
-            Some(info("a.txt", "2026-10-27T21:50:51+02:00")),
-            Some(info("a.txt", "2026-10-27T20:50:51+01:00")),
-        );
-        // The same instant expressed with different offsets is not newer.
-        assert_eq!(newer_side(&entry), None);
-
-        let entry = make_entry(
-            DirEntryStatus::Different,
-            Some(info("a.txt", "2026-10-27T22:00:00+02:00")),
-            Some(info("a.txt", "2026-10-27T21:00:00+01:00")),
-        );
-        // 22:00+02:00 (20:00 UTC) is older than 21:00+01:00 (20:00 UTC).
-        assert_eq!(newer_side(&entry), None);
-
-        let entry = make_entry(
-            DirEntryStatus::Different,
-            Some(info("a.txt", "2026-10-28T00:00:00+02:00")),
-            Some(info("a.txt", "2026-10-27T23:30:00+01:00")),
-        );
-        // 22:00 UTC vs 22:30 UTC: the right side is newer.
-        assert_eq!(newer_side(&entry), Some(Side::Right));
+    fn newer_side_reads_the_newer_bits() {
+        assert_eq!(newer_side(&DirEntryStatus::LeftNewer), Some(Side::Left));
+        assert_eq!(newer_side(&DirEntryStatus::RightNewer), Some(Side::Right));
+        // Differing content with equal dates carries both newer bits and
+        // therefore has no single newer side.
+        assert_eq!(newer_side(&DirEntryStatus::DIFFERENT), None);
+        // Equal and orphan bitmaps carry no newer-side signal.
+        assert_eq!(newer_side(&DirEntryStatus::Same), None);
+        assert_eq!(newer_side(&DirEntryStatus::Equal), None);
+        assert_eq!(newer_side(&DirEntryStatus::LeftOrphan), None);
     }
 
     #[test]
-    fn newer_side_is_none_for_missing_or_unparseable_stamps() {
-        let entry = make_entry(
-            DirEntryStatus::Different,
-            Some(info("a.txt", "")),
-            Some(info("a.txt", "2026-10-27T21:00:00+01:00")),
-        );
-        assert_eq!(newer_side(&entry), None);
-
-        let entry = make_entry(
-            DirEntryStatus::LeftOnly,
-            Some(info("a.txt", "2026-10-27T21:00:00+01:00")),
-            None,
-        );
-        assert_eq!(newer_side(&entry), None);
-    }
-
-    #[test]
-    fn side_role_colors_newer_side_by_severity() {
-        let different = make_entry(
-            DirEntryStatus::Different,
+    fn side_role_colors_the_newer_side() {
+        let left_newer = make_entry(
+            DirEntryStatus::LeftNewer,
             Some(info("a.txt", "2026-10-28T21:00:00+01:00")),
             Some(info("a.txt", "2026-10-27T21:00:00+01:00")),
         );
         assert_eq!(
-            side_role(&different, Side::Left, false),
+            side_role(&left_newer, Side::Left, false),
             ColorRole::Important
         );
         assert_eq!(
-            side_role(&different, Side::Right, false),
+            side_role(&left_newer, Side::Right, false),
             ColorRole::OtherSide
         );
 
-        let similar = DirEntry {
-            status: DirEntryStatus::Similar,
-            ..different.clone()
+        let right_newer = DirEntry {
+            status: DirEntryStatus::RightNewer,
+            ..left_newer.clone()
         };
-        assert_eq!(side_role(&similar, Side::Left, false), ColorRole::Minor);
         assert_eq!(
-            side_role(&similar, Side::Right, false),
+            side_role(&right_newer, Side::Left, false),
             ColorRole::OtherSide
+        );
+        assert_eq!(
+            side_role(&right_newer, Side::Right, false),
+            ColorRole::Important
+        );
+
+        // Without a determinable newer side both sides take the severity
+        // color.
+        let undirected = DirEntry {
+            status: DirEntryStatus::DIFFERENT,
+            ..left_newer.clone()
+        };
+        assert_eq!(
+            side_role(&undirected, Side::Left, false),
+            ColorRole::Important
+        );
+        assert_eq!(
+            side_role(&undirected, Side::Right, false),
+            ColorRole::Important
         );
     }
 
     #[test]
     fn side_role_marks_orphans_and_neutral_rows() {
         let orphan = make_entry(
-            DirEntryStatus::LeftOnly,
+            DirEntryStatus::LeftOrphan,
             Some(info("a.txt", "2026-10-27T21:00:00+01:00")),
             None,
         );
@@ -313,7 +285,7 @@ mod tests {
     #[test]
     fn gutter_icon_covers_every_gutter_state() {
         let different = make_entry(
-            DirEntryStatus::Different,
+            DirEntryStatus::DIFFERENT,
             Some(info("a.txt", "")),
             Some(info("a.txt", "")),
         );
@@ -327,7 +299,7 @@ mod tests {
         assert_eq!(gutter_icon(&same, false), "=");
 
         let orphan = DirEntry {
-            status: DirEntryStatus::RightOnly,
+            status: DirEntryStatus::RightOrphan,
             left: None,
             ..different.clone()
         };
