@@ -251,18 +251,35 @@ pub fn tab_bar_element(
 /// Preview glyph for one display-filter preset, at a fixed icon size.
 ///
 /// The preset icons encode state in color (red newer, gray older, blue
-/// orphan, hollow identical), so they render through `img` to keep the
-/// palette; the tinted `Icon` path would collapse mirrored presets into
-/// the same silhouette. [`FilterPreset::All`] has no custom glyph and
-/// uses the Lucide eye.
+/// orphan, hollow identical), so they render as stacked `img` layers to
+/// keep the palette; the tinted `Icon` path would collapse mirrored
+/// presets into the same silhouette. Every layer shares the composite's
+/// viewBox, so pinning the layers to the top-left of this fixed-size
+/// container at the icon size reproduces the original glyph exactly.
+/// [`FilterPreset::All`] has no custom glyph and uses the Lucide eye.
 fn preset_icon(preset: FilterPreset, size: Pixels) -> AnyElement {
-    match preset.icon_path() {
-        Some(path) => img(SharedString::from(path))
-            .size(size)
-            .flex_shrink_0()
-            .into_any_element(),
-        None => Icon::new(IconName::Eye).with_size(size).into_any_element(),
+    let layers = preset.icon_layers();
+    if layers.is_empty() {
+        return Icon::new(IconName::Eye).with_size(size).into_any_element();
     }
+    div()
+        .relative()
+        .size(size)
+        .flex_shrink_0()
+        .children(layers.iter().map(|path| {
+            // The `img` element falls back to the image's intrinsic
+            // 512px size whenever the style leaves width/height auto,
+            // so pin every layer to the container's top-left at the
+            // explicit icon size. Later children paint above earlier
+            // ones, matching the bottom-to-top layer order from
+            // `icon_layers`.
+            img(SharedString::from(*path))
+                .absolute()
+                .top_0()
+                .left_0()
+                .size(size)
+        }))
+        .into_any_element()
 }
 
 /// Build toolbar row 1 using `gpui-component`'s [`Toolbar`].

@@ -160,26 +160,52 @@ impl FilterPreset {
         }
     }
 
-    /// Asset path of the preset's two-column glyph, or `None` for
-    /// [`Self::All`], which has no custom icon.
-    pub fn icon_path(self) -> Option<&'static str> {
+    /// Asset paths of the preset's two-column glyph, one SVG per color
+    /// layer, in bottom-to-top stacking order (`older`, `newer`,
+    /// `orphan`, `same`).
+    ///
+    /// Multi-color glyphs are shipped as one layer file per color, all
+    /// sharing the composite's viewBox, so stacking them reproduces the
+    /// full icon (see `resources/icons/README.md`). Single-color glyphs
+    /// are a single layer. [`Self::All`] has no custom glyph and yields
+    /// an empty slice.
+    pub fn icon_layers(self) -> &'static [&'static str] {
         match self {
-            Self::All => None,
-            Self::NoOrphans => Some("icons/no-orphans.svg"),
-            Self::NoSame => Some("icons/no-same.svg"),
-            Self::DiffNoOrphans => Some("icons/diff-no-orphans.svg"),
-            Self::SameOnly => Some("icons/same-only.svg"),
-            Self::OrphansOnly => Some("icons/orphans-only.svg"),
-            Self::LeftNewer => Some("icons/left-newer.svg"),
-            Self::RightNewer => Some("icons/right-newer.svg"),
-            Self::LeftOrphans => Some("icons/left-orphans.svg"),
-            Self::RightOrphans => Some("icons/right-orphans.svg"),
-            Self::LeftNewerAndOrphans => {
-                Some("icons/left-newer-and-orphans.svg")
+            Self::All => &[],
+            Self::NoOrphans => &[
+                "icons/no-orphans/older.svg",
+                "icons/no-orphans/newer.svg",
+                "icons/no-orphans/same.svg",
+            ],
+            Self::NoSame => &[
+                "icons/no-same/older.svg",
+                "icons/no-same/newer.svg",
+                "icons/no-same/orphan.svg",
+            ],
+            Self::DiffNoOrphans => &[
+                "icons/diff-no-orphans/older.svg",
+                "icons/diff-no-orphans/newer.svg",
+            ],
+            Self::SameOnly => &["icons/same-only.svg"],
+            Self::OrphansOnly => &["icons/orphans-only.svg"],
+            Self::LeftNewer => {
+                &["icons/left-newer/older.svg", "icons/left-newer/newer.svg"]
             }
-            Self::RightNewerAndOrphans => {
-                Some("icons/right-newer-and-orphans.svg")
+            Self::RightNewer => {
+                &["icons/right-newer/older.svg", "icons/right-newer/newer.svg"]
             }
+            Self::LeftOrphans => &["icons/left-orphans.svg"],
+            Self::RightOrphans => &["icons/right-orphans.svg"],
+            Self::LeftNewerAndOrphans => &[
+                "icons/left-newer-and-orphans/older.svg",
+                "icons/left-newer-and-orphans/newer.svg",
+                "icons/left-newer-and-orphans/orphan.svg",
+            ],
+            Self::RightNewerAndOrphans => &[
+                "icons/right-newer-and-orphans/older.svg",
+                "icons/right-newer-and-orphans/newer.svg",
+                "icons/right-newer-and-orphans/orphan.svg",
+            ],
         }
     }
 

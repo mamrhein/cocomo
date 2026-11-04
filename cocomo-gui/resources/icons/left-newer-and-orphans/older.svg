@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Layer "older" of left-newer-and-orphans. Stack all layers of this icon to
+     reproduce the full icon. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <circle cx="352" cy="112" r="64" fill="#9b9b9b"/>
+  <circle cx="352" cy="256" r="64" fill="#9b9b9b"/>
+</svg>

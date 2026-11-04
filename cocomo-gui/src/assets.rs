@@ -35,8 +35,8 @@ use rust_embed::RustEmbed;
 
 /// The app's own icons, embedded from `resources/` at build time.
 ///
-/// Keys are relative to the embedded folder root, e.g.
-/// `icons/left-newer.svg`.
+/// Keys are relative to the embedded folder root, e.g. the layer files
+/// `icons/left-newer/older.svg` and `icons/left-newer/newer.svg`.
 #[derive(RustEmbed)]
 #[folder = "./resources"]
 #[include = "icons/**/*.svg"]
@@ -109,25 +109,21 @@ impl AssetSource for AppAssets {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::FilterPreset;
 
-    /// Every preset glyph shipped in `resources/icons`.
-    const APP_ICON_PATHS: [&str; 11] = [
-        "icons/diff-no-orphans.svg",
-        "icons/left-newer-and-orphans.svg",
-        "icons/left-newer.svg",
-        "icons/left-orphans.svg",
-        "icons/no-orphans.svg",
-        "icons/no-same.svg",
-        "icons/orphans-only.svg",
-        "icons/right-newer-and-orphans.svg",
-        "icons/right-newer.svg",
-        "icons/right-orphans.svg",
-        "icons/same-only.svg",
-    ];
+    /// Every preset glyph layer the UI stacks, derived from
+    /// [`FilterPreset`] so the served assets and the preset definitions
+    /// can never drift apart.
+    fn served_icon_layers() -> Vec<&'static str> {
+        FilterPreset::ALL
+            .iter()
+            .flat_map(|preset| preset.icon_layers().iter().copied())
+            .collect()
+    }
 
     #[test]
     fn app_icons_are_served() {
-        for path in APP_ICON_PATHS {
+        for path in served_icon_layers() {
             let bytes = AppAssets
                 .load(path)
                 .unwrap_or_else(|e| panic!("{path}: {e}"));
@@ -166,7 +162,7 @@ mod tests {
     #[test]
     fn list_exposes_app_extra_and_default_icons() {
         let paths = AppAssets.list("icons/").unwrap();
-        for path in APP_ICON_PATHS {
+        for path in served_icon_layers() {
             assert!(paths.iter().any(|p| p == path), "{path} missing");
         }
         assert!(paths.iter().any(|p| p == "icons/house.svg"));

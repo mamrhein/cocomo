@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Layer "orphan" of no-same. Stack all layers of this icon to reproduce the
+     full icon. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <circle cx="160" cy="400" r="64" fill="#3b82f6"/>
+  <circle cx="352" cy="400" r="64" fill="#3b82f6"/>
+</svg>
