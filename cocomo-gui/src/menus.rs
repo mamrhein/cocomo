@@ -299,7 +299,7 @@ fn build_app_menus(
             }),
             Some(
                 MenuItem::action("Stop comparison", StopCompare)
-                    .disabled(no_folder || !state.loading),
+                    .disabled(!state.loading),
             ),
             Some(MenuItem::separator()),
             Some(
@@ -881,15 +881,17 @@ pub fn register_menu_handlers(cx: &mut App) {
         });
     });
 
-    // File menu — close all sessions of the active window.
+    // File menu — close all sessions of the active window, prompting
+    // once when any session has unsaved changes.
     cx.on_action(move |_action: &CloseAllSessions, cx: &mut App| {
         let Some(mgr) = active_manager(cx) else {
             return;
         };
-        mgr.update(cx, |mgr, cx| {
-            while !mgr.is_empty() {
-                mgr.close_session(0, cx);
-            }
+        let Some(window) = cx.active_window() else {
+            return;
+        };
+        let _ = window.update(cx, |_, window, cx| {
+            mgr.update(cx, |m, cx| m.request_close_all_sessions(window, cx));
         });
     });
 
@@ -916,11 +918,8 @@ pub fn register_menu_handlers(cx: &mut App) {
         crate::windows::quit_application(cx);
     });
 
-    // Edit menu — copy paths are handled by the focused folder view, which
-    // owns the selection and writes the path to the clipboard.
-    cx.on_action(move |_action: &SelectAllEntries, cx: &mut App| {
-        log::push(LogLevel::Info, "Select all — not yet implemented", cx);
-    });
+    // Edit menu — copy paths and Select all entries are handled by the
+    // focused folder view, which owns the selection.
 
     // View menu — display filters are handled by the focused folder view,
     // which owns the filter state; there is no global handler here.

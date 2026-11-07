@@ -1337,6 +1337,62 @@ impl GuiSessionManager {
         }
     }
 
+    /// Close every open session without prompting.
+    fn close_all_sessions(&mut self, cx: &mut Context<Self>) {
+        let count = self.open_sessions.len();
+        if count == 0 {
+            return;
+        }
+        self.open_sessions.clear();
+        self.active_index = 0;
+        log::push(
+            LogLevel::Info,
+            format!("Closed all sessions ({count})"),
+            cx,
+        );
+        cx.notify();
+    }
+
+    /// Close all sessions of this window, prompting once when any of
+    /// them has unsaved changes.
+    ///
+    /// A single batched alert replaces the per-session prompts: closing
+    /// all is one deliberate action, so the user confirms the discard of
+    /// every dirty session at once.
+    pub fn request_close_all_sessions(
+        &mut self,
+        window: &mut gpui::Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.open_sessions.is_empty() {
+            return;
+        }
+        let dirty = self.open_sessions.iter().filter(|s| s.dirty).count();
+        if dirty == 0 {
+            self.close_all_sessions(cx);
+            return;
+        }
+        let mgr = cx.entity().clone();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            // Clone per builder call: the builder is an `Fn` closure that
+            // may run on every layer rebuild.
+            let mgr = mgr.clone();
+            alert
+                .confirm()
+                .title("Close all sessions?")
+                .description(format!(
+                    "{dirty} sessions have unsaved changes. Closing all \
+                     discards them."
+                ))
+                .ok_text("Close all without saving")
+                .ok_variant(ButtonVariant::Danger)
+                .on_ok(move |_, _, cx| {
+                    mgr.update(cx, |m, cx| m.close_all_sessions(cx));
+                    true
+                })
+        });
+    }
+
     /// Switch to the session at the given index.
     pub fn activate_session(&mut self, index: usize, cx: &mut Context<Self>) {
         if index < self.open_sessions.len() {
@@ -1781,6 +1837,18 @@ mod tests {
         cx.new(|_| GuiSessionManager::new(store))
     }
 
+    /// Install a tokio runtime handle so folder-tab auto-loads can spawn
+    /// their I/O; the returned runtime must outlive the test.
+    fn init_tokio_handle() -> tokio::runtime::Runtime {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _guard = rt.enter();
+        crate::runtime::set_handle();
+        rt
+    }
+
     #[gpui::test]
     fn manager_new_starts_empty(cx: &mut TestAppContext) {
         let mgr = manager_in(cx, "cocomo-test-empty");
@@ -1801,6 +1869,37 @@ mod tests {
             let config = m.active_config().unwrap();
             assert_eq!(config.session_type, SessionType::Home);
             assert!(!m.active_session().unwrap().dirty);
+        });
+    }
+
+    #[gpui::test]
+    fn close_all_sessions_empties_the_manager(cx: &mut TestAppContext) {
+        let _rt = init_tokio_handle();
+        cx.update(|cx| cx.set_global(crate::log::LogBuffer::default()));
+        let mgr = manager_in(cx, "cocomo-test-close-all");
+        mgr.update(cx, |m, cx| {
+            m.open_session_config(config_named("a"), cx).unwrap();
+            m.open_session_config(config_named("b"), cx).unwrap();
+            m.mark_dirty(cx);
+            assert_eq!(m.len(), 2);
+            assert!(m.has_dirty());
+
+            m.close_all_sessions(cx);
+
+            assert!(m.is_empty());
+            assert_eq!(m.active_index(), 0);
+            assert!(!m.has_dirty());
+        });
+    }
+
+    #[gpui::test]
+    fn close_all_sessions_on_an_empty_manager_is_a_noop(
+        cx: &mut TestAppContext,
+    ) {
+        let mgr = manager_in(cx, "cocomo-test-close-all-empty");
+        mgr.update(cx, |m, cx| {
+            m.close_all_sessions(cx);
+            assert!(m.is_empty());
         });
     }
 

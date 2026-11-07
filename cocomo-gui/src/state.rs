@@ -22,6 +22,10 @@ use cocomo_lib::{
     SessionSettings, SessionType, TransferAction, TransferItem,
     compare_content_pair_node, compare_directories_node,
     compare_directories_pair_node, execute_transfers,
+    filter::{
+        DisplayFilters as LibDisplayFilters, FilterSet, NameFilter,
+        OtherFilters, Pattern,
+    },
 };
 use gpui::{App, Context, FocusHandle, SharedString};
 
@@ -281,18 +285,21 @@ impl DisplayFilters {
 
 /// Compute the display order (indices into `entries`) for one tree level.
 ///
-/// Entries hidden by `filters` are excluded outright. Missing side values
-/// always sort last regardless of direction, so an orphan never jumps to
-/// the top of a size or date sort. Ties break on name, which keeps the
-/// order stable and predictable across re-sorts.
+/// Entries hidden by `filters` or rejected by `name_filter` are excluded
+/// outright. Directories always pass the name filter so the tree stays
+/// navigable; the pattern applies to files. Missing side values always
+/// sort last regardless of direction, so an orphan never jumps to the top
+/// of a size or date sort. Ties break on name, which keeps the order
+/// stable and predictable across re-sorts.
 fn compute_display_order(
     entries: &[DirEntry],
     key: SortKey,
     descending: bool,
     filters: &DisplayFilters,
+    name_filter: Option<&FilterSet>,
 ) -> Vec<usize> {
     let mut order: Vec<usize> = (0..entries.len())
-        .filter(|&i| filters.shows_entry(&entries[i]))
+        .filter(|&i| entry_visible(&entries[i], filters, name_filter))
         .collect();
     order.sort_by(|&a, &b| {
         let (ea, eb) = (&entries[a], &entries[b]);
@@ -327,6 +334,58 @@ fn compute_display_order(
         ord.then_with(|| name_cmp(&ea.name, &eb.name))
     });
     order
+}
+
+/// Whether `entry` appears in the table under the status and name filters.
+fn entry_visible(
+    entry: &DirEntry,
+    filters: &DisplayFilters,
+    name_filter: Option<&FilterSet>,
+) -> bool {
+    if !filters.shows_entry(entry) {
+        return false;
+    }
+    match name_filter {
+        // The wildcard pattern matches file names only; hiding a
+        // directory would cut its (possibly matching) children out of
+        // the tree.
+        Some(filter) if !entry_is_dir(entry) => {
+            filter.passes(&entry.name, &entry.status)
+        }
+        _ => true,
+    }
+}
+
+/// Compile a toolbar filter pattern into a [`FilterSet`].
+///
+/// The pattern is a whitespace-separated list of glob tokens. A token
+/// prefixed with `!` excludes matching names; every other token includes
+/// them (include tokens are ORed, excludes subtract from them). Returns
+/// `None` when the pattern carries no token.
+fn compile_name_filter(pattern: &str) -> Option<FilterSet> {
+    let mut name_filters = Vec::new();
+    for token in pattern.split_whitespace() {
+        if let Some(exclude) = token.strip_prefix('!') {
+            if !exclude.is_empty() {
+                name_filters.push(NameFilter::Exclude(Pattern::Glob(
+                    exclude.to_string(),
+                )));
+            }
+        } else {
+            name_filters
+                .push(NameFilter::Include(Pattern::Glob(token.to_string())));
+        }
+    }
+    if name_filters.is_empty() {
+        return None;
+    }
+    // Status and hidden-entry visibility stay with the GUI's own display
+    // filters; the compiled set only carries the name patterns.
+    Some(FilterSet::new(
+        &name_filters,
+        OtherFilters::default(),
+        LibDisplayFilters::all(),
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -397,6 +456,7 @@ struct TreeWalk<'a> {
     key: SortKey,
     descending: bool,
     filters: &'a DisplayFilters,
+    name_filter: Option<&'a FilterSet>,
     expanded: &'a HashSet<String>,
 }
 
@@ -410,12 +470,14 @@ fn compute_tree_rows(
     key: SortKey,
     descending: bool,
     filters: &DisplayFilters,
+    name_filter: Option<&FilterSet>,
     expanded: &HashSet<String>,
 ) -> Vec<TreeRow> {
     let walk = TreeWalk {
         key,
         descending,
         filters,
+        name_filter,
         expanded,
     };
     let mut rows = Vec::new();
@@ -430,9 +492,13 @@ fn collect_tree_rows(
     walk: &TreeWalk<'_>,
     rows: &mut Vec<TreeRow>,
 ) {
-    for entry_index in
-        compute_display_order(entries, walk.key, walk.descending, walk.filters)
-    {
+    for entry_index in compute_display_order(
+        entries,
+        walk.key,
+        walk.descending,
+        walk.filters,
+        walk.name_filter,
+    ) {
         let entry = &entries[entry_index];
         let path = entry_tree_path(entry);
         rows.push(TreeRow {
@@ -847,8 +913,12 @@ pub struct AppState {
     expanded: HashSet<String>,
     /// Which entry categories the table displays.
     filters: DisplayFilters,
-    /// Selected row index in display order.
+    /// Selected row index in display order (the cursor).
     selected_index: usize,
+    /// Paths of additionally selected rows (multi-select, e.g. Select
+    /// all entries). The cursor row is highlighted through
+    /// `selected_index`, not this set.
+    selected_paths: HashSet<String>,
     /// Whether a comparison or transfer is currently in progress.
     loading: bool,
     /// Label for the in-flight operation, shown while `loading`.
@@ -871,6 +941,9 @@ pub struct AppState {
     /// Kept apart from the settings history so an empty (cleared) filter
     /// does not pollute the history list.
     filter_current: Option<String>,
+    /// Compiled form of `filter_current`, applied to file rows during
+    /// display-order computation.
+    name_filter: Option<FilterSet>,
     /// Session type.
     session_type: SessionType,
     /// Monotonic counter that invalidates results of stopped or
@@ -919,6 +992,7 @@ impl AppState {
             expanded: HashSet::new(),
             filters: DisplayFilters::default(),
             selected_index: 0,
+            selected_paths: HashSet::new(),
             loading: false,
             busy_label: None,
             notice: None,
@@ -928,6 +1002,7 @@ impl AppState {
             nav_steps: Vec::new(),
             settings: SessionSettings::default(),
             filter_current: None,
+            name_filter: None,
             session_type: SessionType::DirCompare,
             load_revision: 0,
             cancel_token: None,
@@ -947,6 +1022,9 @@ impl AppState {
         cx: &mut Context<Self>,
     ) -> Self {
         let history = initial_history(&left, &right);
+        let filter_current = config.settings.name_filter.last().cloned();
+        let name_filter =
+            compile_name_filter(filter_current.as_deref().unwrap_or(""));
         Self {
             focus_handle: cx.focus_handle(),
             title,
@@ -959,6 +1037,7 @@ impl AppState {
             expanded: HashSet::new(),
             filters: DisplayFilters::default(),
             selected_index: 0,
+            selected_paths: HashSet::new(),
             loading: false,
             busy_label: None,
             notice: None,
@@ -967,7 +1046,8 @@ impl AppState {
             root_right: right,
             nav_steps: Vec::new(),
             settings: config.settings.clone(),
-            filter_current: config.settings.name_filter.last().cloned(),
+            filter_current,
+            name_filter,
             session_type: config.session_type,
             load_revision: 0,
             cancel_token: None,
@@ -1469,27 +1549,56 @@ impl AppState {
         cx.notify();
     }
 
-    /// Select a row by display-order index.
+    /// Select a row by display-order index, dropping any multi-selection.
     pub fn select_row(&mut self, index: usize, cx: &mut Context<Self>) {
         if index < self.tree_rows.len() {
-            self.selected_index = index;
-            cx.notify();
+            self.move_cursor(index, cx);
         }
+    }
+
+    /// Move the cursor to `index`, clearing the multi-selection set so
+    /// the single-row selection model stays coherent.
+    fn move_cursor(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.selected_index = index;
+        self.selected_paths.clear();
+        cx.notify();
+    }
+
+    /// Whether the row is the cursor row or part of the multi-selection.
+    pub fn is_row_selected(&self, row_ix: usize) -> bool {
+        if self.selected_index == row_ix {
+            return true;
+        }
+        self.tree_rows
+            .get(row_ix)
+            .is_some_and(|row| self.selected_paths.contains(row.path()))
+    }
+
+    /// Select every visible entry (the Edit ▸ Select all entries
+    /// command). The cursor stays put; the other visible rows join the
+    /// highlight set until the next cursor move or recompute.
+    pub fn select_all_entries(&mut self, cx: &mut Context<Self>) {
+        self.selected_paths = self
+            .tree_rows
+            .iter()
+            .map(|row| row.path().to_string())
+            .collect();
+        cx.notify();
     }
 
     /// Navigate down by one row.
     pub fn select_next(&mut self, cx: &mut Context<Self>) {
         if self.selected_index + 1 < self.tree_rows.len() {
-            self.selected_index += 1;
-            cx.notify();
+            let index = self.selected_index + 1;
+            self.move_cursor(index, cx);
         }
     }
 
     /// Navigate up by one row.
     pub fn select_previous(&mut self, cx: &mut Context<Self>) {
         if self.selected_index > 0 {
-            self.selected_index -= 1;
-            cx.notify();
+            let index = self.selected_index - 1;
+            self.move_cursor(index, cx);
         }
     }
 
@@ -1523,8 +1632,7 @@ impl AppState {
             };
             if status_category(&status) != StatusCategory::Same {
                 if index != self.selected_index {
-                    self.selected_index = index;
-                    cx.notify();
+                    self.move_cursor(index, cx);
                 }
                 return;
             }
@@ -2371,11 +2479,13 @@ impl AppState {
         &self.settings.name_filter
     }
 
-    /// Record `pattern` as the current filter and append it to the
-    /// history stored in [`SessionSettings::name_filter`].
+    /// Record `pattern` as the current filter, append it to the history
+    /// stored in [`SessionSettings::name_filter`], and apply it to the
+    /// visible rows.
     ///
     /// An empty pattern clears the current filter but keeps the history,
-    /// so the dropdown still offers the previous entries.
+    /// so the dropdown still offers the previous entries. The selection
+    /// follows the entry with the same name when it survives the filter.
     pub fn push_filter_pattern(
         &mut self,
         pattern: &str,
@@ -2390,6 +2500,19 @@ impl AppState {
         } else {
             Some(pattern.to_string())
         };
+        self.name_filter = compile_name_filter(pattern);
+        if let Some(filter) = &self.name_filter
+            && !filter.compilation_errors().is_empty()
+        {
+            log::push(
+                LogLevel::Warning,
+                format!(
+                    "Filter pattern issues: {}",
+                    filter.compilation_errors().join("; ")
+                ),
+                cx,
+            );
+        }
         if !pattern.is_empty()
             && self.settings.name_filter.last().map(String::as_str)
                 != Some(pattern)
@@ -2401,6 +2524,12 @@ impl AppState {
         } else {
             log::push(LogLevel::Info, format!("Filter set: {pattern}"), cx);
         }
+        let selected_name = self.selected_entry().map(|e| e.name.clone());
+        self.recompute_display_order();
+        self.selected_index = selected_name
+            .as_deref()
+            .and_then(|name| self.display_index_of_name(name))
+            .unwrap_or(0);
         cx.notify();
     }
 
@@ -2427,14 +2556,17 @@ impl AppState {
     }
 
     /// Recompute the visible tree rows from the comparison, sort,
-    /// filters, and expansion set.
+    /// filters, and expansion set. The multi-selection is dropped because
+    /// the visible row set changed.
     fn recompute_display_order(&mut self) {
+        self.selected_paths.clear();
         self.tree_rows = self.comparison.as_ref().map_or_else(Vec::new, |c| {
             compute_tree_rows(
                 c,
                 self.sort_key,
                 self.sort_descending,
                 &self.filters,
+                self.name_filter.as_ref(),
                 &self.expanded,
             )
         });
@@ -2509,13 +2641,13 @@ impl AppState {
         cx.notify();
     }
 
-    /// Add the selected entry's name to the session's name filter, so
-    /// the Exclude command hides it from the panes.
+    /// Add the selected entry's name to the session's name filter as an
+    /// exclude pattern, so the Exclude command hides it from the panes.
     pub fn exclude_selected(&mut self, cx: &mut Context<Self>) {
         let Some(name) = self.selected_entry().map(|e| e.name.clone()) else {
             return;
         };
-        self.push_filter_pattern(&name, cx);
+        self.push_filter_pattern(&format!("!{name}"), cx);
     }
 
     /// Inject a comparison result without running the async load.
@@ -2723,14 +2855,24 @@ mod tests {
     fn name_sort_is_case_insensitive_in_both_directions() {
         let entries = sample_entries();
         let filters = DisplayFilters::default();
-        let asc =
-            compute_display_order(&entries, SortKey::Name, false, &filters);
+        let asc = compute_display_order(
+            &entries,
+            SortKey::Name,
+            false,
+            &filters,
+            None,
+        );
         assert_eq!(
             names_in_order(&entries, &asc),
             ["Alpha.txt", "bravo.txt", "charlie.txt", "delta.txt"]
         );
-        let desc =
-            compute_display_order(&entries, SortKey::Name, true, &filters);
+        let desc = compute_display_order(
+            &entries,
+            SortKey::Name,
+            true,
+            &filters,
+            None,
+        );
         assert_eq!(
             names_in_order(&entries, &desc),
             ["delta.txt", "charlie.txt", "bravo.txt", "Alpha.txt"]
@@ -2745,6 +2887,7 @@ mod tests {
             SortKey::Status,
             false,
             &DisplayFilters::default(),
+            None,
         );
         // DirEntryStatus order follows the raw bits: Same < RightNewer
         // < LeftOrphan < RightOrphan.
@@ -2763,14 +2906,20 @@ mod tests {
             SortKey::SizeLeft,
             false,
             &filters,
+            None,
         );
         // Left sizes: 100, 200, 300; bravo.txt has no left side → last.
         assert_eq!(
             names_in_order(&entries, &asc),
             ["Alpha.txt", "charlie.txt", "delta.txt", "bravo.txt"]
         );
-        let desc =
-            compute_display_order(&entries, SortKey::SizeLeft, true, &filters);
+        let desc = compute_display_order(
+            &entries,
+            SortKey::SizeLeft,
+            true,
+            &filters,
+            None,
+        );
         assert_eq!(
             names_in_order(&entries, &desc),
             ["delta.txt", "charlie.txt", "Alpha.txt", "bravo.txt"]
@@ -2785,6 +2934,7 @@ mod tests {
             SortKey::DateRight,
             false,
             &DisplayFilters::default(),
+            None,
         );
         // Right dates: Alpha 01-01, delta 01-04, bravo 01-05; charlie has
         // no right side → last.
@@ -2800,12 +2950,77 @@ mod tests {
         let filters = DisplayFilters {
             show_statuses: DirEntryStatus::all() ^ DirEntryStatus::EQUAL,
         };
-        let order =
-            compute_display_order(&entries, SortKey::Name, false, &filters);
+        let order = compute_display_order(
+            &entries,
+            SortKey::Name,
+            false,
+            &filters,
+            None,
+        );
         assert_eq!(
             names_in_order(&entries, &order),
             ["bravo.txt", "charlie.txt", "delta.txt"]
         );
+    }
+
+    #[test]
+    fn name_filter_include_token_shows_only_matches() {
+        let entries = sample_entries();
+        let filter = compile_name_filter("charlie*").unwrap();
+        let order = compute_display_order(
+            &entries,
+            SortKey::Name,
+            false,
+            &DisplayFilters::default(),
+            Some(&filter),
+        );
+        assert_eq!(names_in_order(&entries, &order), ["charlie.txt"]);
+    }
+
+    #[test]
+    fn name_filter_combines_include_and_exclude_tokens() {
+        let entries = sample_entries();
+        let filter = compile_name_filter("*.txt !delta*").unwrap();
+        let order = compute_display_order(
+            &entries,
+            SortKey::Name,
+            false,
+            &DisplayFilters::default(),
+            Some(&filter),
+        );
+        assert_eq!(
+            names_in_order(&entries, &order),
+            ["Alpha.txt", "bravo.txt", "charlie.txt"]
+        );
+    }
+
+    #[test]
+    fn name_filter_always_passes_directories() {
+        let mut entries = sample_entries();
+        entries.push(entry(
+            "sub",
+            DirEntryStatus::Same,
+            Some(dir_info("sub")),
+            Some(dir_info("sub")),
+        ));
+        let filter = compile_name_filter("*.rs").unwrap();
+        let order = compute_display_order(
+            &entries,
+            SortKey::Name,
+            false,
+            &DisplayFilters::default(),
+            Some(&filter),
+        );
+        // No file matches `*.rs`, but the directory stays so its
+        // children remain reachable.
+        assert_eq!(names_in_order(&entries, &order), ["sub"]);
+    }
+
+    #[test]
+    fn compile_name_filter_returns_none_without_tokens() {
+        assert!(compile_name_filter("").is_none());
+        assert!(compile_name_filter("   ").is_none());
+        assert!(compile_name_filter("!").is_none());
     }
 
     #[test]
@@ -2830,6 +3045,7 @@ mod tests {
             SortKey::Name,
             false,
             &FilterPreset::LeftNewer.filters(),
+            None,
         );
         assert!(names_in_order(&entries, &order).is_empty());
         let order = compute_display_order(
@@ -2837,6 +3053,7 @@ mod tests {
             SortKey::Name,
             false,
             &FilterPreset::RightNewer.filters(),
+            None,
         );
         assert_eq!(names_in_order(&entries, &order), ["delta.txt"]);
     }
@@ -2849,6 +3066,7 @@ mod tests {
             SortKey::Name,
             false,
             &FilterPreset::LeftOrphans.filters(),
+            None,
         );
         assert_eq!(names_in_order(&entries, &order), ["charlie.txt"]);
         let order = compute_display_order(
@@ -2856,6 +3074,7 @@ mod tests {
             SortKey::Name,
             false,
             &FilterPreset::RightOrphans.filters(),
+            None,
         );
         assert_eq!(names_in_order(&entries, &order), ["bravo.txt"]);
         let order = compute_display_order(
@@ -2863,6 +3082,7 @@ mod tests {
             SortKey::Name,
             false,
             &FilterPreset::OrphansOnly.filters(),
+            None,
         );
         assert_eq!(
             names_in_order(&entries, &order),
@@ -2880,6 +3100,7 @@ mod tests {
             SortKey::Name,
             false,
             &FilterPreset::LeftNewerAndOrphans.filters(),
+            None,
         );
         assert_eq!(names_in_order(&entries, &order), ["charlie.txt"]);
         let order = compute_display_order(
@@ -2887,6 +3108,7 @@ mod tests {
             SortKey::Name,
             false,
             &FilterPreset::RightNewerAndOrphans.filters(),
+            None,
         );
         assert_eq!(
             names_in_order(&entries, &order),
@@ -3381,6 +3603,43 @@ mod tests {
             assert!(!state.is_loading());
             assert!(state.busy_label().is_none());
             assert!(state.notice().is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn select_all_entries_highlights_every_visible_row(
+        cx: &mut TestAppContext,
+    ) {
+        init_log_globals(cx);
+        let state = cx.new(|cx| {
+            AppState::new(
+                Endpoint::local("/left"),
+                Endpoint::local("/right"),
+                "test".into(),
+                cx,
+            )
+        });
+        state.update(cx, |state, cx| {
+            state.set_comparison_for_test(comparison(sample_entries()));
+            assert_eq!(state.entry_count(), 4);
+            state.select_row(2, cx);
+            // Before select-all only the cursor row is selected.
+            assert!(state.is_row_selected(2));
+            assert!(!state.is_row_selected(0));
+
+            state.select_all_entries(cx);
+            for ix in 0..state.entry_count() {
+                assert!(
+                    state.is_row_selected(ix),
+                    "row {ix} must be selected"
+                );
+            }
+
+            // Moving the cursor collapses back to a single selection.
+            state.select_row(1, cx);
+            assert!(state.is_row_selected(1));
+            assert!(!state.is_row_selected(0));
+            assert!(!state.is_row_selected(2));
         });
     }
 

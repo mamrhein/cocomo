@@ -26,9 +26,9 @@ use std::{
 
 use chrono::{DateTime, Local, Utc};
 use cocomo_lib::{
-    ColorOverrides, Endpoint, FsError, Grammar, Importance, LineEnding,
-    LineInfo, NodeFileSystem, TextCompareSettings, TextDiff, TextDifference,
-    TextEncoding, WhitespaceMode, compare_texts, format_size,
+    CancellationToken, ColorOverrides, Endpoint, FsError, Grammar, Importance,
+    LineEnding, LineInfo, NodeFileSystem, TextCompareSettings, TextDiff,
+    TextDifference, TextEncoding, WhitespaceMode, compare_texts, format_size,
 };
 use gpui::{
     Action, AnyElement, App, Bounds, Context, CursorStyle, DispatchPhase, Div,
@@ -66,7 +66,7 @@ use crate::{
     log::{self, LogLevel},
     menus::{
         NextSection, PrevSection, ReloadCompare, SessionInfo, SessionReport,
-        ShowThumbnails, ToggleWordWrap,
+        ShowThumbnails, StopCompare, ToggleWordWrap,
     },
     session_manager::GuiSessionManager,
     state::AppState,
@@ -852,7 +852,7 @@ fn split_lines(text: &str) -> Vec<LineInfo> {
 }
 
 /// Detect the dominant line-ending convention from raw bytes.
-fn detect_line_ending(bytes: &[u8]) -> LineEnding {
+pub(crate) fn detect_line_ending(bytes: &[u8]) -> LineEnding {
     let mut i = 0;
     while i < bytes.len() {
         match bytes[i] {
@@ -988,6 +988,11 @@ pub struct TextDiffSession {
     selected: Option<usize>,
     /// Whether a load is in flight.
     loading: bool,
+    /// Monotonic counter that invalidates results of stopped or
+    /// superseded loads.
+    load_revision: u64,
+    /// Cancellation token of the in-flight load, if any.
+    cancel_token: Option<CancellationToken>,
     /// Last load error, if any.
     error: Option<String>,
     /// Duration of the last successful load, in milliseconds.
@@ -1071,6 +1076,8 @@ impl TextDiffSession {
             collapsed: HashSet::new(),
             selected: None,
             loading: false,
+            load_revision: 0,
+            cancel_token: None,
             error: None,
             load_ms: None,
             word_wrap: false,
@@ -1298,6 +1305,10 @@ impl TextDiffSession {
             return;
         }
         self.loading = true;
+        self.load_revision += 1;
+        let revision = self.load_revision;
+        let token = CancellationToken::new();
+        self.cancel_token = Some(token.clone());
         self.error = None;
         cx.notify();
 
@@ -1327,6 +1338,11 @@ impl TextDiffSession {
                 Ok::<_, anyhow::Error>((bytes, meta))
             };
             let left = read_side(left).await?;
+            // The providers take no token, so the most a stop can save
+            // here is the second read.
+            if token.is_cancelled() {
+                return Err(anyhow::anyhow!("aborted"));
+            }
             let right = read_side(right).await?;
             Ok::<_, anyhow::Error>((
                 left,
@@ -1335,7 +1351,7 @@ impl TextDiffSession {
             ))
         });
 
-        cx.spawn(|_, cx: &mut gpui::AsyncApp| {
+        cx.spawn(move |_, cx: &mut gpui::AsyncApp| {
             let async_app = cx.clone();
             async move {
                 let result = match join_handle.await {
@@ -1345,6 +1361,13 @@ impl TextDiffSession {
                 async_app.update(|cx| {
                     if let Some(entity) = weak.upgrade() {
                         entity.update(cx, |session, cx| {
+                            // A stop or a newer load superseded this
+                            // one; drop the result without touching the
+                            // session state.
+                            if revision != session.load_revision {
+                                return;
+                            }
+                            session.cancel_token = None;
                             session.loading = false;
                             match result {
                                 Ok(((lb, lm), (rb, rm), ms)) => {
@@ -1378,6 +1401,20 @@ impl TextDiffSession {
             }
         })
         .detach();
+    }
+
+    /// Abort the in-flight load, discarding its result.
+    pub fn stop(&mut self, cx: &mut Context<Self>) {
+        if !self.loading {
+            return;
+        }
+        self.load_revision += 1;
+        if let Some(token) = self.cancel_token.take() {
+            token.cancel();
+        }
+        self.loading = false;
+        log::push(LogLevel::Info, "Comparison aborted", cx);
+        cx.notify();
     }
 
     /// Start the initial load unless the model is already populated.
@@ -2668,6 +2705,17 @@ impl TextDiffView {
         });
     }
 
+    /// Handle the StopCompare action dispatched from the Session menu:
+    /// abort the in-flight load.
+    fn handle_stop_compare(
+        &mut self,
+        _: &StopCompare,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.state.update(cx, |s, cx| s.stop(cx));
+    }
+
     fn handle_swap_sides(
         &mut self,
         _: &SwapSides,
@@ -3344,7 +3392,16 @@ impl TextDiffView {
                 .tooltip("Reload / recompare files")
                 .accessibility_label("Reload comparison")
                 .on_click(move |_, _, cx| {
-                    state.update(cx, |s, cx| s.load(cx));
+                    // Same contract as the `ReloadCompare` command: with
+                    // unsaved buffer edits the re-diff runs on the
+                    // buffers so the edits survive.
+                    state.update(cx, |s, cx| {
+                        if s.is_dirty() {
+                            s.recompare(cx);
+                        } else {
+                            s.load(cx);
+                        }
+                    });
                 })
         };
 
@@ -3975,6 +4032,7 @@ impl Render for TextDiffView {
             .on_action(cx.listener(Self::handle_toggle_wrap))
             .on_action(cx.listener(Self::handle_toggle_thumbnails))
             .on_action(cx.listener(Self::handle_reload))
+            .on_action(cx.listener(Self::handle_stop_compare))
             .on_action(cx.listener(Self::handle_swap_sides))
             .on_action(cx.listener(Self::handle_report))
             .on_action(cx.listener(Self::handle_info))
@@ -5063,6 +5121,32 @@ mod tests {
                 assert_eq!(s.left_path(), "/right.txt");
                 assert_eq!(s.right_path(), "/left.txt");
             });
+        });
+    }
+
+    #[gpui::test]
+    fn stop_aborts_an_in_flight_load(cx: &mut TestAppContext) {
+        cx.update(|cx| cx.set_global(crate::log::LogBuffer::default()));
+        let session = cx.new(|cx| TextDiffSession::for_test("a\n", "b\n", cx));
+        session.update(cx, |s, cx| {
+            // Simulate an in-flight load without spawning the real task.
+            s.loading = true;
+            s.load_revision = 7;
+            let token = CancellationToken::new();
+            s.cancel_token = Some(token.clone());
+
+            s.stop(cx);
+
+            assert!(!s.is_loading());
+            // The bumped revision drops the in-flight result on arrival.
+            assert_eq!(s.load_revision, 8);
+            assert!(s.cancel_token.is_none());
+            assert!(token.is_cancelled());
+        });
+        // Stopping an idle session is a no-op.
+        session.update(cx, |s, cx| {
+            s.stop(cx);
+            assert_eq!(s.load_revision, 8);
         });
     }
 

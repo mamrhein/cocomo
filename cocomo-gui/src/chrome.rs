@@ -205,11 +205,9 @@ pub fn tab_bar_element(
                     ))
                     .item(
                         PopupMenuItem::new("Close all").on_click(
-                            move |_, _, cx| {
+                            move |_, window, cx| {
                                 mgr_close_all.update(cx, |m, cx| {
-                                    while !m.is_empty() {
-                                        m.close_session(0, cx);
-                                    }
+                                    m.request_close_all_sessions(window, cx);
                                 });
                             },
                         ),

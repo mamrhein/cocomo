@@ -44,8 +44,9 @@ use crate::{
     folder_table::FolderTableDelegate,
     log::{self, LogLevel},
     menus::{
-        CopyPathLeft, CopyPathRight, ReloadCompare, SaveSession, StopCompare,
-        ToggleShowDifferent, ToggleShowOrphans, ToggleShowSame,
+        CopyPathLeft, CopyPathRight, ReloadCompare, SaveSession,
+        SelectAllEntries, StopCompare, ToggleShowDifferent, ToggleShowOrphans,
+        ToggleShowSame,
     },
     session_manager::GuiSessionManager,
     state::{AppState, BaseSide, StatusCategory},
@@ -716,6 +717,18 @@ impl FolderCompareView {
         if let Some(path) = self.state.read(cx).selected_right_path() {
             cx.write_to_clipboard(ClipboardItem::new_string(path));
         }
+    }
+
+    /// Handle the SelectAllEntries action: add every visible entry to the
+    /// selection.
+    fn handle_select_all_entries(
+        &mut self,
+        _: &SelectAllEntries,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.state
+            .update(cx, |state, cx| state.select_all_entries(cx));
     }
 
     /// Scroll the table so the current selection is visible at the top.
@@ -1596,6 +1609,7 @@ impl Render for FolderCompareView {
             // Clipboard actions (Edit menu and row context menu).
             .on_action(cx.listener(Self::handle_copy_path_left))
             .on_action(cx.listener(Self::handle_copy_path_right))
+            .on_action(cx.listener(Self::handle_select_all_entries))
     }
 }
 

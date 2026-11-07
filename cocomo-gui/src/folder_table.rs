@@ -479,7 +479,7 @@ impl TableDelegate for FolderTableDelegate {
             .row_at(row_ix)
             .map(|row| row.path().to_string())
             .unwrap_or_default();
-        let is_selected = self.state.read(cx).selected_index() == row_ix;
+        let is_selected = self.state.read(cx).is_row_selected(row_ix);
         // Only paint a background when selected. The table applies this
         // style *after* its own stripe background, so setting a
         // background unconditionally would erase the zebra stripes.
@@ -750,8 +750,7 @@ pub(crate) struct TableRow {
     left_role: color::ColorRole,
     right_role: color::ColorRole,
     overrides: cocomo_lib::ColorOverrides,
-    /// Coarse status glyph; empty for orphans, which the row coloring
-    /// already marks.
+    /// Coarse status glyph (`~`, `=`, `|`, `≠`, `*`).
     status_symbol: &'static str,
     has_left: bool,
     has_right: bool,
@@ -1219,14 +1218,14 @@ mod tests {
     }
 
     #[gpui::test]
-    fn orphan_rows_have_no_status_symbol(cx: &mut TestAppContext) {
+    fn orphan_rows_carry_the_pipe_symbol(cx: &mut TestAppContext) {
         let left_orphan = entry(
             "orphan.txt",
             DirEntryStatus::LeftOrphan,
             Some(info("orphan.txt", false)),
             None,
         );
-        assert_eq!(row(&left_orphan, cx).status_symbol, "");
+        assert_eq!(row(&left_orphan, cx).status_symbol, "|");
 
         let right_orphan = entry(
             "orphan.txt",
@@ -1234,7 +1233,7 @@ mod tests {
             None,
             Some(info("orphan.txt", false)),
         );
-        assert_eq!(row(&right_orphan, cx).status_symbol, "");
+        assert_eq!(row(&right_orphan, cx).status_symbol, "|");
 
         // A matched difference still carries its glyph.
         let different = entry(

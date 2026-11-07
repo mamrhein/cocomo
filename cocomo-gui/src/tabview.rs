@@ -638,6 +638,7 @@ impl Render for WindowRoot {
                         is_text_editing: state.is_editing(),
                         can_save_file: state.can_save(),
                         detail_mode: state.detail_mode(),
+                        loading: state.is_loading(),
                         is_home: active_tab
                             .as_ref()
                             .is_some_and(TabEntity::is_home),

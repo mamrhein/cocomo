@@ -21,9 +21,9 @@
 //! tentatively contribute the left side. Taking a section records a
 //! resolution and rebuilds the output. Manual edits in the output pane
 //! invalidate the section-to-output mapping, so the take commands stay
-//! disabled until the next reload or take.
+//! disabled until the next reload.
 
-use std::{collections::HashMap, sync::Arc, time::Instant};
+use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Instant};
 
 use cocomo_lib::{
     Endpoint, FsError, LineEnding, MergeKind, MergeSection, NodeFileSystem,
@@ -59,7 +59,9 @@ use crate::{
     log::{self, LogLevel},
     menus::{ReloadCompare, ToggleMergeAncestor, ToggleWordWrap},
     session_manager::GuiSessionManager,
-    text_diff::{decode_bytes, encode_text, normalize_endings},
+    text_diff::{
+        decode_bytes, detect_line_ending, encode_text, normalize_endings,
+    },
 };
 
 // ---------------------------------------------------------------------------
@@ -123,6 +125,14 @@ pub struct MergeSession {
     right_raw: Option<Vec<u8>>,
     /// Raw ancestor bytes from the last load.
     ancestor_raw: Option<Vec<u8>>,
+    /// Remembered save target, set by the first successful save; later
+    /// saves write to it without prompting again.
+    output_path: Option<PathBuf>,
+    /// Encoding detected from the sources, used when saving the output.
+    output_encoding: TextEncoding,
+    /// Line ending detected from the sources, used when saving the
+    /// output.
+    output_ending: LineEnding,
     /// Decoded left lines.
     left_lines: Arc<Vec<String>>,
     /// Decoded right lines.
@@ -205,6 +215,9 @@ impl MergeSession {
             left_raw: None,
             right_raw: None,
             ancestor_raw: None,
+            output_path: None,
+            output_encoding: TextEncoding::Utf8,
+            output_ending: LineEnding::Lf,
             left_lines: Arc::new(Vec::new()),
             right_lines: Arc::new(Vec::new()),
             ancestor_lines: Arc::new(Vec::new()),
@@ -360,6 +373,7 @@ impl MergeSession {
             right_line_section: self.right_line_section.clone(),
             ancestor_line_section: self.ancestor_line_section.clone(),
             selected: self.selected,
+            output_stale: self.output_stale,
             word_wrap: self.word_wrap,
             show_ancestor: self.show_ancestor(),
             has_ancestor: self.has_ancestor(),
@@ -644,6 +658,7 @@ impl MergeSession {
                                     session.left_raw = Some(lb);
                                     session.right_raw = Some(rb);
                                     session.ancestor_raw = ab;
+                                    session.detect_output_format();
                                     session.load_ms = Some(ms);
                                     session.resolutions.clear();
                                     session.rebuild_model();
@@ -669,11 +684,37 @@ impl MergeSession {
         }
     }
 
-    /// Prompt for a target path and write the merge output, confirming
-    /// first when the target already exists (data-loss warning per spec).
+    /// Detect the save format from the sources: the left side wins,
+    /// falling back to the right when the left file is missing or empty.
+    fn detect_output_format(&mut self) {
+        let left = self.left_raw.as_deref().unwrap_or(&[]);
+        let right = self.right_raw.as_deref().unwrap_or(&[]);
+        let source = if left.is_empty() { right } else { left };
+        self.output_encoding = detect_encoding(source);
+        self.output_ending = detect_line_ending(source);
+    }
+
+    /// Write the merge output, prompting for a target path on the first
+    /// save and remembering it for the session; an existing target needs
+    /// an explicit confirmation (data-loss warning per spec).
     pub fn save_output(&mut self, cx: &mut Context<Self>) {
         let text = self.output_text(cx);
-        let bytes = encode_text(&text, LineEnding::Lf, TextEncoding::Utf8);
+        let bytes =
+            encode_text(&text, self.output_ending, self.output_encoding);
+        let entity = cx.entity().clone();
+        // Once the session has saved, later saves write straight to the
+        // remembered target: the data-loss prompt was already given for
+        // that file and the session owns it.
+        if let Some(target) = self.output_path.clone() {
+            cx.spawn(move |_, cx: &mut gpui::AsyncApp| {
+                let mut cx = cx.clone();
+                async move {
+                    Self::finish_save(entity, bytes, target, &mut cx).await;
+                }
+            })
+            .detach();
+            return;
+        }
         let path = self.left.path().to_path_buf();
         let dir = path
             .parent()
@@ -718,8 +759,23 @@ impl MergeSession {
                         )
                     });
                     if shown {
+                        // The dialog takes over the save flow.
                         return;
                     }
+                    // Without a window the data-loss prompt cannot be
+                    // shown; cancelling beats overwriting unseen.
+                    let for_log = target.display().to_string();
+                    cx.update(|cx| {
+                        log::push(
+                            LogLevel::Warning,
+                            format!(
+                                "Save cancelled: {for_log} exists and the \
+                                 replace prompt could not be shown"
+                            ),
+                            cx,
+                        );
+                    });
+                    return;
                 }
                 Self::finish_save(entity, bytes, target, &mut cx).await;
             }
@@ -815,8 +871,9 @@ impl MergeSession {
         cx: &mut gpui::AsyncApp,
     ) {
         let for_log = target.display().to_string();
+        let write_target = target.clone();
         let result = crate::runtime::spawn_on_tokio(async move {
-            fs_err::tokio::write(&target, &bytes)
+            fs_err::tokio::write(&write_target, &bytes)
                 .await
                 .map_err(|e| anyhow::anyhow!("{e}"))
         })
@@ -824,6 +881,8 @@ impl MergeSession {
         entity.update(cx, |session, cx| {
             match result {
                 Ok(Ok(())) => {
+                    // Remember the target so later saves skip the prompt.
+                    session.output_path = Some(target);
                     if let Some(manager) = &session.manager {
                         manager.update(cx, |m, cx| m.mark_clean(cx));
                     }
@@ -862,12 +921,13 @@ impl MergeSession {
     /// Decode the raw inputs, run the merge, and rebuild every derived
     /// model.
     fn rebuild_model(&mut self) {
+        // Each side is decoded under its own detected encoding so a
+        // Latin-1 source round-trips; the model works in LF-normalized
+        // lines and the save path re-applies the chosen ending.
         let decode = |raw: &Option<Vec<u8>>| -> String {
+            let bytes = raw.as_deref().unwrap_or(&[]);
             normalize_endings(
-                &decode_bytes(
-                    raw.as_deref().unwrap_or(&[]),
-                    TextEncoding::Utf8,
-                ),
+                &decode_bytes(bytes, detect_encoding(bytes)),
                 LineEnding::Lf,
             )
         };
@@ -955,9 +1015,23 @@ pub struct MergeSnapshot {
     pub right_line_section: Arc<Vec<usize>>,
     pub ancestor_line_section: Arc<Vec<usize>>,
     pub selected: Option<usize>,
+    /// The output was edited manually; take commands are disabled.
+    pub output_stale: bool,
     pub word_wrap: bool,
     pub show_ancestor: bool,
     pub has_ancestor: bool,
+}
+
+/// Detect the source encoding from raw bytes: valid UTF-8 selects
+/// UTF-8, anything else falls back to Latin-1 (the byte-preserving
+/// fallback). UTF-16 is not offered because the decode and encode
+/// pipeline, as in the text view, only round-trips UTF-8 and Latin-1.
+fn detect_encoding(bytes: &[u8]) -> TextEncoding {
+    if std::str::from_utf8(bytes).is_ok() {
+        TextEncoding::Utf8
+    } else {
+        TextEncoding::Latin1
+    }
 }
 
 /// The side a section contributes when it has no explicit resolution.
@@ -1306,7 +1380,7 @@ impl MergeView {
         let take_ancestor = take_btn(
             "merge_take_ancestor",
             "Take Ancestor",
-            IconName::ArrowRight,
+            IconName::GitCommitHorizontal,
             MergeChoice::Ancestor,
             state.clone(),
             !can_take || !has_ancestor,
@@ -1482,6 +1556,7 @@ fn render_merge_row(
     mono: &SharedString,
     state: &Entity<MergeSession>,
     has_ancestor: bool,
+    take_disabled: bool,
 ) -> AnyElement {
     let Some(content) = lines.get(ix) else {
         return div().size_full().into_any_element();
@@ -1537,28 +1612,33 @@ fn render_merge_row(
             if si == usize::MAX {
                 return menu;
             }
+            // While the output is stale the take commands no-op, so the
+            // menu must not offer them as live actions.
             let menu = menu
-                .menu(
+                .menu_with_disabled(
                     "Take left",
                     Box::new(TakeSection {
                         section: si,
                         choice: MergeChoice::Left,
                     }),
+                    take_disabled,
                 )
-                .menu(
+                .menu_with_disabled(
                     "Take right",
                     Box::new(TakeSection {
                         section: si,
                         choice: MergeChoice::Right,
                     }),
+                    take_disabled,
                 );
             if has_ancestor {
-                menu.menu(
+                menu.menu_with_disabled(
                     "Take ancestor",
                     Box::new(TakeSection {
                         section: si,
                         choice: MergeChoice::Ancestor,
                     }),
+                    take_disabled,
                 )
             } else {
                 menu
@@ -1642,6 +1722,7 @@ impl Render for MergeView {
         let unresolved = session.unresolved_count();
         let section_count = session.section_count();
         let selected = snap.selected;
+        let take_disabled = snap.output_stale || loading;
         let model_rev = session.model_rev();
         let output_editor = session.output_editor().cloned();
         let has_ancestor = snap.has_ancestor;
@@ -1728,6 +1809,7 @@ impl Render for MergeView {
                         &mono,
                         &state,
                         has_ancestor,
+                        take_disabled,
                     )
                 })
                 .size_full()
@@ -1860,7 +1942,7 @@ impl Render for MergeView {
                                             .child(
                                                 "Editing the output disables \
                                                  the take buttons until the \
-                                                 next take or reload",
+                                                 next reload",
                                             ),
                                     )
                                     .child(
@@ -1945,6 +2027,32 @@ mod tests {
                 MergeSession::from_texts(ancestor, left, right, "t".into(), cx)
             })
         })
+    }
+
+    #[test]
+    fn detect_encoding_falls_back_to_latin1_for_invalid_utf8() {
+        assert_eq!(detect_encoding(b"plain ascii\n"), TextEncoding::Utf8);
+        assert_eq!(detect_encoding(&[]), TextEncoding::Utf8);
+        // 0xE9 is a lone continuation byte: invalid UTF-8, valid Latin-1.
+        assert_eq!(detect_encoding(b"caf\xe9\n"), TextEncoding::Latin1);
+    }
+
+    #[gpui::test]
+    fn output_format_follows_the_left_source(cx: &mut TestAppContext) {
+        let session = session_from(cx, None, "a\nb\n", "a\nR\n");
+        session.update(cx, |s, _| {
+            // Left is Latin-1 (invalid UTF-8): the save format follows it.
+            s.left_raw = Some(b"caf\xe9\n".to_vec());
+            s.detect_output_format();
+            assert_eq!(s.output_encoding, TextEncoding::Latin1);
+
+            // An empty left falls back to the right side's convention.
+            s.left_raw = Some(Vec::new());
+            s.right_raw = Some(b"a\r\nb\r\n".to_vec());
+            s.detect_output_format();
+            assert_eq!(s.output_encoding, TextEncoding::Utf8);
+            assert_eq!(s.output_ending, LineEnding::Crlf);
+        });
     }
 
     #[gpui::test]
