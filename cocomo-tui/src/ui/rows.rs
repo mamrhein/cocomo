@@ -17,9 +17,7 @@
 
 use std::{collections::HashSet, sync::Arc};
 
-use cocomo_lib::{
-    Importance, LineInfo, TransferItem, format_date, format_size,
-};
+use cocomo_lib::{Importance, LineInfo, format_date, format_size};
 use ratatui_kit::{
     prelude::*,
     ratatui::{
@@ -116,31 +114,6 @@ pub(super) fn dir_rows(rows: &[DirRow], theme: &CocomoTheme) -> Vec<CellRow> {
                     TableCell::new(entry.status.symbol().0)
                         .style(status_style),
                     TableCell::new(right_meta),
-                ]),
-            }
-        })
-        .collect()
-}
-
-/// Build the sync-preview rows from the planned transfer items.
-pub(super) fn sync_rows(
-    items: &[TransferItem],
-    theme: &CocomoTheme,
-) -> Vec<CellRow> {
-    items
-        .iter()
-        .enumerate()
-        .map(|(index, item)| {
-            let dir_indicator = if item.is_dir { "\u{1F4C4} " } else { "  " };
-            CellRow {
-                index,
-                cells: Arc::from(vec![
-                    TableCell::new(item.action.label().to_string())
-                        .style(theme.transfer_action_style(item.action)),
-                    TableCell::new(format!(
-                        "{}{}",
-                        dir_indicator, item.rel_path
-                    )),
                 ]),
             }
         })

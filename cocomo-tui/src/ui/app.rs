@@ -491,10 +491,7 @@ mod render_tests {
 
     use super::*;
     use crate::{
-        state::{
-            APP_STATE, AppState, SessionMode, SessionView, SyncStage,
-            TransferOp,
-        },
+        state::{APP_STATE, AppState, SessionMode, SessionView, TransferOp},
         ui::{frame::SPINNER_FRAMES, theme::cocomo_palette},
     };
 
@@ -700,7 +697,8 @@ mod render_tests {
         let mut app = dir_session_state();
         {
             let session = app.active_mut().unwrap();
-            session.set_sync(SyncStage::Planned(SyncResult::default()));
+            session.dir_mut().unwrap().pending_sync =
+                Some(SyncResult::default());
             session.ui.mode = SessionMode::SyncConfirm;
         }
         let screen = render(app);
@@ -720,7 +718,7 @@ mod render_tests {
         let mut app = dir_session_state();
         {
             let session = app.active_mut().unwrap();
-            session.set_sync(SyncStage::Planned(SyncResult {
+            session.dir_mut().unwrap().pending_sync = Some(SyncResult {
                 planned: vec![
                     TransferItem::new(
                         TransferAction::CopyRight,
@@ -736,7 +734,7 @@ mod render_tests {
                     ),
                 ],
                 ..Default::default()
-            }));
+            });
             session.ui.mode = SessionMode::SyncConfirm;
         }
         let screen = render(app);
@@ -784,7 +782,6 @@ mod render_tests {
         let screen = render(app);
         assert!(screen.contains("Compare content"), "{screen}");
         assert!(screen.contains("Hide identical"), "{screen}");
-        assert!(screen.contains("Sync operation"), "{screen}");
         assert!(screen.contains("Enter toggle"), "{screen}");
         assert!(row_with(&screen, "Compare content").contains('\u{25b8}'));
     }

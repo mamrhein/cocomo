@@ -142,12 +142,15 @@ pub enum Cmd {
     ToggleCompareContent,
     /// Plan the sync (dry-run), then confirm its execution (`S`).
     Sync,
-    /// Cycle the sync operation forward.
-    CycleSyncOpForward,
-    /// Cycle the sync operation backward.
-    CycleSyncOpBackward,
-    /// Select the given sync operation (dropdown item).
-    SetSyncOp(SyncOperation),
+    /// Mirror the left panel onto the right (delete extras on the
+    /// right), after a confirmation dialog.
+    SyncLeftRight,
+    /// Mirror the right panel onto the left (delete extras on the
+    /// left), after a confirmation dialog.
+    SyncRightLeft,
+    /// Update both panels from each other (no deletions), after a
+    /// confirmation dialog.
+    SyncBoth,
     /// Toggle the visibility of one entry-status class (dropdown item).
     ToggleStatusFilter(StatusFilter),
     /// Enter save-session mode.
@@ -164,7 +167,7 @@ pub enum Cmd {
     OpenEntry,
     /// Open the parent directories in a new session.
     GoUp,
-    /// Cancel the sync preview, else clear the filter.
+    /// Clear the name filter.
     Cancel,
     /// Execute the planned sync from the approval modal (`y`).
     SyncExecute,
@@ -190,6 +193,9 @@ pub enum Cmd {
     DialogPick(TransferChoice),
     /// Close the transfer dialog without transferring.
     DialogAbort,
+    /// Execute the given transfer choice on the current selection
+    /// immediately (Sync menu dropdown item), without opening the dialog.
+    TransferExecute(TransferOp, TransferChoice),
     /// Enter search mode (`/`).
     StartSearch,
     /// Enter command mode (`:`).
@@ -389,20 +395,6 @@ const KEYMAP: &[KeyBinding] = &[
         scope: KeyScope::DirNormal,
         cmd: Cmd::ToggleCompareContent,
         help: Some(("C", "cont. on/off")),
-    },
-    KeyBinding {
-        key: KeyCode::Char('m'),
-        modifiers: NONE,
-        scope: KeyScope::DirNormal,
-        cmd: Cmd::CycleSyncOpForward,
-        help: Some(("m/M", "sync op")),
-    },
-    KeyBinding {
-        key: KeyCode::Char('M'),
-        modifiers: NONE,
-        scope: KeyScope::DirNormal,
-        cmd: Cmd::CycleSyncOpBackward,
-        help: None,
     },
     KeyBinding {
         // `S` runs the whole sync flow: the controller plans the sync and
@@ -1138,23 +1130,21 @@ fn execute(cmd: Cmd, session: &mut SessionView) -> SessionAction {
                     .unwrap_or_default(),
             }
         }
-        Cmd::CycleSyncOpForward => {
-            if let Some(dir) = session.dir_mut() {
-                dir.sync_operation = cycle_sync_op(&dir.sync_operation, 1);
-            }
-            SessionAction::None
-        }
-        Cmd::CycleSyncOpBackward => {
-            if let Some(dir) = session.dir_mut() {
-                dir.sync_operation = cycle_sync_op(&dir.sync_operation, -1);
-            }
-            SessionAction::None
-        }
-        Cmd::SetSyncOp(operation) => {
-            if let Some(dir) = session.dir_mut() {
-                dir.sync_operation = operation;
-            }
-            SessionAction::None
+        Cmd::SyncLeftRight | Cmd::SyncRightLeft | Cmd::SyncBoth => {
+            // Remember the operation (the confirm modal and the execute
+            // snapshot read it), then plan the sync with it (dry-run);
+            // the controller opens the confirmation modal once the plan
+            // arrives.
+            let Some(dir) = session.dir_mut() else {
+                return SessionAction::None;
+            };
+            let operation = match cmd {
+                Cmd::SyncLeftRight => SyncOperation::MirrorLeft,
+                Cmd::SyncRightLeft => SyncOperation::MirrorRight,
+                _ => SyncOperation::UpdateBoth,
+            };
+            dir.sync_operation = operation;
+            SessionAction::PlanSync { operation }
         }
         Cmd::ToggleStatusFilter(status) => {
             if let Some(dir) = session.dir_mut() {
@@ -1211,20 +1201,13 @@ fn execute(cmd: Cmd, session: &mut SessionView) -> SessionAction {
             }
         }
         Cmd::Cancel => {
-            // If a sync preview is active, cancel it. Otherwise, clear the
-            // name filter.
-            let cancelled_sync = session
-                .dir_mut()
-                .is_some_and(|dir| dir.sync.take().is_some());
-            if !cancelled_sync {
-                session.ui.name_filter = None;
-            }
+            session.ui.name_filter = None;
             session.set_cursor(Some(0));
             SessionAction::None
         }
         Cmd::SyncExecute => {
             // Approving the modal closes it and hands the plan to the
-            // executor; the preview stays on the session for review.
+            // executor.
             session.ui.mode = SessionMode::Normal;
             SessionAction::ExecuteSync
         }
@@ -1259,6 +1242,19 @@ fn execute(cmd: Cmd, session: &mut SessionView) -> SessionAction {
         Cmd::DialogAbort => {
             session.ui.mode = SessionMode::Normal;
             SessionAction::None
+        }
+        Cmd::TransferExecute(op, choice) => {
+            // The menu counterpart of a dialog accelerator: apply the
+            // choice to the current selection right away. Reusing the
+            // dialog's preview logic keeps the enablement rules in one
+            // place, so a choice no target supports is a silent no-op
+            // instead of a partial transfer.
+            let items = choice.preview(op, &session.transfer_targets());
+            if items.is_empty() {
+                SessionAction::None
+            } else {
+                SessionAction::Transfer { items }
+            }
         }
         Cmd::StartSearch => {
             // Enter search mode; the query buffer lives in the mode itself.
@@ -1440,18 +1436,6 @@ fn collapse_dir(session: &mut SessionView, path: &str) {
     }
 }
 
-/// Cycle through sync operations.
-pub(crate) fn cycle_sync_op(
-    current: &SyncOperation,
-    delta: isize,
-) -> SyncOperation {
-    let ops = SyncOperation::ALL;
-    let len = ops.len() as isize;
-    let idx = ops.iter().position(|x| x == current).unwrap_or(0) as isize;
-    let new_idx = ((idx + delta) % len + len) % len;
-    ops[new_idx as usize]
-}
-
 /// Open the transfer dialog for the current selection.
 ///
 /// A no-op when nothing is selected (or no selected entry exists on
@@ -1619,6 +1603,13 @@ fn handle_sync_confirm_key(
         return None;
     }
     let cmd = lookup(KeyScope::SyncConfirm, key)?;
+    if matches!(cmd, Cmd::PanelClose) {
+        // Rejecting discards the plan; the next sync command plans afresh
+        // from the filesystem state.
+        if let Some(dir) = session.dir_mut() {
+            dir.pending_sync = None;
+        }
+    }
     Some(execute(cmd, session))
 }
 
@@ -2112,17 +2103,24 @@ mod tests {
     }
 
     #[test]
-    fn set_sync_op_selects_the_operation() {
+    fn sync_menu_commands_plan_with_their_operation() {
         let mut session = dir_session();
-        let action = run_menu_command(
-            &mut session,
-            Cmd::SetSyncOp(SyncOperation::MirrorRight),
-        );
-        assert!(matches!(action, SessionAction::None));
-        assert_eq!(
-            session.dir().unwrap().sync_operation,
-            SyncOperation::MirrorRight
-        );
+        for (cmd, expected) in [
+            (Cmd::SyncLeftRight, SyncOperation::MirrorLeft),
+            (Cmd::SyncRightLeft, SyncOperation::MirrorRight),
+            (Cmd::SyncBoth, SyncOperation::UpdateBoth),
+        ] {
+            let action = run_menu_command(&mut session, cmd);
+            assert_eq!(
+                action,
+                SessionAction::PlanSync {
+                    operation: expected
+                }
+            );
+            // The operation is recorded so the confirm modal can label
+            // itself and the execute snapshot can pick it up.
+            assert_eq!(session.dir().unwrap().sync_operation, expected);
+        }
     }
 
     #[test]
@@ -2332,9 +2330,11 @@ mod tests {
         // `q` is owned by the App shell, not the session handler.
         assert_eq!(press(&mut session, KeyCode::Char('q')), None);
         // The two-step sync keys `P`/`e` are gone; `S` is the only sync
-        // entry point.
+        // entry point, and the operation is no longer cycled with `m`.
         assert_eq!(press(&mut session, KeyCode::Char('P')), None);
         assert_eq!(press(&mut session, KeyCode::Char('e')), None);
+        assert_eq!(press(&mut session, KeyCode::Char('m')), None);
+        assert_eq!(press(&mut session, KeyCode::Char('M')), None);
         // Dir-only keys are unbound in a text session.
         let mut session = text_session();
         assert_eq!(press(&mut session, KeyCode::Char('f')), None);
@@ -2646,6 +2646,66 @@ mod tests {
         press(&mut session, KeyCode::Char('d'));
         match press(&mut session, KeyCode::Char('b')) {
             Some(SessionAction::Transfer { items }) => {
+                assert_eq!(items.len(), 2);
+                assert_eq!(items[0].action, TransferAction::DeleteLeft);
+                assert_eq!(items[1].action, TransferAction::DeleteRight);
+            }
+            other => panic!("expected Transfer, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn transfer_menu_command_executes_the_choice_directly() {
+        let mut session = dir_session_with_sides();
+        session.ui.table_state.select(Some(2));
+        match run_menu_command(
+            &mut session,
+            Cmd::TransferExecute(TransferOp::Move, TransferChoice::Left),
+        ) {
+            SessionAction::Transfer { items } => {
+                assert_eq!(items.len(), 1);
+                assert_eq!(items[0].action, TransferAction::MoveRight);
+                assert_eq!(items[0].name, "both.txt");
+            }
+            other => panic!("expected Transfer, got {other:?}"),
+        }
+        // Unlike the `v` accelerator, the menu item never opens the dialog.
+        assert_eq!(session.ui.mode, SessionMode::Normal);
+    }
+
+    #[test]
+    fn transfer_menu_command_ignores_choices_the_selection_lacks() {
+        let mut session = dir_session_with_sides();
+        // A right-only entry has no left side to move left → right.
+        session.ui.table_state.select(Some(1));
+        assert!(matches!(
+            run_menu_command(
+                &mut session,
+                Cmd::TransferExecute(TransferOp::Move, TransferChoice::Left),
+            ),
+            SessionAction::None
+        ));
+        // "delete both" needs the entry on both sides; a left-only entry
+        // contributes nothing.
+        session.ui.table_state.select(Some(0));
+        assert!(matches!(
+            run_menu_command(
+                &mut session,
+                Cmd::TransferExecute(TransferOp::Delete, TransferChoice::Both),
+            ),
+            SessionAction::None
+        ));
+    }
+
+    #[test]
+    fn delete_both_menu_item_transfers_one_item_per_side() {
+        let mut session = dir_session_with_sides();
+        session.ui.table_state.select(Some(2));
+        match run_menu_command(
+            &mut session,
+            Cmd::TransferExecute(TransferOp::Delete, TransferChoice::Both),
+        ) {
+            SessionAction::Transfer { items } => {
                 assert_eq!(items.len(), 2);
                 assert_eq!(items[0].action, TransferAction::DeleteLeft);
                 assert_eq!(items[1].action, TransferAction::DeleteRight);

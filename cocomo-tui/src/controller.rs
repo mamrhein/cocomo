@@ -39,13 +39,12 @@ use ratatui_kit::crossterm::event::KeyEvent;
 
 use crate::{
     error::{Result, TuiError},
-    keys::{self, Cmd, cycle_sync_op, dialog_choice, handle_session_key},
+    keys::{self, Cmd, dialog_choice, handle_session_key},
     menu::{self, MenuState},
     session_store::session_to_config,
     state::{
         APP_STATE, AppState, NamePattern, SessionAction, SessionContent,
-        SessionMode, SessionView, SettingItem, StatusFilter, SyncStage,
-        TransferChoice,
+        SessionMode, SessionView, SettingItem, StatusFilter, TransferChoice,
     },
 };
 
@@ -631,12 +630,14 @@ pub(crate) fn process_session_action(action: SessionAction) {
                     if let Some(s) = app.session_mut(id) {
                         // A non-empty plan is executed only after the user
                         // approves it in the confirmation modal; an empty
-                        // plan has nothing to approve, so the preview
-                        // alone is shown. The modal is not opened over
-                        // another mode the user may have entered while the
-                        // plan was running.
+                        // plan has nothing to approve, so nothing is
+                        // recorded. The modal is not opened over another
+                        // mode the user may have entered while the plan was
+                        // running.
                         let confirm = result.planned_count() > 0;
-                        s.set_sync(SyncStage::Planned(result));
+                        if let Some(dir) = s.dir_mut() {
+                            dir.pending_sync = confirm.then_some(result);
+                        }
                         if confirm && matches!(s.ui.mode, SessionMode::Normal)
                         {
                             s.ui.mode = SessionMode::SyncConfirm;
@@ -656,17 +657,48 @@ pub(crate) fn process_session_action(action: SessionAction) {
                     app.session(id).and_then(SessionSnapshot::from_session)
                 },
                 move |snapshot| async move {
-                    execute_sync_session(
+                    let result = execute_sync_session(
                         &snapshot.left,
                         &snapshot.right,
                         snapshot.sync_operation,
                         snapshot.compare_content,
                     )
-                    .await
+                    .await?;
+                    // Non-fatal per-item failures are collected by the
+                    // executor; surface them before re-comparing.
+                    if let Some(transfer) = &result.transfer
+                        && transfer.failed > 0
+                    {
+                        let details: Vec<String> = transfer
+                            .errors
+                            .iter()
+                            .map(|e| e.to_string())
+                            .collect();
+                        report_error(format!(
+                            "Sync partially failed: {}",
+                            details.join("; ")
+                        ));
+                    }
+                    for error in &result.errors {
+                        report_error(format!("Sync: {error}"));
+                    }
+                    // Re-run the comparison so the table reflects the
+                    // sync.
+                    let comparison = compare(
+                        &snapshot.left,
+                        &snapshot.right,
+                        snapshot.compare_content,
+                    )
+                    .await?;
+                    Ok(comparison)
                 },
-                move |app, result| {
+                move |app, comparison| {
                     if let Some(s) = app.session_mut(id) {
-                        s.set_sync(SyncStage::Executed(result));
+                        // Keep the cursor on the synced entry instead of
+                        // jumping to the first row (like a transfer).
+                        // Replacing the comparison also drops the executed
+                        // plan.
+                        s.set_comparison_keeping_selection(comparison);
                     }
                 },
                 "Sync execution failed",
@@ -972,12 +1004,12 @@ pub(crate) fn confirm_sync() {
     process_session_action(action);
 }
 
-/// Reject the planned sync: close the confirmation modal, keeping the
-/// preview on screen for review.
+/// Reject the planned sync: close the confirmation modal and discard the
+/// plan.
 ///
 /// Bound to the modal's cancel action (`n`/`Esc`, or `Enter` while the
-/// list highlights Cancel). From the preview, `Esc` discards it and `S`
-/// re-plans and re-confirms.
+/// list highlights Cancel). A sync command (`S` or the Sync menu) plans
+/// afresh from the current filesystem state.
 pub(crate) fn reject_sync() {
     let state = APP_STATE.state();
     let mut app = state.write();
@@ -985,6 +1017,9 @@ pub(crate) fn reject_sync() {
         && matches!(session.ui.mode, SessionMode::SyncConfirm)
     {
         session.ui.mode = SessionMode::Normal;
+        if let Some(dir) = session.dir_mut() {
+            dir.pending_sync = None;
+        }
     }
 }
 
@@ -1087,9 +1122,6 @@ pub(crate) fn toggle_setting(item: SettingItem) {
                 dir.display.show_statuses =
                     StatusFilter::Equal.toggle(dir.display.show_statuses);
                 session.ui.table_state.select(Some(0));
-            }
-            SettingItem::SyncOperation => {
-                dir.sync_operation = cycle_sync_op(&dir.sync_operation, 1);
             }
         }
     }

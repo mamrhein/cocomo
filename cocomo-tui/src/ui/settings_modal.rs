@@ -9,13 +9,12 @@
 
 //! Settings modal: the `,` entry point for the per-session toggles.
 //!
-//! The modal lists the three session settings (content comparison, hiding
-//! identical entries, sync operation) with their current values in the
-//! hint column of an [`OptionList`]; `Enter` toggles or cycles the
-//! highlighted entry and keeps the modal open, so several settings can be
-//! changed in a row, and `Esc` closes it. The entries mirror the `C`, `F`,
-//! and `m` bindings — the modal is a discoverable front for the same
-//! state, not a second source of truth.
+//! The modal lists the two session settings (content comparison and
+//! hiding identical entries) with their current values in the hint column
+//! of an [`OptionList`]; `Enter` toggles the highlighted entry and keeps
+//! the modal open, so several settings can be changed in a row, and `Esc`
+//! closes it. The entries mirror the `C` and `F` bindings — the modal is a
+//! discoverable front for the same state, not a second source of truth.
 //!
 //! Like `TransferDialog` the component lives in the App shell and reads
 //! the active session. Its handler owns only `Esc`; `j`/`k`/`Enter` are
@@ -67,12 +66,6 @@ pub(super) fn SettingsModal(
                 .hint(on_off(dir.is_some_and(|d| d.compare_content))),
                 OptionItem::new(SettingItem::HideSame, "Hide identical")
                     .hint(on_off(dir.is_some_and(|d| !d.shows_equal()))),
-                OptionItem::new(SettingItem::SyncOperation, "Sync operation")
-                    .hint(
-                        dir.map(|d| d.sync_operation.label())
-                            .unwrap_or("-")
-                            .to_string(),
-                    ),
             ]
         });
     let open = rows.is_some();
