@@ -22,11 +22,8 @@ use cocomo_lib::{
     SyncOperation, SyncResult,
 };
 use cocomo_tui::{
-    keys::{Cmd, KeyScope, handle_session_key, lookup},
-    state::{
-        AppState, NamePattern, SessionAction, SessionMode, SessionView,
-        SyncStage,
-    },
+    keys::{Cmd, KeyScope, handle_session_key, lookup, run_menu_command},
+    state::{AppState, NamePattern, SessionAction, SessionMode, SessionView},
 };
 use ratatui_kit::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -174,40 +171,34 @@ fn enter_on_file_entry_requests_open_file() {
 }
 
 #[test]
-fn sync_operation_cycles_forward_and_back() {
+fn sync_menu_commands_plan_and_sync_key_replans() {
     let mut session = dir_session();
+    // The Sync menu commands plan their concrete operation and record it
+    // on the session.
+    assert_eq!(
+        run_menu_command(&mut session, Cmd::SyncBoth),
+        SessionAction::PlanSync {
+            operation: SyncOperation::UpdateBoth
+        }
+    );
     assert_eq!(
         session.dir().unwrap().sync_operation,
-        SyncOperation::default()
+        SyncOperation::UpdateBoth
     );
 
-    // A full forward cycle returns to the start.
-    for _ in 0..8 {
-        assert_eq!(
-            press(&mut session, KeyCode::Char('m')),
-            Some(SessionAction::None)
-        );
-    }
+    // `S` is the repeat entry point: it re-plans with the recorded
+    // operation.
     assert_eq!(
-        session.dir().unwrap().sync_operation,
-        SyncOperation::default()
-    );
-
-    // One backward step wraps to the last operation.
-    assert_eq!(
-        press(&mut session, KeyCode::Char('M')),
-        Some(SessionAction::None)
-    );
-    assert_eq!(
-        session.dir().unwrap().sync_operation,
-        SyncOperation::DeleteOrphans
+        press(&mut session, KeyCode::Char('S')),
+        Some(SessionAction::PlanSync {
+            operation: SyncOperation::UpdateBoth
+        })
     );
 }
 
 #[test]
 fn session_keys_report_their_controller_actions() {
     let mut session = dir_session();
-    press(&mut session, KeyCode::Char('m'));
     let op = session.dir().unwrap().sync_operation;
     assert_eq!(
         press(&mut session, KeyCode::Char('S')),
@@ -231,7 +222,7 @@ fn sync_confirm_scope_leaves_navigation_to_the_modal() {
     // executes, `n`/`Esc` reject) but leaves navigation to the `OptionList`
     // child it renders, which consumes it in the modal's exclusive input
     // layer, so the table behind the modal cannot move.
-    session.set_sync(SyncStage::Planned(SyncResult::default()));
+    session.dir_mut().unwrap().pending_sync = Some(SyncResult::default());
     session.ui.mode = SessionMode::SyncConfirm;
     assert_eq!(press(&mut session, KeyCode::Char('j')), None);
     assert_eq!(
@@ -239,38 +230,21 @@ fn sync_confirm_scope_leaves_navigation_to_the_modal() {
         Some(SessionAction::ExecuteSync)
     );
     assert_eq!(session.ui.mode, SessionMode::Normal);
-    // Rejecting closes the modal and keeps the preview on screen for
-    // closer inspection.
+    // Rejecting closes the modal and discards the plan; the next sync
+    // command plans afresh from the filesystem state.
     session.ui.mode = SessionMode::SyncConfirm;
     assert_eq!(press(&mut session, KeyCode::Esc), Some(SessionAction::None));
     assert_eq!(session.ui.mode, SessionMode::Normal);
-    assert!(session.dir().unwrap().sync.is_some());
+    assert!(session.dir().unwrap().pending_sync.is_none());
 }
 
 #[test]
-fn cancel_clears_sync_preview_before_filter() {
+fn cancel_clears_the_name_filter() {
     let mut session = dir_session();
     session.ui.name_filter = Some(NamePattern::new("txt").unwrap());
 
-    // Without a preview, Esc clears the filter.
     assert_eq!(press(&mut session, KeyCode::Esc), Some(SessionAction::None));
     assert_eq!(session.ui.name_filter, None);
-
-    // With a preview, Esc drops the preview and keeps the filter; the stage
-    // variant (planned vs. executed) makes no difference to the cancel.
-    for stage in [
-        SyncStage::Planned(SyncResult::default()),
-        SyncStage::Executed(SyncResult::default()),
-    ] {
-        session.ui.name_filter = Some(NamePattern::new("txt").unwrap());
-        session.dir_mut().unwrap().sync = Some(stage);
-        assert_eq!(
-            press(&mut session, KeyCode::Esc),
-            Some(SessionAction::None)
-        );
-        assert!(session.dir().unwrap().sync.is_none());
-        assert_eq!(session.ui.name_filter.as_ref().unwrap().pattern, "txt");
-    }
 }
 
 #[test]

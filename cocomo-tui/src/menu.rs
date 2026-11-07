@@ -19,7 +19,7 @@
 //! unit-testable without a terminal. The controller is the only caller
 //! that applies them to the global atom.
 
-use cocomo_lib::{SyncOperation, filter::DisplayFilters};
+use cocomo_lib::filter::DisplayFilters;
 
 use crate::{
     keys::Cmd,
@@ -57,12 +57,11 @@ pub struct MenuDef {
 
 /// Every menu, in bar order: Sessions, Compare, Sync, View, Filter, Help.
 ///
-/// The Sync menu lists all eight operations explicitly instead of cycling
-/// with `m`/`M`, so the whole strategy set is visible at once; a test
-/// keeps the list in sync with [`SyncOperation::ALL`]. The five per-entry
-/// commands then run a transfer on the current selection directly, with
-/// the same enablement rules as the accelerators of the copy/delete/move
-/// dialogs.
+/// The Sync menu offers the three directional sync commands; each plans a
+/// dry-run and shows a confirmation dialog before anything changes on
+/// disk. The five per-entry commands then run a transfer on the current
+/// selection directly, with the same enablement rules as the accelerators
+/// of the copy/delete/move dialogs.
 pub const MENUS: &[MenuDef] = &[
     MenuDef {
         title: "Sessions",
@@ -131,48 +130,18 @@ pub const MENUS: &[MenuDef] = &[
         accel: 'y',
         items: &[
             MenuItemDef {
-                label: "run sync",
-                cmd: Cmd::Sync,
+                label: "sync left \u{2192} right",
+                cmd: Cmd::SyncLeftRight,
                 requires_dir: true,
             },
             MenuItemDef {
-                label: "mirror left \u{2192} right",
-                cmd: Cmd::SetSyncOp(SyncOperation::MirrorLeft),
+                label: "sync right \u{2192} left",
+                cmd: Cmd::SyncRightLeft,
                 requires_dir: true,
             },
             MenuItemDef {
-                label: "mirror right \u{2192} left",
-                cmd: Cmd::SetSyncOp(SyncOperation::MirrorRight),
-                requires_dir: true,
-            },
-            MenuItemDef {
-                label: "update newer",
-                cmd: Cmd::SetSyncOp(SyncOperation::UpdateNewer),
-                requires_dir: true,
-            },
-            MenuItemDef {
-                label: "update both",
-                cmd: Cmd::SetSyncOp(SyncOperation::UpdateBoth),
-                requires_dir: true,
-            },
-            MenuItemDef {
-                label: "copy left \u{2192} right",
-                cmd: Cmd::SetSyncOp(SyncOperation::CopyLeft),
-                requires_dir: true,
-            },
-            MenuItemDef {
-                label: "copy right \u{2192} left",
-                cmd: Cmd::SetSyncOp(SyncOperation::CopyRight),
-                requires_dir: true,
-            },
-            MenuItemDef {
-                label: "copy newer",
-                cmd: Cmd::SetSyncOp(SyncOperation::CopyNewer),
-                requires_dir: true,
-            },
-            MenuItemDef {
-                label: "delete orphans",
-                cmd: Cmd::SetSyncOp(SyncOperation::DeleteOrphans),
+                label: "sync both",
+                cmd: Cmd::SyncBoth,
                 requires_dir: true,
             },
             // Per-entry transfers; not dir-only, since a text session can
@@ -442,15 +411,15 @@ mod tests {
     }
 
     #[test]
-    fn sync_menu_lists_every_operation() {
+    fn sync_menu_lists_the_directional_commands() {
         let sync = MENUS
             .iter()
             .find(|m| m.title == "Sync")
             .expect("no Sync menu");
-        for op in SyncOperation::ALL {
+        for cmd in [Cmd::SyncLeftRight, Cmd::SyncRightLeft, Cmd::SyncBoth] {
             assert!(
-                sync.items.iter().any(|i| i.cmd == Cmd::SetSyncOp(op)),
-                "Sync menu misses the operation {op:?}",
+                sync.items.iter().any(|i| i.cmd == cmd),
+                "Sync menu misses the command {cmd:?}",
             );
         }
     }

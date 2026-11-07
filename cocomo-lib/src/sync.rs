@@ -67,10 +67,9 @@ pub enum SyncOperation {
 impl SyncOperation {
     /// Every sync operation, in a stable order.
     ///
-    /// Frontends that cycle through the operations (for example the TUI's
-    /// `Tab`/`BackTab` binding) iterate over this list instead of
-    /// hardcoding the variant set, so a newly added variant becomes
-    /// reachable without touching the frontend.
+    /// Frontends that list or cycle through the operations iterate over
+    /// this list instead of hardcoding the variant set, so a newly added
+    /// variant becomes reachable without touching the frontend.
     pub const ALL: [SyncOperation; 8] = [
         SyncOperation::MirrorLeft,
         SyncOperation::MirrorRight,

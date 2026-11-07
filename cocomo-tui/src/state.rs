@@ -62,7 +62,7 @@ pub enum SessionMode {
     /// keeps the shell and the table from seeing keys, so `is_editing` stays
     /// `false`.
     Transfer { op: TransferOp },
-    /// The sync confirmation modal is open for the planned sync (`S`). Like
+    /// The sync confirmation modal is open for the planned sync. Like
     /// [`SessionMode::Transfer`], the modal's exclusive input layer owns
     /// every key while it is open, so this is not a text-entry mode either.
     SyncConfirm,
@@ -604,8 +604,6 @@ pub enum SettingItem {
     CompareContent,
     /// Toggle hiding identical entries (mirrors `F`).
     HideSame,
-    /// Cycle the sync operation forward (mirrors `m`).
-    SyncOperation,
 }
 
 /// A [`ReportConfig`] with field-wise equality.
@@ -638,8 +636,8 @@ pub enum SessionAction {
     GoUp,
     /// Reload the current session's comparison.
     Reload,
-    /// Plan a sync (dry-run), display the preview, then ask for approval
-    /// of the execution in the confirmation modal.
+    /// Plan a sync (dry-run), then ask for approval of the execution in
+    /// the confirmation modal.
     PlanSync { operation: SyncOperation },
     /// Execute the planned sync; dispatched when the confirmation modal is
     /// approved.
@@ -730,9 +728,6 @@ pub struct DirView {
     /// `DirComparison` does not implement `PartialEq`, so this counter is
     /// the change signal the dir view uses as its row-memoization key.
     pub comparison_revision: u64,
-    /// Bumped on every sync outcome recorded through
-    /// [`SessionView::set_sync`]. Keys the sync-preview row memoization.
-    pub sync_revision: u64,
     /// Relative paths (`/`-separated, comparison-root based) of the
     /// directories the user has expanded in the tree view.
     ///
@@ -748,9 +743,13 @@ pub struct DirView {
     /// Which entry statuses and hidden entries the tree displays (driven
     /// by the filter panel, the Filter menu and the digit toggles).
     pub display: DisplayFilters,
-    /// Sync workflow stage, or `None` when no sync is planned or executed.
-    pub sync: Option<SyncStage>,
-    /// Sync operation currently configured.
+    /// The dry-run plan awaiting approval in the confirmation modal, or
+    /// `None` while no sync is pending. Cleared once the plan has been
+    /// executed (or the session reloaded).
+    pub pending_sync: Option<SyncResult>,
+    /// Sync operation of the last plan (labels the confirmation modal,
+    /// drives the `sync` command-line command, and is snapshotted by the
+    /// execute task).
     pub sync_operation: SyncOperation,
 }
 
@@ -765,28 +764,6 @@ impl DirView {
     /// filters (the state of the filter panel's "hidden" checkbox).
     pub fn shows_hidden(&self) -> bool {
         self.display.show_hidden
-    }
-}
-
-/// The lifecycle stage of a sync operation.
-///
-/// The variant distinguishes a dry-run plan from an executed sync, so the
-/// status label reads from one match instead of inferring the stage from
-/// the internals of the [`SyncResult`].
-#[derive(Clone, Debug)]
-pub enum SyncStage {
-    /// A dry-run plan awaiting review or execution.
-    Planned(SyncResult),
-    /// The planned sync was executed.
-    Executed(SyncResult),
-}
-
-impl SyncStage {
-    /// Return the underlying [`SyncResult`], regardless of stage.
-    pub fn result(&self) -> &SyncResult {
-        match self {
-            Self::Planned(result) | Self::Executed(result) => result,
-        }
     }
 }
 
@@ -894,12 +871,11 @@ impl SessionView {
             content: SessionContent::Dir(DirView {
                 comparison: None,
                 comparison_revision: 0,
-                sync_revision: 0,
                 expanded: HashSet::new(),
                 tree_revision: 0,
                 compare_content,
                 display: DisplayFilters::all(),
-                sync: None,
+                pending_sync: None,
                 sync_operation: SyncOperation::default(),
             }),
             ui: UiState::default(),
@@ -973,6 +949,10 @@ impl SessionView {
         if let Some(dir) = self.dir_mut() {
             dir.comparison = comparison;
             dir.comparison_revision += 1;
+            // A fresh comparison invalidates a plan derived from the old
+            // one; the modal cannot be open here, since the session is
+            // busy until this task completes.
+            dir.pending_sync = None;
             self.set_cursor(Some(0));
         }
     }
@@ -980,12 +960,12 @@ impl SessionView {
     /// Set a fresh directory comparison, keeping the selection on the entry
     /// it currently points at.
     ///
-    /// Used after a transfer: the entry under the cursor usually still
-    /// exists (its status merely changed), so the user keeps their place in
-    /// the tree. Only when the entry is gone — removed by the transfer or
-    /// hidden by the display filters — does the selection fall back to the
-    /// first row, matching [`SessionView::set_comparison`]. The drag
-    /// selection anchor is dropped either way.
+    /// Used after a transfer or a sync: the entry under the cursor usually
+    /// still exists (its status merely changed), so the user keeps their
+    /// place in the tree. Only when the entry is gone — removed by the
+    /// transfer or hidden by the display filters — does the selection fall
+    /// back to the first row, matching [`SessionView::set_comparison`]. The
+    /// drag selection anchor is dropped either way.
     pub fn set_comparison_keeping_selection(
         &mut self,
         comparison: DirComparison,
@@ -997,20 +977,6 @@ impl SessionView {
         let index =
             selected.as_deref().and_then(|path| self.row_index_of(path));
         self.set_cursor(Some(index.unwrap_or(0)));
-    }
-
-    /// Record the outcome of a sync run and reset the selection.
-    ///
-    /// Single owner of the `dir.sync` mutation: bumps the revision counter
-    /// that keys the sync-preview row memoization and resets the table
-    /// selection, mirroring [`SessionView::set_comparison`]. A no-op on a
-    /// text session, which has no sync state.
-    pub fn set_sync(&mut self, stage: SyncStage) {
-        if let Some(dir) = self.dir_mut() {
-            dir.sync = Some(stage);
-            dir.sync_revision += 1;
-            self.set_cursor(Some(0));
-        }
     }
 
     /// Move the table cursor to `index` and drop the drag-selection anchor.
@@ -1566,9 +1532,7 @@ impl AppState {
 mod tests {
     use std::sync::Arc;
 
-    use cocomo_lib::{
-        DirComparison, DirEntry, DirEntryStatus, EntryInfo, SyncResult,
-    };
+    use cocomo_lib::{DirComparison, DirEntry, DirEntryStatus, EntryInfo};
 
     use super::*;
 
@@ -1756,14 +1720,6 @@ mod tests {
             DirEntryStatus::LeftNewer,
         )])));
         assert!(text.dir().is_none());
-    }
-
-    #[test]
-    fn sync_stage_exposes_its_result_regardless_of_stage() {
-        let planned = SyncStage::Planned(SyncResult::default());
-        assert_eq!(planned.result().planned_count(), 0);
-        let executed = SyncStage::Executed(SyncResult::default());
-        assert!(executed.result().is_dry_run());
     }
 
     #[test]
@@ -2541,10 +2497,6 @@ mod tests {
             "a",
             DirEntryStatus::LeftNewer,
         )])));
-        assert_eq!(session.ui.selection_anchor, None);
-
-        session.ui.selection_anchor = Some(1);
-        session.set_sync(SyncStage::Planned(SyncResult::default()));
         assert_eq!(session.ui.selection_anchor, None);
     }
 

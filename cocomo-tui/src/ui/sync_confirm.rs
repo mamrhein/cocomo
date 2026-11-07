@@ -7,7 +7,8 @@
 // $Source$
 // $Revision$
 
-//! Sync approval modal: the confirmation step of `S` (sync).
+//! Sync approval modal: the confirmation step of the sync commands (the
+//! Sync menu entries and `S`).
 //!
 //! Once the dry-run plan is ready, the controller puts the session into
 //! [`SessionMode::SyncConfirm`]; this component turns that mode into an
@@ -16,9 +17,8 @@
 //! `Enter` cannot execute by accident. Above the decisions the
 //! [`change_summary`] of the planned items lists the change the approval
 //! would apply (per-action totals and affected paths, collapsed beyond a
-//! cap); the preview table behind the modal still lists every planned
-//! transfer in full, and rejecting keeps it on screen for closer
-//! inspection.
+//! cap); rejecting discards the plan and leaves the comparison table
+//! untouched.
 //!
 //! Like `TransferDialog` the component lives in the App shell and reads the
 //! active session, so one implementation serves every dir tab. It owns an
@@ -46,7 +46,7 @@ use super::{
 };
 use crate::{
     controller::{confirm_sync, dispatch_sync_confirm_key, reject_sync},
-    state::{APP_STATE, SessionMode, SyncStage},
+    state::{APP_STATE, SessionMode},
 };
 
 /// Sync approval modal rendered above the active session.
@@ -58,18 +58,16 @@ pub(super) fn SyncConfirmModal(
     let theme = hooks.use_component_theme::<CocomoTheme>();
 
     // Resolve the pending plan from the active session; the modal only
-    // opens on a planned (not yet executed) sync. The first content line
-    // names the operation and the number of transfers the approval would
-    // run; the [`change_summary`] below it spells out the concrete changes.
+    // opens while a plan awaits approval. The first content line names the
+    // operation and the number of transfers the approval would run; the
+    // [`change_summary`] below it spells out the concrete changes.
     let content = app_handle
         .read()
         .active()
         .filter(|s| matches!(s.ui.mode, SessionMode::SyncConfirm))
         .and_then(|s| {
             let dir = s.dir()?;
-            let SyncStage::Planned(result) = dir.sync.as_ref()? else {
-                return None;
-            };
+            let result = dir.pending_sync.as_ref()?;
             let count = result.planned_count();
             let mut lines = vec![Line::from(format!(
                 "{}: {} transfer{} planned.",

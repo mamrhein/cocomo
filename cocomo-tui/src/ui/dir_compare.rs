@@ -15,7 +15,6 @@ use ratatui_kit::{
     prelude::*,
     ratatui::{
         layout::{Constraint, Direction},
-        style::{Modifier, Style},
         text::{Line, Span},
     },
 };
@@ -24,7 +23,7 @@ use super::{
     frame::{
         COMMAND_PLACEHOLDER, HelpBar, StatusBar, busy_indicator, use_busy_tick,
     },
-    rows::{CellRow, cell_row_renderer, dir_rows, sync_rows},
+    rows::{CellRow, cell_row_renderer, dir_rows},
     session_table::SessionTable,
     theme::CocomoTheme,
 };
@@ -34,7 +33,7 @@ use crate::{
         set_mode_buffer, submit_command, submit_save_name, submit_search,
     },
     keys::{self, KeyScope},
-    state::{APP_STATE, SessionMode, StatusFilter, SyncStage},
+    state::{APP_STATE, SessionMode, StatusFilter},
 };
 
 /// Directory comparison view using ratatui-kit's `Table` component.
@@ -100,25 +99,20 @@ pub(super) fn DirCompareView(
 
     // Memo keys: the session identity plus the revision counters and the
     // filters that change the visible rows. `DirComparison` has no
-    // `PartialEq`, so the counters (bumped by `set_comparison`, `set_sync`
-    // and expand/collapse) are the change signal.
-    let (rows_key, preview_key) = match session {
-        Some(s) => match s.dir() {
-            Some(d) => (
-                Some((
-                    s.core.id,
-                    d.comparison_revision,
-                    d.tree_revision,
-                    d.display.show_statuses,
-                    d.display.show_hidden,
-                    s.ui.name_filter.as_ref().map(|f| f.pattern.clone()),
-                )),
-                d.sync.as_ref().map(|_| (s.core.id, d.sync_revision)),
-            ),
-            None => (None, None),
-        },
-        None => (None, None),
-    };
+    // `PartialEq`, so the counters (bumped by `set_comparison` and
+    // expand/collapse) are the change signal.
+    let rows_key = session.and_then(|s| {
+        s.dir().map(|d| {
+            (
+                s.core.id,
+                d.comparison_revision,
+                d.tree_revision,
+                d.display.show_statuses,
+                d.display.show_hidden,
+                s.ui.name_filter.as_ref().map(|f| f.pattern.clone()),
+            )
+        })
+    });
 
     let entry_rows: Vec<CellRow> = hooks.use_memo(
         || match session {
@@ -126,13 +120,6 @@ pub(super) fn DirCompareView(
             None => Vec::new(),
         },
         rows_key,
-    );
-    let preview_rows: Vec<CellRow> = hooks.use_memo(
-        || match session.and_then(|s| s.dir()).and_then(|d| d.sync.as_ref()) {
-            Some(stage) => sync_rows(&stage.result().planned, &theme),
-            None => Vec::new(),
-        },
-        preview_key,
     );
 
     let Some(session) = session else {
@@ -146,27 +133,7 @@ pub(super) fn DirCompareView(
         return element!(View {});
     };
 
-    // Extract rendering data from the session. The sync status label reads
-    // from a single match on the `SyncStage`, so "Planned" vs. "Executed"
-    // is decided by the variant, not by inspecting the `SyncResult`.
-    let sync_status: Option<String> =
-        dir.sync.as_ref().map(|stage| match stage {
-            SyncStage::Planned(result) => {
-                let mut label =
-                    format!("Planned: {} transfers", result.planned_count());
-                if !result.conflicts.is_empty() {
-                    label.push_str(&format!(
-                        "  ({} name conflict{} skipped)",
-                        result.conflicts.len(),
-                        if result.conflicts.len() == 1 { "" } else { "s" }
-                    ));
-                }
-                label
-            }
-            SyncStage::Executed(_) => "Executed".to_string(),
-        });
-    let sync_active = dir.sync.is_some();
-    let sync_planned = matches!(dir.sync, Some(SyncStage::Planned(_)));
+    // Extract rendering data from the session.
     let mode = session.ui.mode.clone();
     let show_same = dir.shows_equal();
     let display = dir.display.clone();
@@ -174,7 +141,6 @@ pub(super) fn DirCompareView(
         session.ui.name_filter.as_ref().map(|f| f.pattern.clone());
     let left_path_str = session.core.left.display().to_string();
     let right_path_str = session.core.right.display().to_string();
-    let sync_operation = dir.sync_operation;
     let show_help = app.show_help;
     let selection_range = session.selection_range();
 
@@ -198,22 +164,12 @@ pub(super) fn DirCompareView(
     // When in SaveSession or Search mode, the status bar is replaced by a
     // SearchInput rendered in the element! tree.
 
-    let mut status_bar_line: Line<'static> =
-        if let Some(status_text) = &sync_status {
-            let op_label = sync_operation.label();
-            Line::from(Span::styled(
-                format!("Sync: {op_label}  |  {status_text}"),
-                theme.sync_status,
-            ))
-        } else {
-            Line::from(Span::raw(
-                comparison_stats.unwrap_or_else(|| "No data".to_string()),
-            ))
-        };
+    let mut status_bar_line: Line<'static> = Line::from(Span::raw(
+        comparison_stats.unwrap_or_else(|| "No data".to_string()),
+    ));
 
     // A running background task takes the front of the status bar, so the
-    // spinner is visible whichever line (sync status or stats) is shown
-    // behind it.
+    // spinner is visible whichever line is shown behind it.
     if let Some(label) = busy_label {
         let mut spans = busy_indicator(busy_tick, label, theme.sync_status);
         spans.append(&mut status_bar_line.spans);
@@ -238,26 +194,6 @@ pub(super) fn DirCompareView(
             vec![Line::from("/=activate  Enter=jump  Esc=cancel")]
         } else if matches!(mode, SessionMode::Command { .. }) {
             vec![Line::from(":=activate  Enter=run  Esc=cancel")]
-        } else if sync_active {
-            // In a planned preview, `S` re-plans and re-opens the
-            // confirmation modal; after execution it starts a fresh plan.
-            let mut spans = vec![
-                Span::styled("j/k", Style::new().add_modifier(Modifier::BOLD)),
-                Span::raw(" navigate  "),
-            ];
-            if sync_planned {
-                spans.push(Span::styled(
-                    "S",
-                    Style::new().add_modifier(Modifier::BOLD),
-                ));
-                spans.push(Span::raw(" confirm  "));
-            }
-            spans.push(Span::styled(
-                "Esc",
-                Style::new().add_modifier(Modifier::BOLD),
-            ));
-            spans.push(Span::raw(" cancel"));
-            vec![Line::from(spans)]
         } else {
             keys::help_lines(
                 &[KeyScope::DirNormal, KeyScope::Global],
@@ -285,55 +221,33 @@ pub(super) fn DirCompareView(
 
     element!(
         View(flex_direction: Direction::Vertical, height: Constraint::Fill(1)) {
-            // Main content area: sync preview or comparison table.
-            if sync_active {
-                SessionTable(
-                    selected: session_selected,
-                    selection_range: selection_range,
-                    title: "Sync Preview (dry-run)".to_string(),
-                    columns: vec![
-                        TableColumn::new("Action", Constraint::Length(30)),
-                        // `Fill` so the path column absorbs the remaining width.
-                        TableColumn::new("Path", Constraint::Fill(1)),
-                    ],
-                    rows: preview_rows,
-                    render_row: Some(cell_row_renderer()),
-                    empty_message: Line::from("No transfers planned."),
-                    on_select: Handler::from(move |index| {
-                        select_row(index);
-                    }),
-                    on_extend: Handler::from(move |index| {
-                        extend_selection(index);
-                    }),
-                )
-            } else {
-                SessionTable(
-                    selected: session_selected,
-                    selection_range: selection_range,
-                    title: compare_title,
-                    columns: vec![
-                        TableColumn::new("Name", Constraint::Fill(1)),
-                        TableColumn::new(
-                            format!("{:>6} {:^17}", "Size", "Modified"),
-                            Constraint::Length(24),
-                        ),
-                        TableColumn::new("S", Constraint::Length(2)),
-                        TableColumn::new(
-                            format!("{:>6} {:^17}", "Size", "Modified"),
-                            Constraint::Length(24),
-                        ),
-                    ],
-                    rows: entry_rows,
-                    render_row: Some(cell_row_renderer()),
-                    empty_message: Line::from(empty_msg),
-                    on_select: Handler::from(move |index| {
-                        select_row(index);
-                    }),
-                    on_extend: Handler::from(move |index| {
-                        extend_selection(index);
-                    }),
-                )
-            }
+            // Main content area: the comparison table.
+            SessionTable(
+                selected: session_selected,
+                selection_range: selection_range,
+                title: compare_title,
+                columns: vec![
+                    TableColumn::new("Name", Constraint::Fill(1)),
+                    TableColumn::new(
+                        format!("{:>6} {:^17}", "Size", "Modified"),
+                        Constraint::Length(24),
+                    ),
+                    TableColumn::new("S", Constraint::Length(2)),
+                    TableColumn::new(
+                        format!("{:>6} {:^17}", "Size", "Modified"),
+                        Constraint::Length(24),
+                    ),
+                ],
+                rows: entry_rows,
+                render_row: Some(cell_row_renderer()),
+                empty_message: Line::from(empty_msg),
+                on_select: Handler::from(move |index| {
+                    select_row(index);
+                }),
+                on_extend: Handler::from(move |index| {
+                    extend_selection(index);
+                }),
+            )
             // Status bar or input component depending on mode. All text
             // entry uses SearchInput, which owns its exclusive input layer;
             // the activate key matches the key that entered the mode.
