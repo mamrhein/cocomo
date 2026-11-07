@@ -24,21 +24,52 @@
 
 use std::any::TypeId;
 
-use gpui::{Action, App, InvalidKeystrokeError, KeyBinding};
+use gpui::{
+    Action, App, InvalidKeystrokeError, KeyBinding,
+    component::input::{
+        Copy as TextCopy, Cut as TextCut, Delete as TextDelete,
+        DeleteToBeginningOfLine, DeleteToEndOfLine, Indent as TextIndent,
+        Outdent as TextOutdent, Paste as TextPaste, Redo as TextRedo,
+        SelectAll as TextSelectAll, Undo as TextUndo,
+    },
+};
 
 use crate::{
     home,
     menus::{
-        About, CloseSession, FileFormats, MergeFiles, NewCompare, OpenSession,
-        Options, ReloadCompare, RestoreWorkspace, SaveFile, SaveFileAs,
-        SaveSession, SaveSessionAs, SaveWorkspace, SessionSettings,
-        ToggleLogPane, ToggleWordWrap, menu_bindings,
+        About, ClearSession, CloseAllSessions, CloseSession,
+        CompareParentFolders, FileFormats, HelpContents, MergeFiles,
+        NewCompare, NextSection, OpenClipboard, OpenFile, OpenSession,
+        OpenWithAssociatedApp, OpenWithTextEdit, OpenWithTextPatch, Options,
+        PrevSection, Quit, ReloadCompare, RestoreWorkspace, SaveFile,
+        SaveFileAs, SaveSession, SaveSessionAs, SaveWorkspace, SessionInfo,
+        SessionReport, SessionSettings, StopCompare, ToggleLogPane,
+        ToggleMergeAncestor, ToggleWordWrap, menu_bindings,
     },
     options::{self, AppOptions},
-    text_diff, text_merge,
+    text_diff::{
+        AlignWithAnchor, ClearAlignments, CompareSelectionToClipboard,
+        ConvertEndingsMac, ConvertEndingsPc, ConvertEndingsUnix,
+        ConvertSpacesToTabs, ConvertTabsToSpaces, ConvertTrimTrailing,
+        CopyFileLeftNext, CopyFileRightNext, CopySectionLeft,
+        CopySectionRight, DeleteLine, DetailMode, InsertLineAfter,
+        InsertLineBefore, IsolateSelection, NextLine, PrevLine, SelectSection,
+        SetDetailMode,
+    },
+    text_merge::{
+        NextConflict, NextMergeSection, PrevConflict, PrevMergeSection,
+        SaveMergeOutput, TakeAncestor, TakeLeft, TakeRight,
+    },
     ui::{
-        CopyToLeft, CopyToRight, DeleteLeftSide, DeleteRightSide, MoveToLeft,
-        MoveToRight, NextDifference, PrevDifference, folder_compare_bindings,
+        CompareContentsHash, CompareContentsMeta, CopyFilename, CopyToFolder,
+        CopyToLeft, CopyToOtherSide, CopyToRight, DeleteLeftSide,
+        DeleteRightSide, ExchangeEntry, ExcludeEntry, GoBack, GoForward,
+        MoveToFolder, MoveToLeft, MoveToRight, NewFolder, NextDifference,
+        PrevDifference, QuickCompare, RefreshSelection, RenameEntry,
+        RevealInExplorer, SetBaseBoth, SetBaseLeft, SetBaseRight,
+        ShowAttributes, SwapSides, SyncMirrorLeft, SyncMirrorRight,
+        SyncUpdateBoth, SyncUpdateLeft, SyncUpdateRight, ToggleIgnored,
+        TouchEntry, folder_compare_bindings,
     },
 };
 
@@ -70,7 +101,32 @@ fn action<A: Action + Default>() -> Box<dyn Action> {
     Box::new(A::default())
 }
 
+/// The detail-pane modes carry a payload, so they need fixed-mode
+/// constructors instead of [`action`].
+fn detail_text() -> Box<dyn Action> {
+    Box::new(SetDetailMode {
+        mode: DetailMode::Text,
+    })
+}
+
+fn detail_hex() -> Box<dyn Action> {
+    Box::new(SetDetailMode {
+        mode: DetailMode::Hex,
+    })
+}
+
+fn detail_alignment() -> Box<dyn Action> {
+    Box::new(SetDetailMode {
+        mode: DetailMode::Alignment,
+    })
+}
+
 /// Every command exposed to the Options dialog, in display order.
+///
+/// The list is the single source for menu and context-menu visibility
+/// and for key bindings (spec section 7.4-4). Commands whose handlers
+/// arrive in a later phase are registered with `action: None` and stay
+/// out of the menus until their view exists.
 pub fn all_commands() -> Vec<CommandSpec> {
     vec![
         // Session
@@ -96,6 +152,34 @@ pub fn all_commands() -> Vec<CommandSpec> {
             action: Some(action::<SessionSettings>),
         },
         CommandSpec {
+            id: "session.clear",
+            label: "Clear session",
+            category: "Session",
+            default_binding: None,
+            action: Some(action::<ClearSession>),
+        },
+        CommandSpec {
+            id: "session.back",
+            label: "Back",
+            category: "Session",
+            default_binding: None,
+            action: Some(action::<GoBack>),
+        },
+        CommandSpec {
+            id: "session.forward",
+            label: "Forward",
+            category: "Session",
+            default_binding: None,
+            action: Some(action::<GoForward>),
+        },
+        CommandSpec {
+            id: "session.swap_sides",
+            label: "Swap sides",
+            category: "Session",
+            default_binding: None,
+            action: Some(action::<SwapSides>),
+        },
+        CommandSpec {
             id: "session.reload",
             label: "Reload / recompare files",
             category: "Session",
@@ -103,11 +187,39 @@ pub fn all_commands() -> Vec<CommandSpec> {
             action: Some(action::<ReloadCompare>),
         },
         CommandSpec {
+            id: "session.stop",
+            label: "Stop comparison",
+            category: "Session",
+            default_binding: None,
+            action: Some(action::<StopCompare>),
+        },
+        CommandSpec {
+            id: "session.report",
+            label: "Report…",
+            category: "Session",
+            default_binding: None,
+            action: Some(action::<SessionReport>),
+        },
+        CommandSpec {
+            id: "session.info",
+            label: "Info…",
+            category: "Session",
+            default_binding: None,
+            action: Some(action::<SessionInfo>),
+        },
+        CommandSpec {
             id: "session.merge",
             label: "Merge files…",
             category: "Session",
             default_binding: None,
             action: Some(action::<MergeFiles>),
+        },
+        CommandSpec {
+            id: "session.compare_parent",
+            label: "Compare parent folders",
+            category: "Session",
+            default_binding: None,
+            action: Some(action::<CompareParentFolders>),
         },
         // File
         CommandSpec {
@@ -125,18 +237,39 @@ pub fn all_commands() -> Vec<CommandSpec> {
             action: Some(action::<OpenSession>),
         },
         CommandSpec {
-            id: "file.save_workspace",
-            label: "Save workspace…",
+            id: "file.open_file",
+            label: "Open file…",
             category: "File",
             default_binding: None,
-            action: Some(action::<SaveWorkspace>),
+            action: Some(action::<OpenFile>),
         },
         CommandSpec {
-            id: "file.restore_workspace",
-            label: "Restore workspace…",
+            id: "file.open_clipboard",
+            label: "Open clipboard",
             category: "File",
             default_binding: None,
-            action: Some(action::<RestoreWorkspace>),
+            action: Some(action::<OpenClipboard>),
+        },
+        CommandSpec {
+            id: "file.open_with_app",
+            label: "Open with: associated app",
+            category: "File",
+            default_binding: None,
+            action: Some(action::<OpenWithAssociatedApp>),
+        },
+        CommandSpec {
+            id: "file.open_with_text_edit",
+            label: "Open with: text edit",
+            category: "File",
+            default_binding: None,
+            action: Some(action::<OpenWithTextEdit>),
+        },
+        CommandSpec {
+            id: "file.open_with_text_patch",
+            label: "Open with: text patch",
+            category: "File",
+            default_binding: None,
+            action: Some(action::<OpenWithTextPatch>),
         },
         CommandSpec {
             id: "file.save_file",
@@ -159,14 +292,232 @@ pub fn all_commands() -> Vec<CommandSpec> {
             default_binding: Some("cmd-w"),
             action: Some(action::<CloseSession>),
         },
-        // Actions
         CommandSpec {
-            id: "actions.copy_left",
-            label: "Copy to left",
-            category: "Actions",
-            default_binding: Some("cmd-l"),
-            action: Some(action::<CopyToLeft>),
+            id: "file.close_all",
+            label: "Close all sessions",
+            category: "File",
+            default_binding: None,
+            action: Some(action::<CloseAllSessions>),
         },
+        CommandSpec {
+            id: "file.save_workspace",
+            label: "Save workspace…",
+            category: "File",
+            default_binding: None,
+            action: Some(action::<SaveWorkspace>),
+        },
+        CommandSpec {
+            id: "file.restore_workspace",
+            label: "Restore workspace…",
+            category: "File",
+            default_binding: None,
+            action: Some(action::<RestoreWorkspace>),
+        },
+        CommandSpec {
+            id: "file.quit",
+            label: "Quit",
+            category: "File",
+            default_binding: None,
+            action: Some(action::<Quit>),
+        },
+        // Edit
+        CommandSpec {
+            id: "edit.copy_path_left",
+            label: "Copy left path",
+            category: "Edit",
+            default_binding: None,
+            action: Some(action::<crate::menus::CopyPathLeft>),
+        },
+        CommandSpec {
+            id: "edit.copy_path_right",
+            label: "Copy right path",
+            category: "Edit",
+            default_binding: None,
+            action: Some(action::<crate::menus::CopyPathRight>),
+        },
+        CommandSpec {
+            id: "edit.select_all_entries",
+            label: "Select all entries",
+            category: "Edit",
+            default_binding: None,
+            action: Some(action::<crate::menus::SelectAllEntries>),
+        },
+        CommandSpec {
+            id: "edit.undo",
+            label: "Undo",
+            category: "Edit",
+            default_binding: None,
+            action: Some(action::<TextUndo>),
+        },
+        CommandSpec {
+            id: "edit.redo",
+            label: "Redo",
+            category: "Edit",
+            default_binding: None,
+            action: Some(action::<TextRedo>),
+        },
+        CommandSpec {
+            id: "edit.cut",
+            label: "Cut",
+            category: "Edit",
+            default_binding: None,
+            action: Some(action::<TextCut>),
+        },
+        CommandSpec {
+            id: "edit.copy",
+            label: "Copy",
+            category: "Edit",
+            default_binding: None,
+            action: Some(action::<TextCopy>),
+        },
+        CommandSpec {
+            id: "edit.paste",
+            label: "Paste",
+            category: "Edit",
+            default_binding: None,
+            action: Some(action::<TextPaste>),
+        },
+        CommandSpec {
+            id: "edit.delete",
+            label: "Delete",
+            category: "Edit",
+            default_binding: None,
+            action: Some(action::<TextDelete>),
+        },
+        CommandSpec {
+            id: "edit.select_all_text",
+            label: "Select all text",
+            category: "Edit",
+            default_binding: None,
+            action: Some(action::<TextSelectAll>),
+        },
+        CommandSpec {
+            id: "edit.select_section",
+            label: "Select section",
+            category: "Edit",
+            default_binding: None,
+            action: Some(action::<SelectSection>),
+        },
+        CommandSpec {
+            id: "edit.delete_line",
+            label: "Delete line",
+            category: "Edit",
+            default_binding: None,
+            action: Some(action::<DeleteLine>),
+        },
+        CommandSpec {
+            id: "edit.delete_to_end",
+            label: "Delete to line end",
+            category: "Edit",
+            default_binding: None,
+            action: Some(action::<DeleteToEndOfLine>),
+        },
+        CommandSpec {
+            id: "edit.delete_to_start",
+            label: "Delete to line start",
+            category: "Edit",
+            default_binding: None,
+            action: Some(action::<DeleteToBeginningOfLine>),
+        },
+        CommandSpec {
+            id: "edit.insert_before",
+            label: "Insert line before",
+            category: "Edit",
+            default_binding: None,
+            action: Some(action::<InsertLineBefore>),
+        },
+        CommandSpec {
+            id: "edit.insert_after",
+            label: "Insert line after",
+            category: "Edit",
+            default_binding: None,
+            action: Some(action::<InsertLineAfter>),
+        },
+        CommandSpec {
+            id: "edit.indent",
+            label: "Indent",
+            category: "Edit",
+            default_binding: None,
+            action: Some(action::<TextIndent>),
+        },
+        CommandSpec {
+            id: "edit.outdent",
+            label: "Outdent",
+            category: "Edit",
+            default_binding: None,
+            action: Some(action::<TextOutdent>),
+        },
+        CommandSpec {
+            id: "edit.convert_trim",
+            label: "Convert: trim trailing whitespace",
+            category: "Edit",
+            default_binding: None,
+            action: Some(action::<ConvertTrimTrailing>),
+        },
+        CommandSpec {
+            id: "edit.convert_spaces_to_tabs",
+            label: "Convert: spaces to tabs",
+            category: "Edit",
+            default_binding: None,
+            action: Some(action::<ConvertSpacesToTabs>),
+        },
+        CommandSpec {
+            id: "edit.convert_tabs_to_spaces",
+            label: "Convert: tabs to spaces",
+            category: "Edit",
+            default_binding: None,
+            action: Some(action::<ConvertTabsToSpaces>),
+        },
+        CommandSpec {
+            id: "edit.convert_endings_pc",
+            label: "Convert: line endings PC",
+            category: "Edit",
+            default_binding: None,
+            action: Some(action::<ConvertEndingsPc>),
+        },
+        CommandSpec {
+            id: "edit.convert_endings_mac",
+            label: "Convert: line endings Mac",
+            category: "Edit",
+            default_binding: None,
+            action: Some(action::<ConvertEndingsMac>),
+        },
+        CommandSpec {
+            id: "edit.convert_endings_unix",
+            label: "Convert: line endings Unix",
+            category: "Edit",
+            default_binding: None,
+            action: Some(action::<ConvertEndingsUnix>),
+        },
+        CommandSpec {
+            id: "edit.compare_selection",
+            label: "Compare selection to clipboard",
+            category: "Edit",
+            default_binding: None,
+            action: Some(action::<CompareSelectionToClipboard>),
+        },
+        CommandSpec {
+            id: "edit.align_with",
+            label: "Align with marked line",
+            category: "Edit",
+            default_binding: None,
+            action: Some(action::<AlignWithAnchor>),
+        },
+        CommandSpec {
+            id: "edit.clear_alignments",
+            label: "Clear alignment overrides",
+            category: "Edit",
+            default_binding: None,
+            action: Some(action::<ClearAlignments>),
+        },
+        CommandSpec {
+            id: "edit.isolate_section",
+            label: "Isolate section",
+            category: "Edit",
+            default_binding: None,
+            action: Some(action::<IsolateSelection>),
+        },
+        // Actions
         CommandSpec {
             id: "actions.copy_right",
             label: "Copy to right",
@@ -175,11 +526,11 @@ pub fn all_commands() -> Vec<CommandSpec> {
             action: Some(action::<CopyToRight>),
         },
         CommandSpec {
-            id: "actions.move_left",
-            label: "Move to left",
+            id: "actions.copy_left",
+            label: "Copy to left",
             category: "Actions",
-            default_binding: None,
-            action: Some(action::<MoveToLeft>),
+            default_binding: Some("cmd-l"),
+            action: Some(action::<CopyToLeft>),
         },
         CommandSpec {
             id: "actions.move_right",
@@ -189,11 +540,11 @@ pub fn all_commands() -> Vec<CommandSpec> {
             action: Some(action::<MoveToRight>),
         },
         CommandSpec {
-            id: "actions.delete_left",
-            label: "Delete from left",
+            id: "actions.move_left",
+            label: "Move to left",
             category: "Actions",
             default_binding: None,
-            action: Some(action::<DeleteLeftSide>),
+            action: Some(action::<MoveToLeft>),
         },
         CommandSpec {
             id: "actions.delete_right",
@@ -201,6 +552,132 @@ pub fn all_commands() -> Vec<CommandSpec> {
             category: "Actions",
             default_binding: None,
             action: Some(action::<DeleteRightSide>),
+        },
+        CommandSpec {
+            id: "actions.delete_left",
+            label: "Delete from left",
+            category: "Actions",
+            default_binding: None,
+            action: Some(action::<DeleteLeftSide>),
+        },
+        CommandSpec {
+            id: "actions.exchange",
+            label: "Exchange",
+            category: "Actions",
+            default_binding: None,
+            action: Some(action::<ExchangeEntry>),
+        },
+        CommandSpec {
+            id: "actions.copy_to_other_side",
+            label: "Copy to other side",
+            category: "Actions",
+            default_binding: None,
+            action: Some(action::<CopyToOtherSide>),
+        },
+        CommandSpec {
+            id: "actions.copy_to_folder",
+            label: "Copy to folder…",
+            category: "Actions",
+            default_binding: None,
+            action: Some(action::<CopyToFolder>),
+        },
+        CommandSpec {
+            id: "actions.move_to_folder",
+            label: "Move to folder…",
+            category: "Actions",
+            default_binding: None,
+            action: Some(action::<MoveToFolder>),
+        },
+        CommandSpec {
+            id: "actions.sync_update_right",
+            label: "Synchronize: update right",
+            category: "Actions",
+            default_binding: None,
+            action: Some(action::<SyncUpdateRight>),
+        },
+        CommandSpec {
+            id: "actions.sync_update_left",
+            label: "Synchronize: update left",
+            category: "Actions",
+            default_binding: None,
+            action: Some(action::<SyncUpdateLeft>),
+        },
+        CommandSpec {
+            id: "actions.sync_update_both",
+            label: "Synchronize: update both",
+            category: "Actions",
+            default_binding: None,
+            action: Some(action::<SyncUpdateBoth>),
+        },
+        CommandSpec {
+            id: "actions.sync_mirror_right",
+            label: "Synchronize: mirror to right",
+            category: "Actions",
+            default_binding: None,
+            action: Some(action::<SyncMirrorRight>),
+        },
+        CommandSpec {
+            id: "actions.sync_mirror_left",
+            label: "Synchronize: mirror to left",
+            category: "Actions",
+            default_binding: None,
+            action: Some(action::<SyncMirrorLeft>),
+        },
+        CommandSpec {
+            id: "actions.copy_file_right_next",
+            label: "Copy file to right and open next",
+            category: "Actions",
+            default_binding: None,
+            action: Some(action::<CopyFileRightNext>),
+        },
+        CommandSpec {
+            id: "actions.copy_file_left_next",
+            label: "Copy file to left and open next",
+            category: "Actions",
+            default_binding: None,
+            action: Some(action::<CopyFileLeftNext>),
+        },
+        CommandSpec {
+            id: "actions.copy_section_right",
+            label: "Copy section to right",
+            category: "Actions",
+            default_binding: None,
+            action: Some(action::<CopySectionRight>),
+        },
+        CommandSpec {
+            id: "actions.copy_section_left",
+            label: "Copy section to left",
+            category: "Actions",
+            default_binding: None,
+            action: Some(action::<CopySectionLeft>),
+        },
+        CommandSpec {
+            id: "actions.take_left",
+            label: "Take left",
+            category: "Actions",
+            default_binding: None,
+            action: Some(action::<TakeLeft>),
+        },
+        CommandSpec {
+            id: "actions.take_right",
+            label: "Take right",
+            category: "Actions",
+            default_binding: None,
+            action: Some(action::<TakeRight>),
+        },
+        CommandSpec {
+            id: "actions.take_ancestor",
+            label: "Take ancestor",
+            category: "Actions",
+            default_binding: None,
+            action: Some(action::<TakeAncestor>),
+        },
+        CommandSpec {
+            id: "actions.save_merge_output",
+            label: "Save merge output…",
+            category: "Actions",
+            default_binding: None,
+            action: Some(action::<SaveMergeOutput>),
         },
         // Search
         CommandSpec {
@@ -217,6 +694,50 @@ pub fn all_commands() -> Vec<CommandSpec> {
             default_binding: Some("cmd-["),
             action: Some(action::<PrevDifference>),
         },
+        CommandSpec {
+            id: "search.next_section",
+            label: "Next difference section",
+            category: "Search",
+            default_binding: None,
+            action: Some(action::<NextSection>),
+        },
+        CommandSpec {
+            id: "search.prev_section",
+            label: "Previous difference section",
+            category: "Search",
+            default_binding: None,
+            action: Some(action::<PrevSection>),
+        },
+        // Handlers arrive in phase 4; the items stay out of the menus
+        // until then.
+        CommandSpec {
+            id: "search.next_difference_files",
+            label: "Next difference files",
+            category: "Search",
+            default_binding: None,
+            action: None,
+        },
+        CommandSpec {
+            id: "search.prev_difference_files",
+            label: "Previous difference files",
+            category: "Search",
+            default_binding: None,
+            action: None,
+        },
+        CommandSpec {
+            id: "search.find_filename",
+            label: "Find filename…",
+            category: "Search",
+            default_binding: None,
+            action: None,
+        },
+        CommandSpec {
+            id: "search.replace",
+            label: "Replace…",
+            category: "Search",
+            default_binding: None,
+            action: None,
+        },
         // View
         CommandSpec {
             id: "view.word_wrap",
@@ -226,11 +747,39 @@ pub fn all_commands() -> Vec<CommandSpec> {
             action: Some(action::<ToggleWordWrap>),
         },
         CommandSpec {
+            id: "view.show_ancestor",
+            label: "Show ancestor pane",
+            category: "View",
+            default_binding: None,
+            action: Some(action::<ToggleMergeAncestor>),
+        },
+        CommandSpec {
+            id: "view.details_text",
+            label: "Text details",
+            category: "View",
+            default_binding: None,
+            action: Some(detail_text),
+        },
+        CommandSpec {
+            id: "view.details_hex",
+            label: "Hex details",
+            category: "View",
+            default_binding: None,
+            action: Some(detail_hex),
+        },
+        CommandSpec {
+            id: "view.details_alignment",
+            label: "Alignment details",
+            category: "View",
+            default_binding: None,
+            action: Some(detail_alignment),
+        },
+        CommandSpec {
             id: "view.thumbnails",
             label: "Show thumbnails",
             category: "View",
             default_binding: None,
-            action: None,
+            action: Some(action::<crate::menus::ShowThumbnails>),
         },
         CommandSpec {
             id: "view.log_pane",
@@ -238,6 +787,119 @@ pub fn all_commands() -> Vec<CommandSpec> {
             category: "View",
             default_binding: None,
             action: Some(action::<ToggleLogPane>),
+        },
+        // Folder row context menu
+        CommandSpec {
+            id: "folder.open",
+            label: "Open",
+            category: "Folder view",
+            default_binding: None,
+            action: None,
+        },
+        CommandSpec {
+            id: "folder.quick_compare",
+            label: "Quick compare",
+            category: "Folder view",
+            default_binding: None,
+            action: Some(action::<QuickCompare>),
+        },
+        CommandSpec {
+            id: "folder.compare_hash",
+            label: "Compare contents by hash",
+            category: "Folder view",
+            default_binding: None,
+            action: Some(action::<CompareContentsHash>),
+        },
+        CommandSpec {
+            id: "folder.compare_meta",
+            label: "Compare contents by size & date",
+            category: "Folder view",
+            default_binding: None,
+            action: Some(action::<CompareContentsMeta>),
+        },
+        CommandSpec {
+            id: "folder.rename",
+            label: "Rename…",
+            category: "Folder view",
+            default_binding: None,
+            action: Some(action::<RenameEntry>),
+        },
+        CommandSpec {
+            id: "folder.attributes",
+            label: "Attributes",
+            category: "Folder view",
+            default_binding: None,
+            action: Some(action::<ShowAttributes>),
+        },
+        CommandSpec {
+            id: "folder.touch",
+            label: "Touch",
+            category: "Folder view",
+            default_binding: None,
+            action: Some(action::<TouchEntry>),
+        },
+        CommandSpec {
+            id: "folder.exclude",
+            label: "Exclude",
+            category: "Folder view",
+            default_binding: None,
+            action: Some(action::<ExcludeEntry>),
+        },
+        CommandSpec {
+            id: "folder.ignored",
+            label: "Ignored",
+            category: "Folder view",
+            default_binding: None,
+            action: Some(action::<ToggleIgnored>),
+        },
+        CommandSpec {
+            id: "folder.new_folder",
+            label: "New folder",
+            category: "Folder view",
+            default_binding: None,
+            action: Some(action::<NewFolder>),
+        },
+        CommandSpec {
+            id: "folder.copy_filename",
+            label: "Copy filename",
+            category: "Folder view",
+            default_binding: None,
+            action: Some(action::<CopyFilename>),
+        },
+        CommandSpec {
+            id: "folder.refresh",
+            label: "Refresh selection",
+            category: "Folder view",
+            default_binding: None,
+            action: Some(action::<RefreshSelection>),
+        },
+        CommandSpec {
+            id: "folder.reveal",
+            label: "Reveal in explorer",
+            category: "Folder view",
+            default_binding: None,
+            action: Some(action::<RevealInExplorer>),
+        },
+        CommandSpec {
+            id: "folder.set_base_left",
+            label: "Set as base folder (left)",
+            category: "Folder view",
+            default_binding: None,
+            action: Some(action::<SetBaseLeft>),
+        },
+        CommandSpec {
+            id: "folder.set_base_right",
+            label: "Set as base folder (right)",
+            category: "Folder view",
+            default_binding: None,
+            action: Some(action::<SetBaseRight>),
+        },
+        CommandSpec {
+            id: "folder.set_base_both",
+            label: "Set as base folder (both)",
+            category: "Folder view",
+            default_binding: None,
+            action: Some(action::<SetBaseBoth>),
         },
         // Toolbar
         CommandSpec {
@@ -292,6 +954,13 @@ pub fn all_commands() -> Vec<CommandSpec> {
         },
         // Help
         CommandSpec {
+            id: "help.contents",
+            label: "Help contents",
+            category: "Help",
+            default_binding: None,
+            action: Some(action::<HelpContents>),
+        },
+        CommandSpec {
             id: "help.about",
             label: "About cocomo",
             category: "Help",
@@ -302,7 +971,6 @@ pub fn all_commands() -> Vec<CommandSpec> {
 }
 
 /// Look up a command by its persisted id.
-#[allow(dead_code)]
 pub fn find_command(id: &str) -> Option<CommandSpec> {
     all_commands().into_iter().find(|spec| spec.id == id)
 }
@@ -315,38 +983,18 @@ pub fn find_command(id: &str) -> Option<CommandSpec> {
 /// user changes a binding.
 pub fn view_bindings() -> Vec<KeyBinding> {
     vec![
-        KeyBinding::new("j", text_diff::NextLine, Some("TextCompare")),
-        KeyBinding::new("k", text_diff::PrevLine, Some("TextCompare")),
-        KeyBinding::new("down", text_diff::NextLine, Some("TextCompare")),
-        KeyBinding::new("up", text_diff::PrevLine, Some("TextCompare")),
-        KeyBinding::new(
-            "cmd-shift-]",
-            crate::menus::NextSection,
-            Some("TextCompare"),
-        ),
-        KeyBinding::new(
-            "cmd-shift-[",
-            crate::menus::PrevSection,
-            Some("TextCompare"),
-        ),
-        KeyBinding::new("j", text_merge::NextMergeSection, Some("TextMerge")),
-        KeyBinding::new("k", text_merge::PrevMergeSection, Some("TextMerge")),
-        KeyBinding::new(
-            "down",
-            text_merge::NextMergeSection,
-            Some("TextMerge"),
-        ),
-        KeyBinding::new("up", text_merge::PrevMergeSection, Some("TextMerge")),
-        KeyBinding::new(
-            "cmd-shift-]",
-            text_merge::NextConflict,
-            Some("TextMerge"),
-        ),
-        KeyBinding::new(
-            "cmd-shift-[",
-            text_merge::PrevConflict,
-            Some("TextMerge"),
-        ),
+        KeyBinding::new("j", NextLine, Some("TextCompare")),
+        KeyBinding::new("k", PrevLine, Some("TextCompare")),
+        KeyBinding::new("down", NextLine, Some("TextCompare")),
+        KeyBinding::new("up", PrevLine, Some("TextCompare")),
+        KeyBinding::new("cmd-shift-]", NextSection, Some("TextCompare")),
+        KeyBinding::new("cmd-shift-[", PrevSection, Some("TextCompare")),
+        KeyBinding::new("j", NextMergeSection, Some("TextMerge")),
+        KeyBinding::new("k", PrevMergeSection, Some("TextMerge")),
+        KeyBinding::new("down", NextMergeSection, Some("TextMerge")),
+        KeyBinding::new("up", PrevMergeSection, Some("TextMerge")),
+        KeyBinding::new("cmd-shift-]", NextConflict, Some("TextMerge")),
+        KeyBinding::new("cmd-shift-[", PrevConflict, Some("TextMerge")),
     ]
 }
 

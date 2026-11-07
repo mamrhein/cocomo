@@ -1758,6 +1758,65 @@ impl TextDiffSession {
         self.manager = Some(manager);
     }
 
+    /// The folder session this diff was opened from, if any.
+    pub fn parent(&self) -> Option<WeakEntity<AppState>> {
+        self.parent.clone()
+    }
+
+    /// Whether the parent folder session is still open.
+    pub fn has_live_parent(&self, cx: &App) -> bool {
+        self.parent.as_ref().is_some_and(|parent| {
+            parent.upgrade().is_some_and(|parent| {
+                // A cleared parent has no comparison to step through.
+                parent.read(cx).has_comparison()
+            })
+        })
+    }
+
+    /// Clear the comparison: drop content, diff, selection, and
+    /// alignment state, keeping the endpoints and settings (Session ▸
+    /// Clear session).
+    ///
+    /// An in-flight load is aborted first so its result cannot
+    /// repopulate the cleared view; nothing auto-reloads because
+    /// `ensure_loaded` only runs at view creation.
+    pub fn clear_session(&mut self, cx: &mut Context<Self>) {
+        if self.loading {
+            self.load_revision += 1;
+            if let Some(token) = self.cancel_token.take() {
+                token.cancel();
+            }
+        }
+        self.loading = false;
+        self.left_raw = None;
+        self.right_raw = None;
+        self.left_lines = Arc::new(Vec::new());
+        self.right_lines = Arc::new(Vec::new());
+        self.left_meta = None;
+        self.right_meta = None;
+        self.diff = None;
+        self.rows = Arc::new(Vec::new());
+        self.sections = Arc::new(Vec::new());
+        self.display = Arc::new(Vec::new());
+        self.section_display = Arc::new(Vec::new());
+        self.row_section = Arc::new(Vec::new());
+        self.is_section_start = Arc::new(Vec::new());
+        self.collapsed.clear();
+        self.selected = None;
+        self.error = None;
+        self.load_ms = None;
+        self.align_overrides.clear();
+        self.align_anchor = None;
+        // Leave edit mode; the editors re-seed from the (now empty)
+        // model the next time editing is entered.
+        self.editing = false;
+        self.left_dirty = false;
+        self.right_dirty = false;
+        self.editors_stale = true;
+        self.model_rev += 1;
+        cx.notify();
+    }
+
     /// Clear the stale-editor flag and the dirty marks after the view
     /// has re-seeded both editors from the model.
     pub fn mark_editors_seeded(&mut self) {
@@ -4542,11 +4601,16 @@ fn render_diff_row(
                         window.focus(&focus, cx);
                     }
                 })
-                .context_menu(move |menu, _, _| {
+                .context_menu(move |menu, _, cx| {
                     let mut menu = menu;
                     match menu_flags.anchor {
                         Some((anchor_side, _)) => {
-                            if anchor_side != side {
+                            if anchor_side != side
+                                && crate::commands::is_visible(
+                                    "edit.align_with",
+                                    cx,
+                                )
+                            {
                                 menu = menu.menu(
                                     "Align with marked line",
                                     Box::new(AlignWithAnchor),
@@ -4560,31 +4624,62 @@ fn render_diff_row(
                             );
                         }
                     }
-                    if menu_flags.has_overrides {
+                    if menu_flags.has_overrides
+                        && crate::commands::is_visible(
+                            "edit.clear_alignments",
+                            cx,
+                        )
+                    {
                         menu = menu.menu(
                             "Clear alignment overrides",
                             Box::new(ClearAlignments),
                         );
                     }
-                    menu = menu
-                        .separator()
-                        .menu(
+                    menu = menu.separator();
+                    if crate::commands::is_visible(
+                        "actions.copy_section_right",
+                        cx,
+                    ) {
+                        menu = menu.menu(
                             "Copy section → right",
                             Box::new(CopySectionRight),
-                        )
-                        .menu("Copy section ← left", Box::new(CopySectionLeft))
-                        .menu("Isolate section", Box::new(IsolateSelection));
+                        );
+                    }
+                    if crate::commands::is_visible(
+                        "actions.copy_section_left",
+                        cx,
+                    ) {
+                        menu = menu.menu(
+                            "Copy section ← left",
+                            Box::new(CopySectionLeft),
+                        );
+                    }
+                    if crate::commands::is_visible("edit.isolate_section", cx)
+                    {
+                        menu = menu.menu(
+                            "Isolate section",
+                            Box::new(IsolateSelection),
+                        );
+                    }
                     if menu_flags.can_copy_file_next {
-                        menu = menu
-                            .separator()
-                            .menu(
+                        if crate::commands::is_visible(
+                            "actions.copy_file_right_next",
+                            cx,
+                        ) {
+                            menu = menu.menu(
                                 "Copy file to right & open next",
                                 Box::new(CopyFileRightNext),
-                            )
-                            .menu(
+                            );
+                        }
+                        if crate::commands::is_visible(
+                            "actions.copy_file_left_next",
+                            cx,
+                        ) {
+                            menu = menu.menu(
                                 "Copy file to left & open next",
                                 Box::new(CopyFileLeftNext),
                             );
+                        }
                     }
                     menu
                 })
@@ -5151,6 +5246,67 @@ mod tests {
     }
 
     #[gpui::test]
+    fn clear_session_drops_content_and_keeps_paths(cx: &mut TestAppContext) {
+        cx.update(|cx| cx.set_global(crate::log::LogBuffer::default()));
+        let session =
+            cx.new(|cx| TextDiffSession::for_test("a\nb\n", "a\nX\n", cx));
+        session.update(cx, |s, cx| {
+            assert!(s.can_save());
+            assert!(!s.display.is_empty());
+
+            s.clear_session(cx);
+
+            assert!(!s.can_save());
+            assert!(s.left_raw.is_none());
+            assert!(s.right_raw.is_none());
+            assert!(s.diff.is_none());
+            assert!(s.display.is_empty());
+            assert!(s.selected.is_none());
+            assert!(!s.is_editing());
+            assert!(s.editors_stale());
+            // The endpoints survive the clear, so Reload can refetch.
+            assert_eq!(s.left_path(), "/left.txt");
+            assert_eq!(s.right_path(), "/right.txt");
+        });
+    }
+
+    #[gpui::test]
+    fn clear_session_aborts_an_in_flight_load(cx: &mut TestAppContext) {
+        cx.update(|cx| cx.set_global(crate::log::LogBuffer::default()));
+        let session = cx.new(|cx| TextDiffSession::for_test("a\n", "b\n", cx));
+        session.update(cx, |s, cx| {
+            // Simulate an in-flight load without spawning the real task.
+            s.loading = true;
+            s.load_revision = 3;
+            let token = CancellationToken::new();
+            s.cancel_token = Some(token.clone());
+
+            s.clear_session(cx);
+
+            assert!(!s.is_loading());
+            // The bumped revision drops the in-flight result on arrival.
+            assert_eq!(s.load_revision, 4);
+            assert!(s.cancel_token.is_none());
+            assert!(token.is_cancelled());
+        });
+    }
+
+    #[gpui::test]
+    fn side_text_returns_the_loaded_text(cx: &mut TestAppContext) {
+        let session =
+            cx.new(|cx| TextDiffSession::for_test("a\nb\n", "a\nX\n", cx));
+        cx.update(|cx| {
+            assert_eq!(session.read(cx).side_text(Side::Left, cx), "a\nb\n");
+            assert_eq!(session.read(cx).side_text(Side::Right, cx), "a\nX\n");
+        });
+        // After a clear there is no text to compare against.
+        session.update(cx, |s, cx| s.clear_session(cx));
+        cx.update(|cx| {
+            assert_eq!(session.read(cx).side_text(Side::Left, cx), "");
+        });
+    }
+
+    #[gpui::test]
     fn encoding_and_ending_selectors_update_the_session(
         cx: &mut TestAppContext,
     ) {
@@ -5239,6 +5395,72 @@ mod tests {
             let s = session.read(cx);
             assert!(s.is_word_wrap());
             assert!(s.is_show_thumbnail());
+        });
+    }
+
+    /// The Edit menu's alignment commands (promoted from the row context
+    /// menu in phase 2) must reach the focused text view's handlers when
+    /// dispatched as menu items do.
+    #[gpui::test]
+    fn edit_menu_alignment_actions_dispatch_through_the_view(
+        cx: &mut TestAppContext,
+    ) {
+        use gpui::{Bounds, WindowBounds, WindowOptions, test::TestWindowExt};
+
+        use crate::{color::Side, ui::NextDifference};
+
+        cx.update(|cx| {
+            gpui::init(cx);
+            cx.set_global(crate::options::AppOptions::default());
+            cx.set_global(crate::log::LogBuffer::default());
+        });
+
+        let session = cx
+            .new(|cx| TextDiffSession::for_test("a\nb\nc\n", "a\nX\nc\n", cx));
+        let (window, view) = cx.update(|cx| {
+            gpui::open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(
+                        Bounds::maximized(None, cx),
+                    )),
+                    ..Default::default()
+                },
+                cx,
+                |_, cx| cx.new(|cx| TextDiffView::new(session.clone(), cx)),
+            )
+            .expect("failed to open the test window")
+        });
+
+        // Walk to the only difference, mark its left line, then align it
+        // with the row's right line — the menu's two-step flow.
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            let focus = view.read(cx).focus_handle(cx);
+            focus.focus(window, cx);
+            window.dispatch_action(Box::new(NextDifference), cx);
+            window.dispatch_action(
+                Box::new(SetAlignAnchor { side: Side::Left }),
+                cx,
+            );
+            window.dispatch_action(Box::new(AlignWithAnchor), cx);
+        })
+        .expect("failed to dispatch the alignment actions");
+
+        cx.update(|cx| {
+            assert!(session.read(cx).has_align_overrides());
+        });
+
+        // Clear alignment overrides drops the pair again.
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.dispatch_action(Box::new(ClearAlignments), cx);
+        })
+        .expect("failed to dispatch the clear-alignments action");
+
+        cx.update(|cx| {
+            let s = session.read(cx);
+            assert!(!s.has_align_overrides());
+            assert!(s.align_anchor().is_none());
         });
     }
 

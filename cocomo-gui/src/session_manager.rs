@@ -972,6 +972,33 @@ impl GuiSessionManager {
         title: gpui::SharedString,
         cx: &mut Context<Self>,
     ) {
+        self.add_in_memory_diff_tab(
+            left_text,
+            right_text,
+            title,
+            "selection vs clipboard",
+            "selection",
+            "clipboard",
+            cx,
+        );
+    }
+
+    /// Add a text diff tab over two in-memory texts with an explicit
+    /// session name and side labels, and make it active.
+    ///
+    /// In-memory tabs are placeholders (nothing to reopen), so they are
+    /// never recorded as history.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_in_memory_diff_tab(
+        &mut self,
+        left_text: &str,
+        right_text: &str,
+        title: gpui::SharedString,
+        name: &str,
+        left_label: &str,
+        right_label: &str,
+        cx: &mut Context<Self>,
+    ) {
         let mgr = cx.entity().clone();
         let view = crate::text_diff::new_text_diff_view_from_texts(
             left_text,
@@ -984,15 +1011,15 @@ impl GuiSessionManager {
         let session = OpenSession {
             tab_id: next_tab_id(),
             config: SessionConfig {
-                name: "selection vs clipboard".to_string(),
+                name: name.to_string(),
                 session_type: SessionType::TextCompare,
                 left: ProviderRef {
                     provider: Default::default(),
-                    path: "selection".into(),
+                    path: left_label.into(),
                 },
                 right: ProviderRef {
                     provider: Default::default(),
-                    path: "clipboard".into(),
+                    path: right_label.into(),
                 },
                 center: None,
                 settings: SessionSettings::default(),
@@ -1399,6 +1426,30 @@ impl GuiSessionManager {
             self.active_index = index;
             cx.notify();
         }
+    }
+
+    /// Activate the folder tab that owns `parent`, if it is still open.
+    ///
+    /// Backs "Compare parent folders" from a text tab opened out of a
+    /// folder session. Returns `false` when the parent tab was closed.
+    pub fn activate_folder_tab(
+        &mut self,
+        parent: &gpui::WeakEntity<crate::state::AppState>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(parent) = parent.upgrade() else {
+            return false;
+        };
+        let Some(index) = self.open_sessions.iter().position(|session| {
+            session
+                .tab_entity
+                .folder_state(cx)
+                .is_some_and(|state| state == parent)
+        }) else {
+            return false;
+        };
+        self.activate_session(index, cx);
+        true
     }
 
     /// Mark the active session as dirty.
@@ -1870,6 +1921,38 @@ mod tests {
             assert_eq!(config.session_type, SessionType::Home);
             assert!(!m.active_session().unwrap().dirty);
         });
+    }
+
+    #[gpui::test]
+    fn activate_folder_tab_finds_the_owning_tab(cx: &mut TestAppContext) {
+        let _rt = init_tokio_handle();
+        cx.update(|cx| cx.set_global(crate::log::LogBuffer::default()));
+        let mgr = manager_in(cx, "cocomo-test-activate-parent");
+        let first = mgr.update(cx, |m, cx| {
+            m.open_session_config(config_named("a"), cx).unwrap();
+            m.open_session_config(config_named("b"), cx).unwrap();
+            m.open_sessions[0].tab_entity.folder_state(cx).unwrap()
+        });
+        assert_eq!(mgr.read_with(cx, |m, _| m.active_index()), 1);
+
+        mgr.update(cx, |m, cx| {
+            assert!(m.activate_folder_tab(&first.downgrade(), cx));
+        });
+        assert_eq!(mgr.read_with(cx, |m, _| m.active_index()), 0);
+
+        // A folder state that no tab owns activates nothing.
+        let stray = cx.new(|cx| {
+            crate::state::AppState::new(
+                Endpoint::local("/stray-left"),
+                Endpoint::local("/stray-right"),
+                "stray".into(),
+                cx,
+            )
+        });
+        mgr.update(cx, |m, cx| {
+            assert!(!m.activate_folder_tab(&stray.downgrade(), cx));
+        });
+        assert_eq!(mgr.read_with(cx, |m, _| m.active_index()), 0);
     }
 
     #[gpui::test]

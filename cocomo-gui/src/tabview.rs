@@ -617,6 +617,10 @@ impl Render for WindowRoot {
                         .can_transfer(TransferAction::DeleteLeft),
                     can_delete_right: state
                         .can_transfer(TransferAction::DeleteRight),
+                    can_exchange: state.can_exchange(),
+                    has_selection: state.selected_entry().is_some(),
+                    can_sync: state.has_comparison(),
+                    can_compare_parent: false,
                     can_go_back: state.can_go_back(),
                     can_go_forward: state.can_go_forward(),
                     log_open: cx.global::<LogPaneOpen>().0,
@@ -639,6 +643,7 @@ impl Render for WindowRoot {
                         can_save_file: state.can_save(),
                         detail_mode: state.detail_mode(),
                         loading: state.is_loading(),
+                        can_compare_parent: state.has_live_parent(cx),
                         is_home: active_tab
                             .as_ref()
                             .is_some_and(TabEntity::is_home),

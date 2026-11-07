@@ -164,9 +164,15 @@ async fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
     }
 }
 
-/// Open `endpoint` in the platform's file explorer.
-pub(crate) fn reveal_in_explorer(endpoint: &Endpoint) -> FsResult {
-    let path = endpoint.path();
+/// Spawn the platform's "open this path" helper.
+///
+/// The same command backs both operations: on macOS and Linux `open` /
+/// `xdg-open` shows a folder in the file manager and opens a file in its
+/// associated application; on Windows `explorer` does the same.
+fn open_via_os(
+    path: &std::path::Path,
+    what: &str,
+) -> std::result::Result<(), String> {
     let mut command = {
         #[cfg(target_os = "macos")]
         {
@@ -192,13 +198,28 @@ pub(crate) fn reveal_in_explorer(endpoint: &Endpoint) -> FsResult {
             target_os = "windows"
         )))]
         {
-            return Err(
-                "Opening a folder is not supported on this platform".into()
-            );
+            let _ = (path, what);
+            return Err(format!(
+                "Opening a {what} is not supported on this platform"
+            ));
         }
     };
     command
         .spawn()
-        .map_err(|e| format!("Couldn't open the folder: {e}"))?;
+        .map_err(|e| format!("Couldn't open the {what}: {e}"))?;
     Ok(())
+}
+
+/// Open `endpoint` in the platform's file explorer.
+pub(crate) fn reveal_in_explorer(endpoint: &Endpoint) -> FsResult {
+    open_via_os(endpoint.path(), "folder")
+}
+
+/// Open `endpoint` with the operating system's associated application.
+///
+/// Files launch their registered handler; folders open in the file
+/// manager (the closest an OS opener gets to "reveal" without extra
+/// per-platform flags).
+pub(crate) fn open_with_associated_app(endpoint: &Endpoint) -> FsResult {
+    open_via_os(endpoint.path(), "file")
 }

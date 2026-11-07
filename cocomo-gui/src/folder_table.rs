@@ -930,6 +930,26 @@ fn tree_guides(
     (guides, last)
 }
 
+/// Append a context-menu command unless the user hid it in the Options
+/// dialog.
+///
+/// The command registry is the single source for visibility (spec
+/// section 7.4-4), so a hidden command disappears from the menu bar and
+/// this context menu alike.
+fn cmd(
+    menu: PopupMenu,
+    id: &'static str,
+    label: &'static str,
+    action: Box<dyn gpui::Action>,
+    cx: &App,
+) -> PopupMenu {
+    if crate::commands::is_visible(id, cx) {
+        menu.menu(label, action)
+    } else {
+        menu
+    }
+}
+
 /// Build the rich row context menu of spec section 4.4.
 fn build_row_menu(
     row: &TableRow,
@@ -938,97 +958,266 @@ fn build_row_menu(
     cx: &mut gpui::Context<TableState<FolderTableDelegate>>,
 ) -> PopupMenu {
     let differs = !row.status.intersection(!DirEntryStatus::EQUAL).is_empty();
-    let mut menu = menu
-        .menu("Open", row.open_action())
-        .menu("Quick Compare", Box::new(QuickCompare));
+    let menu = cmd(menu, "folder.open", "Open", row.open_action(), cx);
+    let mut menu = cmd(
+        menu,
+        "folder.quick_compare",
+        "Quick Compare",
+        Box::new(QuickCompare),
+        cx,
+    );
     // A file present on both sides can be merged (two-way: a folder
     // comparison has no ancestor to offer).
     if !row.is_dir && row.has_left && row.has_right {
-        menu = menu.menu(
+        menu = cmd(
+            menu,
+            "session.merge",
             "Merge…",
             Box::new(OpenMerge {
                 left_path: row.left_endpoint.clone(),
                 right_path: row.right_endpoint.clone(),
             }),
+            cx,
         );
     }
     // The delegate hands us a `Context<TableState<_>>`, not a
     // `Context<PopupMenu>`, so submenus are built as standalone entities
     // and attached as items.
-    let compare_contents = PopupMenu::build(window, cx, |menu, _, _| {
-        menu.menu("By content (hash)", Box::new(CompareContentsHash))
-            .menu("By size & date", Box::new(CompareContentsMeta))
-    });
-    let mut menu = menu
-        .item(PopupMenuItem::submenu("Compare Contents", compare_contents))
-        .separator();
+    let show_hash = crate::commands::is_visible("folder.compare_hash", cx);
+    let show_meta = crate::commands::is_visible("folder.compare_meta", cx);
+    if show_hash || show_meta {
+        let compare_contents = PopupMenu::build(window, cx, |menu, _, _cx| {
+            let mut menu = menu;
+            if show_hash {
+                menu = menu
+                    .menu("By content (hash)", Box::new(CompareContentsHash));
+            }
+            if show_meta {
+                menu =
+                    menu.menu("By size & date", Box::new(CompareContentsMeta));
+            }
+            menu
+        });
+        menu = menu.item(PopupMenuItem::submenu(
+            "Compare Contents",
+            compare_contents,
+        ));
+    }
+    let mut menu = menu.separator();
     // Reconcile toward each side, following the entry's shape.
     if differs && !row.name_conflict {
         if row.has_left {
-            menu = menu
-                .menu("Copy to right", Box::new(CopyToRight))
-                .menu("Move to right", Box::new(MoveToRight));
+            menu = cmd(
+                menu,
+                "actions.copy_right",
+                "Copy to right",
+                Box::new(CopyToRight),
+                cx,
+            );
+            menu = cmd(
+                menu,
+                "actions.move_right",
+                "Move to right",
+                Box::new(MoveToRight),
+                cx,
+            );
         }
         if row.has_right {
-            menu = menu
-                .menu("Copy to left", Box::new(CopyToLeft))
-                .menu("Move to left", Box::new(MoveToLeft));
+            menu = cmd(
+                menu,
+                "actions.copy_left",
+                "Copy to left",
+                Box::new(CopyToLeft),
+                cx,
+            );
+            menu = cmd(
+                menu,
+                "actions.move_left",
+                "Move to left",
+                Box::new(MoveToLeft),
+                cx,
+            );
         }
         if row.has_left && row.has_right {
-            menu = menu.menu("Exchange", Box::new(ExchangeEntry));
+            menu = cmd(
+                menu,
+                "actions.exchange",
+                "Exchange",
+                Box::new(ExchangeEntry),
+                cx,
+            );
         }
     }
     if row.has_left ^ row.has_right {
-        menu = menu.menu("Copy to other side", Box::new(CopyToOtherSide));
+        menu = cmd(
+            menu,
+            "actions.copy_to_other_side",
+            "Copy to other side",
+            Box::new(CopyToOtherSide),
+            cx,
+        );
     }
-    menu = menu
-        .menu("Copy to folder…", Box::new(CopyToFolder))
-        .menu("Move to folder…", Box::new(MoveToFolder));
+    menu = cmd(
+        menu,
+        "actions.copy_to_folder",
+        "Copy to folder…",
+        Box::new(CopyToFolder),
+        cx,
+    );
+    menu = cmd(
+        menu,
+        "actions.move_to_folder",
+        "Move to folder…",
+        Box::new(MoveToFolder),
+        cx,
+    );
     if differs && !row.name_conflict {
         if row.has_left {
-            menu = menu.menu("Delete from left", Box::new(DeleteLeftSide));
+            menu = cmd(
+                menu,
+                "actions.delete_left",
+                "Delete from left",
+                Box::new(DeleteLeftSide),
+                cx,
+            );
         }
         if row.has_right {
-            menu = menu.menu("Delete from right", Box::new(DeleteRightSide));
+            menu = cmd(
+                menu,
+                "actions.delete_right",
+                "Delete from right",
+                Box::new(DeleteRightSide),
+                cx,
+            );
         }
     }
-    menu = menu
-        .separator()
-        .menu("Rename…", Box::new(RenameEntry))
-        .menu("Attributes", Box::new(ShowAttributes))
-        .menu("Touch", Box::new(TouchEntry))
-        .separator()
-        .menu("Exclude", Box::new(ExcludeEntry))
-        .menu_with_check("Ignored", row.ignored, Box::new(ToggleIgnored))
-        .menu("New Folder", Box::new(NewFolder))
-        .menu("Copy Filename", Box::new(CopyFilename))
-        .menu("Refresh Selection", Box::new(RefreshSelection));
-    let synchronize = PopupMenu::build(window, cx, |menu, _, _| {
-        menu.menu("Update Right", Box::new(SyncUpdateRight))
-            .menu("Update Left", Box::new(SyncUpdateLeft))
-            .menu("Update Both", Box::new(SyncUpdateBoth))
-            .separator()
-            .menu("Mirror to Right", Box::new(SyncMirrorRight))
-            .menu("Mirror to Left", Box::new(SyncMirrorLeft))
-    });
-    menu = menu.item(PopupMenuItem::submenu("Synchronize", synchronize));
+    menu = cmd(
+        menu.separator(),
+        "folder.rename",
+        "Rename…",
+        Box::new(RenameEntry),
+        cx,
+    );
+    menu = cmd(
+        menu,
+        "folder.attributes",
+        "Attributes",
+        Box::new(ShowAttributes),
+        cx,
+    );
+    menu = cmd(menu, "folder.touch", "Touch", Box::new(TouchEntry), cx);
+    menu = cmd(
+        menu.separator(),
+        "folder.exclude",
+        "Exclude",
+        Box::new(ExcludeEntry),
+        cx,
+    );
+    if crate::commands::is_visible("folder.ignored", cx) {
+        menu = menu.menu_with_check(
+            "Ignored",
+            row.ignored,
+            Box::new(ToggleIgnored),
+        );
+    }
+    menu = cmd(
+        menu,
+        "folder.new_folder",
+        "New Folder",
+        Box::new(NewFolder),
+        cx,
+    );
+    menu = cmd(
+        menu,
+        "folder.copy_filename",
+        "Copy Filename",
+        Box::new(CopyFilename),
+        cx,
+    );
+    menu = cmd(
+        menu,
+        "folder.refresh",
+        "Refresh Selection",
+        Box::new(RefreshSelection),
+        cx,
+    );
+    let sync_ids = [
+        "actions.sync_update_right",
+        "actions.sync_update_left",
+        "actions.sync_update_both",
+        "actions.sync_mirror_right",
+        "actions.sync_mirror_left",
+    ];
+    if sync_ids
+        .iter()
+        .any(|id| crate::commands::is_visible(id, cx))
+    {
+        let synchronize = PopupMenu::build(window, cx, |menu, _, cx| {
+            let mut menu = menu;
+            if crate::commands::is_visible("actions.sync_update_right", cx) {
+                menu = menu.menu("Update Right", Box::new(SyncUpdateRight));
+            }
+            if crate::commands::is_visible("actions.sync_update_left", cx) {
+                menu = menu.menu("Update Left", Box::new(SyncUpdateLeft));
+            }
+            if crate::commands::is_visible("actions.sync_update_both", cx) {
+                menu = menu.menu("Update Both", Box::new(SyncUpdateBoth));
+            }
+            menu = menu.separator();
+            if crate::commands::is_visible("actions.sync_mirror_right", cx) {
+                menu = menu.menu("Mirror to Right", Box::new(SyncMirrorRight));
+            }
+            if crate::commands::is_visible("actions.sync_mirror_left", cx) {
+                menu = menu.menu("Mirror to Left", Box::new(SyncMirrorLeft));
+            }
+            menu
+        });
+        menu = menu.item(PopupMenuItem::submenu("Synchronize", synchronize));
+    }
     if row.left_is_dir || row.right_is_dir {
-        menu = menu.menu("Explorer", Box::new(RevealInExplorer));
+        menu = cmd(
+            menu,
+            "folder.reveal",
+            "Explorer",
+            Box::new(RevealInExplorer),
+            cx,
+        );
         menu = menu.separator();
         if row.left_is_dir {
-            menu =
-                menu.menu("Set as base folder (left)", Box::new(SetBaseLeft));
+            menu = cmd(
+                menu,
+                "folder.set_base_left",
+                "Set as base folder (left)",
+                Box::new(SetBaseLeft),
+                cx,
+            );
         }
         if row.right_is_dir {
-            menu = menu
-                .menu("Set as base folder (right)", Box::new(SetBaseRight));
+            menu = cmd(
+                menu,
+                "folder.set_base_right",
+                "Set as base folder (right)",
+                Box::new(SetBaseRight),
+                cx,
+            );
         }
         if row.left_is_dir && row.right_is_dir {
-            menu =
-                menu.menu("Set as base folder (both)", Box::new(SetBaseBoth));
+            menu = cmd(
+                menu,
+                "folder.set_base_both",
+                "Set as base folder (both)",
+                Box::new(SetBaseBoth),
+                cx,
+            );
         }
     } else {
-        menu = menu.menu("Explorer", Box::new(RevealInExplorer));
+        menu = cmd(
+            menu,
+            "folder.reveal",
+            "Explorer",
+            Box::new(RevealInExplorer),
+            cx,
+        );
     }
     menu
 }
