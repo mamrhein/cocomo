@@ -21,7 +21,10 @@
 
 use cocomo_lib::{SyncOperation, filter::DisplayFilters};
 
-use crate::{keys::Cmd, state::StatusFilter};
+use crate::{
+    keys::Cmd,
+    state::{StatusFilter, TransferChoice, TransferOp},
+};
 
 /// A leaf entry of a dropdown menu.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -56,7 +59,10 @@ pub struct MenuDef {
 ///
 /// The Sync menu lists all eight operations explicitly instead of cycling
 /// with `m`/`M`, so the whole strategy set is visible at once; a test
-/// keeps the list in sync with [`SyncOperation::ALL`].
+/// keeps the list in sync with [`SyncOperation::ALL`]. The five per-entry
+/// commands then run a transfer on the current selection directly, with
+/// the same enablement rules as the accelerators of the copy/delete/move
+/// dialogs.
 pub const MENUS: &[MenuDef] = &[
     MenuDef {
         title: "Sessions",
@@ -168,6 +174,48 @@ pub const MENUS: &[MenuDef] = &[
                 label: "delete orphans",
                 cmd: Cmd::SetSyncOp(SyncOperation::DeleteOrphans),
                 requires_dir: true,
+            },
+            // Per-entry transfers; not dir-only, since a text session can
+            // transfer its two files just like `c`/`d`/`v` do.
+            MenuItemDef {
+                label: "move left \u{2192} right",
+                cmd: Cmd::TransferExecute(
+                    TransferOp::Move,
+                    TransferChoice::Left,
+                ),
+                requires_dir: false,
+            },
+            MenuItemDef {
+                label: "move right \u{2192} left",
+                cmd: Cmd::TransferExecute(
+                    TransferOp::Move,
+                    TransferChoice::Right,
+                ),
+                requires_dir: false,
+            },
+            MenuItemDef {
+                label: "delete left",
+                cmd: Cmd::TransferExecute(
+                    TransferOp::Delete,
+                    TransferChoice::Left,
+                ),
+                requires_dir: false,
+            },
+            MenuItemDef {
+                label: "delete right",
+                cmd: Cmd::TransferExecute(
+                    TransferOp::Delete,
+                    TransferChoice::Right,
+                ),
+                requires_dir: false,
+            },
+            MenuItemDef {
+                label: "delete both",
+                cmd: Cmd::TransferExecute(
+                    TransferOp::Delete,
+                    TransferChoice::Both,
+                ),
+                requires_dir: false,
             },
             MenuItemDef {
                 label: "cancel preview",
@@ -403,6 +451,26 @@ mod tests {
             assert!(
                 sync.items.iter().any(|i| i.cmd == Cmd::SetSyncOp(op)),
                 "Sync menu misses the operation {op:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn sync_menu_lists_the_per_entry_transfers() {
+        let sync = MENUS
+            .iter()
+            .find(|m| m.title == "Sync")
+            .expect("no Sync menu");
+        for cmd in [
+            Cmd::TransferExecute(TransferOp::Move, TransferChoice::Left),
+            Cmd::TransferExecute(TransferOp::Move, TransferChoice::Right),
+            Cmd::TransferExecute(TransferOp::Delete, TransferChoice::Left),
+            Cmd::TransferExecute(TransferOp::Delete, TransferChoice::Right),
+            Cmd::TransferExecute(TransferOp::Delete, TransferChoice::Both),
+        ] {
+            assert!(
+                sync.items.iter().any(|i| i.cmd == cmd),
+                "Sync menu misses the per-entry transfer {cmd:?}",
             );
         }
     }

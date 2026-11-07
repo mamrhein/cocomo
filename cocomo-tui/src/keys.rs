@@ -190,6 +190,9 @@ pub enum Cmd {
     DialogPick(TransferChoice),
     /// Close the transfer dialog without transferring.
     DialogAbort,
+    /// Execute the given transfer choice on the current selection
+    /// immediately (Sync menu dropdown item), without opening the dialog.
+    TransferExecute(TransferOp, TransferChoice),
     /// Enter search mode (`/`).
     StartSearch,
     /// Enter command mode (`:`).
@@ -1259,6 +1262,19 @@ fn execute(cmd: Cmd, session: &mut SessionView) -> SessionAction {
         Cmd::DialogAbort => {
             session.ui.mode = SessionMode::Normal;
             SessionAction::None
+        }
+        Cmd::TransferExecute(op, choice) => {
+            // The menu counterpart of a dialog accelerator: apply the
+            // choice to the current selection right away. Reusing the
+            // dialog's preview logic keeps the enablement rules in one
+            // place, so a choice no target supports is a silent no-op
+            // instead of a partial transfer.
+            let items = choice.preview(op, &session.transfer_targets());
+            if items.is_empty() {
+                SessionAction::None
+            } else {
+                SessionAction::Transfer { items }
+            }
         }
         Cmd::StartSearch => {
             // Enter search mode; the query buffer lives in the mode itself.
@@ -2646,6 +2662,66 @@ mod tests {
         press(&mut session, KeyCode::Char('d'));
         match press(&mut session, KeyCode::Char('b')) {
             Some(SessionAction::Transfer { items }) => {
+                assert_eq!(items.len(), 2);
+                assert_eq!(items[0].action, TransferAction::DeleteLeft);
+                assert_eq!(items[1].action, TransferAction::DeleteRight);
+            }
+            other => panic!("expected Transfer, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn transfer_menu_command_executes_the_choice_directly() {
+        let mut session = dir_session_with_sides();
+        session.ui.table_state.select(Some(2));
+        match run_menu_command(
+            &mut session,
+            Cmd::TransferExecute(TransferOp::Move, TransferChoice::Left),
+        ) {
+            SessionAction::Transfer { items } => {
+                assert_eq!(items.len(), 1);
+                assert_eq!(items[0].action, TransferAction::MoveRight);
+                assert_eq!(items[0].name, "both.txt");
+            }
+            other => panic!("expected Transfer, got {other:?}"),
+        }
+        // Unlike the `v` accelerator, the menu item never opens the dialog.
+        assert_eq!(session.ui.mode, SessionMode::Normal);
+    }
+
+    #[test]
+    fn transfer_menu_command_ignores_choices_the_selection_lacks() {
+        let mut session = dir_session_with_sides();
+        // A right-only entry has no left side to move left → right.
+        session.ui.table_state.select(Some(1));
+        assert!(matches!(
+            run_menu_command(
+                &mut session,
+                Cmd::TransferExecute(TransferOp::Move, TransferChoice::Left),
+            ),
+            SessionAction::None
+        ));
+        // "delete both" needs the entry on both sides; a left-only entry
+        // contributes nothing.
+        session.ui.table_state.select(Some(0));
+        assert!(matches!(
+            run_menu_command(
+                &mut session,
+                Cmd::TransferExecute(TransferOp::Delete, TransferChoice::Both),
+            ),
+            SessionAction::None
+        ));
+    }
+
+    #[test]
+    fn delete_both_menu_item_transfers_one_item_per_side() {
+        let mut session = dir_session_with_sides();
+        session.ui.table_state.select(Some(2));
+        match run_menu_command(
+            &mut session,
+            Cmd::TransferExecute(TransferOp::Delete, TransferChoice::Both),
+        ) {
+            SessionAction::Transfer { items } => {
                 assert_eq!(items.len(), 2);
                 assert_eq!(items[0].action, TransferAction::DeleteLeft);
                 assert_eq!(items[1].action, TransferAction::DeleteRight);
