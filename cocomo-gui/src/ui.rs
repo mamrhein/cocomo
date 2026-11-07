@@ -40,7 +40,7 @@ use gpui::{
 };
 
 use crate::{
-    color::Side,
+    color::{ColorFields, Side},
     folder_table::FolderTableDelegate,
     log::{self, LogLevel},
     menus::{
@@ -2360,6 +2360,9 @@ struct FolderRulesBody {
     skip_blank_lines: bool,
     skip_comments: bool,
     name_filter: Entity<InputState>,
+    colors: ColorFields,
+    /// A validation problem to show above the Apply button, if any.
+    error: Option<String>,
 }
 
 impl FolderRulesBody {
@@ -2380,18 +2383,29 @@ impl FolderRulesBody {
                     .placeholder("Name filters (comma-separated globs)")
                     .default_value(settings.name_filter.join(", "))
             }),
+            colors: ColorFields::new(&settings.color_overrides, window, cx),
+            error: None,
             state,
         }
     }
 
     /// Push the drafted rules into the session and re-compare.
     fn apply(&mut self, cx: &mut Context<Self>) {
+        let colors = match self.colors.collect(cx) {
+            Ok(colors) => colors,
+            Err(e) => {
+                self.error = Some(e);
+                cx.notify();
+                return;
+            }
+        };
         let mut settings = self.state.read(cx).settings().clone();
         settings.compare_files = self.compare_files;
         settings.compare_structure = self.compare_structure;
         settings.ignore_whitespace = self.ignore_whitespace;
         settings.skip_blank_lines = self.skip_blank_lines;
         settings.skip_comments = self.skip_comments;
+        settings.color_overrides = colors;
         settings.name_filter = self
             .name_filter
             .read(cx)
@@ -2400,6 +2414,7 @@ impl FolderRulesBody {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .collect();
+        self.error = None;
         self.state
             .update(cx, |state, cx| state.update_settings(settings, cx));
     }
@@ -2422,6 +2437,7 @@ impl Render for FolderRulesBody {
                     cx.notify();
                 }))
         };
+        let theme = cx.theme();
         v_flex()
             .w_full()
             .gap_2()
@@ -2449,6 +2465,18 @@ impl Render for FolderRulesBody {
                 this.skip_comments = v
             }))
             .child(Input::new(&self.name_filter).small())
+            .child(div().w_full().h_px().bg(theme.border))
+            .child(
+                div()
+                    .text_xs()
+                    .font_weight(gpui::FontWeight::BOLD)
+                    .text_color(theme.muted_foreground)
+                    .child("Colors"),
+            )
+            .child(self.colors.render())
+            .when_some(self.error.clone(), |this, err| {
+                this.child(div().text_sm().text_color(theme.danger).child(err))
+            })
             .child(
                 h_flex().justify_end().child(
                     Button::new("folder_rules_apply")

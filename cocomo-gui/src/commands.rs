@@ -54,8 +54,8 @@ use crate::{
         ConvertSpacesToTabs, ConvertTabsToSpaces, ConvertTrimTrailing,
         CopyFileLeftNext, CopyFileRightNext, CopySectionLeft,
         CopySectionRight, DeleteLine, DetailMode, InsertLineAfter,
-        InsertLineBefore, IsolateSelection, NextLine, PrevLine, SelectSection,
-        SetDetailMode,
+        InsertLineBefore, IsolateSelection, NextDifferenceFiles, NextLine,
+        PrevDifferenceFiles, PrevLine, SelectSection, SetDetailMode,
     },
     text_merge::{
         NextConflict, NextMergeSection, PrevConflict, PrevMergeSection,
@@ -709,21 +709,19 @@ pub fn all_commands() -> Vec<CommandSpec> {
             default_binding: None,
             action: Some(action::<PrevSection>),
         },
-        // Handlers arrive in phase 4; the items stay out of the menus
-        // until then.
         CommandSpec {
             id: "search.next_difference_files",
             label: "Next difference files",
             category: "Search",
-            default_binding: None,
-            action: None,
+            default_binding: Some("cmd-alt-]"),
+            action: Some(action::<NextDifferenceFiles>),
         },
         CommandSpec {
             id: "search.prev_difference_files",
             label: "Previous difference files",
             category: "Search",
-            default_binding: None,
-            action: None,
+            default_binding: Some("cmd-alt-["),
+            action: Some(action::<PrevDifferenceFiles>),
         },
         CommandSpec {
             id: "search.find_filename",
@@ -1039,6 +1037,8 @@ pub fn view_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("up", PrevLine, Some("TextCompare")),
         KeyBinding::new("cmd-shift-]", NextSection, Some("TextCompare")),
         KeyBinding::new("cmd-shift-[", PrevSection, Some("TextCompare")),
+        KeyBinding::new("cmd-alt-]", NextDifferenceFiles, Some("TextCompare")),
+        KeyBinding::new("cmd-alt-[", PrevDifferenceFiles, Some("TextCompare")),
         KeyBinding::new("j", NextMergeSection, Some("TextMerge")),
         KeyBinding::new("k", PrevMergeSection, Some("TextMerge")),
         KeyBinding::new("down", NextMergeSection, Some("TextMerge")),

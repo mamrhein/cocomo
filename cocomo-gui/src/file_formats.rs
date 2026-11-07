@@ -138,6 +138,15 @@ impl FileFormatRegistry {
         cx.set_global(GlobalFileFormats(Self::defaults()));
     }
 
+    /// The registered formats, falling back to the built-in defaults when
+    /// the global has not been installed yet (early startup, headless
+    /// tests). Cloned so callers can iterate without holding the global.
+    fn formats_or_defaults(cx: &App) -> Vec<FileFormat> {
+        cx.try_global::<GlobalFileFormats>()
+            .map(|global| global.0.formats.clone())
+            .unwrap_or_else(|| Self::defaults().formats)
+    }
+
     /// The view kind for a path. Unknown extensions fall back to the text
     /// view, mirroring how a compare tool treats unrecognized files.
     pub(crate) fn view_kind(path: &Path, cx: &App) -> FileViewKind {
@@ -146,7 +155,7 @@ impl FileFormatRegistry {
         else {
             return FileViewKind::Text;
         };
-        for format in cx.global::<GlobalFileFormats>().0.formats.iter() {
+        for format in Self::formats_or_defaults(cx).iter() {
             if format.extensions.contains(&ext) {
                 return format.view;
             }
@@ -154,9 +163,23 @@ impl FileFormatRegistry {
         FileViewKind::Text
     }
 
+    /// The registered format name for a path, used as the file-bar format
+    /// label. Unknown extensions fall back to the text format's name.
+    pub(crate) fn format_name(path: &Path, cx: &App) -> String {
+        let ext = path.extension().map(|e| e.to_string_lossy().to_lowercase());
+        if let Some(ext) = ext {
+            for format in Self::formats_or_defaults(cx).iter() {
+                if format.extensions.contains(&ext) {
+                    return format.name.clone();
+                }
+            }
+        }
+        "Text".to_string()
+    }
+
     /// All registered formats.
     pub(crate) fn all(cx: &App) -> Vec<FileFormat> {
-        cx.global::<GlobalFileFormats>().0.formats.clone()
+        Self::formats_or_defaults(cx)
     }
 
     /// Add a format, merging extensions into an existing format of the same

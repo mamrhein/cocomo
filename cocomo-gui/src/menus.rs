@@ -51,7 +51,8 @@ use crate::{
         ConvertEndingsMac, ConvertEndingsPc, ConvertEndingsUnix,
         ConvertSpacesToTabs, ConvertTabsToSpaces, ConvertTrimTrailing,
         CopyFileLeftNext, CopyFileRightNext, DeleteLine, DetailMode,
-        InsertLineAfter, InsertLineBefore, IsolateSelection, SelectSection,
+        InsertLineAfter, InsertLineBefore, IsolateSelection,
+        NextDifferenceFiles, PrevDifferenceFiles, SelectSection,
         SetDetailMode,
     },
     text_merge::{SaveMergeOutput, TakeAncestor, TakeLeft, TakeRight},
@@ -719,6 +720,23 @@ fn build_app_menus(
                         PrevSection,
                     )
                     .disabled(!state.is_text)
+                }),
+                Some(MenuItem::separator()),
+                // Next/Previous Difference Files step the *parent* folder
+                // session of a child text compare; they need a live parent.
+                show(hidden, "search.next_difference_files", || {
+                    MenuItem::action(
+                        "Next difference files",
+                        NextDifferenceFiles,
+                    )
+                    .disabled(!state.can_compare_parent)
+                }),
+                show(hidden, "search.prev_difference_files", || {
+                    MenuItem::action(
+                        "Previous difference files",
+                        PrevDifferenceFiles,
+                    )
+                    .disabled(!state.can_compare_parent)
                 }),
                 // Find filename and Replace arrive with the search UI
                 // (later phase); their registry entries stay hidden until

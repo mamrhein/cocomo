@@ -21,7 +21,8 @@
 //! that can be collapsed to a "N FILTERED LINES" header in either pane.
 
 use std::{
-    cell::Cell, collections::HashSet, rc::Rc, sync::Arc, time::Instant,
+    cell::Cell, collections::HashSet, path::Path, rc::Rc, sync::Arc,
+    time::Instant,
 };
 
 use chrono::{DateTime, Local, Utc};
@@ -62,7 +63,8 @@ use gpui::{
 };
 
 use crate::{
-    color::{ColorRole, Side},
+    color::{ColorFields, ColorRole, Side},
+    file_formats::FileFormatRegistry,
     log::{self, LogLevel},
     menus::{
         NextSection, PrevSection, ReloadCompare, SessionInfo, SessionReport,
@@ -101,6 +103,8 @@ actions!(
         CopySectionLeft,
         CopyFileRightNext,
         CopyFileLeftNext,
+        NextDifferenceFiles,
+        PrevDifferenceFiles,
     ]
 );
 
@@ -929,6 +933,68 @@ fn line_ending_label(ending: LineEnding) -> &'static str {
     }
 }
 
+/// A source language with a built-in classification grammar and a
+/// tree-sitter editor language.
+///
+/// The classification grammar drives minor/important row coloring and
+/// comment skipping in the diff; the editor language names the tree-sitter
+/// grammar the edit-mode editors highlight with. Extensions outside this
+/// small set fall back to plain text (no classification, no highlighting).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Lang {
+    Rust,
+    Python,
+    C,
+}
+
+impl Lang {
+    /// Detect a language from a file path's extension.
+    fn from_path(path: &Path) -> Option<Self> {
+        let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+        Self::from_extension(&ext)
+    }
+
+    /// Detect a language from a lowercase extension.
+    fn from_extension(ext: &str) -> Option<Self> {
+        match ext {
+            "rs" => Some(Self::Rust),
+            "py" | "pyi" => Some(Self::Python),
+            "c" | "h" => Some(Self::C),
+            _ => None,
+        }
+    }
+
+    /// Detect a language from a registered format name. A user who
+    /// registers a `"Rust"` format forces Rust classification and
+    /// highlighting regardless of the file's extension.
+    fn from_format_name(name: &str) -> Option<Self> {
+        match name.trim().to_ascii_lowercase().as_str() {
+            "rust" => Some(Self::Rust),
+            "python" => Some(Self::Python),
+            "c" | "c/c++" | "cpp" | "c++" => Some(Self::C),
+            _ => None,
+        }
+    }
+
+    /// The cocomo-lib classification grammar for this language.
+    fn grammar(self) -> Grammar {
+        match self {
+            Self::Rust => Grammar::rust(),
+            Self::Python => Grammar::python(),
+            Self::C => Grammar::c(),
+        }
+    }
+
+    /// The tree-sitter editor language name for the edit-mode editors.
+    fn editor_name(self) -> &'static str {
+        match self {
+            Self::Rust => "rust",
+            Self::Python => "python",
+            Self::C => "c",
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Session state
 // ---------------------------------------------------------------------------
@@ -1005,6 +1071,14 @@ pub struct TextDiffSession {
     left_ending: LineEnding,
     /// Right line-ending convention (detected, selectable).
     right_ending: LineEnding,
+    /// Left format-name override from the format switcher (`None` keeps
+    /// the registry's extension-derived format).
+    left_format: Option<String>,
+    /// Right format-name override from the format switcher.
+    right_format: Option<String>,
+    /// Per-session auto-substitutions applied to both sides during
+    /// comparison (the rules dialog's replacement list).
+    replacements: Vec<(String, String)>,
     /// Previously loaded left paths, oldest first.
     left_history: Vec<String>,
     /// Previously loaded right paths, oldest first.
@@ -1108,6 +1182,9 @@ impl TextDiffSession {
             right_encoding: TextEncoding::Utf8,
             left_ending: LineEnding::Lf,
             right_ending: LineEnding::Lf,
+            left_format: None,
+            right_format: None,
+            replacements: Vec::new(),
             left_history: Vec::new(),
             right_history: Vec::new(),
             diff: None,
@@ -1488,8 +1565,10 @@ impl TextDiffSession {
             detect_line_ending(self.left_raw.as_deref().unwrap_or(&[]));
         self.right_ending =
             detect_line_ending(self.right_raw.as_deref().unwrap_or(&[]));
-        self.left_lines = Arc::new(split_lines(&left_text));
-        self.right_lines = Arc::new(split_lines(&right_text));
+        self.left_lines =
+            Arc::new(self.tokenize_lines(&split_lines(&left_text)));
+        self.right_lines =
+            Arc::new(self.tokenize_lines(&split_lines(&right_text)));
         self.diff = Some(compare_texts(
             &left_text,
             &right_text,
@@ -1561,9 +1640,18 @@ impl TextDiffSession {
             }
             let updated = endpoint.with_path(path);
             match side {
-                Side::Left => self.left = updated,
-                Side::Right => self.right = updated,
+                Side::Left => {
+                    self.left = updated;
+                    // A new file re-derives its format and language from
+                    // its extension; a stale override would mislabel it.
+                    self.left_format = None;
+                }
+                Side::Right => {
+                    self.right = updated;
+                    self.right_format = None;
+                }
             }
+            self.rebuild_grammar();
             self.load(cx);
         }
     }
@@ -1608,6 +1696,8 @@ impl TextDiffSession {
         std::mem::swap(&mut self.left_encoding, &mut self.right_encoding);
         std::mem::swap(&mut self.left_ending, &mut self.right_ending);
         std::mem::swap(&mut self.left_history, &mut self.right_history);
+        std::mem::swap(&mut self.left_format, &mut self.right_format);
+        self.rebuild_grammar();
         self.rebuild_model();
         cx.notify();
     }
@@ -1782,6 +1872,136 @@ impl TextDiffSession {
     /// Right line-ending selector label.
     pub fn right_ending_label(&self) -> &'static str {
         line_ending_label(self.right_ending)
+    }
+
+    // -- Format, grammar, and replacements ---------------------------------
+
+    /// The detected language for one side: the format override when it
+    /// names a language, otherwise the side's file extension.
+    fn side_lang(&self, side: Side) -> Option<Lang> {
+        let (path, format) = match side {
+            Side::Left => (self.left.path(), self.left_format.as_deref()),
+            Side::Right => (self.right.path(), self.right_format.as_deref()),
+        };
+        format
+            .and_then(Lang::from_format_name)
+            .or_else(|| Lang::from_path(path))
+    }
+
+    /// The language the comparison classifies with: the left side's, or
+    /// the right side's when the left has no recognized language.
+    fn comparison_lang(&self) -> Option<Lang> {
+        self.side_lang(Side::Left)
+            .or_else(|| self.side_lang(Side::Right))
+    }
+
+    /// Rebuild the comparison grammar from the detected language and the
+    /// replacement list, storing it in the compare settings.
+    ///
+    /// Replacements become grammar normalization rules: they rewrite text
+    /// for the comparison only, leaving the displayed content untouched,
+    /// so a substituted-equal pair aligns as identical.
+    fn rebuild_grammar(&mut self) {
+        let mut grammar = self
+            .comparison_lang()
+            .map(Lang::grammar)
+            .unwrap_or_else(Grammar::plain_text);
+        for (from, to) in &self.replacements {
+            if from.is_empty() {
+                continue;
+            }
+            if let Ok(pattern) = regex::Regex::new(&regex::escape(from)) {
+                grammar.add_rule(
+                    format!("replace:{from}"),
+                    pattern,
+                    Importance::Code,
+                    Some(to.clone()),
+                );
+            }
+        }
+        self.compare_settings.grammar = Some(grammar);
+    }
+
+    /// The tree-sitter editor language name for one side.
+    pub fn editor_lang(&self, side: Side) -> SharedString {
+        self.side_lang(side)
+            .map(Lang::editor_name)
+            .unwrap_or("text")
+            .into()
+    }
+
+    /// Left format label: the override or the registry's format name.
+    pub fn left_format_label(&self, cx: &App) -> String {
+        self.format_label(Side::Left, cx)
+    }
+
+    /// Right format label: the override or the registry's format name.
+    pub fn right_format_label(&self, cx: &App) -> String {
+        self.format_label(Side::Right, cx)
+    }
+
+    /// The format name shown in a pane's file bar.
+    fn format_label(&self, side: Side, cx: &App) -> String {
+        let override_name = match side {
+            Side::Left => self.left_format.as_deref(),
+            Side::Right => self.right_format.as_deref(),
+        };
+        match override_name {
+            Some(name) => name.to_string(),
+            None => {
+                let path = match side {
+                    Side::Left => self.left.path(),
+                    Side::Right => self.right.path(),
+                };
+                FileFormatRegistry::format_name(path, cx)
+            }
+        }
+    }
+
+    /// Switch one side's format and re-derive the grammar. The view
+    /// re-applies the editor highlighter from `editor_lang`.
+    pub fn set_format(
+        &mut self,
+        side: Side,
+        name: &str,
+        cx: &mut Context<Self>,
+    ) {
+        match side {
+            Side::Left => self.left_format = Some(name.to_string()),
+            Side::Right => self.right_format = Some(name.to_string()),
+        }
+        self.rebuild_grammar();
+        if self.left_raw.is_some() || self.right_raw.is_some() {
+            self.recompare(cx);
+        } else {
+            cx.notify();
+        }
+    }
+
+    /// The current replacement list, for the rules dialog.
+    pub fn replacements(&self) -> &[(String, String)] {
+        &self.replacements
+    }
+
+    /// Replace the auto-substitution table and re-diff.
+    pub fn set_replacements(
+        &mut self,
+        replacements: Vec<(String, String)>,
+        cx: &mut Context<Self>,
+    ) {
+        self.replacements = replacements;
+        self.rebuild_grammar();
+        self.recompare(cx);
+    }
+
+    /// Apply a format and grammar to a freshly created session before its
+    /// first load. `grammar` is the caller's explicit choice; when `None`
+    /// the language is detected from the endpoints.
+    fn init_grammar(&mut self, grammar: Option<Grammar>) {
+        match grammar {
+            Some(g) => self.compare_settings.grammar = Some(g),
+            None => self.rebuild_grammar(),
+        }
     }
 
     /// Left path history, oldest first.
@@ -2005,8 +2225,10 @@ impl TextDiffSession {
     pub fn recompare(&mut self, cx: &mut Context<Self>) {
         let left_text = self.side_text(Side::Left, cx);
         let right_text = self.side_text(Side::Right, cx);
-        self.left_lines = Arc::new(split_lines(&left_text));
-        self.right_lines = Arc::new(split_lines(&right_text));
+        self.left_lines =
+            Arc::new(self.tokenize_lines(&split_lines(&left_text)));
+        self.right_lines =
+            Arc::new(self.tokenize_lines(&split_lines(&right_text)));
         self.diff = Some(compare_texts(
             &left_text,
             &right_text,
@@ -2016,19 +2238,54 @@ impl TextDiffSession {
         cx.notify();
     }
 
+    /// Classify each line with the comparison grammar so the diff rows can
+    /// color content by importance. A no-op when no grammar is set.
+    fn tokenize_lines(&self, lines: &[LineInfo]) -> Vec<LineInfo> {
+        match &self.compare_settings.grammar {
+            Some(grammar) => lines
+                .iter()
+                .map(|line| {
+                    LineInfo::new(line.number, line.content.clone())
+                        .with_grammar(grammar)
+                })
+                .collect(),
+            None => lines.to_vec(),
+        }
+    }
+
     /// Replace the session's compare rules and re-diff.
+    ///
+    /// The grammar is rebuilt from the detected language and the
+    /// replacement list afterward, so a rules-dialog apply (which builds
+    /// fresh settings) never drops syntax classification.
     pub fn set_compare_settings(
         &mut self,
         settings: TextCompareSettings,
         cx: &mut Context<Self>,
     ) {
         self.compare_settings = settings;
+        self.rebuild_grammar();
         self.recompare(cx);
     }
 
     /// The current compare rules, for the rules dialog.
     pub fn compare_settings(&self) -> &TextCompareSettings {
         &self.compare_settings
+    }
+
+    /// The per-session color overrides, for the rules dialog.
+    pub fn overrides(&self) -> &ColorOverrides {
+        &self.overrides
+    }
+
+    /// Replace the per-session color overrides (spec section 7.1).
+    pub fn set_overrides(
+        &mut self,
+        overrides: ColorOverrides,
+        cx: &mut Context<Self>,
+    ) {
+        self.overrides = overrides;
+        cx.notify();
     }
 
     /// The pending alignment anchor, if a line is marked.
@@ -2410,9 +2667,49 @@ impl TextDiffSession {
         })
         .detach();
     }
+
+    /// Step the parent folder session to its next (`direction > 0`) or
+    /// previous differing pair and open that pair in a new tab.
+    ///
+    /// This is Search ▸ Next/Previous Difference Files for a child text
+    /// session (spec section 5.4); it moves the *parent's* selection, not
+    /// this session's rows.
+    pub fn step_difference_files(
+        &mut self,
+        direction: isize,
+        cx: &mut Context<Self>,
+    ) {
+        let (Some(parent), Some(manager)) =
+            (self.parent.clone(), self.manager.clone())
+        else {
+            log::push(
+                LogLevel::Warning,
+                "Next/Previous Difference Files needs a parent folder \
+                 session."
+                    .to_string(),
+                cx,
+            );
+            return;
+        };
+        let next = parent.update(cx, |state, cx| {
+            if direction > 0 {
+                state.select_next_difference(cx);
+            } else {
+                state.select_previous_difference(cx);
+            }
+            state.selected_endpoints()
+        });
+        let Ok(Some((left, right))) = next else {
+            return;
+        };
+        manager.update(cx, |m, cx| {
+            m.add_text_diff_tab(left, right, Some(parent.clone()), cx)
+        });
+    }
 }
 
-/// File-bar metadata line: modified · size · format · line endings.
+/// File-bar metadata line: modified · size · line endings. The format
+/// name lives in its own switcher in the file-bar row, not here.
 fn meta_label(meta: Option<&FileMeta>, ending: LineEnding) -> String {
     let size = meta
         .map(|m| format_size(m.size))
@@ -2420,7 +2717,7 @@ fn meta_label(meta: Option<&FileMeta>, ending: LineEnding) -> String {
     let modified = meta
         .map(|m| m.modified.clone())
         .unwrap_or_else(|| "—".to_string());
-    format!("{modified} · {size} · Text · {}", line_ending_label(ending))
+    format!("{modified} · {size} · {}", line_ending_label(ending))
 }
 
 impl gpui::Focusable for TextDiffSession {
@@ -2599,6 +2896,102 @@ impl Element for ThumbnailStrip {
 }
 
 // ---------------------------------------------------------------------------
+// Hatched shading element
+// ---------------------------------------------------------------------------
+
+/// A diagonal-hatch fill for the blank counterpart of an inserted or
+/// deleted row and for filtered/context headers, per the spec's "hatched
+/// shading for filtered/blank alignment areas." It fills its bounds with a
+/// background, then paints clipped 45° lines.
+struct Hatch {
+    id: ElementId,
+    background: Hsla,
+    line: Hsla,
+}
+
+impl IntoElement for Hatch {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+impl Element for Hatch {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        Some(self.id.clone())
+    }
+
+    fn source_location(
+        &self,
+    ) -> Option<&'static std::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, Self::RequestLayoutState) {
+        let mut style = Style::default();
+        style.size.width = relative(1.).into();
+        style.size.height = relative(1.).into();
+        (window.request_layout(style, None, cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        _: Bounds<Pixels>,
+        _: &mut Self::RequestLayoutState,
+        _: &mut Window,
+        _: &mut App,
+    ) -> Self::PrepaintState {
+    }
+
+    fn paint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _: &mut Self::RequestLayoutState,
+        _: &mut Self::PrepaintState,
+        window: &mut Window,
+        _: &mut App,
+    ) {
+        window.paint_quad(fill(bounds, self.background));
+        let spacing = px(6.).as_f32();
+        let w = bounds.size.width.as_f32();
+        let h = bounds.size.height.as_f32();
+        let ox = bounds.origin.x;
+        let oy = bounds.origin.y;
+        window.with_content_mask(
+            Some(gpui::ContentMask { bounds }),
+            |window| {
+                // Start one height to the left so the top-left corner is
+                // covered; each line runs bottom-left to top-right.
+                let mut x = -h;
+                while x < w {
+                    let mut path = PathBuilder::stroke(px(1.));
+                    path.move_to(point(ox + px(x), oy + px(h)));
+                    path.line_to(point(ox + px(x + h), oy));
+                    if let Ok(built) = path.build() {
+                        window.paint_path(built, self.line);
+                    }
+                    x += spacing;
+                }
+            },
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Text compare view
 // ---------------------------------------------------------------------------
 
@@ -2643,6 +3036,9 @@ pub struct TextDiffView {
     _detail_subs: Vec<Subscription>,
     /// A detail-line commit waiting for a render (needs a window).
     pending_detail_commit: Option<(Side, usize, String)>,
+    /// The editor language names the highlighters were last set to,
+    /// `(left, right)`; refreshed when a format switch changes them.
+    applied_langs: Option<(SharedString, SharedString)>,
 }
 
 impl TextDiffView {
@@ -2710,6 +3106,7 @@ impl TextDiffView {
             detail_seeded: None,
             _detail_subs: Vec::new(),
             pending_detail_commit: None,
+            applied_langs: None,
         }
     }
 
@@ -3142,6 +3539,26 @@ impl TextDiffView {
             .update(cx, |s, cx| s.copy_file_and_open_next(to, cx));
     }
 
+    fn handle_next_difference_files(
+        &mut self,
+        _: &NextDifferenceFiles,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.state
+            .update(cx, |s, cx| s.step_difference_files(1, cx));
+    }
+
+    fn handle_prev_difference_files(
+        &mut self,
+        _: &PrevDifferenceFiles,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.state
+            .update(cx, |s, cx| s.step_difference_files(-1, cx));
+    }
+
     fn handle_set_detail_mode(
         &mut self,
         action: &SetDetailMode,
@@ -3339,8 +3756,12 @@ fn line_decorations(
         if let Some(&is_minor) = minor_by_line.get(&line.number) {
             let mut color = if is_minor { minor } else { important };
             color.a = 0.18;
+            // Span the line *and* its newline so the fill reaches the line
+            // break (a selected newline paints a one-cell tail), matching
+            // the full-row fill the list view gives difference rows.
+            let end = offset + line.content.len() + 1;
             out.push(
-                RangeDecoration::new(offset..offset + line.content.len())
+                RangeDecoration::new(offset..end)
                     .with_style(RangeDecorationStyle::Fill)
                     .with_color(color),
             );
@@ -3413,6 +3834,18 @@ impl TextDiffView {
                 session.section_count() > 0,
                 session.is_editing(),
             )
+        };
+        // The format switcher acts on the focused side (the file the user
+        // is working on); outside edit mode that is the left side.
+        let (format_label, formats) = {
+            let session = self.state.read(cx);
+            let side = session.focus_side();
+            let label = session.format_label(side, cx);
+            let formats: Vec<(String, bool)> = FileFormatRegistry::all(cx)
+                .into_iter()
+                .map(|f| (f.name, f.view.is_available()))
+                .collect();
+            (label, formats)
         };
 
         let wrap_btn = Button::new("text2_wrap")
@@ -3535,7 +3968,43 @@ impl TextDiffView {
                 })
         };
 
+        let format_btn = {
+            let state = self.state.clone();
+            let current = format_label.clone();
+            Button::new("text2_format")
+                .label(format_label)
+                .ghost()
+                .small()
+                .tooltip("Change file format (focused side)")
+                .accessibility_label("Change file format")
+                .dropdown_menu(move |menu, _, _| {
+                    let mut menu = menu;
+                    for (name, available) in formats.iter() {
+                        let is_current = *name == current;
+                        let name = name.clone();
+                        let state = state.clone();
+                        menu = menu.item(
+                            PopupMenuItem::new(name.clone())
+                                .checked(is_current)
+                                .disabled(!*available)
+                                .on_click(move |_, _, cx| {
+                                    state.update(cx, |s, cx| {
+                                        let side = s.focus_side();
+                                        s.set_format(side, &name, cx);
+                                    });
+                                }),
+                        );
+                    }
+                    menu
+                })
+        };
+
         Toolbar::new("text-view-toolbar")
+            .child(
+                ToolbarGroup::new("text-view-toolbar-format")
+                    .label("Format")
+                    .content(h_flex().items_center().child(format_btn)),
+            )
             .child(
                 ToolbarGroup::new("text-view-toolbar-view")
                     .label("View")
@@ -3631,8 +4100,19 @@ impl Render for TextDiffView {
         // session, which tracks their dirty and focus state.
         let editing = self.state.read(cx).is_editing();
         if editing && self.state.read(cx).left_editor().is_none() {
-            let left = cx.new(|cx| EditorState::new(window, cx));
-            let right = cx.new(|cx| EditorState::new(window, cx));
+            let (left_lang, right_lang) = {
+                let session = self.state.read(cx);
+                (
+                    session.editor_lang(Side::Left),
+                    session.editor_lang(Side::Right),
+                )
+            };
+            let left = cx.new(|cx| {
+                EditorState::new(window, cx).language(left_lang.clone())
+            });
+            let right = cx.new(|cx| {
+                EditorState::new(window, cx).language(right_lang.clone())
+            });
             let left_decs = left.update(cx, |ed, cx| {
                 ed.create_range_decorations_collection(Vec::new(), cx)
             });
@@ -3644,6 +4124,7 @@ impl Render for TextDiffView {
             self.left_decs = Some(left_decs);
             self.right_decs = Some(right_decs);
             self.decoration_rev = usize::MAX;
+            self.applied_langs = Some((left_lang, right_lang));
         }
         // Re-seed the editors after a load; `set_value` clears undo
         // history and emits no change event, matching a fresh file read.
@@ -3676,6 +4157,35 @@ impl Render for TextDiffView {
                 self.decoration_rev = usize::MAX;
             }
         }
+        // Re-apply the tree-sitter highlighter when a format switch (or a
+        // path change) moved a side to a different language.
+        if editing {
+            let editors = {
+                let session = self.state.read(cx);
+                (
+                    session.left_editor().cloned(),
+                    session.right_editor().cloned(),
+                    session.editor_lang(Side::Left),
+                    session.editor_lang(Side::Right),
+                )
+            };
+            if let (Some(left), Some(right)) = (editors.0, editors.1) {
+                let (left_lang, right_lang) = (editors.2, editors.3);
+                let stale = self
+                    .applied_langs
+                    .as_ref()
+                    .is_none_or(|(l, r)| *l != left_lang || *r != right_lang);
+                if stale {
+                    left.update(cx, |ed, cx| {
+                        ed.set_highlighter(left_lang.clone(), cx);
+                    });
+                    right.update(cx, |ed, cx| {
+                        ed.set_highlighter(right_lang.clone(), cx);
+                    });
+                    self.applied_langs = Some((left_lang, right_lang));
+                }
+            }
+        }
         let left_input = self.left_path_input.clone().expect("just created");
         let right_input = self.right_path_input.clone().expect("just created");
 
@@ -3697,6 +4207,8 @@ impl Render for TextDiffView {
         let right_path = session.right_path();
         let left_meta = session.left_meta_label();
         let right_meta = session.right_meta_label();
+        let left_format = session.left_format_label(cx);
+        let right_format = session.right_format_label(cx);
         let left_enc = session.left_encoding_label();
         let right_enc = session.right_encoding_label();
         let left_end = session.left_ending_label();
@@ -3717,6 +4229,12 @@ impl Render for TextDiffView {
             can_copy_file_next: session.parent.is_some()
                 && session.manager.is_some(),
         };
+        // The format switcher lists every registered format; only text-view
+        // formats are selectable until the other views ship.
+        let formats: Vec<(String, bool)> = FileFormatRegistry::all(cx)
+            .into_iter()
+            .map(|f| (f.name, f.view.is_available()))
+            .collect();
 
         // Seed the inputs once from the endpoints; later edits belong to
         // the user (swap re-syncs them through `sync_path_inputs`).
@@ -3758,6 +4276,16 @@ impl Render for TextDiffView {
         let list_hover = theme.list_hover;
         let border = theme.border;
         let danger = theme.danger;
+        // Comment-colored context lines reuse the editor's syntax palette so
+        // the list and the edit-mode editors agree on what a comment looks
+        // like.
+        let syntax_comment = theme
+            .highlight_theme
+            .style
+            .syntax
+            .style("comment")
+            .and_then(|s| s.color)
+            .unwrap_or(muted_fg);
 
         // Refresh the editor difference fills whenever the model changed;
         // the ranges track subsequent edits on their own.
@@ -3816,6 +4344,7 @@ impl Render for TextDiffView {
                     list_active,
                     list_hover,
                     fg,
+                    syntax_comment,
                     &mono,
                     &state,
                     menu_flags,
@@ -3851,6 +4380,7 @@ impl Render for TextDiffView {
                     list_active,
                     list_hover,
                     fg,
+                    syntax_comment,
                     &mono,
                     &state,
                     menu_flags,
@@ -3912,62 +4442,59 @@ impl Render for TextDiffView {
                 .map(|l| l.content.clone())
                 .unwrap_or_default()
         };
+        // The Text and Alignment detail panes share one pair of editable
+        // inputs; Alignment adds a difference caret under each line.
+        // Outside edit mode the inputs are disabled, so a commit can never
+        // silently no-op against a missing editor.
+        let editable_details =
+            matches!(detail_mode, DetailMode::Text | DetailMode::Alignment);
+        if editable_details && self.detail_inputs.is_none() {
+            let l = cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder("Left line — Enter commits")
+            });
+            let r = cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder("Right line — Enter commits")
+            });
+            for (side, input) in [(Side::Left, &l), (Side::Right, &r)] {
+                let sub =
+                    cx.subscribe(input, move |this, input, event, cx| {
+                        if matches!(event, InputEvent::PressEnter { .. }) {
+                            let value = input.read(cx).value().to_string();
+                            let line =
+                                this.state.read(cx).selected_line_number(side);
+                            if let Some(line) = line {
+                                this.pending_detail_commit =
+                                    Some((side, line, value));
+                                cx.notify();
+                            }
+                        }
+                    });
+                self._detail_subs.push(sub);
+            }
+            self.detail_inputs = Some((l, r));
+            self.detail_seeded = None;
+        }
+        let detail_key = (
+            selected_row.and_then(|r| r.left),
+            selected_row.and_then(|r| r.right),
+        );
+        if editable_details {
+            let (left_in, right_in) =
+                self.detail_inputs.clone().expect("just created");
+            if self.detail_seeded != Some(detail_key) {
+                self.detail_seeded = Some(detail_key);
+                let lt = selected_line(&left_lines, detail_key.0);
+                let rt = selected_line(&right_lines, detail_key.1);
+                left_in.update(cx, |i, cx| i.set_value(lt, window, cx));
+                right_in.update(cx, |i, cx| i.set_value(rt, window, cx));
+            }
+        }
         let details = match detail_mode {
             DetailMode::Text => {
-                if self.detail_inputs.is_none() {
-                    let l = cx.new(|cx| {
-                        InputState::new(window, cx)
-                            .placeholder("Left line — Enter commits")
-                    });
-                    let r = cx.new(|cx| {
-                        InputState::new(window, cx)
-                            .placeholder("Right line — Enter commits")
-                    });
-                    for (side, input) in [(Side::Left, &l), (Side::Right, &r)]
-                    {
-                        let sub = cx.subscribe(
-                            input,
-                            move |this, input, event, cx| {
-                                if matches!(
-                                    event,
-                                    InputEvent::PressEnter { .. }
-                                ) {
-                                    let value =
-                                        input.read(cx).value().to_string();
-                                    let line = this
-                                        .state
-                                        .read(cx)
-                                        .selected_line_number(side);
-                                    if let Some(line) = line {
-                                        this.pending_detail_commit =
-                                            Some((side, line, value));
-                                        cx.notify();
-                                    }
-                                }
-                            },
-                        );
-                        self._detail_subs.push(sub);
-                    }
-                    self.detail_inputs = Some((l, r));
-                    self.detail_seeded = None;
-                }
                 let (left_in, right_in) =
                     self.detail_inputs.clone().expect("just created");
-                let key = (
-                    selected_row.and_then(|r| r.left),
-                    selected_row.and_then(|r| r.right),
-                );
-                if self.detail_seeded != Some(key) {
-                    self.detail_seeded = Some(key);
-                    let lt = selected_line(&left_lines, key.0);
-                    let rt = selected_line(&right_lines, key.1);
-                    left_in.update(cx, |i, cx| {
-                        i.set_value(lt, window, cx);
-                    });
-                    right_in.update(cx, |i, cx| {
-                        i.set_value(rt, window, cx);
-                    });
-                }
                 h_flex()
                     .flex_shrink_0()
                     .h(px(64.))
@@ -3975,21 +4502,13 @@ impl Render for TextDiffView {
                     .border_t_1()
                     .border_color(border)
                     .bg(muted)
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .px_2()
-                            .child(Input::new(&left_in).small()),
-                    )
+                    .child(div().flex_1().min_w_0().px_2().child(
+                        Input::new(&left_in).small().disabled(!editing),
+                    ))
                     .child(div().w(px(1.)).bg(border))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .px_2()
-                            .child(Input::new(&right_in).small()),
-                    )
+                    .child(div().flex_1().min_w_0().px_2().child(
+                        Input::new(&right_in).small().disabled(!editing),
+                    ))
             }
             DetailMode::Hex => h_flex()
                 .flex_shrink_0()
@@ -4013,18 +4532,15 @@ impl Render for TextDiffView {
                     &mono,
                 )),
             DetailMode::Alignment => {
-                let lt = selected_line(
-                    &left_lines,
-                    selected_row.and_then(|r| r.left),
-                );
-                let rt = selected_line(
-                    &right_lines,
-                    selected_row.and_then(|r| r.right),
-                );
+                let (left_in, right_in) =
+                    self.detail_inputs.clone().expect("just created");
+                let lt = selected_line(&left_lines, detail_key.0);
+                let rt = selected_line(&right_lines, detail_key.1);
                 let caret = first_difference_caret(&lt, &rt);
                 h_flex()
                     .flex_shrink_0()
                     .h(px(64.))
+                    .items_center()
                     .border_t_1()
                     .border_color(border)
                     .bg(muted)
@@ -4033,12 +4549,19 @@ impl Render for TextDiffView {
                             .flex_1()
                             .min_w_0()
                             .px_2()
-                            .py_1()
-                            .overflow_hidden()
-                            .font_family(mono.clone())
-                            .text_xs()
-                            .child(lt.clone())
-                            .child(caret.clone()),
+                            .gap_0p5()
+                            .child(
+                                Input::new(&left_in)
+                                    .small()
+                                    .disabled(!editing),
+                            )
+                            .child(
+                                div()
+                                    .font_family(mono.clone())
+                                    .text_xs()
+                                    .text_color(muted_fg)
+                                    .child(caret.clone()),
+                            ),
                     )
                     .child(div().w(px(1.)).bg(border))
                     .child(
@@ -4046,12 +4569,19 @@ impl Render for TextDiffView {
                             .flex_1()
                             .min_w_0()
                             .px_2()
-                            .py_1()
-                            .overflow_hidden()
-                            .font_family(mono.clone())
-                            .text_xs()
-                            .child(rt)
-                            .child(caret),
+                            .gap_0p5()
+                            .child(
+                                Input::new(&right_in)
+                                    .small()
+                                    .disabled(!editing),
+                            )
+                            .child(
+                                div()
+                                    .font_family(mono.clone())
+                                    .text_xs()
+                                    .text_color(muted_fg)
+                                    .child(caret),
+                            ),
                     )
             }
         };
@@ -4127,6 +4657,8 @@ impl Render for TextDiffView {
                                             Side::Left,
                                             &left_input,
                                             &left_meta,
+                                            &left_format,
+                                            &formats,
                                             left_enc,
                                             left_end,
                                             &left_hist,
@@ -4140,6 +4672,8 @@ impl Render for TextDiffView {
                                             Side::Right,
                                             &right_input,
                                             &right_meta,
+                                            &right_format,
+                                            &formats,
                                             right_enc,
                                             right_end,
                                             &right_hist,
@@ -4206,6 +4740,8 @@ impl Render for TextDiffView {
             .on_action(cx.listener(|this, _: &CopyFileLeftNext, w, cx| {
                 this.handle_copy_file_next(Side::Left, w, cx);
             }))
+            .on_action(cx.listener(Self::handle_next_difference_files))
+            .on_action(cx.listener(Self::handle_prev_difference_files))
             .on_action(cx.listener(Self::handle_set_detail_mode))
     }
 }
@@ -4264,6 +4800,8 @@ fn render_pane(
     side: Side,
     input: &Entity<InputState>,
     meta: &str,
+    format: &str,
+    formats: &[(String, bool)],
     enc: &'static str,
     ending: &'static str,
     history: &[String],
@@ -4273,6 +4811,7 @@ fn render_pane(
 ) -> impl IntoElement {
     let side_key = if side == Side::Left { "l" } else { "r" };
     let history = history.to_vec();
+    let formats = formats.to_vec();
     let drop_state = state.clone();
     let primary = theme.primary;
     v_flex()
@@ -4357,6 +4896,49 @@ fn render_pane(
                                 .flex_1()
                                 .min_w_0()
                                 .text_color(theme.foreground),
+                        )
+                        .child(
+                            Button::new(ElementId::Name(
+                                format!("text_format_{side_key}").into(),
+                            ))
+                            .label(format.to_string())
+                            .ghost()
+                            .xsmall()
+                            .tooltip("File format")
+                            .accessibility_label("File format")
+                            .dropdown_menu({
+                                let state = state.clone();
+                                let current = format.to_string();
+                                move |menu, _, _| {
+                                    let mut menu = menu;
+                                    for (name, available) in formats.iter() {
+                                        let is_current = *name == current;
+                                        let name = name.clone();
+                                        let state = state.clone();
+                                        menu = menu.item(
+                                            PopupMenuItem::new(name.clone())
+                                                .checked(is_current)
+                                                // Only the text view can
+                                                // open a file today, so a
+                                                // table/hex/picture format
+                                                // stays visible but inert.
+                                                .disabled(!*available)
+                                                .on_click(move |_, _, cx| {
+                                                    state.update(
+                                                        cx,
+                                                        |s, cx| {
+                                                            s.set_format(
+                                                                side, &name,
+                                                                cx,
+                                                            );
+                                                        },
+                                                    );
+                                                }),
+                                        );
+                                    }
+                                    menu
+                                }
+                            }),
                         )
                         .child(
                             Button::new(ElementId::Name(
@@ -4527,6 +5109,7 @@ fn render_diff_row(
     list_active: Hsla,
     list_hover: Hsla,
     foreground: Hsla,
+    syntax_comment: Hsla,
     mono: &SharedString,
     state: &Entity<TextDiffSession>,
     menu_flags: RowMenuFlags,
@@ -4544,15 +5127,27 @@ fn render_diff_row(
                     ElementId::from("text_filtered"),
                     format!("{side_key}-{d}"),
                 ))
+                .relative()
                 .w_full()
-                .flex()
                 .flex_shrink_0()
-                .justify_center()
-                .py_0p5()
-                .text_xs()
-                .text_color(muted_fg)
+                .overflow_hidden()
                 .hover(|el| el.bg(list_hover))
-                .child(format!("[+] {count} FILTERED LINES"))
+                .child(div().absolute().inset_0().child(Hatch {
+                    id: ElementId::Name(
+                        format!("text_filtered_hatch-{side_key}-{d}").into(),
+                    ),
+                    background: muted,
+                    line: muted_fg.opacity(0.25),
+                }))
+                .child(
+                    h_flex()
+                        .w_full()
+                        .justify_center()
+                        .py_0p5()
+                        .text_xs()
+                        .text_color(muted_fg)
+                        .child(format!("[+] {count} FILTERED LINES")),
+                )
                 .on_click(move |_, _, cx| {
                     state.update(cx, |s, cx| s.toggle_section(section, cx));
                 })
@@ -4560,14 +5155,26 @@ fn render_diff_row(
         }
         DisplayRow::Context { count } => div()
             .id((ElementId::from("text_context"), format!("{side_key}-{d}")))
+            .relative()
             .w_full()
-            .flex()
             .flex_shrink_0()
-            .justify_center()
-            .py_0p5()
-            .text_xs()
-            .text_color(muted_fg)
-            .child(format!("{count} context lines hidden"))
+            .overflow_hidden()
+            .child(div().absolute().inset_0().child(Hatch {
+                id: ElementId::Name(
+                    format!("text_context_hatch-{side_key}-{d}").into(),
+                ),
+                background: muted,
+                line: muted_fg.opacity(0.25),
+            }))
+            .child(
+                h_flex()
+                    .w_full()
+                    .justify_center()
+                    .py_0p5()
+                    .text_xs()
+                    .text_color(muted_fg)
+                    .child(format!("{count} context lines hidden")),
+            )
             .into_any_element(),
         DisplayRow::Line(r) => {
             let Some(row) = rows.get(*r) else {
@@ -4577,8 +5184,9 @@ fn render_diff_row(
                 Side::Left => row.left,
                 Side::Right => row.right,
             };
-            // The blank counterpart of an inserted/deleted row stays
-            // muted so the row alignment remains visible in both panes.
+            // The blank counterpart of an inserted/deleted row is hatched
+            // so the row alignment stays visible in both panes (spec
+            // section 5.2).
             let Some(number) = number else {
                 return div()
                     .id((
@@ -4588,7 +5196,14 @@ fn render_diff_row(
                     .w_full()
                     .h(row_h)
                     .flex_shrink_0()
-                    .bg(muted)
+                    .overflow_hidden()
+                    .child(Hatch {
+                        id: ElementId::Name(
+                            format!("text_blank_hatch-{side_key}-{d}").into(),
+                        ),
+                        background: muted,
+                        line: muted_fg.opacity(0.3),
+                    })
                     .into_any_element();
             };
             let si = row_section.get(*r).copied().unwrap_or(usize::MAX);
@@ -4627,7 +5242,16 @@ fn render_diff_row(
                 .map(|l| l.content.as_str())
                 .unwrap_or("");
             let fg = if row.status == RowStatus::Same {
-                foreground
+                // Context lines take their color from the grammar's line
+                // classification: comments read as comments, ignored text
+                // as muted, everything else as the default foreground.
+                match lines.get(number - 1).and_then(|l| l.tokens.first()) {
+                    Some(t) if t.importance == Importance::Comment => {
+                        syntax_comment
+                    }
+                    Some(t) if t.importance == Importance::Ignored => muted_fg,
+                    _ => foreground,
+                }
             } else if row.minor {
                 minor
             } else {
@@ -4783,12 +5407,14 @@ pub(crate) fn new_text_diff_view(
     manager: Option<Entity<GuiSessionManager>>,
     cx: &mut App,
 ) -> Entity<TextDiffView> {
-    // Grammar-aware token classification arrives with the editing phase.
-    let _ = grammar;
+    // The grammar (when the caller supplies one) drives classification and
+    // editor highlighting; otherwise the language is detected from the
+    // endpoints' extensions.
     let title = format!("{} vs {}", base_name(&left), base_name(&right));
     let session = cx.new(|cx| {
         TextDiffSession::new(left, right, title.into(), parent, manager, cx)
     });
+    session.update(cx, |s, _| s.init_grammar(grammar));
     cx.new(|cx| TextDiffView::new(session, cx))
 }
 
@@ -4820,9 +5446,10 @@ fn base_name(endpoint: &Endpoint) -> String {
 // Session rules dialog
 // ---------------------------------------------------------------------------
 
-/// Body of the text session's rules dialog. A `Render` entity so the
-/// checkboxes repaint as they are toggled (dialog content is otherwise
-/// built only once when the dialog opens).
+/// Body of the text session's rules dialog: compare rules, per-session
+/// color overrides, and the auto-substitution (replacement) list. A
+/// `Render` entity so the controls repaint as they are edited (dialog
+/// content is otherwise built only once when the dialog opens).
 struct TextRulesBody {
     session: Entity<TextDiffSession>,
     ignore_case: bool,
@@ -4830,11 +5457,45 @@ struct TextRulesBody {
     ignore_blank_lines: bool,
     ignore_comments: bool,
     ignore_numeric: bool,
+    colors: ColorFields,
+    /// `(find, replace)` input pairs for the replacement table.
+    replacement_rows: Vec<(Entity<InputState>, Entity<InputState>)>,
+    /// A validation problem to show above the Apply button, if any.
+    error: Option<String>,
 }
 
 impl TextRulesBody {
-    fn new(session: Entity<TextDiffSession>, cx: &mut Context<Self>) -> Self {
-        let settings = session.read(cx).compare_settings();
+    fn new(
+        session: Entity<TextDiffSession>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let (settings, overrides, replacements) = {
+            let session = session.read(cx);
+            (
+                session.compare_settings().clone(),
+                session.overrides().clone(),
+                session.replacements().to_vec(),
+            )
+        };
+        let replacement_rows = replacements
+            .into_iter()
+            .map(|(from, to)| {
+                let from_in = cx.new(|cx| {
+                    let mut s =
+                        InputState::new(window, cx).placeholder("Find");
+                    s.set_value(from, window, cx);
+                    s
+                });
+                let to_in = cx.new(|cx| {
+                    let mut s =
+                        InputState::new(window, cx).placeholder("Replace");
+                    s.set_value(to, window, cx);
+                    s
+                });
+                (from_in, to_in)
+            })
+            .collect();
         Self {
             ignore_case: settings.ignore_case,
             ignore_whitespace: !matches!(
@@ -4844,12 +5505,35 @@ impl TextRulesBody {
             ignore_blank_lines: settings.ignore_blank_lines,
             ignore_comments: settings.ignore_comments,
             ignore_numeric: settings.ignore_numeric_changes,
+            colors: ColorFields::new(&overrides, window, cx),
+            replacement_rows,
+            error: None,
             session,
         }
     }
 
-    /// Push the drafted rules into the session and re-diff.
+    /// Push the drafted rules, colors, and replacements into the session.
+    ///
+    /// An invalid color aborts the apply and leaves the dialog open with a
+    /// message, so a typo never silently drops a preference.
     fn apply(&mut self, cx: &mut Context<Self>) {
+        let colors = match self.colors.collect(cx) {
+            Ok(colors) => colors,
+            Err(e) => {
+                self.error = Some(e);
+                cx.notify();
+                return;
+            }
+        };
+        let mut replacements = Vec::new();
+        for (from_in, to_in) in &self.replacement_rows {
+            let from = from_in.read(cx).value().to_string();
+            if from.is_empty() {
+                continue;
+            }
+            let to = to_in.read(cx).value().to_string();
+            replacements.push((from, to));
+        }
         let settings = TextCompareSettings {
             ignore_case: self.ignore_case,
             whitespace_mode: if self.ignore_whitespace {
@@ -4862,8 +5546,12 @@ impl TextRulesBody {
             ignore_numeric_changes: self.ignore_numeric,
             ..TextCompareSettings::new()
         };
-        self.session
-            .update(cx, |s, cx| s.set_compare_settings(settings, cx));
+        self.error = None;
+        self.session.update(cx, |s, cx| {
+            s.set_compare_settings(settings, cx);
+            s.set_overrides(colors, cx);
+            s.set_replacements(replacements, cx);
+        });
     }
 
     fn toggle(
@@ -4875,6 +5563,20 @@ impl TextRulesBody {
         field(self, checked);
         cx.notify();
     }
+
+    /// Append an empty find/replace row.
+    fn add_replacement(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let from_in =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Find"));
+        let to_in =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Replace"));
+        self.replacement_rows.push((from_in, to_in));
+        cx.notify();
+    }
 }
 
 impl Render for TextRulesBody {
@@ -4883,6 +5585,14 @@ impl Render for TextRulesBody {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let theme = cx.theme();
+        let heading = |label: &'static str| {
+            div()
+                .text_xs()
+                .font_weight(gpui::FontWeight::BOLD)
+                .text_color(theme.muted_foreground)
+                .child(label)
+        };
         let row = |label: &'static str,
                    checked: bool,
                    handler: fn(&mut Self, bool)| {
@@ -4893,9 +5603,50 @@ impl Render for TextRulesBody {
                     this.toggle(handler, *checked, cx);
                 }))
         };
+        let replacement_rows = v_flex().gap_1().children(
+            self.replacement_rows.iter().enumerate().map(
+                |(ix, (from_in, to_in))| {
+                    h_flex()
+                        .items_center()
+                        .gap_1()
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .child(Input::new(from_in).small()),
+                        )
+                        .child(div().text_xs().child("→"))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .child(Input::new(to_in).small()),
+                        )
+                        .child(
+                            Button::new(ElementId::Name(
+                                format!("rep_rm_{ix}").into(),
+                            ))
+                            .icon(IconName::Close)
+                            .ghost()
+                            .xsmall()
+                            .tooltip("Remove substitution")
+                            .accessibility_label("Remove substitution")
+                            .on_click(
+                                cx.listener(move |this, _, _, cx| {
+                                    if ix < this.replacement_rows.len() {
+                                        this.replacement_rows.remove(ix);
+                                        cx.notify();
+                                    }
+                                }),
+                            ),
+                        )
+                },
+            ),
+        );
         v_flex()
             .w_full()
-            .gap_2()
+            .gap_3()
+            .child(heading("Compare rules"))
             .child(row("Ignore case", self.ignore_case, |this, v| {
                 this.ignore_case = v
             }))
@@ -4919,6 +5670,28 @@ impl Render for TextRulesBody {
                 self.ignore_numeric,
                 |this, v| this.ignore_numeric = v,
             ))
+            .child(div().w_full().h_px().bg(theme.border))
+            .child(heading("Colors"))
+            .child(self.colors.render())
+            .child(div().w_full().h_px().bg(theme.border))
+            .child(heading("Replacements"))
+            .child(div().text_xs().text_color(theme.muted_foreground).child(
+                "Auto-substitutions applied to both sides during comparison; \
+                 a substituted-equal pair aligns as identical.",
+            ))
+            .child(replacement_rows)
+            .child(
+                Button::new("rep_add")
+                    .label("Add substitution")
+                    .xsmall()
+                    .ghost()
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.add_replacement(window, cx);
+                    })),
+            )
+            .when_some(self.error.clone(), |this, err| {
+                this.child(div().text_sm().text_color(theme.danger).child(err))
+            })
             .child(
                 h_flex().justify_end().child(
                     Button::new("rules_apply")
@@ -4938,12 +5711,15 @@ pub(crate) fn open_text_rules_dialog(
     window: &mut Window,
     cx: &mut App,
 ) {
-    let body = cx.new(|cx| TextRulesBody::new(session, cx));
+    let body = cx.new(|cx| TextRulesBody::new(session, window, cx));
     window.open_dialog(cx, move |dialog, _, _| {
-        dialog
-            .title("Session rules")
-            .w(px(420.))
-            .child(body.clone())
+        dialog.title("Session rules").w(px(480.)).child(
+            div()
+                .id(ElementId::Name("text_rules_scroll".into()))
+                .max_h(px(520.))
+                .overflow_y_scroll()
+                .child(body.clone()),
+        )
     });
 }
 
@@ -5921,5 +6697,86 @@ mod tests {
         cx.update(|cx| {
             assert_eq!(session.read(cx).detail_mode(), DetailMode::Hex);
         });
+    }
+
+    #[gpui::test]
+    fn rust_grammar_marks_comment_differences_minor(cx: &mut App) {
+        let session =
+            cx.new(|cx| TextDiffSession::for_test("// a\n", "// b\n", cx));
+        // With no grammar the comment lines are unclassified, so the
+        // difference stays important.
+        session.update(cx, |s, _| {
+            let changed = s
+                .rows
+                .iter()
+                .find(|r| r.status == RowStatus::Changed)
+                .expect("one changed row");
+            assert!(!changed.minor);
+        });
+        // A Rust grammar classifies both lines as comments, making the
+        // change minor (spec section 5.2).
+        session.update(cx, |s, cx| {
+            s.compare_settings.grammar = Some(Grammar::rust());
+            s.recompare(cx);
+            let changed = s
+                .rows
+                .iter()
+                .find(|r| r.status == RowStatus::Changed)
+                .expect("one changed row");
+            assert!(changed.minor);
+        });
+    }
+
+    #[gpui::test]
+    fn replacements_align_substituted_pairs(cx: &mut App) {
+        let session =
+            cx.new(|cx| TextDiffSession::for_test("foo\n", "bar\n", cx));
+        session.update(cx, |s, _| {
+            assert_eq!(s.info_stats().changes, 1);
+        });
+        // Substituting "foo"→"bar" on both sides makes the pair compare
+        // equal, so it no longer counts as a difference.
+        session.update(cx, |s, cx| {
+            s.set_replacements(vec![("foo".into(), "bar".into())], cx);
+            assert_eq!(s.info_stats().changes, 0);
+            assert_eq!(s.replacements().len(), 1);
+        });
+    }
+
+    #[gpui::test]
+    fn format_override_drives_editor_language(cx: &mut App) {
+        let session = cx.new(|cx| {
+            TextDiffSession::for_test("fn main() {}\n", "fn main() { }\n", cx)
+        });
+        // A `.txt` endpoint has no language until the format forces one.
+        session.update(cx, |s, _| {
+            assert_eq!(s.editor_lang(Side::Left).as_ref(), "text");
+        });
+        session.update(cx, |s, cx| {
+            s.set_format(Side::Left, "Rust", cx);
+            assert_eq!(s.editor_lang(Side::Left).as_ref(), "rust");
+            assert_eq!(s.left_format_label(cx), "Rust");
+        });
+    }
+
+    #[gpui::test]
+    fn word_wrap_is_per_session(cx: &mut App) {
+        let left = cx.new(|cx| TextDiffSession::for_test("a\n", "b\n", cx));
+        let right = cx.new(|cx| TextDiffSession::for_test("a\n", "b\n", cx));
+        left.update(cx, |s, cx| s.toggle_wrap(cx));
+        assert!(left.read(cx).is_word_wrap());
+        assert!(!right.read(cx).is_word_wrap());
+    }
+
+    #[gpui::test]
+    fn step_difference_files_without_parent_is_safe(cx: &mut App) {
+        use gpui::AppContext as _;
+        cx.set_global(crate::log::LogBuffer::default());
+        let session = cx.new(|cx| TextDiffSession::for_test("a\n", "b\n", cx));
+        // No parent or manager: the command logs a warning and returns
+        // without panicking or changing the session.
+        session.update(cx, |s, cx| s.step_difference_files(1, cx));
+        session.update(cx, |s, cx| s.step_difference_files(-1, cx));
+        assert_eq!(session.read(cx).info_stats().changes, 1);
     }
 }

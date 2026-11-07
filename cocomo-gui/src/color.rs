@@ -19,7 +19,17 @@
 //! hook of spec section 7.1).
 
 use cocomo_lib::{ColorOverrides, DirEntry, DirEntryStatus};
-use gpui::{App, Hsla, Rgba};
+use gpui::{
+    App, Entity, Hsla, IntoElement, Rgba, Window,
+    component::{
+        Sizable as _, h_flex,
+        input::{Input, InputState},
+        label::Label,
+        v_flex,
+    },
+    div,
+    prelude::*,
+};
 
 use crate::state::status_category;
 
@@ -166,6 +176,109 @@ pub fn gutter_icon(entry: &DirEntry, ignored: bool) -> &'static str {
         crate::state::StatusCategory::Same => "=",
         crate::state::StatusCategory::Orphan => "|",
         crate::state::StatusCategory::Different => "~",
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Per-session color override editor
+// ---------------------------------------------------------------------------
+
+/// The four semantic color fields, shared by the Options dialog and the
+/// per-session rules dialogs (spec section 7.1: colors configurable
+/// globally and per session).
+///
+/// The inputs are `RenderOnce`-hosted `InputState` entities so a dialog
+/// that rebuilds its body keeps the edited values; validation and
+/// extraction live here so every surface parses hex the same way.
+pub struct ColorFields {
+    fields: Vec<(&'static str, &'static str, Entity<InputState>)>,
+}
+
+/// The `(key, label)` pairs in display order.
+const FIELDS: [(&str, &str); 4] = [
+    ("important", "Important difference"),
+    ("minor", "Minor difference"),
+    ("orphan", "Orphan entry"),
+    ("other_side", "Older side"),
+];
+
+impl ColorFields {
+    /// Create the four inputs, seeded from `overrides`.
+    pub fn new(
+        overrides: &ColorOverrides,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Self {
+        let seed = |key: &str| match key {
+            "important" => overrides.important.clone(),
+            "minor" => overrides.minor.clone(),
+            "orphan" => overrides.orphan.clone(),
+            "other_side" => overrides.other_side.clone(),
+            _ => None,
+        };
+        let fields = FIELDS
+            .into_iter()
+            .map(|(key, label)| {
+                let value = seed(key);
+                let input = cx.new(|cx| {
+                    let mut state =
+                        InputState::new(window, cx).placeholder("#rrggbb");
+                    if let Some(value) = value {
+                        state.set_value(value, window, cx);
+                    }
+                    state
+                });
+                (key, label, input)
+            })
+            .collect();
+        Self { fields }
+    }
+
+    /// Render the labeled hex-color rows.
+    pub fn render(&self) -> impl IntoElement {
+        v_flex().gap_2().children(self.fields.iter().map(
+            |(_, label, input)| {
+                h_flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .w_40()
+                            .flex_shrink_0()
+                            .child(Label::new(*label).text_sm()),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(Input::new(input).small()),
+                    )
+            },
+        ))
+    }
+
+    /// Validate the fields and collect them into overrides. An empty field
+    /// clears that role (falls back to the theme); a malformed hex is an
+    /// error so a typo never silently drops a color.
+    pub fn collect(&self, cx: &App) -> Result<ColorOverrides, String> {
+        let mut out = ColorOverrides::default();
+        for (key, _, input) in &self.fields {
+            let value = input.read(cx).value().trim().to_string();
+            if value.is_empty() {
+                continue;
+            }
+            Rgba::try_from(value.as_str()).map_err(|e| {
+                format!("\"{value}\" is not a valid color. {e}")
+            })?;
+            match *key {
+                "important" => out.important = Some(value),
+                "minor" => out.minor = Some(value),
+                "orphan" => out.orphan = Some(value),
+                "other_side" => out.other_side = Some(value),
+                _ => {}
+            }
+        }
+        Ok(out)
     }
 }
 
