@@ -77,6 +77,10 @@ pub struct AppOptions {
     /// Snapshot dirty sessions periodically so a crash loses little work.
     #[serde(default = "default_true")]
     pub auto_save_sessions: bool,
+    /// Merge the shared toolbar row and the view's row 2 into a single
+    /// horizontal row instead of stacking them.
+    #[serde(default)]
+    pub single_row_toolbar: bool,
     /// Global row-color overrides (spec section 7.1).
     #[serde(default)]
     pub colors: ColorOverrides,
@@ -92,6 +96,7 @@ impl Default for AppOptions {
         Self {
             restore_workspace_on_launch: true,
             auto_save_sessions: true,
+            single_row_toolbar: false,
             colors: ColorOverrides::default(),
             commands: HashMap::new(),
         }
@@ -278,6 +283,7 @@ pub fn open_options_dialog(window: &mut Window, cx: &mut App) {
 fn render_general_page(draft: &Entity<OptionsDraft>, cx: &App) -> AnyElement {
     let restore = draft.read(cx).working.restore_workspace_on_launch;
     let auto_save = draft.read(cx).working.auto_save_sessions;
+    let single_row = draft.read(cx).working.single_row_toolbar;
 
     let restore_switch = {
         let draft_restore = draft.clone();
@@ -306,10 +312,25 @@ fn render_general_page(draft: &Entity<OptionsDraft>, cx: &App) -> AnyElement {
             })
     };
 
+    let single_row_switch = {
+        let draft_row = draft.clone();
+        Switch::new("options_single_row_toolbar")
+            .label("Show toolbars in a single row")
+            .checked(single_row)
+            .on_click(move |checked, _, cx| {
+                let checked = *checked;
+                draft_row.update(cx, |d, cx| {
+                    d.working.single_row_toolbar = checked;
+                    cx.notify();
+                });
+            })
+    };
+
     v_flex()
         .gap_3()
         .child(restore_switch)
         .child(auto_save_switch)
+        .child(single_row_switch)
         .child(
             div()
                 .text_xs()

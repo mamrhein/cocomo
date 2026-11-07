@@ -88,6 +88,7 @@ actions!(
         ToggleShowOrphans,
         ToggleWordWrap,
         ToggleLogPane,
+        ToggleSingleRowToolbar,
         SessionSettings,
         ClearSession,
         CompareParentFolders,
@@ -185,6 +186,9 @@ pub struct MenuState {
     pub can_go_forward: bool,
     /// Whether the log pane is visible (checkmark on the View toggle).
     pub log_open: bool,
+    /// Whether the toolbars render in a single merged row (checkmark on
+    /// the View toggle).
+    pub single_row_toolbar: bool,
     /// Whether the active text compare wraps long lines (checkmark on
     /// the View toggle).
     pub word_wrap: bool,
@@ -230,6 +234,7 @@ impl MenuState {
             can_go_back: false,
             can_go_forward: false,
             log_open: true,
+            single_row_toolbar: false,
             word_wrap: false,
             show_thumbnails: false,
             is_text_editing: false,
@@ -779,6 +784,12 @@ fn build_app_menus(
                 MenuItem::action("Log pane", ToggleLogPane)
                     .checked(state.log_open)
             }),
+            // The single-row layout is an application option; the global
+            // handler toggles and persists it for every window.
+            show(hidden, "view.single_row_toolbar", || {
+                MenuItem::action("Single-row toolbar", ToggleSingleRowToolbar)
+                    .checked(state.single_row_toolbar)
+            }),
         ])),
         Menu::new("Tools").items(items([
             show(hidden, "tools.options", || {
@@ -1095,6 +1106,30 @@ pub fn register_menu_handlers(cx: &mut App) {
     // observes, so the toggle works regardless of which view has focus.
     cx.on_action(move |_action: &ToggleLogPane, cx: &mut App| {
         cx.update_global::<LogPaneOpen, _>(|open, _| open.0 = !open.0);
+    });
+
+    // View menu — the single-row toolbar is a persisted application
+    // option. Toggling it updates the global (which every window root
+    // observes), saves it, and refreshes the windows so the toolbars
+    // re-layout; the menu checkmark follows through the window root's
+    // recomputed snapshot.
+    cx.on_action(move |_action: &ToggleSingleRowToolbar, cx: &mut App| {
+        let enabled = {
+            let options = cx.global::<crate::options::AppOptions>();
+            !options.single_row_toolbar
+        };
+        cx.update_global::<crate::options::AppOptions, _>(|options, _| {
+            options.single_row_toolbar = enabled;
+        });
+        let options = cx.global::<crate::options::AppOptions>().clone();
+        if let Err(e) = crate::options::save_options(&options) {
+            log::push(
+                LogLevel::Error,
+                format!("Failed to save the toolbar layout option: {e}"),
+                cx,
+            );
+        }
+        crate::windows::refresh_all_windows(cx);
     });
 
     // Session menu — reload is handled by the focused folder view; the

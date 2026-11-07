@@ -391,20 +391,19 @@ impl FolderCompareView {
                 menu
             });
 
-        // The full filter editor is a later phase; the dialog container
-        // already exists so the entry point is discoverable.
+        // The full filter editor manages the session's include and
+        // exclude rule list; the combo above stays the quick path.
         let filters_btn = Button::new("row2_filters_dialog")
             .icon(IconName::Ellipsis)
             .ghost()
             .small()
             .tooltip("Open filter editor")
             .accessibility_label("Open filter editor")
-            .on_click(|_, window, cx| {
-                window.open_dialog(cx, |dialog, _, _| {
-                    dialog.title("Filters").child(
-                        "The full filter editor arrives in a later phase.",
-                    )
-                });
+            .on_click({
+                let state = self.state.clone();
+                move |_, window, cx| {
+                    open_filter_editor_dialog(state.clone(), window, cx);
+                }
             });
 
         // Difference sections are a text-view concept; the buttons are
@@ -784,97 +783,15 @@ impl FolderCompareView {
 
     /// Run the transfer `action` on the selected entry.
     ///
-    /// Orphans transfer immediately; operations that overwrite an
-    /// existing entry or delete content first ask for confirmation in
-    /// an alert dialog, per the spec's overwrite rule.
+    /// Delegates to the free function of the same name so the toolbar's
+    /// Ops group can reuse the confirmation flow.
     fn run_transfer_action(
         &mut self,
         action: TransferAction,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(plan) = self.state.read(cx).transfer_plan(action) else {
-            self.state.update(cx, |state, cx| {
-                state.explain_blocked_transfer(cx);
-            });
-            return;
-        };
-        if !plan.confirm {
-            self.state
-                .update(cx, |state, cx| state.run_transfer(plan, cx));
-            return;
-        }
-        let name = plan.item.name.clone();
-        let verb = match action {
-            TransferAction::DeleteLeft | TransferAction::DeleteRight => {
-                "delete"
-            }
-            TransferAction::MoveLeft | TransferAction::MoveRight => "move",
-            _ => "copy",
-        };
-        let side = match action {
-            TransferAction::CopyLeft
-            | TransferAction::MoveLeft
-            | TransferAction::DeleteLeft => "left",
-            _ => "right",
-        };
-        let (title, description, ok_text, danger) = match verb {
-            "delete" => (
-                format!("Delete from the {side}?"),
-                format!(
-                    "\"{name}\" is removed from the {side} side. This cannot \
-                     be undone."
-                ),
-                "Delete",
-                true,
-            ),
-            "move" => (
-                format!("Move to the {side}?"),
-                if plan.confirm {
-                    format!(
-                        "\"{name}\" already exists on the {side} side and \
-                         will be replaced. The source copy is removed."
-                    )
-                } else {
-                    format!(
-                        "\"{name}\" is moved to the {side} side; the source \
-                         copy is removed."
-                    )
-                },
-                "Move",
-                false,
-            ),
-            _ => (
-                format!("Overwrite on the {side}?"),
-                format!(
-                    "\"{name}\" already exists on the {side} side and will \
-                     be replaced."
-                ),
-                "Replace",
-                false,
-            ),
-        };
-        let state = self.state.clone();
-        window.open_alert_dialog(cx, move |alert, _, _| {
-            // Clone per builder call: the builder is an `Fn` closure
-            // that may run on every layer rebuild.
-            let state = state.clone();
-            let plan = plan.clone();
-            let mut alert = alert
-                .confirm()
-                .title(title.clone())
-                .description(description.clone())
-                .ok_text(ok_text);
-            if danger {
-                alert = alert.ok_variant(ButtonVariant::Danger);
-            }
-            alert.on_ok(move |_, _, cx| {
-                state.update(cx, |state, cx| {
-                    state.run_transfer(plan.clone(), cx);
-                });
-                true
-            })
-        });
+        run_transfer_action(self.state.clone(), action, window, cx);
     }
 
     /// Handle copy-to-left: reconcile the selected entry by copying it
@@ -2138,6 +2055,295 @@ fn status_legend(theme: &Theme) -> impl IntoElement {
                     )
             },
         )))
+}
+
+// ---------------------------------------------------------------------------
+// Transfer confirmation
+// ---------------------------------------------------------------------------
+
+/// Run the transfer `action` on the selected entry of `state`.
+///
+/// Orphans transfer immediately; operations that overwrite an existing
+/// entry or delete content first ask for confirmation in an alert
+/// dialog, per the spec's overwrite rule. Shared by the view's action
+/// handlers and the toolbar's Ops group.
+pub(crate) fn run_transfer_action(
+    state: Entity<AppState>,
+    action: TransferAction,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let Some(plan) = state.read(cx).transfer_plan(action) else {
+        state.update(cx, |state, cx| {
+            state.explain_blocked_transfer(cx);
+        });
+        return;
+    };
+    if !plan.confirm {
+        state.update(cx, |state, cx| state.run_transfer(plan, cx));
+        return;
+    }
+    let name = plan.item.name.clone();
+    let verb = match action {
+        TransferAction::DeleteLeft | TransferAction::DeleteRight => "delete",
+        TransferAction::MoveLeft | TransferAction::MoveRight => "move",
+        _ => "copy",
+    };
+    let side = match action {
+        TransferAction::CopyLeft
+        | TransferAction::MoveLeft
+        | TransferAction::DeleteLeft => "left",
+        _ => "right",
+    };
+    let (title, description, ok_text, danger) = match verb {
+        "delete" => (
+            format!("Delete from the {side}?"),
+            format!(
+                "\"{name}\" is removed from the {side} side. This cannot be \
+                 undone."
+            ),
+            "Delete",
+            true,
+        ),
+        "move" => (
+            format!("Move to the {side}?"),
+            if plan.confirm {
+                format!(
+                    "\"{name}\" already exists on the {side} side and will \
+                     be replaced. The source copy is removed."
+                )
+            } else {
+                format!(
+                    "\"{name}\" is moved to the {side} side; the source copy \
+                     is removed."
+                )
+            },
+            "Move",
+            false,
+        ),
+        _ => (
+            format!("Overwrite on the {side}?"),
+            format!(
+                "\"{name}\" already exists on the {side} side and will be \
+                 replaced."
+            ),
+            "Replace",
+            false,
+        ),
+    };
+    window.open_alert_dialog(cx, move |alert, _, _| {
+        // Clone per builder call: the builder is an `Fn` closure
+        // that may run on every layer rebuild.
+        let state = state.clone();
+        let plan = plan.clone();
+        let mut alert = alert
+            .confirm()
+            .title(title.clone())
+            .description(description.clone())
+            .ok_text(ok_text);
+        if danger {
+            alert = alert.ok_variant(ButtonVariant::Danger);
+        }
+        alert.on_ok(move |_, _, cx| {
+            state.update(cx, |state, cx| {
+                state.run_transfer(plan.clone(), cx);
+            });
+            true
+        })
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Filter editor dialog
+// ---------------------------------------------------------------------------
+
+/// Body of the full filter editor dialog. A `Render` entity so the rule
+/// list repaints as rules are added or removed.
+///
+/// Each rule is one glob token; a `!` prefix marks an exclude rule. The
+/// draft is pushed into the session settings on Apply, where it joins
+/// the quick toolbar pattern for the displayed rows.
+struct FilterEditorBody {
+    state: Entity<AppState>,
+    /// Draft rules, in list order.
+    rules: Vec<String>,
+    /// Pattern input for the next rule.
+    pattern_input: Entity<InputState>,
+}
+
+impl FilterEditorBody {
+    fn new(
+        state: Entity<AppState>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let rules = state.read(cx).filter_rules().to_vec();
+        Self {
+            state,
+            rules,
+            pattern_input: cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder("Glob pattern, e.g. *.rs or vendor/*")
+            }),
+        }
+    }
+
+    /// Add the input's value as an include or exclude rule and clear
+    /// the input. Duplicate tokens are ignored.
+    fn add_rule(
+        &mut self,
+        exclude: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let value = self.pattern_input.read(cx).value().trim().to_string();
+        if value.is_empty() {
+            return;
+        }
+        let token = if value.starts_with('!') || !exclude {
+            value
+        } else {
+            format!("!{value}")
+        };
+        if !self.rules.contains(&token) {
+            self.rules.push(token);
+        }
+        self.pattern_input.update(cx, |input, cx| {
+            input.set_value("", window, cx);
+        });
+        cx.notify();
+    }
+
+    /// Drop the rule at `index` from the draft.
+    fn remove_rule(&mut self, index: usize, cx: &mut Context<Self>) {
+        if index < self.rules.len() {
+            self.rules.remove(index);
+            cx.notify();
+        }
+    }
+
+    /// Push the drafted rules into the session and re-apply the filter.
+    fn apply(&self, cx: &mut App) {
+        let rules = self.rules.clone();
+        self.state
+            .update(cx, |state, cx| state.set_filter_rules(rules, cx));
+    }
+}
+
+impl Render for FilterEditorBody {
+    fn render(
+        &mut self,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let theme = cx.theme();
+        let rules_row = |(ix, rule): (usize, String)| {
+            let (kind, pattern) = match rule.strip_prefix('!') {
+                Some(pattern) => ("exclude", pattern.to_string()),
+                None => ("include", rule.clone()),
+            };
+            h_flex()
+                .w_full()
+                .items_center()
+                .gap_2()
+                .child(
+                    div()
+                        .w(gpui::px(56.))
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(kind),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .text_sm()
+                        .text_color(theme.foreground)
+                        .child(pattern),
+                )
+                .child(
+                    Button::new(("filter_rule_remove", ix))
+                        .icon(IconName::X)
+                        .ghost()
+                        .xsmall()
+                        .tooltip("Remove rule")
+                        .accessibility_label(format!("Remove rule {rule}"))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.remove_rule(ix, cx);
+                        })),
+                )
+        };
+        let list = if self.rules.is_empty() {
+            div()
+                .w_full()
+                .text_sm()
+                .text_color(theme.muted_foreground)
+                .child(
+                    "No rules yet. Add include patterns to narrow the rows \
+                     and exclude patterns (or the ! prefix) to hide them.",
+                )
+        } else {
+            v_flex().w_full().gap_1().children(
+                self.rules.clone().into_iter().enumerate().map(rules_row),
+            )
+        };
+        v_flex()
+            .w_full()
+            .gap_3()
+            .child(list)
+            .child(
+                h_flex()
+                    .w_full()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        Input::new(&self.pattern_input)
+                            .small()
+                            .flex_1()
+                            .text_color(theme.foreground),
+                    )
+                    .child(
+                        Button::new("filter_rule_add_include")
+                            .label("Add include")
+                            .small()
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.add_rule(false, window, cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("filter_rule_add_exclude")
+                            .label("Add exclude")
+                            .small()
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.add_rule(true, window, cx);
+                            })),
+                    ),
+            )
+            .child(
+                h_flex().justify_end().child(
+                    Button::new("filter_editor_apply")
+                        .label("Apply")
+                        .primary()
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.apply(cx);
+                        })),
+                ),
+            )
+    }
+}
+
+/// Open the full filter editor for a folder compare session.
+pub(crate) fn open_filter_editor_dialog(
+    state: Entity<AppState>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let body = cx.new(|cx| FilterEditorBody::new(state, window, cx));
+    window.open_dialog(cx, move |dialog, _, _| {
+        dialog
+            .title("Filter rules")
+            .w(gpui::px(480.))
+            .child(body.clone())
+    });
 }
 
 // ---------------------------------------------------------------------------

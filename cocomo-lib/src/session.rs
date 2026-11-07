@@ -159,6 +159,11 @@ pub struct SessionSettings {
     /// Name filter patterns (glob).
     #[serde(default)]
     pub name_filter: Vec<String>,
+    /// Full filter editor rules: one glob pattern per entry, `!` prefix
+    /// marks an exclude rule. Applied to the displayed rows together with
+    /// the quick toolbar pattern.
+    #[serde(default)]
+    pub filter_rules: Vec<String>,
     /// Ignore whitespace differences in text comparison.
     #[serde(default)]
     pub ignore_whitespace: bool,
@@ -192,6 +197,7 @@ impl Default for SessionSettings {
             compare_files: true,
             compare_structure: true,
             name_filter: Vec::new(),
+            filter_rules: Vec::new(),
             ignore_whitespace: false,
             skip_blank_lines: false,
             skip_comments: false,

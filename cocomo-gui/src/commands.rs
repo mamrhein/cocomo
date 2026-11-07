@@ -44,7 +44,8 @@ use crate::{
         PrevSection, Quit, ReloadCompare, RestoreWorkspace, SaveFile,
         SaveFileAs, SaveSession, SaveSessionAs, SaveWorkspace, SessionInfo,
         SessionReport, SessionSettings, StopCompare, ToggleLogPane,
-        ToggleMergeAncestor, ToggleWordWrap, menu_bindings,
+        ToggleMergeAncestor, ToggleSingleRowToolbar, ToggleWordWrap,
+        menu_bindings,
     },
     options::{self, AppOptions},
     text_diff::{
@@ -788,6 +789,13 @@ pub fn all_commands() -> Vec<CommandSpec> {
             default_binding: None,
             action: Some(action::<ToggleLogPane>),
         },
+        CommandSpec {
+            id: "view.single_row_toolbar",
+            label: "Single-row toolbar",
+            category: "View",
+            default_binding: None,
+            action: Some(action::<ToggleSingleRowToolbar>),
+        },
         // Folder row context menu
         CommandSpec {
             id: "folder.open",
@@ -919,6 +927,48 @@ pub fn all_commands() -> Vec<CommandSpec> {
         CommandSpec {
             id: "toolbar.filters",
             label: "Display filters",
+            category: "Toolbar",
+            default_binding: None,
+            action: None,
+        },
+        CommandSpec {
+            id: "toolbar.structure",
+            label: "Structure menu",
+            category: "Toolbar",
+            default_binding: None,
+            action: None,
+        },
+        CommandSpec {
+            id: "toolbar.context",
+            label: "Context menu",
+            category: "Toolbar",
+            default_binding: None,
+            action: None,
+        },
+        CommandSpec {
+            id: "toolbar.expand",
+            label: "Expand all directories",
+            category: "Toolbar",
+            default_binding: None,
+            action: None,
+        },
+        CommandSpec {
+            id: "toolbar.collapse",
+            label: "Collapse all directories",
+            category: "Toolbar",
+            default_binding: None,
+            action: None,
+        },
+        CommandSpec {
+            id: "toolbar.select",
+            label: "Select menu",
+            category: "Toolbar",
+            default_binding: None,
+            action: None,
+        },
+        CommandSpec {
+            id: "toolbar.files",
+            label: "Files menu",
             category: "Toolbar",
             default_binding: None,
             action: None,

@@ -639,16 +639,27 @@ pub(crate) enum DisplayRow {
     Line(usize),
     /// Collapsed section header for `count` hidden rows.
     Filtered { section: usize, count: usize },
+    /// Non-interactive header standing in for `count` context rows that
+    /// the section context depth hides between differences.
+    Context { count: usize },
 }
 
-/// Build the display list from the rows and the collapsed sections.
+/// Build the display list from the rows, the collapsed sections, and the
+/// context depth.
 ///
 /// Returns the display rows, the row-index → display-index map, and the
 /// section-index → display-index map (`usize::MAX` for absent entries).
+///
+/// With a context depth of `Some(n)`, every maximal run of context rows
+/// (rows outside any section) longer than `2n` is folded to its first
+/// and last `n` rows plus a [`DisplayRow::Context`] header for the
+/// hidden middle; `Some(0)` hides whole context runs. `None` keeps the
+/// full context.
 pub(crate) fn display_rows(
     rows: &[DiffRow],
     sections: &[DiffSection],
     collapsed: &HashSet<usize>,
+    context_depth: Option<usize>,
 ) -> (Vec<DisplayRow>, Vec<usize>, Vec<usize>) {
     let mut section_of_row = vec![usize::MAX; rows.len()];
     for (si, section) in sections.iter().enumerate() {
@@ -659,6 +670,11 @@ pub(crate) fn display_rows(
     let mut display = Vec::with_capacity(rows.len());
     let mut line_display = vec![usize::MAX; rows.len()];
     let mut section_display = vec![usize::MAX; sections.len()];
+    let push_line =
+        |display: &mut Vec<DisplayRow>, line_display: &mut Vec<usize>, r| {
+            line_display[r] = display.len();
+            display.push(DisplayRow::Line(r));
+        };
     let mut i = 0;
     while i < rows.len() {
         let si = section_of_row[i];
@@ -670,10 +686,35 @@ pub(crate) fn display_rows(
                 count: section.end_row - section.start_row,
             });
             i = section.end_row;
-        } else {
-            line_display[i] = display.len();
-            display.push(DisplayRow::Line(i));
+        } else if si != usize::MAX {
+            push_line(&mut display, &mut line_display, i);
             i += 1;
+        } else {
+            // Maximal context run [i, end): fold it when a context
+            // depth is set and the run is longer than the kept edges.
+            let mut end = i;
+            while end < rows.len() && section_of_row[end] == usize::MAX {
+                end += 1;
+            }
+            let len = end - i;
+            let fold = context_depth.is_some_and(|n| len > 2 * n);
+            if fold {
+                let keep = context_depth.unwrap_or(0);
+                for r in i..i + keep {
+                    push_line(&mut display, &mut line_display, r);
+                }
+                display.push(DisplayRow::Context {
+                    count: len - 2 * keep,
+                });
+                for r in end - keep..end {
+                    push_line(&mut display, &mut line_display, r);
+                }
+            } else {
+                for r in i..end {
+                    push_line(&mut display, &mut line_display, r);
+                }
+            }
+            i = end;
         }
     }
     (display, line_display, section_display)
@@ -984,6 +1025,9 @@ pub struct TextDiffSession {
     is_section_start: Arc<Vec<bool>>,
     /// Collapsed section indices.
     collapsed: HashSet<usize>,
+    /// Context lines kept around each difference (`None` shows the
+    /// full context, `Some(0)` shows only the differences).
+    context_depth: Option<usize>,
     /// Selected display index.
     selected: Option<usize>,
     /// Whether a load is in flight.
@@ -1074,6 +1118,7 @@ impl TextDiffSession {
             row_section: Arc::new(Vec::new()),
             is_section_start: Arc::new(Vec::new()),
             collapsed: HashSet::new(),
+            context_depth: None,
             selected: None,
             loading: false,
             load_revision: 0,
@@ -1198,7 +1243,7 @@ impl TextDiffSession {
         let d = self.selected?;
         match self.display.get(d)? {
             DisplayRow::Line(r) => self.rows.get(*r),
-            DisplayRow::Filtered { .. } => None,
+            DisplayRow::Filtered { .. } | DisplayRow::Context { .. } => None,
         }
     }
 
@@ -1476,11 +1521,15 @@ impl TextDiffSession {
         self.rebuild_display();
     }
 
-    /// Rebuild the display list from rows and collapsed sections, keeping
-    /// the selection within bounds.
+    /// Rebuild the display list from rows, collapsed sections, and the
+    /// context depth, keeping the selection within bounds.
     fn rebuild_display(&mut self) {
-        let (display, _line_display, section_display) =
-            display_rows(&self.rows, &self.sections, &self.collapsed);
+        let (display, _line_display, section_display) = display_rows(
+            &self.rows,
+            &self.sections,
+            &self.collapsed,
+            self.context_depth,
+        );
         self.display = Arc::new(display);
         self.section_display = Arc::new(section_display);
         if let Some(sel) = self.selected
@@ -1568,6 +1617,28 @@ impl TextDiffSession {
         if !self.collapsed.remove(&section) {
             self.collapsed.insert(section);
         }
+        self.rebuild_display();
+        cx.notify();
+    }
+
+    /// Context lines kept around each difference, or `None` for the
+    /// full context.
+    pub fn context_depth(&self) -> Option<usize> {
+        self.context_depth
+    }
+
+    /// Set the section context depth: keep `depth` context lines around
+    /// each difference (`Some(0)` shows the differences only, `None`
+    /// shows the full context) and rebuild the display list.
+    pub fn set_context_depth(
+        &mut self,
+        depth: Option<usize>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.context_depth == depth {
+            return;
+        }
+        self.context_depth = depth;
         self.rebuild_display();
         cx.notify();
     }
@@ -4487,6 +4558,17 @@ fn render_diff_row(
                 })
                 .into_any_element()
         }
+        DisplayRow::Context { count } => div()
+            .id((ElementId::from("text_context"), format!("{side_key}-{d}")))
+            .w_full()
+            .flex()
+            .flex_shrink_0()
+            .justify_center()
+            .py_0p5()
+            .text_xs()
+            .text_color(muted_fg)
+            .child(format!("{count} context lines hidden"))
+            .into_any_element(),
         DisplayRow::Line(r) => {
             let Some(row) = rows.get(*r) else {
                 return div().size_full().into_any_element();
@@ -5043,13 +5125,13 @@ mod tests {
         ];
         let sections = diff_sections(&rows);
         let (display, line_display, section_display) =
-            display_rows(&rows, &sections, &HashSet::new());
+            display_rows(&rows, &sections, &HashSet::new(), None);
         assert_eq!(display.len(), 4);
         // Expanded sections have no display index of their own.
         assert_eq!(section_display[0], usize::MAX);
         let collapsed = HashSet::from([0usize]);
         let (display, line_display_c, section_display) =
-            display_rows(&rows, &sections, &collapsed);
+            display_rows(&rows, &sections, &collapsed, None);
         assert_eq!(display.len(), 3);
         assert_eq!(
             display[1],
@@ -5061,6 +5143,60 @@ mod tests {
         assert_eq!(section_display[0], 1);
         assert_eq!(line_display_c[1], usize::MAX);
         assert_eq!(line_display[1], 1);
+    }
+
+    #[test]
+    fn display_rows_folds_context_runs_to_the_depth() {
+        // Four context rows, one difference, four context rows.
+        let mut rows = vec![row(Some(1), Some(1), RowStatus::Same, false); 4];
+        rows.push(row(Some(5), Some(5), RowStatus::Changed, false));
+        rows.extend(vec![row(Some(6), Some(6), RowStatus::Same, false); 4]);
+        let sections = diff_sections(&rows);
+
+        // Full context: every row is displayed.
+        let (display, ..) =
+            display_rows(&rows, &sections, &HashSet::new(), None);
+        assert_eq!(display.len(), 9);
+        assert!(
+            !display
+                .iter()
+                .any(|d| matches!(d, DisplayRow::Context { .. }))
+        );
+
+        // One context line per edge: each 4-row run folds to two rows
+        // plus a header for the hidden middle.
+        let (display, line_display, _) =
+            display_rows(&rows, &sections, &HashSet::new(), Some(1));
+        assert_eq!(
+            display,
+            vec![
+                DisplayRow::Line(0),
+                DisplayRow::Context { count: 2 },
+                DisplayRow::Line(3),
+                DisplayRow::Line(4),
+                DisplayRow::Line(5),
+                DisplayRow::Context { count: 2 },
+                DisplayRow::Line(8),
+            ]
+        );
+        assert_eq!(line_display[2], usize::MAX);
+
+        // Differences only: whole context runs become headers.
+        let (display, ..) =
+            display_rows(&rows, &sections, &HashSet::new(), Some(0));
+        assert_eq!(
+            display,
+            vec![
+                DisplayRow::Context { count: 4 },
+                DisplayRow::Line(4),
+                DisplayRow::Context { count: 4 },
+            ]
+        );
+
+        // A depth that already covers the run keeps everything.
+        let (display, ..) =
+            display_rows(&rows, &sections, &HashSet::new(), Some(2));
+        assert_eq!(display.len(), 9);
     }
 
     #[test]
@@ -5215,6 +5351,41 @@ mod tests {
                 s.swap_sides(cx);
                 assert_eq!(s.left_path(), "/right.txt");
                 assert_eq!(s.right_path(), "/left.txt");
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn context_depth_folds_context_runs(cx: &mut TestAppContext) {
+        let session = cx.new(|cx| {
+            TextDiffSession::for_test(
+                "a\nb\nc\nd\ne\nf\n",
+                "a\nb\nc\nX\ne\nf\n",
+                cx,
+            )
+        });
+
+        cx.update(|cx| {
+            session.update(cx, |s, cx| {
+                // Full context by default: all six aligned rows.
+                assert_eq!(s.context_depth(), None);
+                assert_eq!(s.display.len(), 6);
+
+                // Differences only: both context runs become headers.
+                s.set_context_depth(Some(0), cx);
+                assert_eq!(s.context_depth(), Some(0));
+                assert_eq!(
+                    s.display.to_vec(),
+                    vec![
+                        DisplayRow::Context { count: 3 },
+                        DisplayRow::Line(3),
+                        DisplayRow::Context { count: 2 },
+                    ]
+                );
+
+                // Restoring the full context rebuilds the row list.
+                s.set_context_depth(None, cx);
+                assert_eq!(s.display.len(), 6);
             });
         });
     }
@@ -5379,7 +5550,9 @@ mod tests {
                 DisplayRow::Line(r) => {
                     assert_eq!(s.rows[r].status, RowStatus::Changed)
                 }
-                DisplayRow::Filtered { .. } => panic!("expected a line row"),
+                DisplayRow::Filtered { .. } | DisplayRow::Context { .. } => {
+                    panic!("expected a line row")
+                }
             }
         });
 

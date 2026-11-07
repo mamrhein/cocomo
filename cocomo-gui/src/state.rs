@@ -356,15 +356,20 @@ fn entry_visible(
     }
 }
 
-/// Compile a toolbar filter pattern into a [`FilterSet`].
+/// Compile the toolbar's quick pattern and the filter editor's rules
+/// into a single [`FilterSet`].
 ///
-/// The pattern is a whitespace-separated list of glob tokens. A token
-/// prefixed with `!` excludes matching names; every other token includes
-/// them (include tokens are ORed, excludes subtract from them). Returns
-/// `None` when the pattern carries no token.
-fn compile_name_filter(pattern: &str) -> Option<FilterSet> {
+/// The quick pattern is a whitespace-separated list of glob tokens; each
+/// rule entry carries exactly one token (the editor keeps rules apart
+/// from each other). A token prefixed with `!` excludes matching names;
+/// every other token includes them (include tokens are ORed, excludes
+/// subtract from them). Returns `None` when neither carries a token.
+fn compile_name_filter(pattern: &str, rules: &[String]) -> Option<FilterSet> {
     let mut name_filters = Vec::new();
-    for token in pattern.split_whitespace() {
+    let tokens = pattern
+        .split_whitespace()
+        .chain(rules.iter().map(String::as_str));
+    for token in tokens {
         if let Some(exclude) = token.strip_prefix('!') {
             if !exclude.is_empty() {
                 name_filters.push(NameFilter::Exclude(Pattern::Glob(
@@ -458,6 +463,9 @@ struct TreeWalk<'a> {
     filters: &'a DisplayFilters,
     name_filter: Option<&'a FilterSet>,
     expanded: &'a HashSet<String>,
+    /// Hide directories whose aggregated subtree holds no difference
+    /// or orphan (sparse display).
+    sparse: bool,
 }
 
 /// Flatten the expanded subtree into display rows, depth-first.
@@ -472,6 +480,7 @@ fn compute_tree_rows(
     filters: &DisplayFilters,
     name_filter: Option<&FilterSet>,
     expanded: &HashSet<String>,
+    sparse: bool,
 ) -> Vec<TreeRow> {
     let walk = TreeWalk {
         key,
@@ -479,6 +488,7 @@ fn compute_tree_rows(
         filters,
         name_filter,
         expanded,
+        sparse,
     };
     let mut rows = Vec::new();
     collect_tree_rows(None, &comparison.entries, 0, &walk, &mut rows);
@@ -500,6 +510,16 @@ fn collect_tree_rows(
         walk.name_filter,
     ) {
         let entry = &entries[entry_index];
+        // Sparse display hides directories whose recursively
+        // aggregated status holds nothing the user could act on.
+        if walk.sparse
+            && entry_is_dir(entry)
+            && !entry
+                .status
+                .intersects(DirEntryStatus::DIFFERENT | DirEntryStatus::ORPHAN)
+        {
+            continue;
+        }
         let path = entry_tree_path(entry);
         rows.push(TreeRow {
             parent: parent.cloned(),
@@ -512,6 +532,26 @@ fn collect_tree_rows(
             && let Some(sub) = &entry.sub_entries
         {
             collect_tree_rows(Some(sub), &sub.entries, depth + 1, walk, rows);
+        }
+    }
+}
+
+/// Insert the tree paths of every directory in `comparison`, recursing
+/// through the preloaded subtrees. `depth` bounds the recursion (`0`
+/// unlimited); directories at level `depth` are still expanded.
+fn collect_dir_paths(
+    comparison: &DirComparison,
+    depth: usize,
+    out: &mut HashSet<String>,
+) {
+    for entry in &comparison.entries {
+        if entry_is_dir(entry) {
+            out.insert(entry_tree_path(entry));
+            if depth > 1
+                && let Some(sub) = &entry.sub_entries
+            {
+                collect_dir_paths(sub, depth - 1, out);
+            }
         }
     }
 }
@@ -911,6 +951,9 @@ pub struct AppState {
     tree_rows: Vec<TreeRow>,
     /// Root-relative paths of the directories expanded in place.
     expanded: HashSet<String>,
+    /// Whether directories without differences or orphans in their
+    /// subtree are hidden from the tree (sparse display).
+    sparse: bool,
     /// Which entry categories the table displays.
     filters: DisplayFilters,
     /// Selected row index in display order (the cursor).
@@ -990,6 +1033,7 @@ impl AppState {
             sort_descending: false,
             tree_rows: Vec::new(),
             expanded: HashSet::new(),
+            sparse: false,
             filters: DisplayFilters::default(),
             selected_index: 0,
             selected_paths: HashSet::new(),
@@ -1023,8 +1067,10 @@ impl AppState {
     ) -> Self {
         let history = initial_history(&left, &right);
         let filter_current = config.settings.name_filter.last().cloned();
-        let name_filter =
-            compile_name_filter(filter_current.as_deref().unwrap_or(""));
+        let name_filter = compile_name_filter(
+            filter_current.as_deref().unwrap_or(""),
+            &config.settings.filter_rules,
+        );
         Self {
             focus_handle: cx.focus_handle(),
             title,
@@ -1035,6 +1081,7 @@ impl AppState {
             sort_descending: false,
             tree_rows: Vec::new(),
             expanded: HashSet::new(),
+            sparse: false,
             filters: DisplayFilters::default(),
             selected_index: 0,
             selected_paths: HashSet::new(),
@@ -2519,6 +2566,34 @@ impl AppState {
         &self.settings.name_filter
     }
 
+    /// The full filter editor's rules, one glob token per entry with a
+    /// `!` prefix marking excludes (persisted in the session settings).
+    pub fn filter_rules(&self) -> &[String] {
+        &self.settings.filter_rules
+    }
+
+    /// Replace the filter editor's rules and re-apply the combined name
+    /// filter (quick pattern plus rules) to the visible rows. The
+    /// selection follows the entry with the same name when it survives.
+    pub fn set_filter_rules(
+        &mut self,
+        rules: Vec<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if rules == self.settings.filter_rules {
+            return;
+        }
+        self.settings.filter_rules = rules;
+        self.recompile_name_filter(cx);
+        let selected_name = self.selected_entry().map(|e| e.name.clone());
+        self.recompute_display_order();
+        self.selected_index = selected_name
+            .as_deref()
+            .and_then(|name| self.display_index_of_name(name))
+            .unwrap_or(0);
+        cx.notify();
+    }
+
     /// Record `pattern` as the current filter, append it to the history
     /// stored in [`SessionSettings::name_filter`], and apply it to the
     /// visible rows.
@@ -2540,19 +2615,7 @@ impl AppState {
         } else {
             Some(pattern.to_string())
         };
-        self.name_filter = compile_name_filter(pattern);
-        if let Some(filter) = &self.name_filter
-            && !filter.compilation_errors().is_empty()
-        {
-            log::push(
-                LogLevel::Warning,
-                format!(
-                    "Filter pattern issues: {}",
-                    filter.compilation_errors().join("; ")
-                ),
-                cx,
-            );
-        }
+        self.recompile_name_filter(cx);
         if !pattern.is_empty()
             && self.settings.name_filter.last().map(String::as_str)
                 != Some(pattern)
@@ -2571,6 +2634,26 @@ impl AppState {
             .and_then(|name| self.display_index_of_name(name))
             .unwrap_or(0);
         cx.notify();
+    }
+
+    /// Recompile [`Self::name_filter`] from the current quick pattern
+    /// and the filter editor rules, logging any glob compilation issues.
+    fn recompile_name_filter(&mut self, cx: &mut Context<Self>) {
+        let pattern = self.filter_current.clone().unwrap_or_default();
+        self.name_filter =
+            compile_name_filter(&pattern, &self.settings.filter_rules);
+        if let Some(filter) = &self.name_filter
+            && !filter.compilation_errors().is_empty()
+        {
+            log::push(
+                LogLevel::Warning,
+                format!(
+                    "Filter pattern issues: {}",
+                    filter.compilation_errors().join("; ")
+                ),
+                cx,
+            );
+        }
     }
 
     /// Display-order position of the entry with the given name.
@@ -2608,6 +2691,7 @@ impl AppState {
                 &self.filters,
                 self.name_filter.as_ref(),
                 &self.expanded,
+                self.sparse,
             )
         });
     }
@@ -2625,6 +2709,102 @@ impl AppState {
             .and_then(|name| self.display_index_of_name(name))
             .unwrap_or(0);
         cx.notify();
+    }
+
+    /// Whether the tree hides directories whose subtree holds no
+    /// difference or orphan (sparse display).
+    pub fn is_sparse(&self) -> bool {
+        self.sparse
+    }
+
+    /// Toggle sparse display: directories whose recursively aggregated
+    /// status carries neither a difference nor an orphan disappear from
+    /// the tree, leaving only the subtrees the user can act on.
+    pub fn toggle_sparse(&mut self, cx: &mut Context<Self>) {
+        self.sparse = !self.sparse;
+        let selected_name = self.selected_entry().map(|e| e.name.clone());
+        self.recompute_display_order();
+        self.selected_index = selected_name
+            .as_deref()
+            .and_then(|name| self.display_index_of_name(name))
+            .unwrap_or(0);
+        cx.notify();
+    }
+
+    /// Expand every directory in the loaded tree.
+    pub fn expand_all(&mut self, cx: &mut Context<Self>) {
+        self.apply_expansion(usize::MAX, cx);
+    }
+
+    /// Expand directories down to `depth` levels: `1` expands the root
+    /// level's directories, `3` also expands their children and
+    /// grandchildren.
+    pub fn expand_to_depth(&mut self, depth: usize, cx: &mut Context<Self>) {
+        self.apply_expansion(depth, cx);
+    }
+
+    /// Collapse every expanded directory.
+    pub fn collapse_all(&mut self, cx: &mut Context<Self>) {
+        self.apply_expansion(0, cx);
+    }
+
+    /// Rebuild the expansion set to the directories within `depth`
+    /// levels (`0` collapses everything, `usize::MAX` expands
+    /// everything), keeping the selection on the same entry by name.
+    fn apply_expansion(&mut self, depth: usize, cx: &mut Context<Self>) {
+        self.expanded.clear();
+        if depth > 0
+            && let Some(comparison) = &self.comparison
+        {
+            collect_dir_paths(comparison, depth, &mut self.expanded);
+        }
+        let selected_name = self.selected_entry().map(|e| e.name.clone());
+        self.recompute_display_order();
+        self.selected_index = selected_name
+            .as_deref()
+            .and_then(|name| self.display_index_of_name(name))
+            .unwrap_or(0);
+        cx.notify();
+    }
+
+    /// Invert the multi-selection over the visible rows: selected rows
+    /// become unselected and vice versa. The cursor row counts as
+    /// selected.
+    pub fn invert_selection(&mut self, cx: &mut Context<Self>) {
+        let cursor_path = self
+            .tree_rows
+            .get(self.selected_index)
+            .map(|row| row.path().to_string());
+        for row in &self.tree_rows {
+            let path = row.path();
+            let was_selected = self.selected_paths.contains(path)
+                || cursor_path.as_deref() == Some(path);
+            if was_selected {
+                self.selected_paths.remove(path);
+            } else {
+                self.selected_paths.insert(path.to_string());
+            }
+        }
+        cx.notify();
+    }
+
+    /// Select every visible file row (the toolbar's Select ▸ Select
+    /// files by filter command): the rows already pass the quick
+    /// pattern and the editor rules, so this selects what the filter
+    /// leaves visible. Directories stay out of the selection.
+    pub fn select_by_filter(&mut self, cx: &mut Context<Self>) {
+        self.selected_paths = self.visible_file_paths().into_iter().collect();
+        cx.notify();
+    }
+
+    /// Root-relative paths of every visible file row, in display order
+    /// (the Files ▸ Export filenames command writes these).
+    pub fn visible_file_paths(&self) -> Vec<String> {
+        (0..self.tree_rows.len())
+            .filter_map(|i| self.entry_at(i))
+            .filter(|e| !entry_is_dir(e))
+            .map(entry_tree_path)
+            .collect()
     }
 
     /// Point `side` at `path`, keeping the other side, and re-compare.
@@ -3006,7 +3186,7 @@ mod tests {
     #[test]
     fn name_filter_include_token_shows_only_matches() {
         let entries = sample_entries();
-        let filter = compile_name_filter("charlie*").unwrap();
+        let filter = compile_name_filter("charlie*", &[]).unwrap();
         let order = compute_display_order(
             &entries,
             SortKey::Name,
@@ -3020,7 +3200,7 @@ mod tests {
     #[test]
     fn name_filter_combines_include_and_exclude_tokens() {
         let entries = sample_entries();
-        let filter = compile_name_filter("*.txt !delta*").unwrap();
+        let filter = compile_name_filter("*.txt !delta*", &[]).unwrap();
         let order = compute_display_order(
             &entries,
             SortKey::Name,
@@ -3043,7 +3223,7 @@ mod tests {
             Some(dir_info("sub")),
             Some(dir_info("sub")),
         ));
-        let filter = compile_name_filter("*.rs").unwrap();
+        let filter = compile_name_filter("*.rs", &[]).unwrap();
         let order = compute_display_order(
             &entries,
             SortKey::Name,
@@ -3058,9 +3238,23 @@ mod tests {
 
     #[test]
     fn compile_name_filter_returns_none_without_tokens() {
-        assert!(compile_name_filter("").is_none());
-        assert!(compile_name_filter("   ").is_none());
-        assert!(compile_name_filter("!").is_none());
+        assert!(compile_name_filter("", &[]).is_none());
+        assert!(compile_name_filter("   ", &[]).is_none());
+        assert!(compile_name_filter("!", &[]).is_none());
+    }
+
+    #[test]
+    fn compile_name_filter_merges_editor_rules_with_the_quick_pattern() {
+        // The include rule `charlie*` joins the quick pattern's
+        // includes; the exclude rule drops delta from the result.
+        let filter = compile_name_filter(
+            "delta*",
+            &["charlie*".to_string(), "!delta.txt".to_string()],
+        )
+        .unwrap();
+        assert!(filter.passes("charlie.txt", &DirEntryStatus::LeftOrphan));
+        assert!(!filter.passes("delta.txt", &DirEntryStatus::RightNewer));
+        assert!(!filter.passes("Alpha.txt", &DirEntryStatus::Same));
     }
 
     #[test]
@@ -3930,6 +4124,272 @@ mod tests {
         cx.update(|cx| {
             state.update(cx, |state, cx| state.toggle_expanded("sub", cx));
             assert_eq!(state.read(cx).entry_count(), 2);
+        });
+    }
+
+    /// A two-directory comparison: `quiet` holds only identical files,
+    /// `loud` holds a difference, for sparse-display tests.
+    fn sparse_comparison() -> DirComparison {
+        comparison(vec![
+            dir_with_sub(
+                "loud",
+                DirEntryStatus::DIFFERENT,
+                comparison(vec![entry(
+                    "diff.txt",
+                    DirEntryStatus::DIFFERENT,
+                    Some(info("loud/diff.txt", 1, "")),
+                    Some(info("loud/diff.txt", 2, "")),
+                )]),
+            ),
+            dir_with_sub(
+                "quiet",
+                DirEntryStatus::Same,
+                comparison(vec![entry(
+                    "same.txt",
+                    DirEntryStatus::Same,
+                    Some(info("quiet/same.txt", 1, "")),
+                    Some(info("quiet/same.txt", 1, "")),
+                )]),
+            ),
+            entry(
+                "top.txt",
+                DirEntryStatus::Same,
+                Some(info("top.txt", 1, "")),
+                Some(info("top.txt", 1, "")),
+            ),
+        ])
+    }
+
+    #[gpui::test]
+    fn sparse_display_hides_dirs_without_differences(cx: &mut TestAppContext) {
+        init_log_globals(cx);
+        let state = cx.new(|cx| {
+            let mut state = AppState::new(
+                Endpoint::local("/left"),
+                Endpoint::local("/right"),
+                "test".into(),
+                cx,
+            );
+            state.set_comparison_for_test(sparse_comparison());
+            state
+        });
+
+        // Without sparse display all three root rows are visible.
+        state.update(cx, |state, _cx| {
+            assert_eq!(state.entry_count(), 3);
+            assert!(!state.is_sparse());
+        });
+
+        // Sparse display hides the identical directory but keeps the
+        // differing one and the plain file row.
+        state.update(cx, |state, cx| {
+            state.toggle_sparse(cx);
+            assert!(state.is_sparse());
+            let names: Vec<&str> = (0..state.entry_count())
+                .map(|i| state.entry_at(i).unwrap().name.as_str())
+                .collect();
+            assert_eq!(names, ["loud", "top.txt"]);
+        });
+
+        // Toggling back restores the hidden directory.
+        state.update(cx, |state, cx| {
+            state.toggle_sparse(cx);
+            assert_eq!(state.entry_count(), 3);
+        });
+    }
+
+    /// A chain of nested directories `a/b/c` with a `leaf.txt` file at
+    /// the bottom, for expand-depth tests.
+    fn nested_dirs() -> DirComparison {
+        let dir = |path: &str, sub: DirComparison| DirEntry {
+            sub_entries: Some(Arc::new(sub)),
+            ..entry(
+                path.rsplit('/').next().unwrap_or(path),
+                DirEntryStatus::Same,
+                Some(dir_info(path)),
+                Some(dir_info(path)),
+            )
+        };
+        let leaf = entry(
+            "leaf.txt",
+            DirEntryStatus::Same,
+            Some(info("a/b/c/leaf.txt", 1, "")),
+            Some(info("a/b/c/leaf.txt", 1, "")),
+        );
+        comparison(vec![dir(
+            "a",
+            comparison(vec![dir(
+                "a/b",
+                comparison(vec![dir("a/b/c", comparison(vec![leaf]))]),
+            )]),
+        )])
+    }
+
+    #[gpui::test]
+    fn expand_all_and_collapse_all_walk_the_loaded_tree(
+        cx: &mut TestAppContext,
+    ) {
+        init_log_globals(cx);
+        let state = cx.new(|cx| {
+            let mut state = AppState::new(
+                Endpoint::local("/left"),
+                Endpoint::local("/right"),
+                "test".into(),
+                cx,
+            );
+            state.set_comparison_for_test(nested_dirs());
+            state
+        });
+
+        // Expand all reveals the whole a/b/c/leaf.txt chain.
+        state.update(cx, |state, cx| {
+            state.expand_all(cx);
+            assert_eq!(state.entry_count(), 4);
+            assert!(state.is_expanded("a"));
+            assert!(state.is_expanded("a/b"));
+            assert!(state.is_expanded("a/b/c"));
+        });
+
+        // Collapse all returns to the single root row.
+        state.update(cx, |state, cx| {
+            state.collapse_all(cx);
+            assert_eq!(state.entry_count(), 1);
+            assert!(!state.is_expanded("a"));
+        });
+    }
+
+    #[gpui::test]
+    fn expand_to_depth_expands_only_n_levels(cx: &mut TestAppContext) {
+        init_log_globals(cx);
+        let state = cx.new(|cx| {
+            let mut state = AppState::new(
+                Endpoint::local("/left"),
+                Endpoint::local("/right"),
+                "test".into(),
+                cx,
+            );
+            state.set_comparison_for_test(nested_dirs());
+            state
+        });
+
+        // One level: `a` expands, showing `b`, but `b` stays collapsed.
+        state.update(cx, |state, cx| {
+            state.expand_to_depth(1, cx);
+            assert!(state.is_expanded("a"));
+            assert!(!state.is_expanded("a/b"));
+            assert_eq!(state.entry_count(), 2);
+        });
+
+        // Two levels: `a` and `b` expand, showing `c` collapsed.
+        state.update(cx, |state, cx| {
+            state.expand_to_depth(2, cx);
+            assert!(state.is_expanded("a"));
+            assert!(state.is_expanded("a/b"));
+            assert!(!state.is_expanded("a/b/c"));
+            assert_eq!(state.entry_count(), 3);
+        });
+    }
+
+    #[gpui::test]
+    fn invert_selection_flips_the_visible_rows(cx: &mut TestAppContext) {
+        init_log_globals(cx);
+        let state = cx.new(|cx| {
+            let mut state = AppState::new(
+                Endpoint::local("/left"),
+                Endpoint::local("/right"),
+                "test".into(),
+                cx,
+            );
+            state.set_comparison_for_test(comparison(sample_entries()));
+            state
+        });
+
+        // The cursor row counts as selected, so inverting selects the
+        // other three rows.
+        state.update(cx, |state, cx| {
+            state.invert_selection(cx);
+            assert!(state.is_row_selected(0));
+            for row in 1..4 {
+                assert!(state.is_row_selected(row), "row {row}");
+            }
+        });
+
+        // Inverting again clears the multi-selection (the cursor row
+        // stays highlighted through `selected_index`).
+        state.update(cx, |state, cx| {
+            state.invert_selection(cx);
+            for row in 1..4 {
+                assert!(!state.is_row_selected(row), "row {row}");
+            }
+        });
+    }
+
+    #[gpui::test]
+    fn select_by_filter_selects_visible_files_only(cx: &mut TestAppContext) {
+        init_log_globals(cx);
+        let state = cx.new(|cx| {
+            let mut state = AppState::new(
+                Endpoint::local("/left"),
+                Endpoint::local("/right"),
+                "test".into(),
+                cx,
+            );
+            state.set_comparison_for_test(sparse_comparison());
+            state
+        });
+
+        // With no pattern, all visible files are selected; directories
+        // stay out of the selection (the cursor moves to the file row
+        // so the directory row's highlight reflects only the set).
+        state.update(cx, |state, cx| {
+            state.select_row(2, cx);
+            state.select_by_filter(cx);
+            assert!(state.is_row_selected(2)); // top.txt
+            assert!(!state.is_row_selected(0)); // loud (directory)
+            assert_eq!(state.visible_file_paths(), ["top.txt"]);
+        });
+
+        // Expanding the differing directory and filtering to `diff*`
+        // narrows the selection to the surviving file row.
+        state.update(cx, |state, cx| {
+            state.toggle_expanded("loud", cx);
+            state.push_filter_pattern("diff*", cx);
+            state.select_row(1, cx);
+            state.select_by_filter(cx);
+            assert_eq!(state.visible_file_paths(), ["loud/diff.txt"]);
+            let paths: Vec<&str> = (0..state.entry_count())
+                .filter(|&i| state.is_row_selected(i))
+                .map(|i| state.row_at(i).unwrap().path())
+                .collect();
+            assert_eq!(paths, ["loud/diff.txt"]);
+        });
+    }
+
+    #[gpui::test]
+    fn set_filter_rules_applies_and_persists(cx: &mut TestAppContext) {
+        init_log_globals(cx);
+        let state = cx.new(|cx| {
+            let mut state = AppState::new(
+                Endpoint::local("/left"),
+                Endpoint::local("/right"),
+                "test".into(),
+                cx,
+            );
+            state.set_comparison_for_test(comparison(sample_entries()));
+            state
+        });
+
+        state.update(cx, |state, cx| {
+            state.set_filter_rules(vec!["!delta*".to_string()], cx);
+            let names: Vec<&str> = (0..state.entry_count())
+                .map(|i| state.entry_at(i).unwrap().name.as_str())
+                .collect();
+            assert_eq!(names, ["Alpha.txt", "bravo.txt", "charlie.txt"]);
+            assert_eq!(state.filter_rules(), ["!delta*"]);
+
+            // The rules ride along into the persisted session settings.
+            let config = state.to_config("test".into());
+            assert_eq!(config.settings.filter_rules, ["!delta*"]);
         });
     }
 

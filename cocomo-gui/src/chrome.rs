@@ -14,14 +14,17 @@
 //! presentation layer and theme system. Row 2 is view-specific and
 //! rendered by the active tab (see `crate::tabview::TabEntity::view_toolbar`).
 
+use cocomo_lib::TransferAction;
 use gpui::{
     AnyElement, App, Context, ElementId, Entity, IntoElement, Pixels, Render,
     SharedString, Window,
     assets::IconName,
     base::{Disableable as _, Selectable as _},
     component::{
-        ActiveTheme, Icon, Sizable as _,
-        button::{Button, ButtonVariants as _, DropdownButton},
+        ActiveTheme, Icon, Sizable as _, WindowExt as _,
+        button::{
+            Button, ButtonCustomVariant, ButtonVariants as _, DropdownButton,
+        },
         h_flex,
         menu::{ContextMenuExt as _, PopupMenuItem},
         tab::{Tab, TabBar},
@@ -39,6 +42,7 @@ use crate::{
     session_manager::GuiSessionManager,
     state::{AppState, FilterPreset},
     tabview::TabEntity,
+    ui::run_transfer_action,
     windows,
 };
 
@@ -283,10 +287,11 @@ fn preset_icon(preset: FilterPreset, size: Pixels) -> AnyElement {
 /// Build toolbar row 1 using `gpui-component`'s [`Toolbar`].
 ///
 /// Row 1 is shared across all views: Home, the Sessions dropdown, the
-/// display-filter preset dropdown, Refresh, and Rules. Controls
-/// whose operations arrive in later phases render disabled with a
-/// tooltip that names the wait. `active_state` is the active folder
-/// tab's state, or `None` for text-diff tabs and an empty window.
+/// display-filter preset toggle group, the Structure and Context
+/// dropdowns, the Ops controls (copy, expand/collapse, Select, Files),
+/// Refresh, and Rules. Folder-only controls disable on text tabs and
+/// vice versa. `active_state` is the active folder tab's state, or
+/// `None` for text-diff tabs and an empty window.
 pub fn toolbar_element(
     active_state: Option<Entity<AppState>>,
     session_manager: Entity<GuiSessionManager>,
@@ -350,61 +355,316 @@ pub fn toolbar_element(
             menu
         });
 
-    // Display filter presets: the eleven preset glyphs plus "All" do not
-    // fit an exclusive toggle group, so one dropdown carries the choice
-    // (same trigger pattern as "Sessions"). A custom combination —
-    // reachable through the category toggles — shows a neutral funnel.
+    // Display filter presets: an exclusive icon toggle group, one
+    // icon-only button per preset in `FilterPreset::ALL` order. The
+    // active preset carries the selected styling; "Differences only"
+    // tints red while active so the narrowed view stays noticeable.
     let current_preset = active_state
         .as_ref()
         .and_then(|state| state.read(cx).filter_preset());
-    let trigger_icon = match current_preset {
-        Some(preset) => preset_icon(preset, px(14.)),
-        None => Icon::new(IconName::Funnel).small().into_any_element(),
-    };
-    let trigger_label: SharedString = current_preset
-        .map(FilterPreset::label)
-        .unwrap_or("Custom filter")
-        .into();
-    let menu_state = active_state.clone();
-    let preset_btn = DropdownButton::new("toolbar_filter_preset")
+    let theme = cx.theme();
+    let preset_buttons: Vec<AnyElement> = FilterPreset::ALL
+        .into_iter()
+        .map(|preset| {
+            let state = active_state.clone();
+            let active = current_preset == Some(preset);
+            let label: SharedString = preset.label().into();
+            let button = Button::new((
+                ElementId::from("toolbar_preset"),
+                label.clone(),
+            ))
+            .small()
+            .ghost()
+            .child(preset_icon(preset, px(14.)))
+            .selected(active)
+            .toggled(active)
+            .tooltip(label.clone())
+            .accessibility_label(label)
+            .disabled(no_folder);
+            let button = if active && preset == FilterPreset::DiffNoOrphans {
+                button.custom(
+                    ButtonCustomVariant::new(cx)
+                        .color(theme.danger.opacity(0.15))
+                        .foreground(theme.danger)
+                        .hover(theme.danger.opacity(0.25))
+                        .active(theme.danger.opacity(0.35)),
+                )
+            } else {
+                button
+            };
+            button
+                .on_click(move |_, _, cx| {
+                    if let Some(state) = &state {
+                        state.update(cx, |state, cx| {
+                            state.set_filter_preset(preset, cx);
+                        });
+                    }
+                })
+                .into_any_element()
+        })
+        .collect();
+
+    // Structure (folder tabs): the sparse-display toggle plus the
+    // expand/collapse presets for the mirrored tree.
+    let sparse = active_state
+        .as_ref()
+        .is_some_and(|state| state.read(cx).is_sparse());
+    let structure_state = active_state.clone();
+    let structure_btn = DropdownButton::new("toolbar_structure")
         .button(
-            Button::new("toolbar_filter_preset_btn")
+            Button::new("toolbar_structure_btn")
+                .label("Structure")
                 .ghost()
                 .small()
-                .child(
-                    h_flex()
-                        .items_center()
-                        .gap_2()
-                        .child(trigger_icon)
-                        .child(trigger_label),
-                )
-                .accessibility_label("Display filter preset"),
+                .disabled(no_folder),
         )
-        .menu_accessibility_label("Display filter presets")
-        .disabled(no_folder)
+        .menu_accessibility_label("Tree structure")
         .dropdown_menu(move |menu, _, _| {
-            let mut menu = menu;
-            for preset in FilterPreset::ALL {
-                let state = menu_state.clone();
-                menu = menu.item(
-                    PopupMenuItem::element(move |_, _| {
-                        h_flex()
-                            .items_center()
-                            .gap_2()
-                            .child(preset_icon(preset, px(14.)))
-                            .child(preset.label())
-                    })
-                    .checked(current_preset == Some(preset))
-                    .on_click(move |_, _, cx| {
-                        if let Some(state) = &state {
+            let Some(state) = structure_state.clone() else {
+                return menu;
+            };
+            let mut menu = menu.item(
+                PopupMenuItem::new("Sparse display")
+                    .checked(sparse)
+                    .on_click({
+                        let state = state.clone();
+                        move |_, _, cx| {
                             state.update(cx, |state, cx| {
-                                state.set_filter_preset(preset, cx);
+                                state.toggle_sparse(cx);
                             });
                         }
                     }),
+            );
+            menu = menu.separator();
+            for (label, action) in [
+                ("Expand all", 0usize),
+                ("Expand 1 level", 1),
+                ("Expand 2 levels", 2),
+                ("Expand 3 levels", 3),
+                ("Collapse all", usize::MAX),
+            ] {
+                let state = state.clone();
+                menu = menu.item(PopupMenuItem::new(label).on_click(
+                    move |_, _, cx| {
+                        state.update(cx, |state, cx| match action {
+                            0 => state.expand_all(cx),
+                            usize::MAX => state.collapse_all(cx),
+                            depth => state.expand_to_depth(depth, cx),
+                        });
+                    },
+                ));
+            }
+            menu
+        });
+
+    // Context (text tabs): how many context lines stay visible around
+    // each difference section.
+    let text_session = session_manager.read(cx).active_text_session(cx);
+    let context_depth = text_session
+        .as_ref()
+        .and_then(|session| session.read(cx).context_depth());
+    let context_state = text_session.clone();
+    let context_btn = DropdownButton::new("toolbar_context")
+        .button(
+            Button::new("toolbar_context_btn")
+                .label("Context")
+                .ghost()
+                .small()
+                .disabled(text_session.is_none()),
+        )
+        .menu_accessibility_label("Section context depth")
+        .dropdown_menu(move |menu, _, _| {
+            let Some(session) = context_state.clone() else {
+                return menu;
+            };
+            let mut menu = menu;
+            for (label, depth) in [
+                ("Full context", None),
+                ("Differences only", Some(0usize)),
+                ("1 line", Some(1)),
+                ("2 lines", Some(2)),
+                ("3 lines", Some(3)),
+            ] {
+                let session = session.clone();
+                menu = menu.item(
+                    PopupMenuItem::new(label)
+                        .checked(context_depth == depth)
+                        .on_click(move |_, _, cx| {
+                            session.update(cx, |session, cx| {
+                                session.set_context_depth(depth, cx);
+                            });
+                        }),
                 );
             }
             menu
+        });
+
+    // Ops: reconcile the selected entry toward either side. The
+    // confirmation flow is shared with the Actions menu commands.
+    let can_copy_right = active_state.as_ref().is_some_and(|state| {
+        state.read(cx).can_transfer(TransferAction::CopyRight)
+    });
+    let can_copy_left = active_state.as_ref().is_some_and(|state| {
+        state.read(cx).can_transfer(TransferAction::CopyLeft)
+    });
+    let copy_right_btn = Button::new("toolbar_copy_right")
+        .icon(IconName::ArrowRightFromLine)
+        .ghost()
+        .small()
+        .disabled(!can_copy_right)
+        .tooltip("Copy to right")
+        .accessibility_label("Copy to right")
+        .on_click({
+            let state = active_state.clone();
+            move |_, window, cx| {
+                if let Some(state) = &state {
+                    run_transfer_action(
+                        state.clone(),
+                        TransferAction::CopyRight,
+                        window,
+                        cx,
+                    );
+                }
+            }
+        });
+    let copy_left_btn = Button::new("toolbar_copy_left")
+        .icon(IconName::ArrowLeftFromLine)
+        .ghost()
+        .small()
+        .disabled(!can_copy_left)
+        .tooltip("Copy to left")
+        .accessibility_label("Copy to left")
+        .on_click({
+            let state = active_state.clone();
+            move |_, window, cx| {
+                if let Some(state) = &state {
+                    run_transfer_action(
+                        state.clone(),
+                        TransferAction::CopyLeft,
+                        window,
+                        cx,
+                    );
+                }
+            }
+        });
+
+    // Expand/collapse every directory of the tree in one step.
+    let expand_btn = Button::new("toolbar_expand")
+        .icon(IconName::UnfoldVertical)
+        .ghost()
+        .small()
+        .disabled(no_folder)
+        .tooltip("Expand all directories")
+        .accessibility_label("Expand all directories")
+        .on_click({
+            let state = active_state.clone();
+            move |_, _, cx| {
+                if let Some(state) = &state {
+                    state.update(cx, |state, cx| state.expand_all(cx));
+                }
+            }
+        });
+    let collapse_btn = Button::new("toolbar_collapse")
+        .icon(IconName::FoldVertical)
+        .ghost()
+        .small()
+        .disabled(no_folder)
+        .tooltip("Collapse all directories")
+        .accessibility_label("Collapse all directories")
+        .on_click({
+            let state = active_state.clone();
+            move |_, _, cx| {
+                if let Some(state) = &state {
+                    state.update(cx, |state, cx| state.collapse_all(cx));
+                }
+            }
+        });
+
+    // Select: whole-table selection commands over the visible rows.
+    let select_state = active_state.clone();
+    let select_btn = DropdownButton::new("toolbar_select")
+        .button(
+            Button::new("toolbar_select_btn")
+                .label("Select")
+                .ghost()
+                .small()
+                .disabled(no_folder),
+        )
+        .menu_accessibility_label("Selection commands")
+        .dropdown_menu(move |menu, _, _| {
+            let Some(state) = select_state.clone() else {
+                return menu;
+            };
+            let mut menu = menu;
+            for (label, action) in [
+                ("Select all entries", 0usize),
+                ("Invert selection", 1),
+                ("Select files by filter", 2),
+            ] {
+                let state = state.clone();
+                menu = menu.item(PopupMenuItem::new(label).on_click(
+                    move |_, _, cx| {
+                        state.update(cx, |state, cx| match action {
+                            0 => state.select_all_entries(cx),
+                            1 => state.invert_selection(cx),
+                            _ => state.select_by_filter(cx),
+                        });
+                    },
+                ));
+            }
+            menu
+        });
+
+    // Files: export the visible filenames or open the comparison
+    // report generated by cocomo-lib.
+    let files_state = active_state.clone();
+    let files_btn = DropdownButton::new("toolbar_files")
+        .button(
+            Button::new("toolbar_files_btn")
+                .label("Files")
+                .ghost()
+                .small()
+                .disabled(no_folder),
+        )
+        .menu_accessibility_label("File commands")
+        .dropdown_menu(move |menu, _, _| {
+            let Some(state) = files_state.clone() else {
+                return menu;
+            };
+            let export_state = state.clone();
+            menu.item(PopupMenuItem::new("Export filenames…").on_click(
+                move |_, _, cx| {
+                    let (paths, dir) =
+                        export_state.read_with(cx, |state, _| {
+                            (
+                                state.visible_file_paths(),
+                                state.left().path().to_path_buf(),
+                            )
+                        });
+                    if paths.is_empty() {
+                        log::push(
+                            LogLevel::Info,
+                            "No visible files to export",
+                            cx,
+                        );
+                        return;
+                    }
+                    let mut text = paths.join("\n");
+                    text.push('\n');
+                    write_export(
+                        text,
+                        dir,
+                        "filenames.txt",
+                        "Filename list",
+                        cx,
+                    );
+                },
+            ))
+            .item(PopupMenuItem::new("Open report…").on_click(
+                move |_, window, cx| {
+                    open_folder_report_dialog(state.clone(), window, cx);
+                },
+            ))
         });
 
     // Refresh re-reads and re-compares the active session.
@@ -453,10 +713,36 @@ pub fn toolbar_element(
     let mut display_group =
         ToolbarGroup::new("toolbar-display").label("Display filters");
     if commands::is_visible("toolbar.filters", cx) {
-        display_group = display_group.content(preset_btn);
+        display_group = display_group.content(
+            h_flex().items_center().gap_0p5().children(preset_buttons),
+        );
+    }
+    if commands::is_visible("toolbar.structure", cx) {
+        display_group = display_group.content(structure_btn);
+    }
+    if commands::is_visible("toolbar.context", cx) {
+        display_group = display_group.content(context_btn);
     }
 
     let mut ops_group = ToolbarGroup::new("toolbar-ops").label("Operations");
+    if commands::is_visible("actions.copy_right", cx) {
+        ops_group = ops_group.child(copy_right_btn);
+    }
+    if commands::is_visible("actions.copy_left", cx) {
+        ops_group = ops_group.child(copy_left_btn);
+    }
+    if commands::is_visible("toolbar.expand", cx) {
+        ops_group = ops_group.child(expand_btn);
+    }
+    if commands::is_visible("toolbar.collapse", cx) {
+        ops_group = ops_group.child(collapse_btn);
+    }
+    if commands::is_visible("toolbar.select", cx) {
+        ops_group = ops_group.content(select_btn);
+    }
+    if commands::is_visible("toolbar.files", cx) {
+        ops_group = ops_group.content(files_btn);
+    }
     if commands::is_visible("toolbar.refresh", cx) {
         ops_group = ops_group.child(refresh_btn);
     }
@@ -469,4 +755,206 @@ pub fn toolbar_element(
         .child(display_group)
         .child(ops_group)
         .into_any_element()
+}
+
+/// Prompt for a path and write `text` to it; the outcome goes to the
+/// log, mirroring the text view's report save.
+fn write_export(
+    text: String,
+    dir: std::path::PathBuf,
+    default_name: &'static str,
+    what: &'static str,
+    cx: &mut App,
+) {
+    let receiver = cx.prompt_for_new_path(&dir, Some(default_name));
+    cx.spawn(async move |cx| {
+        let path = match receiver.await {
+            Ok(Ok(Some(path))) => path,
+            // The user cancelled the save dialog.
+            Ok(Ok(None)) => return,
+            Ok(Err(e)) => {
+                cx.update(|cx| {
+                    log::push(
+                        LogLevel::Error,
+                        format!("{what} export failed: {e}"),
+                        cx,
+                    );
+                });
+                return;
+            }
+            Err(_) => return,
+        };
+        let for_log = path.display().to_string();
+        let result = crate::runtime::spawn_on_tokio(async move {
+            fs_err::tokio::write(&path, text.as_bytes())
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))
+        })
+        .await;
+        cx.update(|cx| match result {
+            Ok(Ok(())) => log::push(
+                LogLevel::Info,
+                format!("{what} exported: {for_log}"),
+                cx,
+            ),
+            Ok(Err(e)) => log::push(
+                LogLevel::Error,
+                format!("{what} export failed: {e}"),
+                cx,
+            ),
+            Err(e) => log::push(
+                LogLevel::Error,
+                format!("{what} export task panicked: {e}"),
+                cx,
+            ),
+        });
+    })
+    .detach();
+}
+
+/// Open the plain-text comparison report of a folder session in a
+/// dialog, generated by cocomo-lib's report writer.
+fn open_folder_report_dialog(
+    state: Entity<AppState>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let Some(text) = state.read(cx).comparison().map(|comparison| {
+        cocomo_lib::report::generate_report(
+            comparison,
+            cocomo_lib::report::ReportFormat::Text,
+            &cocomo_lib::report::ReportConfig::all(),
+        )
+    }) else {
+        log::push(LogLevel::Info, "No comparison to report on", cx);
+        return;
+    };
+    window.open_dialog(cx, move |dialog, _, _| {
+        dialog
+            .title("Comparison report")
+            .child(
+                div()
+                    .id(ElementId::Name("folder_report_preview".into()))
+                    .max_h(px(384.))
+                    .overflow_y_scroll()
+                    .child(text.clone()),
+            )
+            .footer(
+                h_flex().justify_end().child(
+                    Button::new("folder_report_close")
+                        .label("Close")
+                        .on_click(|_, window, cx| window.close_dialog(cx)),
+                ),
+            )
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use cocomo_lib::Endpoint;
+    use gpui::{
+        Bounds, TestAppContext, WindowBounds, WindowOptions,
+        test::TestWindowExt,
+    };
+
+    use super::{toolbar_element, *};
+    use crate::{
+        session_manager::{GuiSessionManager, SavedSessionStore},
+        state::{AppState, FilterPreset},
+    };
+
+    /// Minimal host view that renders the shared toolbar row so a
+    /// headless window can exercise its controls without the full
+    /// window root.
+    struct ToolbarHost {
+        state: Entity<AppState>,
+        manager: Entity<GuiSessionManager>,
+    }
+
+    impl Render for ToolbarHost {
+        fn render(
+            &mut self,
+            _window: &mut Window,
+            cx: &mut Context<Self>,
+        ) -> impl IntoElement {
+            let element: AnyElement = toolbar_element(
+                Some(self.state.clone()),
+                self.manager.clone(),
+                cx,
+            );
+            div().size_full().child(element)
+        }
+    }
+
+    fn open_toolbar(
+        cx: &mut TestAppContext,
+        state: Entity<AppState>,
+        manager: Entity<GuiSessionManager>,
+    ) -> gpui::AnyWindowHandle {
+        cx.update(|cx| {
+            gpui::open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(
+                        Bounds::maximized(None, cx),
+                    )),
+                    ..Default::default()
+                },
+                cx,
+                |_, cx| cx.new(|_| ToolbarHost { state, manager }),
+            )
+            .expect("failed to open the test window")
+            .0
+        })
+    }
+
+    /// UI integration test: the preset toggle group is a real control.
+    /// Renders the production toolbar in a headless window, clicks the
+    /// "Differences only" glyph, and verifies the folder state adopts
+    /// that display-filter preset.
+    #[gpui::test]
+    fn toolbar_preset_toggle_applies_the_display_filter(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(|cx| {
+            gpui::init(cx);
+            cx.set_global(crate::options::AppOptions::default());
+            cx.set_global(crate::log::LogBuffer::default());
+        });
+        let state = cx.new(|cx| {
+            AppState::new(
+                Endpoint::local("/left"),
+                Endpoint::local("/right"),
+                "test".into(),
+                cx,
+            )
+        });
+        let store = cx.new(|_| {
+            SavedSessionStore::new(std::path::PathBuf::from(
+                "/tmp/cocomo-chrome-tests",
+            ))
+        });
+        let manager = cx.new(|_| GuiSessionManager::new(store));
+        let window = open_toolbar(cx, state.clone(), manager);
+
+        let preset_btn = (
+            ElementId::from("toolbar_preset"),
+            "Differences only".to_string(),
+        );
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(
+                state.read(cx).filter_preset(),
+                Some(FilterPreset::All)
+            );
+            window.click(preset_btn, cx);
+        })
+        .expect("failed to click the preset toggle");
+
+        cx.update(|cx| {
+            assert_eq!(
+                state.read(cx).filter_preset(),
+                Some(FilterPreset::DiffNoOrphans)
+            );
+        });
+    }
 }

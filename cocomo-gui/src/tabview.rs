@@ -35,6 +35,7 @@ use crate::{
     home::HomeView,
     log::{LogBuffer, LogLevel, LogPaneOpen},
     menus::{self, MenuState},
+    options::AppOptions,
     session_manager::GuiSessionManager,
     state::AppState,
     text_diff::{TextDiffSession, TextDiffView},
@@ -428,6 +429,9 @@ impl WindowRoot {
         let _log_subscriptions = vec![
             cx.observe_global::<LogBuffer>(|_, cx| cx.notify()),
             cx.observe_global::<LogPaneOpen>(|_, cx| cx.notify()),
+            // The single-row toolbar layout is a persisted option; any
+            // window can toggle it, so every root re-renders on change.
+            cx.observe_global::<AppOptions>(|_, cx| cx.notify()),
         ];
 
         // The saved-session list is shared across windows; observing it
@@ -590,6 +594,9 @@ impl Render for WindowRoot {
         // wrap toggles re-evaluate the menu snapshot.
         let merge_state =
             active_tab.as_ref().and_then(|tab| tab.merge_state(cx));
+        // The merged-toolbar layout is a global option; reading it here
+        // both drives the View checkmark and the row composition below.
+        let single_row = cx.global::<AppOptions>().single_row_toolbar;
         let menu_state = folder_state
             .as_ref()
             .map(|state| {
@@ -624,6 +631,7 @@ impl Render for WindowRoot {
                     can_go_back: state.can_go_back(),
                     can_go_forward: state.can_go_forward(),
                     log_open: cx.global::<LogPaneOpen>().0,
+                    single_row_toolbar: single_row,
                     is_text_editing: false,
                     can_save_file: false,
                     detail_mode: Default::default(),
@@ -648,6 +656,7 @@ impl Render for WindowRoot {
                             .as_ref()
                             .is_some_and(TabEntity::is_home),
                         log_open: cx.global::<LogPaneOpen>().0,
+                        single_row_toolbar: single_row,
                         ..MenuState::empty()
                     }
                 })
@@ -665,6 +674,7 @@ impl Render for WindowRoot {
                             .as_ref()
                             .is_some_and(TabEntity::is_home),
                         log_open: cx.global::<LogPaneOpen>().0,
+                        single_row_toolbar: single_row,
                         ..MenuState::empty()
                     }
                 })
@@ -672,6 +682,7 @@ impl Render for WindowRoot {
             .unwrap_or_else(|| MenuState {
                 is_home: active_tab.as_ref().is_some_and(TabEntity::is_home),
                 log_open: cx.global::<LogPaneOpen>().0,
+                single_row_toolbar: single_row,
                 ..MenuState::empty()
             });
         if self.last_menu_state != Some(menu_state) {
@@ -691,6 +702,30 @@ impl Render for WindowRoot {
             .as_ref()
             .and_then(|tab| tab.view_toolbar(window, cx));
 
+        // The toolbar band holds the shared row and the view's row 2.
+        // The single-row option merges them into one horizontal band;
+        // the default stacks them. The tab strip sits below the band so
+        // the controls stay adjacent to the content they act on.
+        let toolbar_band = if single_row {
+            let mut row = h_flex()
+                .w_full()
+                .flex_shrink_0()
+                .items_center()
+                .overflow_x_hidden()
+                .child(toolbar_element);
+            if let Some(row2) = view_toolbar {
+                row = row.child(row2);
+            }
+            row.into_any_element()
+        } else {
+            let mut col =
+                v_flex().w_full().flex_shrink_0().child(toolbar_element);
+            if let Some(row2) = view_toolbar {
+                col = col.child(row2);
+            }
+            col.into_any_element()
+        };
+
         div()
             .flex()
             .flex_col()
@@ -698,11 +733,8 @@ impl Render for WindowRoot {
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             .text_sm()
+            .child(toolbar_band)
             .child(tab_bar_element)
-            .child(toolbar_element)
-            .when_some(view_toolbar, |root, row2| {
-                root.child(row2.into_any_element())
-            })
             .child(
                 div().flex_1().min_h_0().overflow_hidden().child(
                     NavStack::new(&self.nav_stack_state).size_full().item(
