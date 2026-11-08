@@ -28,8 +28,9 @@ use std::{
 use chrono::{DateTime, Local, Utc};
 use cocomo_lib::{
     CancellationToken, ColorOverrides, Endpoint, FsError, Grammar, Importance,
-    LineEnding, LineInfo, NodeFileSystem, TextCompareSettings, TextDiff,
-    TextDifference, TextEncoding, WhitespaceMode, compare_texts, format_size,
+    LineEnding, LineInfo, MergedRowStatus, NodeFileSystem,
+    TextCompareSettings, TextDiff, TextEncoding, WhitespaceMode,
+    compare_texts, format_size,
 };
 use gpui::{
     Action, AnyElement, App, Bounds, Context, CursorStyle, DispatchPhase, Div,
@@ -355,47 +356,6 @@ fn lines_are_minor<'a>(lines: impl IntoIterator<Item = &'a LineInfo>) -> bool {
     saw_token
 }
 
-/// Push aligned context rows until both cursors reach their targets, then
-/// emit any leftover left rows as deleted and right rows as inserted.
-///
-/// Cursors are 0-based line indices; targets are exclusive 0-based bounds.
-fn push_context(
-    rows: &mut Vec<DiffRow>,
-    l: &mut usize,
-    r: &mut usize,
-    left_target: usize,
-    right_target: usize,
-) {
-    while *l < left_target && *r < right_target {
-        rows.push(DiffRow {
-            left: Some(*l + 1),
-            right: Some(*r + 1),
-            status: RowStatus::Same,
-            minor: false,
-        });
-        *l += 1;
-        *r += 1;
-    }
-    while *l < left_target {
-        rows.push(DiffRow {
-            left: Some(*l + 1),
-            right: None,
-            status: RowStatus::Deleted,
-            minor: false,
-        });
-        *l += 1;
-    }
-    while *r < right_target {
-        rows.push(DiffRow {
-            left: None,
-            right: Some(*r + 1),
-            status: RowStatus::Inserted,
-            minor: false,
-        });
-        *r += 1;
-    }
-}
-
 /// Force the given `(left, right)` line pairs onto shared rows.
 ///
 /// Applied after [`align_rows`]; each override either merges a deleted
@@ -441,127 +401,30 @@ fn apply_align_overrides(
 
 /// Align a [`TextDiff`] into side-by-side rows.
 ///
-/// Context between differences is aligned pairwise; added and removed
-/// blocks get a blank counterpart cell on the other side.
+/// Delegates the alignment itself to [`TextDiff::merged_rows`], which
+/// pairs context and pads blocks of differing length with blank cells;
+/// this function only projects each merged row onto the GUI's [`DiffRow`]
+/// and computes the `minor` flag from the row's tokens.
 pub(crate) fn align_rows(diff: &TextDiff) -> Vec<DiffRow> {
-    let mut rows = Vec::new();
-    let (mut l, mut r) = (0usize, 0usize);
-    for difference in &diff.differences {
-        match difference {
-            TextDifference::LineDifferent(left, right) => {
-                push_context(
-                    &mut rows,
-                    &mut l,
-                    &mut r,
-                    left.number - 1,
-                    right.number - 1,
-                );
-                let minor = lines_are_minor([left, right]);
-                rows.push(DiffRow {
-                    left: Some(left.number),
-                    right: Some(right.number),
-                    status: RowStatus::Changed,
-                    minor,
-                });
-                l = left.number;
-                r = right.number;
+    diff.merged_rows()
+        .iter()
+        .map(|row| {
+            let status = match row.status {
+                MergedRowStatus::Same => RowStatus::Same,
+                MergedRowStatus::Changed => RowStatus::Changed,
+                MergedRowStatus::Inserted => RowStatus::Inserted,
+                MergedRowStatus::Deleted => RowStatus::Deleted,
+            };
+            let minor = row.status.is_difference()
+                && lines_are_minor(row.left.iter().chain(row.right.iter()));
+            DiffRow {
+                left: row.left.as_ref().map(|line| line.number),
+                right: row.right.as_ref().map(|line| line.number),
+                status,
+                minor,
             }
-            TextDifference::LinesAdded(start, lines) => {
-                let right_target = start - 1;
-                let left_target = l + right_target.saturating_sub(r);
-                push_context(
-                    &mut rows,
-                    &mut l,
-                    &mut r,
-                    left_target,
-                    right_target,
-                );
-                for line in lines {
-                    let minor = lines_are_minor([line]);
-                    rows.push(DiffRow {
-                        left: None,
-                        right: Some(line.number),
-                        status: RowStatus::Inserted,
-                        minor,
-                    });
-                }
-                r = right_target + lines.len();
-            }
-            TextDifference::LinesRemoved(start, lines) => {
-                let left_target = start - 1;
-                let right_target = r + left_target.saturating_sub(l);
-                push_context(
-                    &mut rows,
-                    &mut l,
-                    &mut r,
-                    left_target,
-                    right_target,
-                );
-                for line in lines {
-                    let minor = lines_are_minor([line]);
-                    rows.push(DiffRow {
-                        left: Some(line.number),
-                        right: None,
-                        status: RowStatus::Deleted,
-                        minor,
-                    });
-                }
-                l = left_target + lines.len();
-            }
-            TextDifference::LinesChanged(start, removed, added) => {
-                let left_target = start - 1;
-                let right_target = r + left_target.saturating_sub(l);
-                push_context(
-                    &mut rows,
-                    &mut l,
-                    &mut r,
-                    left_target,
-                    right_target,
-                );
-                let paired = removed.len().min(added.len());
-                for i in 0..paired {
-                    let minor = lines_are_minor([&removed[i], &added[i]]);
-                    rows.push(DiffRow {
-                        left: Some(removed[i].number),
-                        right: Some(added[i].number),
-                        status: RowStatus::Changed,
-                        minor,
-                    });
-                }
-                for line in &removed[paired..] {
-                    let minor = lines_are_minor([line]);
-                    rows.push(DiffRow {
-                        left: Some(line.number),
-                        right: None,
-                        status: RowStatus::Deleted,
-                        minor,
-                    });
-                }
-                for line in &added[paired..] {
-                    let minor = lines_are_minor([line]);
-                    rows.push(DiffRow {
-                        left: None,
-                        right: Some(line.number),
-                        status: RowStatus::Inserted,
-                        minor,
-                    });
-                }
-                l = left_target + removed.len();
-                r = right_target + added.len();
-            }
-            // A blank-line classification difference carries no line
-            // numbers to align on; ignore it.
-            TextDifference::BlankLine => {}
-        }
-    }
-    push_context(
-        &mut rows,
-        &mut l,
-        &mut r,
-        diff.left_line_count,
-        diff.right_line_count,
-    );
-    rows
+        })
+        .collect()
 }
 
 /// Kind of a difference section, for the report and gutter.
@@ -5748,7 +5611,7 @@ pub(crate) fn open_text_rules_dialog(
 
 #[cfg(test)]
 mod tests {
-    use cocomo_lib::Token;
+    use cocomo_lib::{TextDifference, Token};
     use gpui::TestAppContext;
 
     use super::*;
