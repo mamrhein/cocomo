@@ -445,14 +445,6 @@ fn entry_is_dir(entry: &DirEntry) -> bool {
         || entry.right.as_ref().is_some_and(|r| r.is_dir)
 }
 
-/// Whether the `side` half of `entry` is a directory.
-fn side_is_dir(entry: &DirEntry, side: Side) -> bool {
-    match side {
-        Side::Left => entry.left.as_ref().is_some_and(|l| l.is_dir),
-        Side::Right => entry.right.as_ref().is_some_and(|r| r.is_dir),
-    }
-}
-
 /// The expansion key of an entry: its side path relative to the
 /// comparison root, preferring the left side.
 fn entry_tree_path(entry: &DirEntry) -> String {
