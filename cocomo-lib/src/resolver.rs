@@ -101,11 +101,14 @@ pub fn resolve_provider(
     profile_id: Option<&str>,
     prompter: &dyn Prompter,
 ) -> Result<Provider, ResolverError> {
-    let store = if url.scheme == Url::LOCAL_SCHEME {
-        None
-    } else {
-        Some(ProfileStore::open_default()?)
-    };
+    let store =
+        if url.scheme == Url::LOCAL_SCHEME || url.scheme == Url::ZIP_SCHEME {
+            // Local paths and local archives need no credentials, so the
+            // profile files are never touched for them.
+            None
+        } else {
+            Some(ProfileStore::open_default()?)
+        };
     let secrets = Secrets::new();
     let provider = Provider::resolve(
         url,
@@ -228,7 +231,13 @@ impl Endpoint {
             return Ok(Self::local(path));
         }
         let mut url = Url::parse(provider)?;
-        url.path = path;
+        if url.scheme == Url::ZIP_SCHEME {
+            // The ref carries the archive path; the saved path is the
+            // location inside the archive.
+            url.entry = zip_entry(path);
+        } else {
+            url.path = path;
+        }
         let fs = Arc::new(resolve_provider(&url, None, prompter)?);
         Ok(Self { fs, url })
     }
@@ -244,7 +253,14 @@ impl Endpoint {
     }
 
     /// The path within the provider.
+    ///
+    /// For zip endpoints this is the location inside the archive (the
+    /// archive file itself lives in [`Url::path`]); the archive root
+    /// addresses `/`.
     pub fn path(&self) -> &Path {
+        if self.url.scheme == Url::ZIP_SCHEME {
+            return self.url.entry.as_deref().unwrap_or(Path::new("/"));
+        }
         &self.url.path
     }
 
@@ -266,9 +282,17 @@ impl Endpoint {
     }
 
     /// The same endpoint located at `path`.
+    ///
+    /// For zip endpoints `path` is a location inside the archive; the
+    /// archive file itself never changes.
     pub fn with_path(&self, path: impl Into<PathBuf>) -> Self {
         let mut url = self.url.clone();
-        url.path = path.into();
+        let path = path.into();
+        if url.scheme == Url::ZIP_SCHEME {
+            url.entry = zip_entry(path);
+        } else {
+            url.path = path;
+        }
         Self {
             fs: self.fs.clone(),
             url,
@@ -277,6 +301,16 @@ impl Endpoint {
 
     /// The same endpoint one directory up; `None` at the provider root.
     pub fn parent(&self) -> Option<Self> {
+        if self.url.scheme == Url::ZIP_SCHEME {
+            // The archive root has no parent: the archive file itself is
+            // not part of the provider's namespace.
+            return self
+                .url
+                .entry
+                .as_deref()
+                .and_then(|entry| entry.parent())
+                .map(|parent| self.with_path(parent));
+        }
         Some(self.with_path(self.url.path.parent()?))
     }
 
@@ -294,6 +328,13 @@ impl Endpoint {
         if self.is_local() {
             return Url::LOCAL_SCHEME.to_string();
         }
+        if self.url.scheme == Url::ZIP_SCHEME {
+            // The archive path is the provider identity; the in-archive
+            // location is saved separately as the session path.
+            let mut url = self.url.clone();
+            url.entry = None;
+            return url.to_string();
+        }
         let host = self.url.host.clone().unwrap_or_default();
         // Bracket IPv6 literals so the authority re-parses as a host.
         let host = if host.contains(':') {
@@ -307,6 +348,18 @@ impl Endpoint {
             }
             None => format!("{}://{host}", self.url.scheme),
         }
+    }
+}
+
+/// Normalize a saved or navigated path into a zip URL's in-archive
+/// entry: relative to the archive root, with the archive root itself
+/// stored as `None`.
+fn zip_entry(path: PathBuf) -> Option<PathBuf> {
+    let rel = path.strip_prefix("/").unwrap_or(&path);
+    if rel.as_os_str().is_empty() {
+        None
+    } else {
+        Some(rel.to_path_buf())
     }
 }
 
@@ -433,6 +486,45 @@ mod tests {
         );
         assert_eq!(endpoint.provider_ref(), "ftp://host.example:2121");
         assert_eq!(endpoint.path(), Path::new("pub"));
+    }
+
+    #[test]
+    fn a_zip_endpoint_addresses_the_archive_and_its_entries() {
+        let url = Url::parse("zip:///a/b.zip!/docs/readme.md").unwrap();
+        let endpoint = Endpoint::new(Endpoint::local("/").fs_arc(), url);
+        assert_eq!(endpoint.path(), Path::new("docs/readme.md"));
+        assert_eq!(endpoint.provider_ref(), "zip:///a/b.zip");
+        assert_eq!(endpoint.parent().unwrap().path(), Path::new("docs"));
+        assert_eq!(
+            endpoint.parent().unwrap().provider_ref(),
+            "zip:///a/b.zip"
+        );
+        assert_eq!(endpoint.with_path("/").path(), Path::new("/"));
+        assert!(endpoint.with_path("/").parent().is_none());
+    }
+
+    #[test]
+    fn a_saved_zip_ref_rebuilds_a_zip_endpoint() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("a.zip");
+        {
+            let file = fs_err::File::create(&archive).unwrap();
+            let mut writer = zip::ZipWriter::new(file);
+            let options = zip::write::FileOptions::<()>::default();
+            writer.add_directory("docs/", options).unwrap();
+            writer.start_file("docs/readme.md", options).unwrap();
+            std::io::Write::write_all(&mut writer, b"hi").unwrap();
+            writer.finish().unwrap();
+        }
+        let provider = format!("zip://{}", archive.display());
+        let endpoint = Endpoint::from_ref(
+            &provider,
+            "docs/readme.md".into(),
+            &NullPrompter,
+        )
+        .unwrap();
+        assert_eq!(endpoint.path(), Path::new("docs/readme.md"));
+        assert_eq!(endpoint.provider_ref(), provider);
     }
 
     #[test]

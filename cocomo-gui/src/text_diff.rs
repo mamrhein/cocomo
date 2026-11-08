@@ -4283,6 +4283,7 @@ impl Render for TextDiffView {
         let muted_fg = theme.muted_foreground;
         let list_active = theme.list_active;
         let list_hover = theme.list_hover;
+        let table_even = theme.table_even;
         let border = theme.border;
         let danger = theme.danger;
         // Comment-colored context lines reuse the editor's syntax palette so
@@ -4352,6 +4353,7 @@ impl Render for TextDiffView {
                     muted_fg,
                     list_active,
                     list_hover,
+                    table_even,
                     fg,
                     syntax_comment,
                     &mono,
@@ -4388,6 +4390,7 @@ impl Render for TextDiffView {
                     muted_fg,
                     list_active,
                     list_hover,
+                    table_even,
                     fg,
                     syntax_comment,
                     &mono,
@@ -5117,6 +5120,7 @@ fn render_diff_row(
     muted_fg: Hsla,
     list_active: Hsla,
     list_hover: Hsla,
+    table_even: Hsla,
     foreground: Hsla,
     syntax_comment: Hsla,
     mono: &SharedString,
@@ -5281,6 +5285,12 @@ fn render_diff_row(
                 .text_color(fg)
                 .font_family(mono.clone())
                 .text_xs()
+                // Alternating row backgrounds (spec section 7.4-7);
+                // difference tints, selection, and hover override.
+                .when(
+                    d % 2 == 1 && diff_bg.is_none() && selected != Some(d),
+                    |el| el.bg(table_even),
+                )
                 .when_some(diff_bg, |el, c| el.bg(c))
                 .when(selected == Some(d), |el| el.bg(list_active))
                 .hover(|el| el.bg(list_hover))

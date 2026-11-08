@@ -153,9 +153,11 @@ pub fn tab_bar_element(
                 .child(label_text)
                 // Dragging a tab onto another tab reorders this window's
                 // tabs. Moving a tab to a *different* window goes through
-                // the context menu: GPUI delivers an internal drag's
-                // mouse-up to the window that started it, so a cross-window
-                // drop would never arrive.
+                // the context menu ("Move tab to new window"): GPUI
+                // delivers an internal drag's mouse-up to the window that
+                // started it, so a cross-window drop would never arrive.
+                // This is a framework limitation, not a missing feature;
+                // the context menu is the supported path (gap plan S1).
                 .on_drag(dragged, move |drag, _, window, cx| {
                     let _ = (drag, window);
                     cx.new(|_| TabDragLabel {

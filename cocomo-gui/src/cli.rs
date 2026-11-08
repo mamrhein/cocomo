@@ -22,11 +22,12 @@
 //! exit with a message before the window is opened.
 //!
 //! Remote endpoints resolve through the shared `cocomo-lib` resolver
-//! (profile store, environment, then keychain). A GUI has no reliable
-//! terminal, so credential entry never prompts: whatever the profile
-//! store, the environment, and the keychain do not supply must come from
-//! a profile given with `--profile`. A dialog-backed prompter is planned
-//! as a follow-up.
+//! (profile store, environment, then keychain). Command-line endpoints
+//! are resolved before any window exists, so a [`NullPrompter`] backs
+//! that first resolution: whatever the profile store, the environment,
+//! and the keychain do not supply must come from a profile given with
+//! `--profile`. Once the window is up, runtime opens use the
+//! dialog-backed [`crate::credentials::DialogPrompter`].
 
 use std::sync::Arc;
 

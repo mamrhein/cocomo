@@ -15,8 +15,8 @@
 //! All filesystem I/O is async behind the [`NodeFileSystem`] and
 //! [`WritableFileSystem`] traits. Built-in
 //! providers include [`LocalFs`] for the local filesystem, [`S3Fs`] for
-//! Amazon S3, [`FtpFs`] for FTP/FTPS, [`SftpFs`] for SFTP, and [`WebDavFs`]
-//! for WebDAV. Front-ends
+//! Amazon S3, [`FtpFs`] for FTP/FTPS, [`SftpFs`] for SFTP, [`WebDavFs`]
+//! for WebDAV, and the read-only [`ZipFs`] for ZIP archives. Front-ends
 //! (TUI, GUI, CLI) await on the same abstractions, keeping the library as the
 //! single source of business logic.
 //!
@@ -30,6 +30,7 @@
 //! - [`ftp`] — [`FtpFs`], the FTP/FTPS provider.
 //! - [`sftp`] — [`SftpFs`], the SFTP (SSH file transfer) provider.
 //! - [`webdav`] — [`WebDavFs`], the WebDAV provider.
+//! - [`zip`] — [`ZipFs`], the read-only ZIP archive provider.
 //! - [`provider`] — [`Provider`] enum and [`ProviderRegistry`] for unified
 //!   access to all backends.
 //! - [`resolver`] — Shared endpoint resolution: turns frontend path/URL
@@ -90,6 +91,7 @@ pub mod text;
 pub mod transfer;
 pub mod url;
 pub mod webdav;
+pub mod zip;
 
 // Re-exports for convenience.
 pub use compare::{
@@ -161,3 +163,4 @@ pub use url::{Url, UrlError};
 pub use webdav::{
     WebDavConfig, WebDavDirId, WebDavFileId, WebDavFs, WebDavNodeId,
 };
+pub use zip::{ZipDirId, ZipFile, ZipFileId, ZipFs, ZipNodeId};

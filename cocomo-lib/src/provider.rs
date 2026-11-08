@@ -10,8 +10,8 @@
 //! Provider enum and registry that unify all filesystem backends.
 //!
 //! The [`Provider`] enum wraps every concrete filesystem implementation
-//! ([`LocalFs`], [`FtpFs`], [`SftpFs`], [`S3Fs`], [`WebDavFs`]) behind a
-//! single type.
+//! ([`LocalFs`], [`FtpFs`], [`SftpFs`], [`S3Fs`], [`WebDavFs`], [`ZipFs`])
+//! behind a single type.
 //! This enables the [`ProviderRegistry`] to store heterogeneous providers
 //! and resolve them from connection profiles.
 //!
@@ -55,6 +55,7 @@ use crate::{
     snapshot::ProviderId,
     url::Url,
     webdav::{WebDavConfig, WebDavFs},
+    zip::ZipFs,
 };
 
 // ---------------------------------------------------------------------------
@@ -77,6 +78,8 @@ pub enum Provider {
     S3(S3Fs),
     /// WebDAV.
     WebDav(WebDavFs),
+    /// Read-only ZIP archive.
+    Zip(ZipFs),
 }
 
 // ---------------------------------------------------------------------------
@@ -158,6 +161,11 @@ pub enum ProviderError {
     /// A profile-store operation failed.
     #[error(transparent)]
     Profile(#[from] ProfileError),
+
+    /// The endpoint could not be opened (e.g., a ZIP archive that is
+    /// missing or whose central directory cannot be read).
+    #[error(transparent)]
+    Io(#[from] FsError),
 }
 
 impl Provider {
@@ -169,6 +177,7 @@ impl Provider {
             Self::Sftp(_) => ProviderType::Sftp,
             Self::S3(_) => ProviderType::S3,
             Self::WebDav(_) => ProviderType::WebDav,
+            Self::Zip(_) => ProviderType::Zip,
         }
     }
 
@@ -235,6 +244,10 @@ impl Provider {
     /// the scheme (`ftps`/`webdavs`), and a profile without any secret
     /// never triggers an implicit anonymous login.
     ///
+    /// The `zip` scheme addresses a local archive file, so no credentials
+    /// are resolved; the archive is opened eagerly and a missing or
+    /// unreadable archive fails with [`ProviderError::Io`].
+    ///
     /// # Errors
     ///
     /// Returns a [`ProviderError`] if no provider can be resolved for
@@ -252,6 +265,12 @@ impl Provider {
                 &Credentials::default(),
                 false,
                 String::from(Url::LOCAL_SCHEME),
+            ),
+            Url::ZIP_SCHEME => Self::build(
+                url,
+                &Credentials::default(),
+                false,
+                url.lookup_key(),
             ),
             "ftp" | "ftps" => {
                 Self::resolve_ftp(url, store, profile_id, secrets, prompter)
@@ -319,7 +338,7 @@ impl Provider {
             // attempt, and anonymous access would be implicit (OQ3).
             user = secrets.get(&url.scheme, "user");
             secret = secrets.get(&url.scheme, "password");
-            if secret.is_none() && prompter.is_tty() {
+            if secret.is_none() && prompter.is_tty(&endpoint) {
                 // A prompt is pointless when the host cannot be reached at
                 // all, so probe before asking for credentials.
                 if let (Some(host), Some(port)) =
@@ -404,7 +423,7 @@ impl Provider {
             user = secrets.get(&url.scheme, "user");
             secret = secrets.get(&url.scheme, "password");
             if secret.is_none()
-                && prompter.is_tty()
+                && prompter.is_tty(&endpoint)
                 && !key_auth_fallback_available()
             {
                 // A prompt is pointless when the host cannot be reached at
@@ -492,6 +511,11 @@ impl Provider {
                     None,
                 ),
             ))),
+            // The archive is a local file; opening it reads the central
+            // directory eagerly.
+            Url::ZIP_SCHEME => {
+                Ok(Self::Zip(ZipFs::with_label(label, &url.path)?))
+            }
             scheme => Err(ProviderError::Unimplemented {
                 scheme: scheme.to_owned(),
             }),
@@ -626,6 +650,16 @@ impl Provider {
                     },
                 )))
             }
+            ProviderType::Zip => {
+                // A zip profile points at a local archive file.
+                let archive = profile.setting("archive").ok_or_else(|| {
+                    ProfileError::NotFound(profile.id.clone())
+                })?;
+                let fs = ZipFs::with_label(label, archive).map_err(|e| {
+                    ProfileError::Io(std::io::Error::other(e.to_string()))
+                })?;
+                Ok(Self::Zip(fs))
+            }
         }
     }
 }
@@ -638,6 +672,7 @@ impl std::fmt::Debug for Provider {
             Self::Sftp(_) => f.debug_tuple("Provider::Sftp").finish(),
             Self::S3(_) => f.debug_tuple("Provider::S3").finish(),
             Self::WebDav(_) => f.debug_tuple("Provider::WebDav").finish(),
+            Self::Zip(_) => f.debug_tuple("Provider::Zip").finish(),
         }
     }
 }
@@ -721,6 +756,7 @@ impl NodeFileSystem for Provider {
             Self::Sftp(p) => p.id(),
             Self::S3(p) => p.id(),
             Self::WebDav(p) => p.id(),
+            Self::Zip(p) => p.id(),
         }
     }
 
@@ -731,6 +767,7 @@ impl NodeFileSystem for Provider {
             Self::Sftp(p) => p.label(),
             Self::S3(p) => p.label(),
             Self::WebDav(p) => p.label(),
+            Self::Zip(p) => p.label(),
         }
     }
 
@@ -741,6 +778,7 @@ impl NodeFileSystem for Provider {
             Self::Sftp(p) => p.resolve_path(path).await,
             Self::S3(p) => p.resolve_path(path).await,
             Self::WebDav(p) => p.resolve_path(path).await,
+            Self::Zip(p) => p.resolve_path(path).await,
         }
     }
 
@@ -754,6 +792,7 @@ impl NodeFileSystem for Provider {
             Self::Sftp(p) => p.resolve_symlink(id).await,
             Self::S3(p) => p.resolve_symlink(id).await,
             Self::WebDav(p) => p.resolve_symlink(id).await,
+            Self::Zip(p) => p.resolve_symlink(id).await,
         }
     }
 
@@ -764,6 +803,7 @@ impl NodeFileSystem for Provider {
             Self::Sftp(p) => p.get_node(id),
             Self::S3(p) => p.get_node(id),
             Self::WebDav(p) => p.get_node(id),
+            Self::Zip(p) => p.get_node(id),
         }
     }
 
@@ -774,6 +814,7 @@ impl NodeFileSystem for Provider {
             Self::Sftp(p) => p.node_metadata(id),
             Self::S3(p) => p.node_metadata(id),
             Self::WebDav(p) => p.node_metadata(id),
+            Self::Zip(p) => p.node_metadata(id),
         }
     }
 
@@ -788,6 +829,7 @@ impl NodeFileSystem for Provider {
             Self::Sftp(p) => p.set_node_hash(id, hash),
             Self::S3(p) => p.set_node_hash(id, hash),
             Self::WebDav(p) => p.set_node_hash(id, hash),
+            Self::Zip(p) => p.set_node_hash(id, hash),
         }
     }
 
@@ -798,6 +840,7 @@ impl NodeFileSystem for Provider {
             Self::Sftp(p) => p.read_dir_node(id).await,
             Self::S3(p) => p.read_dir_node(id).await,
             Self::WebDav(p) => p.read_dir_node(id).await,
+            Self::Zip(p) => p.read_dir_node(id).await,
         }
     }
 
@@ -812,6 +855,7 @@ impl NodeFileSystem for Provider {
             Self::Sftp(p) => p.open_node(id, mode).await,
             Self::S3(p) => p.open_node(id, mode).await,
             Self::WebDav(p) => p.open_node(id, mode).await,
+            Self::Zip(p) => p.open_node(id, mode).await,
         }
     }
 
@@ -826,6 +870,7 @@ impl NodeFileSystem for Provider {
             Self::Sftp(p) => p.read_node(id, range).await,
             Self::S3(p) => p.read_node(id, range).await,
             Self::WebDav(p) => p.read_node(id, range).await,
+            Self::Zip(p) => p.read_node(id, range).await,
         }
     }
 
@@ -840,6 +885,7 @@ impl NodeFileSystem for Provider {
             Self::Sftp(p) => p.read_stream_node(id, range).await,
             Self::S3(p) => p.read_stream_node(id, range).await,
             Self::WebDav(p) => p.read_stream_node(id, range).await,
+            Self::Zip(p) => p.read_stream_node(id, range).await,
         }
     }
 }
@@ -861,6 +907,7 @@ impl WritableFileSystem for Provider {
             Self::Sftp(p) => p.create_file(parent, name).await,
             Self::S3(p) => p.create_file(parent, name).await,
             Self::WebDav(p) => p.create_file(parent, name).await,
+            Self::Zip(p) => p.create_file(parent, name).await,
         }
     }
 
@@ -875,6 +922,7 @@ impl WritableFileSystem for Provider {
             Self::Sftp(p) => p.create_dir_node(parent, name).await,
             Self::S3(p) => p.create_dir_node(parent, name).await,
             Self::WebDav(p) => p.create_dir_node(parent, name).await,
+            Self::Zip(p) => p.create_dir_node(parent, name).await,
         }
     }
 
@@ -890,6 +938,7 @@ impl WritableFileSystem for Provider {
             Self::Sftp(p) => p.create_symlink(parent, name, target).await,
             Self::S3(p) => p.create_symlink(parent, name, target).await,
             Self::WebDav(p) => p.create_symlink(parent, name, target).await,
+            Self::Zip(p) => p.create_symlink(parent, name, target).await,
         }
     }
 
@@ -904,6 +953,7 @@ impl WritableFileSystem for Provider {
             Self::Sftp(p) => p.write_node(id, data).await,
             Self::S3(p) => p.write_node(id, data).await,
             Self::WebDav(p) => p.write_node(id, data).await,
+            Self::Zip(p) => p.write_node(id, data).await,
         }
     }
 
@@ -914,6 +964,7 @@ impl WritableFileSystem for Provider {
             Self::Sftp(p) => p.flush_node(id).await,
             Self::S3(p) => p.flush_node(id).await,
             Self::WebDav(p) => p.flush_node(id).await,
+            Self::Zip(p) => p.flush_node(id).await,
         }
     }
 
@@ -924,6 +975,7 @@ impl WritableFileSystem for Provider {
             Self::Sftp(p) => p.remove_node(id).await,
             Self::S3(p) => p.remove_node(id).await,
             Self::WebDav(p) => p.remove_node(id).await,
+            Self::Zip(p) => p.remove_node(id).await,
         }
     }
 
@@ -934,6 +986,7 @@ impl WritableFileSystem for Provider {
             Self::Sftp(p) => p.remove_all_node(id).await,
             Self::S3(p) => p.remove_all_node(id).await,
             Self::WebDav(p) => p.remove_all_node(id).await,
+            Self::Zip(p) => p.remove_all_node(id).await,
         }
     }
 
@@ -948,6 +1001,7 @@ impl WritableFileSystem for Provider {
             Self::Sftp(p) => p.rename_node(id, new_name).await,
             Self::S3(p) => p.rename_node(id, new_name).await,
             Self::WebDav(p) => p.rename_node(id, new_name).await,
+            Self::Zip(p) => p.rename_node(id, new_name).await,
         }
     }
 
@@ -962,6 +1016,7 @@ impl WritableFileSystem for Provider {
             Self::Sftp(p) => p.copy_node(src, dst).await,
             Self::S3(p) => p.copy_node(src, dst).await,
             Self::WebDav(p) => p.copy_node(src, dst).await,
+            Self::Zip(p) => p.copy_node(src, dst).await,
         }
     }
 
@@ -976,6 +1031,7 @@ impl WritableFileSystem for Provider {
             Self::Sftp(p) => p.move_node(src, dst).await,
             Self::S3(p) => p.move_node(src, dst).await,
             Self::WebDav(p) => p.move_node(src, dst).await,
+            Self::Zip(p) => p.move_node(src, dst).await,
         }
     }
 }
@@ -1167,6 +1223,11 @@ mod tests {
             },
         ));
         assert_eq!(s3.provider_type(), ProviderType::S3);
+
+        let dir = tempdir().unwrap();
+        let zip =
+            Provider::Zip(ZipFs::open(write_test_zip(dir.path())).unwrap());
+        assert_eq!(zip.provider_type(), ProviderType::Zip);
     }
 
     #[test]
@@ -1279,7 +1340,7 @@ mod tests {
     }
 
     impl Prompter for RecordingPrompter {
-        fn is_tty(&self) -> bool {
+        fn is_tty(&self, _endpoint: &str) -> bool {
             true
         }
 
@@ -1565,7 +1626,8 @@ mod tests {
     #[tokio::test]
     async fn registry_get_or_create_missing_profile_fails() {
         let registry = ProviderRegistry::new();
-        let bad_profile = Profile::new("bad-s3", ProviderType::S3); // missing required fields
+        // The S3 profile is missing all required fields.
+        let bad_profile = Profile::new("bad-s3", ProviderType::S3);
         let fake_id = FileSystemId::new(999u64);
 
         let result = registry.get_or_create(&fake_id, &bad_profile).await;
@@ -1698,6 +1760,51 @@ mod tests {
                 "unexpected error for {input}: {error}"
             );
         }
+    }
+
+    /// Write a minimal valid archive and return its path.
+    fn write_test_zip(dir: &std::path::Path) -> PathBuf {
+        use std::io::Write;
+
+        let path = dir.join("sample.zip");
+        let mut zw =
+            ::zip::ZipWriter::new(fs_err::File::create(&path).unwrap());
+        let opts = ::zip::write::SimpleFileOptions::default();
+        zw.start_file("hello.txt", opts).unwrap();
+        zw.write_all(b"hello").unwrap();
+        zw.finish().unwrap();
+        path
+    }
+
+    #[test]
+    fn resolve_zip_needs_no_credentials() {
+        let dir = tempdir().unwrap();
+        let archive = write_test_zip(dir.path());
+        let url = Url::parse(&format!("zip://{}", archive.display())).unwrap();
+        let provider = Provider::resolve(
+            &url,
+            None,
+            None,
+            &Secrets::with_keychain(false),
+            &NullPrompter,
+        )
+        .unwrap();
+        assert!(matches!(provider, Provider::Zip(_)));
+        assert_eq!(provider.provider_type(), ProviderType::Zip);
+    }
+
+    #[test]
+    fn resolve_zip_missing_archive_fails() {
+        let url = Url::parse("zip:///nonexistent/archive.zip").unwrap();
+        let err = Provider::resolve(
+            &url,
+            None,
+            None,
+            &Secrets::with_keychain(false),
+            &NullPrompter,
+        )
+        .unwrap_err();
+        assert!(matches!(err, ProviderError::Io(_)));
     }
 
     #[test]

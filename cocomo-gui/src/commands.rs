@@ -42,11 +42,12 @@ use crate::{
         CompareUsingTable, CompareUsingText, FileFormats, HelpContents,
         MergeFiles, NewCompare, NextSection, OpenClipboard, OpenFile,
         OpenSession, OpenWithAssociatedApp, OpenWithTextEdit,
-        OpenWithTextPatch, Options, PrevSection, Quit, ReloadCompare,
-        RestoreWorkspace, SaveFile, SaveFileAs, SaveSession, SaveSessionAs,
-        SaveWorkspace, SessionInfo, SessionReport, SessionSettings,
-        StopCompare, SyncPresets, ToggleLogPane, ToggleMergeAncestor,
-        ToggleSingleRowToolbar, ToggleWordWrap, menu_bindings,
+        OpenWithTextPatch, Options, PrevSection, Profiles, Quit,
+        ReloadCompare, RestoreWorkspace, SaveFile, SaveFileAs, SaveSession,
+        SaveSessionAs, SaveWorkspace, SessionInfo, SessionReport,
+        SessionSettings, StopCompare, SyncPresets, ToggleLogPane,
+        ToggleMergeAncestor, ToggleSingleRowToolbar, ToggleWordWrap,
+        menu_bindings,
     },
     options::{self, AppOptions},
     text_diff::{
@@ -1051,6 +1052,13 @@ pub fn all_commands() -> Vec<CommandSpec> {
             category: "Tools",
             default_binding: None,
             action: Some(action::<SyncPresets>),
+        },
+        CommandSpec {
+            id: "tools.profiles",
+            label: "Profiles…",
+            category: "Tools",
+            default_binding: None,
+            action: Some(action::<Profiles>),
         },
         // Help
         CommandSpec {

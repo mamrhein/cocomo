@@ -117,6 +117,7 @@ actions!(
         StopCompare,
         FileFormats,
         SyncPresets,
+        Profiles,
         HelpContents,
         About,
         Quit,
@@ -860,6 +861,9 @@ fn build_app_menus(
             }),
             show(hidden, "tools.sync_presets", || {
                 MenuItem::action("Folder Sync presets…", SyncPresets)
+            }),
+            show(hidden, "tools.profiles", || {
+                MenuItem::action("Profiles…", Profiles)
             }),
         ])),
         Menu::new("Help").items(items([
@@ -1618,6 +1622,16 @@ pub fn register_menu_handlers(cx: &mut App) {
         };
         let _ = window.update(cx, |_, window, cx| {
             crate::sync_presets::open_sync_presets_dialog(window, cx);
+        });
+    });
+
+    // Tools menu — the profile management dialog.
+    cx.on_action(move |_action: &Profiles, cx: &mut App| {
+        let Some(window) = cx.active_window() else {
+            return;
+        };
+        let _ = window.update(cx, |_, window, cx| {
+            crate::profiles::open_profiles_dialog(window, cx);
         });
     });
 

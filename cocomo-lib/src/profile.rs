@@ -111,6 +111,8 @@ pub enum ProviderType {
     S3,
     /// WebDAV.
     WebDav,
+    /// Read-only ZIP archive.
+    Zip,
 }
 
 impl ProviderType {
@@ -122,6 +124,7 @@ impl ProviderType {
             Self::Sftp => "sftp",
             Self::S3 => "s3",
             Self::WebDav => "webdav",
+            Self::Zip => "zip",
         }
     }
 }
@@ -134,6 +137,7 @@ impl fmt::Display for ProviderType {
             Self::Sftp => write!(f, "sftp"),
             Self::S3 => write!(f, "s3"),
             Self::WebDav => write!(f, "webdav"),
+            Self::Zip => write!(f, "zip"),
         }
     }
 }
@@ -821,6 +825,7 @@ mod tests {
         assert_eq!(ProviderType::Sftp.scheme(), "sftp");
         assert_eq!(ProviderType::S3.scheme(), "s3");
         assert_eq!(ProviderType::WebDav.scheme(), "webdav");
+        assert_eq!(ProviderType::Zip.scheme(), "zip");
     }
 
     #[test]
@@ -830,6 +835,7 @@ mod tests {
         assert_eq!(format!("{}", ProviderType::Sftp), "sftp");
         assert_eq!(format!("{}", ProviderType::S3), "s3");
         assert_eq!(format!("{}", ProviderType::WebDav), "webdav");
+        assert_eq!(format!("{}", ProviderType::Zip), "zip");
     }
 
     #[test]

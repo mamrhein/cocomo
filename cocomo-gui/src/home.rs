@@ -15,13 +15,13 @@
 //! panel lists saved sessions (searchable, with a context menu) and the
 //! auto-saved history of recently opened sessions.
 
-use std::cell::Cell;
+use std::{cell::Cell, path::PathBuf, sync::Arc};
 
-use cocomo_lib::{Endpoint, SessionConfig, SessionType};
+use cocomo_lib::{Endpoint, Provider, SessionConfig, SessionType, Url, ZipFs};
 use gpui::{
     App, AsyncApp, ClickEvent, Context, ElementId, Entity, ExternalPaths,
-    FocusHandle, Focusable, FontWeight, KeyBinding, PathPromptOptions, Render,
-    SharedString, Subscription, Window, actions,
+    FocusHandle, Focusable, FontWeight, Hsla, KeyBinding, PathPromptOptions,
+    Render, SharedString, Subscription, Window, actions,
     assets::IconName,
     component::{
         ActiveTheme, Sizable as _, WindowExt as _,
@@ -177,18 +177,45 @@ fn prompt_text_merge_triple(mgr: Entity<GuiSessionManager>, cx: &mut App) {
     .detach();
 }
 
+/// Turn a picked path into a folder endpoint.
+///
+/// A directory becomes a local endpoint; a `.zip` file is opened as a
+/// read-only archive side (the archive provider).
+fn folder_or_archive_endpoint(path: PathBuf) -> anyhow::Result<Endpoint> {
+    if path.is_file() {
+        anyhow::ensure!(
+            path.extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("zip")),
+            "Only .zip archives can be used as a folder side, not {}.",
+            path.display()
+        );
+        let label = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "archive".to_string());
+        let zip = ZipFs::with_label(label, &path)?;
+        let mut url = Url::from_path(&path);
+        url.scheme = Url::ZIP_SCHEME.to_string();
+        Ok(Endpoint::new(Arc::new(Provider::Zip(zip)), url))
+    } else {
+        Ok(Endpoint::local(path))
+    }
+}
+
 /// Ask for two folders in sequence, then open a Folder Sync tab.
 ///
-/// The second dialog is only shown after the first folder is chosen;
-/// cancelling either step abandons the flow silently.
+/// Either side may also be a `.zip` archive, which opens as a read-only
+/// folder side. The second dialog is only shown after the first folder
+/// is chosen; cancelling either step abandons the flow silently.
 fn prompt_dir_pair(mgr: Entity<GuiSessionManager>, cx: &mut App) {
     let options = |prompt: &'static str| PathPromptOptions {
-        files: false,
+        files: true,
         directories: true,
         multiple: false,
         prompt: Some(prompt.into()),
     };
-    let left_receiver = cx.prompt_for_paths(options("Choose the left folder"));
+    let left_receiver =
+        cx.prompt_for_paths(options("Choose the left folder or ZIP archive"));
     cx.spawn(move |cx: &mut AsyncApp| {
         let cx = cx.clone();
         async move {
@@ -199,7 +226,9 @@ fn prompt_dir_pair(mgr: Entity<GuiSessionManager>, cx: &mut App) {
                 return;
             };
             let right_receiver = cx.update(|cx| {
-                cx.prompt_for_paths(options("Choose the right folder"))
+                cx.prompt_for_paths(options(
+                    "Choose the right folder or ZIP archive",
+                ))
             });
             let Ok(Ok(Some(paths))) = right_receiver.await else {
                 return;
@@ -207,17 +236,29 @@ fn prompt_dir_pair(mgr: Entity<GuiSessionManager>, cx: &mut App) {
             let Some(right) = paths.into_iter().next() else {
                 return;
             };
-            cx.update(|cx| {
+            let opened = cx.update(|cx| -> anyhow::Result<()> {
+                let left = folder_or_archive_endpoint(left)?;
+                let right = folder_or_archive_endpoint(right)?;
                 mgr.update(cx, |m, cx| {
                     m.add_folder_tab_with_type(
                         SessionType::DirSync,
-                        Endpoint::local(left),
-                        Endpoint::local(right),
+                        left,
+                        right,
                         None,
                         cx,
                     );
                 });
+                Ok(())
             });
+            if let Err(err) = opened {
+                cx.update(|cx| {
+                    log::push(
+                        LogLevel::Error,
+                        format!("Cannot open folder session: {err}."),
+                        cx,
+                    );
+                });
+            }
         }
     })
     .detach();
@@ -226,17 +267,19 @@ fn prompt_dir_pair(mgr: Entity<GuiSessionManager>, cx: &mut App) {
 /// Ask for a left, right, and ancestor folder in sequence, then open a
 /// Folder Merge tab.
 ///
-/// Unlike a text merge, a folder merge needs an ancestor, so cancelling
-/// the ancestor prompt abandons the flow silently rather than falling
-/// back to a two-way merge.
+/// Any side may also be a `.zip` archive, which opens as a read-only
+/// folder side. Unlike a text merge, a folder merge needs an ancestor,
+/// so cancelling the ancestor prompt abandons the flow silently rather
+/// than falling back to a two-way merge.
 fn prompt_dir_triple(mgr: Entity<GuiSessionManager>, cx: &mut App) {
     let options = |prompt: &'static str| PathPromptOptions {
-        files: false,
+        files: true,
         directories: true,
         multiple: false,
         prompt: Some(prompt.into()),
     };
-    let left_receiver = cx.prompt_for_paths(options("Choose the left folder"));
+    let left_receiver =
+        cx.prompt_for_paths(options("Choose the left folder or ZIP archive"));
     cx.spawn(move |cx: &mut AsyncApp| {
         let cx = cx.clone();
         async move {
@@ -247,7 +290,9 @@ fn prompt_dir_triple(mgr: Entity<GuiSessionManager>, cx: &mut App) {
                 return;
             };
             let right_receiver = cx.update(|cx| {
-                cx.prompt_for_paths(options("Choose the right folder"))
+                cx.prompt_for_paths(options(
+                    "Choose the right folder or ZIP archive",
+                ))
             });
             let Ok(Ok(Some(paths))) = right_receiver.await else {
                 return;
@@ -256,7 +301,9 @@ fn prompt_dir_triple(mgr: Entity<GuiSessionManager>, cx: &mut App) {
                 return;
             };
             let ancestor_receiver = cx.update(|cx| {
-                cx.prompt_for_paths(options("Choose the ancestor folder"))
+                cx.prompt_for_paths(options(
+                    "Choose the ancestor folder or ZIP archive",
+                ))
             });
             let Ok(Ok(Some(paths))) = ancestor_receiver.await else {
                 return;
@@ -264,17 +311,30 @@ fn prompt_dir_triple(mgr: Entity<GuiSessionManager>, cx: &mut App) {
             let Some(ancestor) = paths.into_iter().next() else {
                 return;
             };
-            cx.update(|cx| {
+            let opened = cx.update(|cx| -> anyhow::Result<()> {
+                let left = folder_or_archive_endpoint(left)?;
+                let right = folder_or_archive_endpoint(right)?;
+                let ancestor = folder_or_archive_endpoint(ancestor)?;
                 mgr.update(cx, |m, cx| {
                     m.add_folder_tab_with_type(
                         SessionType::DirMerge,
-                        Endpoint::local(left),
-                        Endpoint::local(right),
-                        Some(Endpoint::local(ancestor)),
+                        left,
+                        right,
+                        Some(ancestor),
                         cx,
                     );
                 });
+                Ok(())
             });
+            if let Err(err) = opened {
+                cx.update(|cx| {
+                    log::push(
+                        LogLevel::Error,
+                        format!("Cannot open folder session: {err}."),
+                        cx,
+                    );
+                });
+            }
         }
     })
     .detach();
@@ -809,6 +869,7 @@ impl HomeView {
             .rounded_md()
             .cursor_pointer()
             .hover(|style| style.bg(theme.muted))
+            .when(index % 2 == 1 && !selected, |row| row.bg(theme.table_even))
             .when(selected, |row| row.bg(theme.accent))
             .child(div().flex_1().min_w_0().truncate().child(name))
             .when(is_default, |row| {
@@ -914,7 +975,9 @@ impl HomeView {
     /// One row of the auto-saved history list. History is transient, so a
     /// single click opens it and there is no context menu.
     fn history_row(
+        index: usize,
         entry: &SavedSession,
+        stripe: Hsla,
         session_manager: Entity<GuiSessionManager>,
     ) -> gpui::AnyElement {
         let config = entry.config().clone();
@@ -924,28 +987,34 @@ impl HomeView {
             config.right.path.display()
         )
         .into();
-        Button::new(ElementId::Name(
-            format!("history-{}", entry.path().display()).into(),
-        ))
-        .label(config.name.clone())
-        .ghost()
-        .small()
-        .w_full()
-        .justify_start()
-        .truncate()
-        .tooltip(tooltip)
-        .on_click(move |_, _, cx| {
-            session_manager.update(cx, |m, cx| {
-                if let Err(e) = m.open_saved(config.clone(), cx) {
-                    log::push(
-                        LogLevel::Error,
-                        format!("Open session failed: {e}"),
-                        cx,
-                    );
-                }
-            });
-        })
-        .into_any_element()
+        div()
+            .w_full()
+            .rounded_md()
+            .when(index % 2 == 1, |row| row.bg(stripe))
+            .child(
+                Button::new(ElementId::Name(
+                    format!("history-{}", entry.path().display()).into(),
+                ))
+                .label(config.name.clone())
+                .ghost()
+                .small()
+                .w_full()
+                .justify_start()
+                .truncate()
+                .tooltip(tooltip)
+                .on_click(move |_, _, cx| {
+                    session_manager.update(cx, |m, cx| {
+                        if let Err(e) = m.open_saved(config.clone(), cx) {
+                            log::push(
+                                LogLevel::Error,
+                                format!("Open session failed: {e}"),
+                                cx,
+                            );
+                        }
+                    });
+                }),
+            )
+            .into_any_element()
     }
 }
 
@@ -982,13 +1051,14 @@ impl Render for HomeView {
 
         // Copy the theme colors up front: `cx.theme()` borrows the app,
         // and building rows needs mutable app access.
-        let (bg, fg, border, muted_foreground) = {
+        let (bg, fg, border, muted_foreground, table_even) = {
             let theme = cx.theme();
             (
                 theme.background,
                 theme.foreground,
                 theme.border,
                 theme.muted_foreground,
+                theme.table_even,
             )
         };
         let focus_handle = self.focus_handle(cx);
@@ -1122,7 +1192,10 @@ impl Render for HomeView {
         }
         let history_rows: Vec<gpui::AnyElement> = history
             .iter()
-            .map(|entry| Self::history_row(entry, mgr.clone()))
+            .enumerate()
+            .map(|(index, entry)| {
+                Self::history_row(index, entry, table_even, mgr.clone())
+            })
             .collect();
 
         let right = v_flex()

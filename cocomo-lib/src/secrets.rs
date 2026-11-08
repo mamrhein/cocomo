@@ -130,9 +130,10 @@ fn keychain_lookup(service: &str, account: &str) -> Option<String> {
 
 /// Interactive, one-time credential entry for a remote endpoint.
 pub trait Prompter {
-    /// Return whether interactive credential entry is possible at all (i.e.
-    /// whether both stdin and stderr are attached to a terminal).
-    fn is_tty(&self) -> bool;
+    /// Return whether interactive credential entry is possible for
+    /// `endpoint` (a terminal prompt attached to a TTY, or a GUI dialog
+    /// that already has credentials ready for that endpoint).
+    fn is_tty(&self, endpoint: &str) -> bool;
 
     /// Prompt for the username to log in at `endpoint`.
     fn prompt_user(&self, endpoint: &str) -> Option<String>;
@@ -146,7 +147,7 @@ pub trait Prompter {
 pub struct NullPrompter;
 
 impl Prompter for NullPrompter {
-    fn is_tty(&self) -> bool {
+    fn is_tty(&self, _endpoint: &str) -> bool {
         false
     }
 
@@ -173,12 +174,12 @@ impl TtyPrompter {
 
 impl Prompter for TtyPrompter {
     #[cfg(feature = "prompt")]
-    fn is_tty(&self) -> bool {
+    fn is_tty(&self, _endpoint: &str) -> bool {
         io::stdin().is_terminal() && io::stderr().is_terminal()
     }
 
     #[cfg(not(feature = "prompt"))]
-    fn is_tty(&self) -> bool {
+    fn is_tty(&self, _endpoint: &str) -> bool {
         false
     }
 

@@ -22,7 +22,13 @@
 //! - `s3://bucket[/prefix…]/path` — the bucket name occupies the authority
 //!   position, the remainder is the path within the bucket.
 //! - `webdav://host[:port]/path` and `webdavs://…` (TLS implied by `webdavs`).
-//! - `file:///abs/path`, `file://./rel/path`, and bare paths — local paths.
+//! - `zip:///abs/path/to/archive.zip` — a read-only view of a local ZIP
+//!   archive. The archive is addressed by its absolute local path; a location
+//!   inside the archive uses a `!` separator between the archive path and the
+//!   in-archive path (split at the first `!`): e.g.
+//!   `zip:///abs/path/to/archive.zip!/inner/dir/file.txt`. The in-archive
+//!   location is kept in [`Url::entry`], while [`Url::path`] holds the archive
+//!   path.
 //!
 //! Anything that looks like a scheme (a `://` separator) but is not one of
 //! the accepted forms fails to parse, so a mistyped remote URL never
@@ -50,7 +56,7 @@ pub enum UrlError {
     Empty,
 
     /// The input uses a scheme other than `file`, `ftp`, `ftps`, `sftp`,
-    /// `s3`, `webdav`, or `webdavs`.
+    /// `s3`, `webdav`, `webdavs`, or `zip`.
     #[error("unsupported URL scheme \"{scheme}\" in \"{url}\"")]
     UnsupportedScheme {
         /// The offending URL as typed by the user.
@@ -119,7 +125,7 @@ pub enum UrlError {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Url {
     /// URL scheme, one of `file`, `ftp`, `ftps`, `sftp`, `s3`, `webdav`,
-    /// `webdavs`.
+    /// `webdavs`, `zip`.
     pub scheme: String,
     /// Authority host (or S3 bucket name). `None` for local URLs.
     pub host: Option<String>,
@@ -128,13 +134,22 @@ pub struct Url {
     /// Path within the provider. For remote URLs this is the part after the
     /// authority, relative to the provider root (a leading `/` is dropped so
     /// that S3 keys and FTP/WebDAV paths behave uniformly). For local URLs
-    /// this is the whole path.
+    /// this is the whole path. For `zip` URLs this is the path of the
+    /// archive file itself.
     pub path: PathBuf,
+    /// Location inside the archive for `zip` URLs: the part after the first
+    /// `!` separator, relative to the archive root (a leading `/` is
+    /// dropped, like the path of a remote URL). `None` for every other
+    /// scheme and for a URL that addresses the archive root.
+    pub entry: Option<PathBuf>,
 }
 
 impl Url {
     /// The scheme common to all local URLs.
     pub const LOCAL_SCHEME: &'static str = "file";
+
+    /// The scheme of read-only ZIP archive URLs.
+    pub const ZIP_SCHEME: &'static str = "zip";
 
     /// The port a remote scheme uses when the URL does not name one.
     pub const DEFAULT_PORTS: &'static [(&'static str, u16)] = &[
@@ -174,6 +189,7 @@ impl Url {
             host: None,
             port: None,
             path: path.as_ref().to_owned(),
+            entry: None,
         }
     }
 
@@ -223,6 +239,9 @@ impl Url {
         if scheme == Self::LOCAL_SCHEME {
             return Self::parse_file_url(scheme, rest, input);
         }
+        if scheme == Self::ZIP_SCHEME {
+            return Self::parse_zip_url(scheme, rest, input);
+        }
         if !matches!(
             scheme.as_str(),
             "ftp" | "ftps" | "sftp" | "s3" | "webdav" | "webdavs"
@@ -263,7 +282,33 @@ impl Url {
             host: Some(host.to_owned()),
             port,
             path: PathBuf::from(path_str),
+            entry: None,
         })
+    }
+
+    /// Parse a `zip://` URL: the archive is addressed like a local path,
+    /// and an optional `!` separator introduces the location inside the
+    /// archive (split at the first `!`, so entry names may themselves
+    /// contain `!`).
+    fn parse_zip_url(
+        scheme: String,
+        rest: &str,
+        input: &str,
+    ) -> Result<Self, UrlError> {
+        let (archive, entry) = match rest.find('!') {
+            Some(idx) => (&rest[..idx], &rest[idx + 1..]),
+            None => (rest, ""),
+        };
+        // Drop the leading `/` so the entry is relative to the archive
+        // root, no matter how the URL spelled it.
+        let entry = entry.strip_prefix('/').unwrap_or(entry);
+        // The archive part must look like a local path; anything that
+        // resembles an authority is refused, just as for `file://`.
+        let mut url = Self::parse_file_url(scheme, archive, input)?;
+        if !entry.is_empty() {
+            url.entry = Some(PathBuf::from(entry));
+        }
+        Ok(url)
     }
 
     /// Parse a `file://` URL: everything after the scheme separator is a
@@ -296,6 +341,7 @@ impl Url {
                 host: None,
                 port: None,
                 path: PathBuf::from(rest),
+                entry: None,
             });
         }
         let host = rest.split('/').next().unwrap_or(rest).to_owned();
@@ -368,7 +414,21 @@ impl fmt::Display for Url {
                 }
                 Ok(())
             }
-            None => write!(f, "{}", self.path.display()),
+            None => {
+                // Local URLs display as bare paths; `zip` URLs keep their
+                // scheme and the `!`-separated entry so `Display` round-
+                // trips through `parse`.
+                if self.scheme == Self::ZIP_SCHEME {
+                    write!(f, "{}://{}", self.scheme, self.path.display())?;
+                    if let Some(entry) = &self.entry
+                        && !entry.as_os_str().is_empty()
+                    {
+                        write!(f, "!/{}", entry.display())?;
+                    }
+                    return Ok(());
+                }
+                write!(f, "{}", self.path.display())
+            }
         }
     }
 }
@@ -454,6 +514,45 @@ mod tests {
         assert_eq!(tls.scheme, "webdavs");
         assert!(tls.uses_tls_by_default());
         assert_eq!(tls.effective_port(), Some(443));
+    }
+
+    #[test]
+    fn parse_zip_urls_round_trip() {
+        // The archive root: the whole remainder is the archive path.
+        let url = Url::parse("zip:///a/b.zip").unwrap();
+        assert_eq!(url.scheme, "zip");
+        assert_eq!(url.host, None);
+        assert_eq!(url.path, Path::new("/a/b.zip"));
+        assert_eq!(url.entry, None);
+        assert_eq!(url.to_string(), "zip:///a/b.zip");
+
+        // A location inside the archive, separated by `!`.
+        let url = Url::parse("zip:///a/b.zip!/x/y.txt").unwrap();
+        assert_eq!(url.path, Path::new("/a/b.zip"));
+        assert_eq!(url.entry.as_deref(), Some(Path::new("x/y.txt")));
+        assert_eq!(url.to_string(), "zip:///a/b.zip!/x/y.txt");
+    }
+
+    #[test]
+    fn parse_zip_splits_at_first_bang() {
+        // Only the first `!` separates; entry names may contain `!`.
+        let url = Url::parse("zip:///a.zip!/x!y/z").unwrap();
+        assert_eq!(url.path, Path::new("/a.zip"));
+        assert_eq!(url.entry.as_deref(), Some(Path::new("x!y/z")));
+        assert_eq!(url.to_string(), "zip:///a.zip!/x!y/z");
+        // A trailing `!` addresses the archive root.
+        let url = Url::parse("zip:///a.zip!").unwrap();
+        assert_eq!(url.path, Path::new("/a.zip"));
+        assert_eq!(url.entry, None);
+    }
+
+    #[test]
+    fn parse_zip_rejects_authority() {
+        // The archive is a local file, so a host makes no sense.
+        assert!(matches!(
+            Url::parse("zip://host/a.zip"),
+            Err(UrlError::InvalidHost { .. })
+        ));
     }
 
     #[test]

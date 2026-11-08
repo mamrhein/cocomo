@@ -25,6 +25,7 @@
 
 use std::{
     path::{Path, PathBuf},
+    rc::Rc,
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -34,8 +35,8 @@ use std::{
 
 use anyhow::{Context as _, Result};
 use cocomo_lib::{
-    Endpoint, FsError, NullPrompter, ProviderRef, Session, SessionConfig,
-    SessionSettings, SessionType,
+    Endpoint, FsError, ProviderRef, Session, SessionConfig, SessionSettings,
+    SessionType,
 };
 use gpui::{
     App, AppContext as _, Context, Entity, Global, Task,
@@ -43,6 +44,7 @@ use gpui::{
 };
 
 use crate::{
+    credentials::{DialogPrompter, RemoteOpen, resolve_remote},
     file_formats::FileViewKind,
     log::{self, LogLevel},
     tabview::TabEntity,
@@ -583,14 +585,15 @@ impl SavedSessionStore {
     /// Build a runtime [`Session`] from a config, rebuilding the providers
     /// from the refs recorded in it.
     ///
-    /// Remote refs re-resolve without prompting: the GUI has no reliable
-    /// terminal, so credentials must come from a profile, the environment,
-    /// or the keychain.
+    /// Remote refs resolve through the credential cache; a ref that needs
+    /// fresh credentials fails (this entry point has no window to attach
+    /// a dialog to), so credentials should come from a profile, the
+    /// environment, or the keychain.
     pub async fn build_session(
         &self,
         config: &SessionConfig,
     ) -> Result<Session> {
-        let prompter = NullPrompter;
+        let prompter = DialogPrompter;
         let left = Endpoint::from_ref(
             &config.left.provider,
             config.left.path.clone(),
@@ -836,12 +839,13 @@ impl GuiSessionManager {
         let title = gpui::SharedString::from(config.name.clone());
 
         // A merge session carries an ancestor endpoint; resolve it with
-        // the same no-prompt rule as the two main sides.
+        // the same credential rule as the two main sides (the cache is
+        // already warm when the sides came through the dialog).
         let center = config.center.as_ref().and_then(|center| {
             Endpoint::from_ref(
                 &center.provider,
                 center.path.clone(),
-                &NullPrompter,
+                &DialogPrompter,
             )
             .ok()
         });
@@ -1262,36 +1266,83 @@ impl GuiSessionManager {
     /// type and rebuilding all endpoints from the provider refs recorded
     /// in it.
     ///
-    /// Remote refs re-resolve without prompting (same rule as
-    /// [`SavedSessionStore::build_session`]); a ref that needs credentials
-    /// fails and the caller reports the error.
+    /// Remote refs resolve through the credential cache; when one needs
+    /// credentials the dialog from [`crate::credentials`] opens and this
+    /// open re-runs once the user confirms, so the return value is `Ok`
+    /// while the open is merely pending. A non-credential failure is
+    /// returned for the caller to report.
     pub fn open_session_config(
         &mut self,
         config: SessionConfig,
         cx: &mut Context<Self>,
     ) -> Result<()> {
-        let prompter = NullPrompter;
-        let resolve = |p: &ProviderRef, what: &str| -> Result<Endpoint> {
-            Endpoint::from_ref(&p.provider, p.path.clone(), &prompter)
-                .with_context(|| {
-                    format!(
-                        "failed to resolve {what} endpoint: {}",
-                        p.path.display()
-                    )
-                })
+        // Re-running the whole open is the retry path after the
+        // credential dialog confirms; the cache makes it succeed.
+        let retry: Rc<dyn Fn(&mut App)> = {
+            let mgr = cx.entity().clone();
+            let retry_config = config.clone();
+            Rc::new(move |cx: &mut App| {
+                mgr.update(cx, |m, cx| {
+                    if let Err(e) =
+                        m.open_session_config(retry_config.clone(), cx)
+                    {
+                        log::push(
+                            LogLevel::Error,
+                            format!("Open session failed: {e}"),
+                            cx,
+                        );
+                    }
+                });
+            })
         };
-        let left = resolve(&config.left, "left")?;
-        let right = resolve(&config.right, "right")?;
+        let resolve =
+            |p: &ProviderRef, what: &str, cx: &mut App| -> RemoteOpen {
+                resolve_remote(
+                    &p.provider,
+                    p.path.clone(),
+                    what,
+                    retry.clone(),
+                    cx,
+                )
+            };
+        let left = match resolve(&config.left, "The left side", cx) {
+            RemoteOpen::Resolved(endpoint) => endpoint,
+            RemoteOpen::Prompted => return Ok(()),
+            RemoteOpen::Failed(e) => {
+                return Err(e.context(format!(
+                    "failed to resolve left endpoint: {}",
+                    config.left.path.display()
+                )));
+            }
+        };
+        let right = match resolve(&config.right, "The right side", cx) {
+            RemoteOpen::Resolved(endpoint) => endpoint,
+            RemoteOpen::Prompted => return Ok(()),
+            RemoteOpen::Failed(e) => {
+                return Err(e.context(format!(
+                    "failed to resolve right endpoint: {}",
+                    config.right.path.display()
+                )));
+            }
+        };
         match config.session_type {
             SessionType::TextCompare => {
                 self.add_text_diff_tab(left, right, None, cx);
             }
             SessionType::TextMerge => {
-                let ancestor = config
-                    .center
-                    .as_ref()
-                    .map(|c| resolve(c, "ancestor"))
-                    .transpose()?;
+                let ancestor = match &config.center {
+                    Some(c) => match resolve(c, "The ancestor", cx) {
+                        RemoteOpen::Resolved(endpoint) => Some(endpoint),
+                        RemoteOpen::Prompted => return Ok(()),
+                        RemoteOpen::Failed(e) => {
+                            return Err(e.context(format!(
+                                "failed to resolve ancestor endpoint: {}",
+                                c.path.display()
+                            )));
+                        }
+                    },
+                    None => None,
+                };
                 self.add_text_merge_tab(left, right, ancestor, cx);
             }
             SessionType::TableCompare => {

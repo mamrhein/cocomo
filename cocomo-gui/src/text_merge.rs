@@ -1814,6 +1814,7 @@ fn render_merge_row(
     muted_fg: Hsla,
     list_active: Hsla,
     list_hover: Hsla,
+    table_even: Hsla,
     mono: &SharedString,
     state: &Entity<MergeSession>,
     has_ancestor: bool,
@@ -1835,6 +1836,9 @@ fn render_merge_row(
         .font_family(mono.clone())
         .text_xs()
         .child(div().w(px(3.)).flex_shrink_0().bg(bar_color))
+        // Alternating row backgrounds (spec section 7.4-7); selection
+        // and hover override.
+        .when(ix % 2 == 1 && !is_selected, |el| el.bg(table_even))
         .when(is_selected, |el| el.bg(list_active))
         .hover(|el| el.bg(list_hover))
         .when(!word_wrap, |el| {
@@ -1997,6 +2001,7 @@ impl Render for MergeView {
         let muted_fg = theme.muted_foreground;
         let list_active = theme.list_active;
         let list_hover = theme.list_hover;
+        let table_even = theme.table_even;
         let border = theme.border;
         let danger = theme.danger;
 
@@ -2069,6 +2074,7 @@ impl Render for MergeView {
                         muted_fg,
                         list_active,
                         list_hover,
+                        table_even,
                         &mono,
                         &state,
                         has_ancestor,
