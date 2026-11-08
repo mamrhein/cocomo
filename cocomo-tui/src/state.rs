@@ -24,7 +24,7 @@ use std::{
 };
 
 use cocomo_lib::{
-    DirComparison, DirEntry, DirEntryStatus, Endpoint, Grammar, LineInfo,
+    DirComparison, DirEntry, DirEntryStatus, Endpoint, Grammar, MergedDiffRow,
     SyncOperation, SyncResult, TextDiff, TransferAction, TransferItem,
     filter::DisplayFilters,
     report::{ReportConfig, ReportFormat},
@@ -791,16 +791,30 @@ pub struct DirRow<'a> {
     pub tree_prefix: String,
 }
 
-/// Text diff state: the diff result plus the file-content cache.
+/// Text diff state: the diff result plus the derived display model.
 pub struct TextDiffView {
     /// Text diff result, or `None` while loading.
     pub text_diff: Option<TextDiff>,
-    /// Full left file content, in display order (line numbers are 1-based).
-    pub left_lines: Vec<LineInfo>,
-    /// Full right file content, in display order (line numbers are 1-based).
-    pub right_lines: Vec<LineInfo>,
+    /// Aligned side-by-side rows derived from [`Self::text_diff`]: the row
+    /// model that the text view renders and that every row index (cursor,
+    /// search, diff-group navigation) is based on.
+    ///
+    /// Always in sync with the diff; replace the diff only through
+    /// [`Self::set_text_diff`] to preserve the invariant.
+    pub merged_rows: Vec<MergedDiffRow>,
     /// Grammar used for syntax classification.
     pub grammar: Grammar,
+}
+
+impl TextDiffView {
+    /// Replace the diff and rebuild the derived [`Self::merged_rows`]
+    /// model in one step, keeping the two in sync.
+    pub fn set_text_diff(&mut self, text_diff: Option<TextDiff>) {
+        self.merged_rows = text_diff
+            .as_ref()
+            .map_or_else(Vec::new, TextDiff::merged_rows);
+        self.text_diff = text_diff;
+    }
 }
 
 /// View state shared by both session content types.
@@ -883,20 +897,21 @@ impl SessionView {
     }
 
     /// Create a new text comparison session.
+    ///
+    /// The merged row model is derived from the diff at construction, so
+    /// the session always carries the exact rows its view renders.
     pub fn new_text_compare(
         left: Endpoint,
         right: Endpoint,
-        left_lines: Vec<LineInfo>,
-        right_lines: Vec<LineInfo>,
         text_diff: TextDiff,
         grammar: Grammar,
     ) -> Self {
+        let merged_rows = text_diff.merged_rows();
         Self {
             core: SessionCore::new(left, right),
             content: SessionContent::Text(TextDiffView {
                 text_diff: Some(text_diff),
-                left_lines,
-                right_lines,
+                merged_rows,
                 grammar,
             }),
             ui: UiState::default(),
@@ -1014,9 +1029,7 @@ impl SessionView {
     pub fn row_count(&self) -> usize {
         match &self.content {
             SessionContent::Dir(_) => self.visible_rows().len(),
-            SessionContent::Text(text) => {
-                std::cmp::max(text.left_lines.len(), text.right_lines.len())
-            }
+            SessionContent::Text(text) => text.merged_rows.len(),
         }
     }
 
@@ -1345,7 +1358,10 @@ impl SessionView {
                 .get(i)
                 .is_some_and(|r| r.entry.name.to_lowercase().contains(query)),
             SessionContent::Text(text) => {
-                [text.left_lines.get(i), text.right_lines.get(i)]
+                let Some(row) = text.merged_rows.get(i) else {
+                    return false;
+                };
+                [row.left.as_ref(), row.right.as_ref()]
                     .into_iter()
                     .flatten()
                     .any(|line| line.content.to_lowercase().contains(query))
@@ -1532,7 +1548,10 @@ impl AppState {
 mod tests {
     use std::sync::Arc;
 
-    use cocomo_lib::{DirComparison, DirEntry, DirEntryStatus, EntryInfo};
+    use cocomo_lib::{
+        DirComparison, DirEntry, DirEntryStatus, EntryInfo,
+        TextCompareSettings, compare_texts,
+    };
 
     use super::*;
 
@@ -1704,8 +1723,6 @@ mod tests {
         let mut text = SessionView::new_text_compare(
             Endpoint::local("/left"),
             Endpoint::local("/right"),
-            Vec::new(),
-            Vec::new(),
             TextDiff::default(),
             Grammar::plain_text(),
         );
@@ -2118,20 +2135,15 @@ mod tests {
 
     #[test]
     fn find_row_matching_searches_both_sides_of_a_text_diff() {
-        let left = vec![
-            LineInfo::new(1, "fn one()".into()),
-            LineInfo::new(2, "fn two()".into()),
-        ];
-        let right = vec![
-            LineInfo::new(1, "fn one()".into()),
-            LineInfo::new(2, "let THREE = 3;".into()),
-        ];
+        let diff = compare_texts(
+            "fn one()\nfn two()\n",
+            "fn one()\nlet THREE = 3;\n",
+            &TextCompareSettings::new(),
+        );
         let session = SessionView::new_text_compare(
             Endpoint::local("/left"),
             Endpoint::local("/right"),
-            left,
-            right,
-            TextDiff::default(),
+            diff,
             Grammar::plain_text(),
         );
 
@@ -2591,8 +2603,6 @@ mod tests {
         let text = SessionView::new_text_compare(
             Endpoint::local("/left/a.txt"),
             Endpoint::local("/right/a.txt"),
-            Vec::new(),
-            Vec::new(),
             TextDiff::default(),
             Grammar::plain_text(),
         );
@@ -2606,8 +2616,6 @@ mod tests {
         let mismatched = SessionView::new_text_compare(
             Endpoint::local("/left/a.txt"),
             Endpoint::local("/right/b.txt"),
-            Vec::new(),
-            Vec::new(),
             TextDiff::default(),
             Grammar::plain_text(),
         );

@@ -29,8 +29,9 @@ use super::{
 };
 use crate::{
     controller::{
-        dispatch_dir_key, extend_selection, select_row, set_active_mode,
-        set_mode_buffer, submit_command, submit_save_name, submit_search,
+        dispatch_dir_key, extend_selection, scroll_active, select_row,
+        set_active_mode, set_mode_buffer, submit_command, submit_save_name,
+        submit_search,
     },
     keys::{self, KeyScope},
     state::{APP_STATE, SessionMode, StatusFilter},
@@ -246,6 +247,9 @@ pub(super) fn DirCompareView(
                 }),
                 on_extend: Handler::from(move |index| {
                     extend_selection(index);
+                }),
+                on_scroll: Handler::from(move |delta| {
+                    scroll_active(delta);
                 }),
             )
             // Status bar or input component depending on mode. All text

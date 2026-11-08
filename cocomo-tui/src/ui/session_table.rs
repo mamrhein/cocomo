@@ -20,10 +20,11 @@
 //! offset to the top of the slice.
 //!
 //! Mouse support lives here too: clicking a row selects it, dragging
-//! extends the selection to a contiguous range, and the row under the
-//! pointer is highlighted. The session owns the selection; the component
+//! extends the selection to a contiguous range, the row under the pointer
+//! is highlighted, and the wheel moves the selection by [`WHEEL_ROWS`]
+//! rows per notch. The session owns the selection; the component
 //! only maps pointer positions to row indices and calls the `on_select`
-//! / `on_extend` handlers.
+//! / `on_extend` / `on_scroll` handlers.
 
 use ratatui_kit::{
     crossterm::event::MouseButton,
@@ -40,7 +41,7 @@ use ratatui_kit::{
     },
 };
 
-use super::{mouse_enabled, rows::CellRow, theme::CocomoTheme};
+use super::{WHEEL_ROWS, mouse_enabled, rows::CellRow, theme::CocomoTheme};
 
 /// Map a framework cell alignment to the native widget's alignment.
 fn to_alignment(alignment: TableCellAlignment) -> Alignment {
@@ -185,13 +186,17 @@ pub(super) struct SessionTableProps {
     /// Called with the absolute row index while a drag extends the
     /// selection.
     pub(super) on_extend: Handler<'static, usize>,
+    /// Called with a signed row delta when the mouse wheel scrolls over
+    /// the table.
+    pub(super) on_scroll: Handler<'static, isize>,
 }
 
 /// Themed table shared by the comparison views (F16).
 ///
 /// Owns the selection mirroring ([`use_session_table_state`]), the row
 /// windowing ([`window_offset`]), the bordered block with themed title,
-/// the mouse selection (click, drag-to-extend, hover highlight), and the
+/// the mouse selection (click, drag-to-extend, hover highlight, wheel
+/// navigation), and the
 /// default table styling, so the views only supply columns, rows, and the
 /// renderer.  The session owns the *absolute* selection; the `Table`
 /// receives only the visible slice with a selection relative to that
@@ -257,6 +262,7 @@ pub(super) fn SessionTable(
     if mouse_enabled() {
         let mut on_select = props.on_select.take();
         let mut on_extend = props.on_extend.take();
+        let mut on_scroll = props.on_scroll.take();
         hooks.use_pointer(PointerOptions::default(), move |ev| {
             let row = ev
                 .position
@@ -278,6 +284,26 @@ pub(super) fn SessionTable(
                     }
                     None => EventResult::Ignored,
                 },
+                // The wheel navigates (like repeated j/k) rather than
+                // sliding the window on its own: the session owns the
+                // selection and the window follows it. Consume only when
+                // there are rows to move through.
+                PointerKind::ScrollUp => {
+                    if window.total > 0 {
+                        on_scroll(-WHEEL_ROWS);
+                        EventResult::Consumed
+                    } else {
+                        EventResult::Ignored
+                    }
+                }
+                PointerKind::ScrollDown => {
+                    if window.total > 0 {
+                        on_scroll(WHEEL_ROWS);
+                        EventResult::Consumed
+                    } else {
+                        EventResult::Ignored
+                    }
+                }
                 _ => EventResult::Ignored,
             }
         });

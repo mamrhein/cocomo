@@ -5781,6 +5781,7 @@ mod tests {
             left_line_count,
             right_line_count,
             max_importance: Importance::Code,
+            ..Default::default()
         }
     }
 

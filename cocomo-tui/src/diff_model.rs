@@ -16,28 +16,9 @@
 //! only bridge the session's `Option<TextDiff>` and its table selection to
 //! those methods, so the view layer never has to unwrap the diff itself.
 
-use std::collections::HashSet;
-
 use cocomo_lib::{DirEntryStatus, TextDiff};
 
 use crate::state::{SessionContent, SessionView};
-
-/// Build the per-side sets of line numbers that are part of a difference.
-///
-/// The first set holds the left file's differing line numbers, the second
-/// the right file's. The text view's center gutter needs them split by side
-/// to tell `<` (the right side is newer) from `>` (the left side is).
-pub fn diff_line_numbers_by_side(
-    session: &SessionView,
-) -> (HashSet<usize>, HashSet<usize>) {
-    session
-        .text()
-        .and_then(|text| text.text_diff.as_ref())
-        .map_or_else(
-            || (HashSet::new(), HashSet::new()),
-            TextDiff::difference_line_numbers_by_side,
-        )
-}
 
 /// Return the first row index of each contiguous difference group.
 ///
@@ -90,62 +71,30 @@ pub fn current_diff_position(session: &SessionView) -> (usize, usize) {
 mod tests {
     use std::path::PathBuf;
 
-    use cocomo_lib::{Endpoint, Grammar, LineInfo, TextDiff, TextDifference};
+    use cocomo_lib::{Endpoint, Grammar, TextCompareSettings, compare_texts};
 
     use super::*;
 
-    /// Text session with 10 merged rows: line 3 differs, lines 4 and 5 were
-    /// added on the right, line 7 differs.
+    /// Text session with 12 merged rows: line 3 differs, lines 4 and 5
+    /// were added on the right, line 7 (left) differs against line 9
+    /// (right).
     fn session() -> SessionView {
-        let left_lines: Vec<LineInfo> = (1..=10)
-            .map(|n| LineInfo::new(n, format!("left {n}")))
-            .collect();
-        let right_lines: Vec<LineInfo> = (1..=10)
-            .map(|n| LineInfo::new(n, format!("right {n}")))
-            .collect();
-        let diff = TextDiff {
-            differences: vec![
-                TextDifference::LineDifferent(
-                    LineInfo::new(3, "a".into()),
-                    LineInfo::new(3, "b".into()),
-                ),
-                TextDifference::LinesAdded(
-                    4,
-                    vec![
-                        LineInfo::new(4, "c".into()),
-                        LineInfo::new(5, "d".into()),
-                    ],
-                ),
-                TextDifference::LineDifferent(
-                    LineInfo::new(7, "e".into()),
-                    LineInfo::new(7, "f".into()),
-                ),
-            ],
-            ..Default::default()
-        };
+        let left = "l1\nl2\nA\nl4\nl5\nl6\nB\nl8\nl9\nl10\n";
+        let right = "l1\nl2\nB\nX\nY\nl4\nl5\nl6\nA\nl8\nl9\nl10\n";
+        let diff = compare_texts(left, right, &TextCompareSettings::new());
         SessionView::new_text_compare(
             Endpoint::local(PathBuf::from("/left")),
             Endpoint::local(PathBuf::from("/right")),
-            left_lines,
-            right_lines,
             diff,
             Grammar::plain_text(),
         )
     }
 
     #[test]
-    fn diff_line_numbers_by_side_delegates_to_lib() {
-        let (left, right) = diff_line_numbers_by_side(&session());
-        // Lines 3 and 7 differ on both sides, lines 4 and 5 were added on
-        // the right only.
-        assert_eq!(left, HashSet::from([3, 7]));
-        assert_eq!(right, HashSet::from([3, 4, 5, 7]));
-    }
-
-    #[test]
     fn diff_group_starts_delegates_to_lib() {
-        // Diff rows 2, 3, 4 (0-based) form one group, row 6 another.
-        assert_eq!(diff_group_starts(&session()), vec![2, 6]);
+        // Diff rows 2, 3, 4 (0-based into the merged view) form one group,
+        // row 8 another.
+        assert_eq!(diff_group_starts(&session()), vec![2, 8]);
     }
 
     #[test]
@@ -155,17 +104,14 @@ mod tests {
         assert_eq!(current_diff_position(&session), (0, 2));
         session.ui.table_state.select(Some(3));
         assert_eq!(current_diff_position(&session), (1, 2));
-        session.ui.table_state.select(Some(9));
+        session.ui.table_state.select(Some(11));
         assert_eq!(current_diff_position(&session), (2, 2));
     }
 
     #[test]
     fn session_without_a_text_diff_is_empty() {
         let mut session = session();
-        session.text_mut().unwrap().text_diff = None;
-        let (left, right) = diff_line_numbers_by_side(&session);
-        assert!(left.is_empty());
-        assert!(right.is_empty());
+        session.text_mut().unwrap().set_text_diff(None);
         assert!(diff_group_starts(&session).is_empty());
         assert_eq!(current_diff_position(&session), (0, 0));
     }

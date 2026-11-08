@@ -1308,20 +1308,28 @@ fn execute(cmd: Cmd, session: &mut SessionView) -> SessionAction {
 }
 
 /// Move the selection by `delta` rows, clamped to the session's row count.
-fn navigate(session: &mut SessionView, delta: isize) {
+///
+/// `delta` is typically ±1 (j/k, arrow keys); the mouse wheel passes larger
+/// magnitudes. Without a selection, a forward move starts at the first row
+/// and a backward move stays a no-op (matching the single-step behavior).
+pub(crate) fn navigate(session: &mut SessionView, delta: isize) {
     let rows = session.row_count();
-    if delta > 0 {
-        if let Some(selected) = session.ui.table_state.selected() {
-            if selected + 1 < rows {
-                session.set_cursor(Some(selected + 1));
+    if rows == 0 {
+        return;
+    }
+    match session.ui.table_state.selected() {
+        Some(selected) => {
+            let target =
+                (selected as isize + delta).clamp(0, rows as isize - 1);
+            if target as usize != selected {
+                session.set_cursor(Some(target as usize));
             }
-        } else if rows > 0 {
-            session.set_cursor(Some(0));
         }
-    } else if let Some(selected) =
-        session.ui.table_state.selected().filter(|s| *s > 0)
-    {
-        session.set_cursor(Some(selected - 1));
+        None => {
+            if delta > 0 {
+                session.set_cursor(Some(0));
+            }
+        }
     }
 }
 
@@ -1781,7 +1789,7 @@ mod tests {
 
     use cocomo_lib::{
         DirComparison, DirEntry, DirEntryStatus, Endpoint, EntryInfo, Grammar,
-        LineInfo, TextDiff, TextDifference, TransferAction,
+        TextCompareSettings, TransferAction, compare_texts,
     };
     use ratatui_kit::crossterm::event::KeyEvent;
 
@@ -1793,30 +1801,12 @@ mod tests {
 
     /// Text session with 10 merged rows and diff groups at rows 2 and 6.
     fn text_session() -> SessionView {
-        let left_lines: Vec<LineInfo> = (1..=10)
-            .map(|n| LineInfo::new(n, format!("left {n}")))
-            .collect();
-        let right_lines: Vec<LineInfo> = (1..=10)
-            .map(|n| LineInfo::new(n, format!("right {n}")))
-            .collect();
-        let diff = TextDiff {
-            differences: vec![
-                TextDifference::LineDifferent(
-                    LineInfo::new(3, "a".into()),
-                    LineInfo::new(3, "b".into()),
-                ),
-                TextDifference::LineDifferent(
-                    LineInfo::new(7, "c".into()),
-                    LineInfo::new(7, "d".into()),
-                ),
-            ],
-            ..Default::default()
-        };
+        let left = "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\n";
+        let right = "a\nb\nC\nd\ne\nf\nG\nh\ni\nj\n";
+        let diff = compare_texts(left, right, &TextCompareSettings::new());
         SessionView::new_text_compare(
             Endpoint::local(PathBuf::from("/left")),
             Endpoint::local(PathBuf::from("/right")),
-            left_lines,
-            right_lines,
             diff,
             Grammar::plain_text(),
         )
@@ -2045,6 +2035,26 @@ mod tests {
         // Clamped at the bottom.
         assert_eq!(session.ui.table_state.selected(), Some(9));
         press(&mut session, KeyCode::Char('g'));
+        assert_eq!(session.ui.table_state.selected(), Some(0));
+    }
+
+    #[test]
+    fn navigate_moves_multiple_rows_and_clamps() {
+        // The mouse wheel drives `navigate` with magnitudes > 1; the
+        // selection clamps at both ends instead of wrapping.
+        let mut session = text_session();
+        navigate(&mut session, 3);
+        assert_eq!(session.ui.table_state.selected(), Some(0));
+        navigate(&mut session, 3);
+        assert_eq!(session.ui.table_state.selected(), Some(3));
+        navigate(&mut session, 3);
+        assert_eq!(session.ui.table_state.selected(), Some(6));
+        // Overshooting the last row clamps to it (the session has 10 rows).
+        navigate(&mut session, 3);
+        assert_eq!(session.ui.table_state.selected(), Some(9));
+        navigate(&mut session, -5);
+        assert_eq!(session.ui.table_state.selected(), Some(4));
+        navigate(&mut session, -10);
         assert_eq!(session.ui.table_state.selected(), Some(0));
     }
 
