@@ -15,9 +15,12 @@
 //! rows share an `Arc<[TableCell]>`, and a diff row is a single pair of
 //! pre-styled lines plus a gutter status.
 
-use std::{collections::HashSet, sync::Arc};
+use std::sync::Arc;
 
-use cocomo_lib::{Importance, LineInfo, format_date, format_size};
+use cocomo_lib::{
+    Importance, LineInfo, MergedDiffRow, MergedRowStatus, format_date,
+    format_size,
+};
 use ratatui_kit::{
     prelude::*,
     ratatui::{
@@ -159,51 +162,44 @@ pub(super) struct TextDiffRow {
     pub gutter: DiffGutter,
 }
 
-/// Build the memoized text-diff rows from the two files' lines.
+/// Build the memoized text-diff rows from the aligned diff rows.
 ///
-/// `left_diff_numbers` and `right_diff_numbers` are the per-side sets of
-/// differing line numbers; a row's gutter is `<` when its right line is
-/// part of a difference (changed or added), `>` when only its left line
-/// is (removed), and `=` otherwise.
+/// Each merged row contributes one display row: its two (possibly absent)
+/// line halves are pre-styled, and the gutter status follows the row's
+/// alignment — `<` when the right side carries new or changed content
+/// (inserted or changed), `>` when only the left side does (deleted), and
+/// `=` for equal context.
 ///
 /// The result is `Arc`-wrapped so the component clones it in O(1) per
 /// frame; the rows themselves are only rebuilt when the underlying diff
 /// changes.
 pub(super) fn text_diff_rows(
-    left_lines: &[LineInfo],
-    right_lines: &[LineInfo],
-    left_diff_numbers: &HashSet<usize>,
-    right_diff_numbers: &HashSet<usize>,
+    merged: &[MergedDiffRow],
     theme: &CocomoTheme,
 ) -> Arc<Vec<TextDiffRow>> {
-    let max_lines = std::cmp::max(left_lines.len(), right_lines.len());
     Arc::new(
-        (0..max_lines)
-            .map(|i| {
-                let left = left_lines.get(i);
-                let right = right_lines.get(i);
-                let left_diff = left
-                    .is_some_and(|l| left_diff_numbers.contains(&l.number));
-                let right_diff = right
-                    .is_some_and(|l| right_diff_numbers.contains(&l.number));
-                let gutter = if right_diff {
-                    // A changed or added right line is the newer content.
-                    DiffGutter::RightNewer
-                } else if left_diff {
-                    DiffGutter::LeftNewer
-                } else {
-                    DiffGutter::Equal
+        merged
+            .iter()
+            .map(|row| {
+                let gutter = match row.status {
+                    MergedRowStatus::Same => DiffGutter::Equal,
+                    MergedRowStatus::Changed | MergedRowStatus::Inserted => {
+                        // The right side carries the newer content.
+                        DiffGutter::RightNewer
+                    }
+                    MergedRowStatus::Deleted => DiffGutter::LeftNewer,
                 };
+                let is_diff = row.status.is_difference();
                 TextDiffRow {
                     left: diff_side_line(
-                        left,
-                        left_diff_numbers,
+                        row.left.as_ref(),
+                        is_diff,
                         theme,
                         theme.diff_removed,
                     ),
                     right: diff_side_line(
-                        right,
-                        right_diff_numbers,
+                        row.right.as_ref(),
+                        is_diff,
                         theme,
                         theme.diff_added,
                     ),
@@ -214,35 +210,42 @@ pub(super) fn text_diff_rows(
     )
 }
 
-/// Render one side of a diff row: line number, diff marker, and content,
-/// or a blank placeholder when the file has no line at this index.
+/// Width of the line-number column on each side.
+const LINE_NUMBER_WIDTH: usize = 6;
+
+/// Render one side of a diff row: line number, diff marker, and content.
 ///
-/// `diff_numbers` is the *side's own* set of differing line numbers, so a
-/// line is only marked when it participates in a difference on its own
-/// side. Diff lines are highlighted with `diff_style` (red for the left,
-/// green for the right side); otherwise the grammar classification of the
-/// line decides the style.
+/// The absent side of a filler row stays fully blank: no number, no
+/// marker, no highlight, so filler rows read as gaps rather than as line
+/// 0.
+///
+/// Diff lines are highlighted with `diff_style` (red for the left, green
+/// for the right side); otherwise the grammar classification of the line
+/// decides the style.
 fn diff_side_line(
     line: Option<&LineInfo>,
-    diff_numbers: &HashSet<usize>,
+    is_diff: bool,
     theme: &CocomoTheme,
     diff_style: Style,
 ) -> Line<'static> {
-    let number = line.map(|l| l.number).unwrap_or(0);
-    let content = line.map(|l| l.content.clone()).unwrap_or_default();
-    let is_diff = line.is_some_and(|l| diff_numbers.contains(&l.number));
+    let Some(line) = line else {
+        return Line::from(vec![
+            Span::raw(" ".repeat(LINE_NUMBER_WIDTH)),
+            Span::raw("  "),
+            Span::raw(""),
+        ]);
+    };
     let content_style = if is_diff {
         diff_style
     } else {
-        theme.grammar_style(
-            line.map(importance_for_line).unwrap_or(Importance::Ignored),
-        )
+        theme.grammar_style(importance_for_line(line))
     };
     let marker: &str = if is_diff { "\u{25B6} " } else { "  " };
+    let number = format!("{:<width$}", line.number, width = LINE_NUMBER_WIDTH);
     Line::from(vec![
-        Span::styled(format!("{number:<6}"), theme.dim),
+        Span::styled(number, theme.dim),
         Span::styled(marker, content_style),
-        Span::styled(content, content_style),
+        Span::styled(line.content.clone(), content_style),
     ])
 }
 
@@ -390,51 +393,35 @@ mod tests {
         assert_eq!(name_cell(&cell_rows[1]), "\u{2514}\u{2500} x.txt");
     }
 
-    fn lines(contents: &[&str]) -> Vec<LineInfo> {
-        contents
-            .iter()
-            .enumerate()
-            .map(|(i, c)| LineInfo::new(i + 1, (*c).to_string()))
-            .collect()
-    }
-
-    fn numbers(nums: &[usize]) -> HashSet<usize> {
-        nums.iter().copied().collect()
-    }
-
     #[test]
     fn text_diff_rows_gutter_points_at_the_behind_side() {
         // Line 2 changed on both sides, line 4 exists only on the left.
-        let left = lines(&["a", "b", "c", "d"]);
-        let right = lines(&["a", "x", "c"]);
-        let rows = text_diff_rows(
-            &left,
-            &right,
-            &numbers(&[2, 4]),
-            &numbers(&[2]),
-            &CocomoTheme::default(),
+        let diff = cocomo_lib::compare_texts(
+            "a\nb\nc\nd\n",
+            "a\nx\nc\n",
+            &cocomo_lib::TextCompareSettings::new(),
         );
+        let rows =
+            text_diff_rows(&diff.merged_rows(), &CocomoTheme::default());
         let gutters: Vec<&str> =
             rows.iter().map(|r| r.gutter.symbol()).collect();
         assert_eq!(gutters, vec!["=", "<", "=", ">"]);
     }
 
     #[test]
-    fn text_diff_rows_mark_only_their_own_side() {
-        let left = lines(&["a"]);
-        let right = lines(&["b"]);
-        // Only the right line participates in a difference: the left line
-        // must not carry a diff marker even though line 1 differs on the
-        // other side.
-        let rows = text_diff_rows(
-            &left,
-            &right,
-            &numbers(&[]),
-            &numbers(&[1]),
-            &CocomoTheme::default(),
+    fn text_diff_rows_fill_blank_cells_without_markers() {
+        let diff = cocomo_lib::compare_texts(
+            "a\n",
+            "a\nb\n",
+            &cocomo_lib::TextCompareSettings::new(),
         );
-        assert_eq!(rows[0].left.spans[1].content.as_ref(), "  ");
-        assert_eq!(rows[0].right.spans[1].content.as_ref(), "\u{25B6} ");
-        assert_eq!(rows[0].gutter, DiffGutter::RightNewer);
+        let rows =
+            text_diff_rows(&diff.merged_rows(), &CocomoTheme::default());
+        assert_eq!(rows.len(), 2);
+        // The inserted row's left half is a blank placeholder: no diff
+        // marker on the absent side, while the present side is marked.
+        assert_eq!(rows[1].left.spans[1].content.as_ref(), "  ");
+        assert_eq!(rows[1].right.spans[1].content.as_ref(), "\u{25B6} ");
+        assert_eq!(rows[1].gutter, DiffGutter::RightNewer);
     }
 }

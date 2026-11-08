@@ -30,8 +30,8 @@ use std::{
 
 use cocomo_lib::{
     CompareConfig, ContentCache, DirComparison, DirEntryStatus, Endpoint,
-    FsError, FsPair, Grammar, LineInfo, NodeFileSystem, NullPrompter,
-    Prompter, Provider, SessionConfig, SyncOperation, SyncResult, SyncRules,
+    FsError, FsPair, Grammar, NodeFileSystem, NullPrompter, Prompter,
+    Provider, SessionConfig, SyncOperation, SyncResult, SyncRules,
     TextCompareSettings, compare_texts, default_session_dir,
     execute_transfers, list_saved_sessions, report::generate_report,
 };
@@ -133,20 +133,6 @@ async fn read_text_file(fs: &Provider, path: &Path) -> Result<String> {
     }
 }
 
-/// Split file content into line info entries with grammar classification.
-///
-/// Derives the lines from an already-read string so each file is read
-/// exactly once per comparison.
-fn line_infos(content: &str, grammar: &Grammar) -> Vec<LineInfo> {
-    content
-        .lines()
-        .enumerate()
-        .map(|(i, line)| {
-            LineInfo::new(i + 1, line.to_string()).with_grammar(grammar)
-        })
-        .collect()
-}
-
 /// Run a text comparison and create a new [`SessionView`].
 async fn run_text_comparison(
     left: Endpoint,
@@ -161,24 +147,17 @@ async fn run_text_comparison(
         detect_grammar(left.path())
     };
 
-    // Read each file exactly once and derive both the raw content and the
-    // line info from the same string.
+    // Read each file exactly once.
     let left_content = read_text_file(left.fs(), left.path()).await?;
     let right_content = read_text_file(right.fs(), right.path()).await?;
-    let left_lines = line_infos(&left_content, &grammar);
-    let right_lines = line_infos(&right_content, &grammar);
 
-    // Run the text comparison.
+    // Run the text comparison; the session derives the merged row model
+    // from the diff.
     let settings = build_text_settings(&grammar);
     let text_diff = compare_texts(&left_content, &right_content, &settings);
 
     Ok(SessionView::new_text_compare(
-        left,
-        right,
-        left_lines,
-        right_lines,
-        text_diff,
-        grammar,
+        left, right, text_diff, grammar,
     ))
 }
 
@@ -1557,17 +1536,6 @@ mod tests {
         assert!(matches!(err, TuiError::Lib(_)));
     }
 
-    #[test]
-    fn line_infos_are_one_based_and_complete() {
-        let grammar = Grammar::plain_text();
-        let lines = line_infos("alpha\nbeta", &grammar);
-        assert_eq!(lines.len(), 2);
-        assert_eq!(lines[0].number, 1);
-        assert_eq!(lines[0].content, "alpha");
-        assert_eq!(lines[1].number, 2);
-        assert_eq!(lines[1].content, "beta");
-    }
-
     #[tokio::test]
     async fn run_text_comparison_reads_missing_left_as_empty() {
         let dir = tempfile::tempdir().unwrap();
@@ -1578,9 +1546,14 @@ mod tests {
             .unwrap();
         let session = run_text_comparison(left, right).await.unwrap();
         let text = session.text().expect("a text session was created");
-        assert!(text.left_lines.is_empty());
-        assert_eq!(text.right_lines.len(), 1);
-        assert_eq!(text.right_lines[0].content, "fn a() {}");
+        // The missing left file yields a single inserted row whose left
+        // cell is blank.
+        assert_eq!(text.merged_rows.len(), 1);
+        assert!(text.merged_rows[0].left.is_none());
+        assert_eq!(
+            text.merged_rows[0].right.as_ref().unwrap().content,
+            "fn a() {}"
+        );
         assert!(text.text_diff.is_some());
     }
 
@@ -1874,8 +1847,6 @@ mod tests {
         app.add_session(SessionView::new_text_compare(
             Endpoint::local("/left/a.txt"),
             Endpoint::local("/right/b.txt"),
-            Vec::new(),
-            Vec::new(),
             cocomo_lib::TextDiff::default(),
             Grammar::plain_text(),
         ));

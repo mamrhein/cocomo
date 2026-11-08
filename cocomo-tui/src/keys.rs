@@ -1789,7 +1789,7 @@ mod tests {
 
     use cocomo_lib::{
         DirComparison, DirEntry, DirEntryStatus, Endpoint, EntryInfo, Grammar,
-        LineInfo, TextDiff, TextDifference, TransferAction,
+        TextCompareSettings, TransferAction, compare_texts,
     };
     use ratatui_kit::crossterm::event::KeyEvent;
 
@@ -1801,30 +1801,12 @@ mod tests {
 
     /// Text session with 10 merged rows and diff groups at rows 2 and 6.
     fn text_session() -> SessionView {
-        let left_lines: Vec<LineInfo> = (1..=10)
-            .map(|n| LineInfo::new(n, format!("left {n}")))
-            .collect();
-        let right_lines: Vec<LineInfo> = (1..=10)
-            .map(|n| LineInfo::new(n, format!("right {n}")))
-            .collect();
-        let diff = TextDiff {
-            differences: vec![
-                TextDifference::LineDifferent(
-                    LineInfo::new(3, "a".into()),
-                    LineInfo::new(3, "b".into()),
-                ),
-                TextDifference::LineDifferent(
-                    LineInfo::new(7, "c".into()),
-                    LineInfo::new(7, "d".into()),
-                ),
-            ],
-            ..Default::default()
-        };
+        let left = "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\n";
+        let right = "a\nb\nC\nd\ne\nf\nG\nh\ni\nj\n";
+        let diff = compare_texts(left, right, &TextCompareSettings::new());
         SessionView::new_text_compare(
             Endpoint::local(PathBuf::from("/left")),
             Endpoint::local(PathBuf::from("/right")),
-            left_lines,
-            right_lines,
             diff,
             Grammar::plain_text(),
         )

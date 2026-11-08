@@ -33,7 +33,7 @@ use crate::{
         dispatch_text_key, scroll_active, select_row, set_active_mode,
         set_mode_buffer, submit_command, submit_search,
     },
-    diff_model::{current_diff_position, diff_line_numbers_by_side},
+    diff_model::current_diff_position,
     keys::{self, KeyScope},
     state::{APP_STATE, SessionMode},
 };
@@ -93,27 +93,18 @@ pub(super) fn TextCompareView(
     let session = app.active().filter(|s| s.content.is_text());
     let session_selected = session.and_then(|s| s.ui.table_state.selected());
 
-    // Memo key: the session identity plus the line counts. The text
-    // content is immutable once the session is created, so the counts
-    // fully determine the rows.
+    // Memo key: the session identity plus the merged row count. The diff
+    // is only ever replaced through `TextDiffView::set_text_diff`, which
+    // rebuilds the merged rows together with it, so a changed diff that
+    // keeps the row count exactly re-renders on the next session switch
+    // (sessions are rebuilt, not mutated, on reload).
     let rows_key = session.and_then(|s| {
-        let text = s.text()?;
-        Some((s.core.id, text.left_lines.len(), text.right_lines.len()))
+        s.text().map(|text| (s.core.id, text.merged_rows.len()))
     });
     let rows: Arc<Vec<TextDiffRow>> = hooks.use_memo(
         || match session {
             Some(s) => match s.text() {
-                Some(text) => {
-                    let (left_diffs, right_diffs) =
-                        diff_line_numbers_by_side(s);
-                    text_diff_rows(
-                        &text.left_lines,
-                        &text.right_lines,
-                        &left_diffs,
-                        &right_diffs,
-                        &theme,
-                    )
-                }
+                Some(text) => text_diff_rows(&text.merged_rows, &theme),
                 None => Arc::new(Vec::new()),
             },
             None => Arc::new(Vec::new()),
@@ -136,8 +127,16 @@ pub(super) fn TextCompareView(
     let left_path_str = session.core.left.display().to_string();
     let right_path_str = session.core.right.display().to_string();
     let grammar_name = text.grammar.name.clone();
-    let left_line_count = text.left_lines.len();
-    let right_line_count = text.right_lines.len();
+    // The stats show the files' own line counts, not the merged row count
+    // (which grows with the filler rows).
+    let left_line_count = text
+        .text_diff
+        .as_ref()
+        .map_or(0, |diff| diff.left_line_count);
+    let right_line_count = text
+        .text_diff
+        .as_ref()
+        .map_or(0, |diff| diff.right_line_count);
     let show_help = app.show_help;
     let mode = session.ui.mode.clone();
     let busy_label = app.busy_label();
