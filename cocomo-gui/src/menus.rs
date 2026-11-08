@@ -55,7 +55,9 @@ use crate::{
         NextDifferenceFiles, PrevDifferenceFiles, SelectSection,
         SetDetailMode,
     },
-    text_merge::{SaveMergeOutput, TakeAncestor, TakeLeft, TakeRight},
+    text_merge::{
+        SaveMergeOutput, SetMergeAncestor, TakeAncestor, TakeLeft, TakeRight,
+    },
     ui::{
         CopyToFolder, CopyToLeft, CopyToRight, DeleteLeftSide,
         DeleteRightSide, ExchangeEntry, GoBack, GoForward, MoveToFolder,
@@ -698,6 +700,14 @@ fn build_app_menus(
                 show(hidden, "actions.save_merge_output", || {
                     MenuItem::action("Save merge output…", SaveMergeOutput)
                         .disabled(!state.is_merge)
+                }),
+                // Adding a base file is only meaningful for a two-way merge;
+                // a three-way merge already has an ancestor.
+                show(hidden, "actions.set_ancestor", || {
+                    MenuItem::action("Set ancestor…", SetMergeAncestor)
+                        .disabled(
+                            !(state.is_merge && !state.merge_has_ancestor),
+                        )
                 }),
             ])),
             Menu::new("Search").items(items([

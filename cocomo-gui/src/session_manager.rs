@@ -1481,6 +1481,23 @@ impl GuiSessionManager {
         }
     }
 
+    /// Record an ancestor on the active merge session's config so a
+    /// two-way merge promoted to three-way persists its base file.
+    pub fn set_active_merge_ancestor(
+        &mut self,
+        ancestor: &Endpoint,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(session) = self.open_sessions.get_mut(self.active_index) {
+            session.config.center = Some(ProviderRef {
+                provider: ancestor.provider_ref(),
+                path: ancestor.path().to_path_buf(),
+            });
+            session.dirty = true;
+            cx.notify();
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Moving tabs between windows
     // -----------------------------------------------------------------------

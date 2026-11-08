@@ -19,11 +19,17 @@
 //!
 //! The output is constructed automatically from the merge; conflicts
 //! tentatively contribute the left side. Taking a section records a
-//! resolution and rebuilds the output. Manual edits in the output pane
-//! invalidate the section-to-output mapping, so the take commands stay
-//! disabled until the next reload.
+//! resolution and rebuilds the output. Manual edits in the output pane are
+//! tracked per section: the section-to-output mapping is re-derived after
+//! every edit, so a take on one section preserves the manual edits made to
+//! the others.
 
-use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Instant};
+use std::{
+    collections::{HashMap, HashSet},
+    path::PathBuf,
+    sync::Arc,
+    time::Instant,
+};
 
 use cocomo_lib::{
     Endpoint, FsError, LineEnding, MergeKind, MergeSection, NodeFileSystem,
@@ -79,8 +85,35 @@ actions!(
         NextMergeSection,
         PrevMergeSection,
         SaveMergeOutput,
+        SetMergeAncestor,
     ]
 );
+
+/// Which side a section's output lines came from, for the output pane's
+/// contribution strip.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OutputFill {
+    /// Both sides identical; no contribution marker.
+    Same,
+    /// The left side's lines.
+    Left,
+    /// The right side's lines.
+    Right,
+    /// The ancestor's lines.
+    Ancestor,
+    /// An unresolved conflict.
+    Conflict,
+}
+
+/// One segment of the output pane's contribution strip: the side a section
+/// contributes and how many output lines it currently spans.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ContributionSegment {
+    /// The contributing side.
+    pub fill: OutputFill,
+    /// The number of output lines the section currently occupies.
+    pub lines: usize,
+}
 
 /// Which side's lines a merge section should contribute to the output.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -159,9 +192,13 @@ pub struct MergeSession {
     resolutions: HashMap<usize, MergeChoice>,
     /// The constructed output lines.
     output: Vec<String>,
-    /// The output editor was edited manually; the section-to-output mapping
-    /// is no longer trustworthy, so take commands are disabled.
-    output_stale: bool,
+    /// Sections whose output lines were edited manually and no longer match
+    /// the side they resolve to. A take on one of these sections replaces
+    /// its manual content; a take on any other section preserves it.
+    section_edited: HashSet<usize>,
+    /// Per-section contribution segments for the output pane's strip,
+    /// rebuilt whenever the output or a resolution changes.
+    contributions: Arc<Vec<ContributionSegment>>,
     /// The output editor still needs re-seeding from the model.
     output_reseed: bool,
     /// The editable output editor, created by the view.
@@ -231,7 +268,8 @@ impl MergeSession {
             ancestor_starts: Arc::new(Vec::new()),
             resolutions: HashMap::new(),
             output: Vec::new(),
-            output_stale: false,
+            section_edited: HashSet::new(),
+            contributions: Arc::new(Vec::new()),
             output_reseed: false,
             output_editor: None,
             _editor_sub: None,
@@ -358,8 +396,12 @@ impl MergeSession {
     }
 
     /// Whether a take command can run right now.
+    ///
+    /// A take works whenever a section is selected, even after manual edits:
+    /// edits are tracked per section, so taking one section preserves the
+    /// others.
     pub fn can_take(&self) -> bool {
-        self.selected.is_some() && !self.output_stale && !self.loading
+        self.selected.is_some() && !self.loading
     }
 
     /// The snapshot the view renders; cheap Arc clones.
@@ -373,7 +415,7 @@ impl MergeSession {
             right_line_section: self.right_line_section.clone(),
             ancestor_line_section: self.ancestor_line_section.clone(),
             selected: self.selected,
-            output_stale: self.output_stale,
+            contributions: self.contributions.clone(),
             word_wrap: self.word_wrap,
             show_ancestor: self.show_ancestor(),
             has_ancestor: self.has_ancestor(),
@@ -406,12 +448,13 @@ impl MergeSession {
         (byte_start, byte_end)
     }
 
-    /// The byte ranges of all unresolved conflicts, empty once the output
-    /// was edited manually (the ranges would point at the wrong text).
+    /// The byte ranges of all unresolved conflicts.
+    ///
+    /// The ranges are derived from the live output and its current
+    /// per-section ranges, so they stay correct after manual edits: an
+    /// unresolved conflict keeps its marker until it is taken (spec §6,
+    /// closes R2).
     pub fn conflict_fill_ranges(&self) -> Vec<(usize, usize)> {
-        if self.output_stale {
-            return Vec::new();
-        }
         self.sections
             .iter()
             .enumerate()
@@ -531,14 +574,15 @@ impl MergeSession {
     ///
     /// Rebuilding reseeds the output editor, which clears its undo history;
     /// that is the documented trade-off for keeping the section-to-output
-    /// mapping exact after every take.
+    /// mapping exact after every take. Manual edits to other sections are
+    /// preserved: their current lines are carried into the rebuilt output.
     pub fn take_at(
         &mut self,
         section: usize,
         choice: MergeChoice,
         cx: &mut Context<Self>,
     ) {
-        if self.output_stale || self.loading {
+        if self.loading {
             return;
         }
         if choice == MergeChoice::Ancestor && self.ancestor.is_none() {
@@ -548,6 +592,9 @@ impl MergeSession {
             return;
         }
         self.resolutions.insert(section, choice);
+        // Taking a section adopts a side's lines, so any manual edit to it
+        // is superseded; edits to other sections survive the rebuild.
+        self.section_edited.remove(&section);
         self.rebuild_output();
         if let Some(manager) = &self.manager {
             manager.update(cx, |m, cx| m.mark_dirty(cx));
@@ -567,19 +614,21 @@ impl MergeSession {
         std::mem::take(&mut self.output_reseed)
     }
 
-    /// Adopt the view's output editor; manual edits mark the output stale
-    /// and the tab dirty.
+    /// Adopt the view's output editor; manual edits are attributed to the
+    /// sections they touch and mark the tab dirty.
     pub fn attach_output_editor(
         &mut self,
         editor: Entity<EditorState>,
         cx: &mut Context<Self>,
     ) {
         self._editor_sub =
-            Some(cx.subscribe(&editor, |this, _editor, event, cx| {
+            Some(cx.subscribe(&editor, |this, editor, event, cx| {
                 // `set_value` emits no change event, so any Change here is
-                // a user edit.
-                if matches!(event, InputEvent::Change) && !this.output_stale {
-                    this.output_stale = true;
+                // a user edit. Re-derive the section-to-output mapping from
+                // the edited buffer so takes stay accurate per section.
+                if matches!(event, InputEvent::Change) {
+                    let text = editor.read(cx).value().to_string();
+                    this.apply_output_edit(split_lines(&text));
                     if let Some(manager) = &this.manager {
                         manager.update(cx, |m, cx| m.mark_dirty(cx));
                     }
@@ -682,6 +731,30 @@ impl MergeSession {
         if self.left_raw.is_none() && !self.loading && self.error.is_none() {
             self.load(cx);
         }
+    }
+
+    /// Add an ancestor to a two-way merge and reload it as a three-way
+    /// merge (spec §6, closes R5). The stored session config's center is
+    /// updated so the new ancestor persists across a save.
+    pub fn set_ancestor(
+        &mut self,
+        ancestor: Endpoint,
+        cx: &mut Context<Self>,
+    ) {
+        self.ancestor = Some(ancestor.clone());
+        self.show_ancestor = true;
+        self.title = format!(
+            "{} vs {} (3-way)",
+            base_name(&self.left),
+            base_name(&self.right)
+        )
+        .into();
+        if let Some(manager) = &self.manager {
+            manager.update(cx, |m, cx| {
+                m.set_active_merge_ancestor(&ancestor, cx)
+            });
+        }
+        self.load(cx);
     }
 
     /// Detect the save format from the sources: the left side wins,
@@ -959,32 +1032,173 @@ impl MergeSession {
         if self.selected.is_some_and(|s| s >= self.sections.len()) {
             self.selected = None;
         }
+        // A fresh merge has no manual edits yet.
+        self.section_edited.clear();
         self.rebuild_output();
     }
 
     /// Rebuild the output lines and their per-section ranges from the
-    /// sections and the recorded resolutions.
+    /// sections, the recorded resolutions, and any manual section edits.
+    ///
+    /// A manually edited section keeps its current lines; every other
+    /// section contributes the side it resolves to. This is what lets a take
+    /// on one section coexist with manual edits to the others.
     fn rebuild_output(&mut self) {
+        let old_output = std::mem::take(&mut self.output);
+        let old_ranges = self.section_output_ranges.clone();
         let mut output: Vec<String> = Vec::new();
         let mut ranges: Vec<(usize, usize)> = Vec::new();
         for (i, section) in self.sections.iter().enumerate() {
-            let choice = self
-                .resolutions
-                .get(&i)
-                .copied()
-                .unwrap_or_else(|| default_choice(section.kind()));
-            let lines: &[String] = match choice {
-                MergeChoice::Left => section.left(),
-                MergeChoice::Right => section.right(),
-                MergeChoice::Ancestor => section.ancestor(),
+            let lines: Vec<String> = if self.section_edited.contains(&i) {
+                let (s, e) = old_ranges.get(i).copied().unwrap_or((0, 0));
+                let s = s.min(old_output.len());
+                let e = e.min(old_output.len()).max(s);
+                old_output[s..e].to_vec()
+            } else {
+                side_lines(section, self.choice_for(i, section.kind()))
+                    .to_vec()
             };
             ranges.push((output.len(), output.len() + lines.len()));
-            output.extend_from_slice(lines);
+            output.extend(lines);
         }
         self.output = output;
         self.section_output_ranges = Arc::new(ranges);
-        self.output_stale = false;
         self.output_reseed = true;
+        self.model_rev += 1;
+        self.recompute_contributions();
+    }
+
+    /// The side a section contributes: its explicit resolution, else the
+    /// default for its kind.
+    fn choice_for(&self, section: usize, kind: MergeKind) -> MergeChoice {
+        self.resolutions
+            .get(&section)
+            .copied()
+            .unwrap_or_else(|| default_choice(kind))
+    }
+
+    /// Re-derive which sections were edited manually by comparing each
+    /// section's current output lines against the side it resolves to.
+    fn recompute_section_edited(&mut self) {
+        let mut edited = HashSet::new();
+        for (i, section) in self.sections.iter().enumerate() {
+            let (s, e) =
+                self.section_output_ranges.get(i).copied().unwrap_or((0, 0));
+            let s = s.min(self.output.len());
+            let e = e.min(self.output.len()).max(s);
+            let expected =
+                side_lines(section, self.choice_for(i, section.kind()));
+            if &self.output[s..e] != expected {
+                edited.insert(i);
+            }
+        }
+        self.section_edited = edited;
+    }
+
+    /// Rebuild the per-section contribution segments for the output strip.
+    fn recompute_contributions(&mut self) {
+        let mut segs: Vec<ContributionSegment> =
+            Vec::with_capacity(self.sections.len());
+        for (i, section) in self.sections.iter().enumerate() {
+            let (s, e) =
+                self.section_output_ranges.get(i).copied().unwrap_or((0, 0));
+            let lines = e.saturating_sub(s);
+            let kind = section.kind();
+            let fill = if kind == MergeKind::Same {
+                OutputFill::Same
+            } else if kind == MergeKind::Conflict
+                && !self.resolutions.contains_key(&i)
+            {
+                OutputFill::Conflict
+            } else {
+                match self.choice_for(i, kind) {
+                    MergeChoice::Left => OutputFill::Left,
+                    MergeChoice::Right => OutputFill::Right,
+                    MergeChoice::Ancestor => OutputFill::Ancestor,
+                }
+            };
+            segs.push(ContributionSegment { fill, lines });
+        }
+        self.contributions = Arc::new(segs);
+    }
+
+    /// Re-anchor the section-to-output mapping after a manual edit.
+    ///
+    /// The changed line span is located by trimming the common prefix and
+    /// suffix against the previous output; every section boundary is then
+    /// shifted across the edit. Contiguity is repaired afterwards so the
+    /// ranges always partition the output, and the edited sections are
+    /// re-derived from the resulting content.
+    fn apply_output_edit(&mut self, new_lines: Vec<String>) {
+        let n_old = self.output.len();
+        let n_new = new_lines.len();
+        let mut a = 0;
+        while a < n_old && a < n_new && self.output[a] == new_lines[a] {
+            a += 1;
+        }
+        let mut t = 0;
+        while t < (n_old - a).min(n_new - a)
+            && self.output[n_old - 1 - t] == new_lines[n_new - 1 - t]
+        {
+            t += 1;
+        }
+        let b = n_old - t;
+        let edit_end_new = n_new - t;
+        let delta = n_new as isize - n_old as isize;
+        let map = |p: usize| -> usize {
+            if p <= a {
+                p
+            } else if p >= b {
+                (p as isize + delta) as usize
+            } else {
+                a
+            }
+        };
+        let n = self.sections.len();
+        let old_ranges = self.section_output_ranges.clone();
+        let mut new_ranges: Vec<(usize, usize)> = Vec::with_capacity(n);
+        for i in 0..n {
+            let (s, e) = old_ranges.get(i).copied().unwrap_or((0, 0));
+            new_ranges.push((map(s), map(e)));
+        }
+        // Hand the inserted region to the section that owns the edit point so
+        // no output line falls outside a section.
+        if edit_end_new > a && n > 0 {
+            let owner = (0..n)
+                .find(|&i| {
+                    let (s, e) = old_ranges.get(i).copied().unwrap_or((0, 0));
+                    s <= a && a < e
+                })
+                .or_else(|| {
+                    (0..n).find(|&i| {
+                        old_ranges.get(i).copied().unwrap_or((0, 0)).0 == a
+                    })
+                })
+                .or(Some(n - 1));
+            if let Some(oi) = owner {
+                if new_ranges[oi].0 > a {
+                    new_ranges[oi].0 = a;
+                }
+                if new_ranges[oi].1 < edit_end_new {
+                    new_ranges[oi].1 = edit_end_new;
+                }
+            }
+        }
+        // Repair contiguity and bounds so the ranges always partition the
+        // output, even for an edit that spans several sections.
+        let mut pos = 0usize;
+        for range in new_ranges.iter_mut() {
+            let end = range.1.clamp(pos, n_new);
+            *range = (pos, end);
+            pos = end;
+        }
+        if let Some(last) = new_ranges.last_mut() {
+            last.1 = n_new;
+        }
+        self.section_output_ranges = Arc::new(new_ranges);
+        self.output = new_lines;
+        self.recompute_section_edited();
+        self.recompute_contributions();
         self.model_rev += 1;
     }
 
@@ -1003,6 +1217,12 @@ impl MergeSession {
     fn output_text_lines(&self) -> Vec<&str> {
         self.output.iter().map(String::as_str).collect()
     }
+
+    /// Whether a section currently holds manually edited lines, for tests.
+    #[cfg(test)]
+    pub fn is_section_edited(&self, section: usize) -> bool {
+        self.section_edited.contains(&section)
+    }
 }
 
 /// The cheap-Arc snapshot the list closures render from.
@@ -1015,8 +1235,8 @@ pub struct MergeSnapshot {
     pub right_line_section: Arc<Vec<usize>>,
     pub ancestor_line_section: Arc<Vec<usize>>,
     pub selected: Option<usize>,
-    /// The output was edited manually; take commands are disabled.
-    pub output_stale: bool,
+    /// Per-section contribution segments for the output strip.
+    pub contributions: Arc<Vec<ContributionSegment>>,
     pub word_wrap: bool,
     pub show_ancestor: bool,
     pub has_ancestor: bool,
@@ -1039,6 +1259,15 @@ fn default_choice(kind: MergeKind) -> MergeChoice {
     match kind {
         MergeKind::RightChanged => MergeChoice::Right,
         _ => MergeChoice::Left,
+    }
+}
+
+/// The lines a section contributes for a given choice.
+fn side_lines(section: &MergeSection, choice: MergeChoice) -> &[String] {
+    match choice {
+        MergeChoice::Left => section.left(),
+        MergeChoice::Right => section.right(),
+        MergeChoice::Ancestor => section.ancestor(),
     }
 }
 
@@ -1314,6 +1543,38 @@ impl MergeView {
         cx: &mut Context<Self>,
     ) {
         self.state.update(cx, |s, cx| s.load(cx));
+    }
+
+    /// Handle SetMergeAncestor: prompt for a base file and reload the
+    /// two-way merge as a three-way merge (spec §6, closes R5).
+    fn handle_set_ancestor(
+        &mut self,
+        _: &SetMergeAncestor,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let state = self.state.clone();
+        let receiver = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Choose the ancestor file".into()),
+        });
+        cx.spawn(move |_, cx: &mut gpui::AsyncApp| {
+            let cx = cx.clone();
+            async move {
+                let path = match receiver.await {
+                    Ok(Ok(Some(paths))) => paths.into_iter().next(),
+                    _ => None,
+                };
+                let Some(path) = path else { return };
+                let endpoint = Endpoint::local(path);
+                cx.update(|cx| {
+                    state.update(cx, |s, cx| s.set_ancestor(endpoint, cx));
+                });
+            }
+        })
+        .detach();
     }
 
     // -- Toolbar
@@ -1722,7 +1983,9 @@ impl Render for MergeView {
         let unresolved = session.unresolved_count();
         let section_count = session.section_count();
         let selected = snap.selected;
-        let take_disabled = snap.output_stale || loading;
+        // Takes work whenever a section is selected; manual edits are tracked
+        // per section, so they no longer disable the take commands.
+        let take_disabled = loading;
         let model_rev = session.model_rev();
         let output_editor = session.output_editor().cloned();
         let has_ancestor = snap.has_ancestor;
@@ -1843,10 +2106,38 @@ impl Render for MergeView {
             self.state.clone(),
         );
 
+        // The output pane's contribution strip: one segment per section,
+        // sized by its output line count and colored by the side it takes.
+        let contribution_strip: AnyElement = v_flex()
+            .w(px(4.))
+            .flex_shrink_0()
+            .flex_col()
+            .overflow_hidden()
+            .children(snap.contributions.iter().map(|seg| {
+                let color = match seg.fill {
+                    OutputFill::Same => gpui::hsla(0., 0., 0., 0.),
+                    OutputFill::Left => theme.info,
+                    OutputFill::Right => theme.primary,
+                    OutputFill::Ancestor => muted_fg,
+                    OutputFill::Conflict => danger,
+                };
+                div().w_full().flex_grow(seg.lines as f32).bg(color)
+            }))
+            .into_any_element();
+
         let output_body: AnyElement = match &output_editor {
-            Some(editor) => {
-                Editor::new(editor).appearance(false).into_any_element()
-            }
+            Some(editor) => h_flex()
+                .size_full()
+                .min_h_0()
+                .child(contribution_strip)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .min_h_0()
+                        .child(Editor::new(editor).appearance(false)),
+                )
+                .into_any_element(),
             None => div().into_any_element(),
         };
 
@@ -1940,9 +2231,9 @@ impl Render for MergeView {
                                             .text_color(muted_fg)
                                             .child("Output")
                                             .child(
-                                                "Editing the output disables \
-                                                 the take buttons until the \
-                                                 next reload",
+                                                "Take updates the selected \
+                                                 section only; manual edits \
+                                                 to the rest are kept.",
                                             ),
                                     )
                                     .child(
@@ -1968,6 +2259,7 @@ impl Render for MergeView {
             .on_action(cx.listener(Self::handle_save_output))
             .on_action(cx.listener(Self::handle_toggle_wrap))
             .on_action(cx.listener(Self::handle_toggle_ancestor))
+            .on_action(cx.listener(Self::handle_set_ancestor))
             .on_action(cx.listener(Self::handle_reload))
     }
 }
@@ -2163,7 +2455,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn manual_edit_disables_take(cx: &mut TestAppContext) {
+    fn manual_edit_keeps_take_per_section(cx: &mut TestAppContext) {
         use gpui::{Bounds, WindowBounds, WindowOptions, test::TestWindowExt};
 
         cx.update(gpui::init);
@@ -2200,23 +2492,81 @@ mod tests {
             s.select_section(1, cx);
             assert!(s.can_take());
         });
-        // Simulate a manual edit through the editor's change path; the
-        // silent `replace` helper emits no event, so go through the input
-        // handler like a real keystroke does.
+        // Simulate a manual edit inside the first (same) section through
+        // the editor's change path; the silent `replace` helper emits no
+        // event, so go through the input handler like a real keystroke
+        // does.
         use gpui::EntityInputHandler as _;
         let editor = session.read_with(cx, |s, _| {
             s.output_editor().cloned().expect("editor attached")
         });
         cx.update_window(window, |_, window, cx| {
             editor.update(cx, |ed, cx| {
-                ed.replace_text_in_range(None, "X", window, cx);
+                ed.replace_text_in_range(Some(0..1), "X", window, cx);
             });
         })
         .expect("edit failed");
         session.read_with(cx, |s, _| {
-            assert!(!s.can_take(), "manual edit must disable take");
-            // Conflict fills are dropped once the ranges are untrustworthy.
-            assert!(s.conflict_fill_ranges().is_empty());
+            // A manual edit no longer disables take globally; the other
+            // section is still selected and resolvable.
+            assert!(s.can_take(), "manual edit must not disable take");
+            // Conflict markers persist until the section is resolved.
+            assert!(
+                !s.conflict_fill_ranges().is_empty(),
+                "conflict fills must survive a manual edit"
+            );
+            // The edited section is tracked, the untouched one is not.
+            assert!(s.is_section_edited(0));
+            assert!(!s.is_section_edited(1));
+        });
+        // Taking the conflicted section rewrites only its lines; the
+        // manual edit to the first section is preserved.
+        session.update(cx, |s, cx| {
+            s.take_at(1, MergeChoice::Right, cx);
+        });
+        session.read_with(cx, |s, _| {
+            assert_eq!(s.output_lines(), &["X".to_string(), "R".to_string()]);
+            assert!(
+                s.conflict_fill_ranges().is_empty(),
+                "resolving the section must clear its conflict marker"
+            );
+            assert!(!s.is_section_edited(1));
+        });
+    }
+
+    #[gpui::test]
+    fn contributions_follow_the_output(cx: &mut TestAppContext) {
+        let session = session_from(cx, Some("a\nb\n"), "a\nL\n", "a\nR\n");
+        session.read_with(cx, |s, _| {
+            // One same section, then one unresolved conflict.
+            let fills: Vec<(OutputFill, usize)> = s
+                .contributions
+                .iter()
+                .map(|seg| (seg.fill, seg.lines))
+                .collect();
+            assert_eq!(
+                fills,
+                vec![(OutputFill::Same, 1), (OutputFill::Conflict, 1)]
+            );
+            let total: usize =
+                s.contributions.iter().map(|seg| seg.lines).sum();
+            assert_eq!(total, s.output_lines().len());
+        });
+        session.update(cx, |s, cx| {
+            s.take_at(1, MergeChoice::Right, cx);
+        });
+        session.read_with(cx, |s, _| {
+            let fills: Vec<OutputFill> =
+                s.contributions.iter().map(|seg| seg.fill).collect();
+            assert_eq!(fills, vec![OutputFill::Same, OutputFill::Right]);
+        });
+        session.update(cx, |s, cx| {
+            s.take_at(1, MergeChoice::Ancestor, cx);
+        });
+        session.read_with(cx, |s, _| {
+            let fills: Vec<OutputFill> =
+                s.contributions.iter().map(|seg| seg.fill).collect();
+            assert_eq!(fills, vec![OutputFill::Same, OutputFill::Ancestor]);
         });
     }
 

@@ -124,7 +124,7 @@ pub struct OpenFileDiff {
     pub right_path: Option<Endpoint>,
 }
 
-/// Action to open a two-way text merge for a file pair in a new tab.
+/// Action to open a text merge for a file pair in a new tab.
 #[derive(Action, Clone, Debug, PartialEq)]
 #[action(namespace = folder_compare, no_json)]
 pub struct OpenMerge {
@@ -132,6 +132,9 @@ pub struct OpenMerge {
     pub left_path: Endpoint,
     /// Right file endpoint.
     pub right_path: Endpoint,
+    /// When set, prompt for an ancestor first and open a three-way merge
+    /// (the folder row's "Merge with ancestor…" entry).
+    pub ask_ancestor: bool,
 }
 
 /// Action to open a directory compare in a new tab.
@@ -674,22 +677,57 @@ impl FolderCompareView {
         });
     }
 
-    /// Handle OpenMerge: open the pair as a two-way text merge tab (no
-    /// ancestor is known from a folder comparison).
+    /// Handle OpenMerge: open the pair as a text merge tab. Without an
+    /// ancestor request this is a two-way merge (a folder comparison has
+    /// no ancestor to offer); with it, the user is prompted for an
+    /// ancestor file and the merge opens three-way.
     fn handle_open_merge(
         &mut self,
         action: &OpenMerge,
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.session_manager.update(cx, |mgr, cx| {
-            mgr.add_text_merge_tab(
-                action.left_path.clone(),
-                action.right_path.clone(),
-                None,
-                cx,
-            );
+        let manager = self.session_manager.clone();
+        if !action.ask_ancestor {
+            manager.update(cx, |mgr, cx| {
+                mgr.add_text_merge_tab(
+                    action.left_path.clone(),
+                    action.right_path.clone(),
+                    None,
+                    cx,
+                );
+            });
+            return;
+        }
+        let receiver = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Choose the ancestor file".into()),
         });
+        let left = action.left_path.clone();
+        let right = action.right_path.clone();
+        cx.spawn(move |_, cx: &mut gpui::AsyncApp| {
+            let cx = cx.clone();
+            async move {
+                let path = match receiver.await {
+                    Ok(Ok(Some(paths))) => paths.into_iter().next(),
+                    _ => return,
+                };
+                let Some(path) = path else { return };
+                cx.update(|cx| {
+                    manager.update(cx, |mgr, cx| {
+                        mgr.add_text_merge_tab(
+                            left.clone(),
+                            right.clone(),
+                            Some(Endpoint::local(path.clone())),
+                            cx,
+                        );
+                    });
+                });
+            }
+        })
+        .detach();
     }
 
     /// Handle the CopyPathLeft action: copy the selected entry's left

@@ -986,8 +986,8 @@ fn build_row_menu(
         Box::new(QuickCompare),
         cx,
     );
-    // A file present on both sides can be merged (two-way: a folder
-    // comparison has no ancestor to offer).
+    // A file present on both sides can be merged, two-way or (picking
+    // an ancestor file in a prompt) three-way.
     if !row.is_dir && row.has_left && row.has_right {
         menu = cmd(
             menu,
@@ -996,6 +996,18 @@ fn build_row_menu(
             Box::new(OpenMerge {
                 left_path: row.left_endpoint.clone(),
                 right_path: row.right_endpoint.clone(),
+                ask_ancestor: false,
+            }),
+            cx,
+        );
+        menu = cmd(
+            menu,
+            "session.merge_ancestor",
+            "Merge with ancestor…",
+            Box::new(OpenMerge {
+                left_path: row.left_endpoint.clone(),
+                right_path: row.right_endpoint.clone(),
+                ask_ancestor: true,
             }),
             cx,
         );

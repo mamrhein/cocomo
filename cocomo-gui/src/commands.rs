@@ -59,18 +59,18 @@ use crate::{
     },
     text_merge::{
         NextConflict, NextMergeSection, PrevConflict, PrevMergeSection,
-        SaveMergeOutput, TakeAncestor, TakeLeft, TakeRight,
+        SaveMergeOutput, SetMergeAncestor, TakeAncestor, TakeLeft, TakeRight,
     },
     ui::{
-        BeginAlignWith, BeginCompareTo, CompareContentsHash,
-        CompareContentsMeta, CopyFilename, CopyToFolder, CopyToLeft,
-        CopyToOtherSide, CopyToRight, DeleteLeftSide, DeleteRightSide,
-        ExchangeEntry, ExcludeEntry, GoBack, GoForward, MoveToFolder,
-        MoveToLeft, MoveToRight, NewFolder, NextDifference, PrevDifference,
-        QuickCompare, RefreshSelection, RenameEntry, RevealInExplorer,
-        SetBaseBoth, SetBaseLeft, SetBaseRight, ShowAttributes, SwapSides,
-        SyncMirrorLeft, SyncMirrorRight, SyncUpdateBoth, SyncUpdateLeft,
-        SyncUpdateRight, ToggleIgnored, TouchEntry, folder_compare_bindings,
+        CompareContentsHash, CompareContentsMeta, CopyFilename, CopyToFolder,
+        CopyToLeft, CopyToOtherSide, CopyToRight, DeleteLeftSide,
+        DeleteRightSide, ExchangeEntry, ExcludeEntry, GoBack, GoForward,
+        MoveToFolder, MoveToLeft, MoveToRight, NewFolder, NextDifference,
+        PrevDifference, QuickCompare, RefreshSelection, RenameEntry,
+        RevealInExplorer, SetBaseBoth, SetBaseLeft, SetBaseRight,
+        ShowAttributes, SwapSides, SyncMirrorLeft, SyncMirrorRight,
+        SyncUpdateBoth, SyncUpdateLeft, SyncUpdateRight, ToggleIgnored,
+        TouchEntry, folder_compare_bindings,
     },
 };
 
@@ -214,6 +214,15 @@ pub fn all_commands() -> Vec<CommandSpec> {
             category: "Session",
             default_binding: None,
             action: Some(action::<MergeFiles>),
+        },
+        CommandSpec {
+            id: "session.merge_ancestor",
+            label: "Merge with ancestor…",
+            category: "Session",
+            default_binding: None,
+            // Invoked only from the folder row's context menu, which supplies
+            // the file pair, so it has no command-palette action.
+            action: None,
         },
         CommandSpec {
             id: "session.compare_parent",
@@ -679,6 +688,13 @@ pub fn all_commands() -> Vec<CommandSpec> {
             category: "Actions",
             default_binding: None,
             action: Some(action::<SaveMergeOutput>),
+        },
+        CommandSpec {
+            id: "actions.set_ancestor",
+            label: "Set ancestor…",
+            category: "Actions",
+            default_binding: None,
+            action: Some(action::<SetMergeAncestor>),
         },
         // Search
         CommandSpec {
