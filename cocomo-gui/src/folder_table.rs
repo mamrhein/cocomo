@@ -46,7 +46,7 @@ use gpui::{
 use crate::{
     color::{self, Side},
     log::{self, LogLevel},
-    state::{AppState, SortKey, TreeRow, entry_endpoints},
+    state::{AppState, MergeRowStatus, SortKey, TreeRow, entry_endpoints},
     ui::{
         CompareContentsHash, CompareContentsMeta, CopyFilename, CopyToFolder,
         CopyToLeft, CopyToOtherSide, CopyToRight, DeleteLeftSide,
@@ -563,18 +563,28 @@ impl TableDelegate for FolderTableDelegate {
                             span,
                         })
                     });
+                // The merge-decision glyph rides along right of the
+                // status glyph, tinted by its own role.
+                let merge_glyph = data.merge_glyph.map(|(glyph, role)| {
+                    div()
+                        .flex_shrink_0()
+                        .text_color(role.resolve(theme, &data.overrides))
+                        .child(glyph)
+                });
                 div()
                     .size_full()
                     .relative()
                     .flex()
                     .items_center()
                     .justify_center()
+                    .gap_1()
                     .font_weight(FontWeight(700.))
                     .text_color(theme.muted_foreground)
                     .children(connector)
                     .when(!data.status_symbol.is_empty(), |this| {
                         this.child(data.status_symbol)
                     })
+                    .children(merge_glyph)
                     .into_any_element()
             }
         }
@@ -605,7 +615,16 @@ impl TableDelegate for FolderTableDelegate {
                 .right_modified
                 .as_deref()
                 .map(|m| format_modified_label(m).into()),
-            COL_STATUS => Some(SharedString::from(data.status_symbol)),
+            COL_STATUS => {
+                let mut label = data.status_symbol.to_string();
+                if let Some((glyph, _)) = data.merge_glyph {
+                    if !label.is_empty() {
+                        label.push(' ');
+                    }
+                    label.push_str(glyph);
+                }
+                Some(label.into())
+            }
             _ => None,
         }
     }
@@ -690,6 +709,29 @@ fn side_role(row: &TableRow, side: Side) -> color::ColorRole {
     }
 }
 
+/// The merge-decision glyph for a row's status lane.
+///
+/// A resolved decision (`L`/`R`) is an informational side marker, a
+/// conflict is an important alert. `None` (outside merge mode, or a path
+/// the ancestor scans do not cover) and `Unchanged` render no extra
+/// glyph.
+fn merge_glyph(
+    status: Option<MergeRowStatus>,
+) -> Option<(&'static str, color::ColorRole)> {
+    match status {
+        Some(MergeRowStatus::TakeLeft) => {
+            Some(("L", color::ColorRole::Orphan))
+        }
+        Some(MergeRowStatus::TakeRight) => {
+            Some(("R", color::ColorRole::Orphan))
+        }
+        Some(MergeRowStatus::Conflict) => {
+            Some(("!", color::ColorRole::Important))
+        }
+        Some(MergeRowStatus::Unchanged) | None => None,
+    }
+}
+
 /// One clickable column header, driving [`AppState::set_sort`].
 ///
 /// `side` (`"Left"` / `"Right"`) distinguishes the two halves of the
@@ -768,6 +810,9 @@ pub(crate) struct TableRow {
     overrides: cocomo_lib::ColorOverrides,
     /// Coarse status glyph (`~`, `=`, `|`, `≠`, `*`).
     status_symbol: &'static str,
+    /// Merge-decision glyph (`L`, `R`, `!`) and its color role, set only
+    /// in merge mode for paths the ancestor scans cover.
+    merge_glyph: Option<(&'static str, color::ColorRole)>,
     has_left: bool,
     has_right: bool,
     left_is_dir: bool,
@@ -792,6 +837,12 @@ impl TableRow {
         let ignored = state.is_ignored(&entry.name);
         let (left_endpoint, right_endpoint) =
             entry_endpoints(entry, state.left(), state.right());
+        // The tree path is exactly the key `merge_status` is stored
+        // under, so the row's own path resolves its merge decision.
+        let merge_status = state
+            .is_merge_mode()
+            .then(|| state.merge_row_status(row.path()))
+            .flatten();
         Self {
             guides,
             last,
@@ -815,6 +866,7 @@ impl TableRow {
             right_role: color::side_role(entry, Side::Right, ignored),
             overrides: overrides.clone(),
             status_symbol: color::gutter_icon(entry, ignored),
+            merge_glyph: merge_glyph(merge_status),
             has_left: entry.left.is_some(),
             has_right: entry.right.is_some(),
             left_is_dir: entry.left.as_ref().is_some_and(|l| l.is_dir),
@@ -1464,6 +1516,24 @@ mod tests {
                 &cocomo_lib::ColorOverrides::default(),
             )
         })
+    }
+
+    #[test]
+    fn merge_glyph_maps_every_merge_row_status() {
+        assert_eq!(merge_glyph(None), None);
+        assert_eq!(merge_glyph(Some(MergeRowStatus::Unchanged)), None);
+        assert_eq!(
+            merge_glyph(Some(MergeRowStatus::TakeLeft)),
+            Some(("L", color::ColorRole::Orphan))
+        );
+        assert_eq!(
+            merge_glyph(Some(MergeRowStatus::TakeRight)),
+            Some(("R", color::ColorRole::Orphan))
+        );
+        assert_eq!(
+            merge_glyph(Some(MergeRowStatus::Conflict)),
+            Some(("!", color::ColorRole::Important))
+        );
     }
 
     #[gpui::test]

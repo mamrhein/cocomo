@@ -38,14 +38,15 @@ use crate::{
     home,
     menus::{
         About, ClearSession, CloseAllSessions, CloseSession,
-        CompareParentFolders, FileFormats, HelpContents, MergeFiles,
-        NewCompare, NextSection, OpenClipboard, OpenFile, OpenSession,
-        OpenWithAssociatedApp, OpenWithTextEdit, OpenWithTextPatch, Options,
-        PrevSection, Quit, ReloadCompare, RestoreWorkspace, SaveFile,
-        SaveFileAs, SaveSession, SaveSessionAs, SaveWorkspace, SessionInfo,
-        SessionReport, SessionSettings, StopCompare, ToggleLogPane,
-        ToggleMergeAncestor, ToggleSingleRowToolbar, ToggleWordWrap,
-        menu_bindings,
+        CompareParentFolders, CompareUsingHex, CompareUsingPicture,
+        CompareUsingTable, CompareUsingText, FileFormats, HelpContents,
+        MergeFiles, NewCompare, NextSection, OpenClipboard, OpenFile,
+        OpenSession, OpenWithAssociatedApp, OpenWithTextEdit,
+        OpenWithTextPatch, Options, PrevSection, Quit, ReloadCompare,
+        RestoreWorkspace, SaveFile, SaveFileAs, SaveSession, SaveSessionAs,
+        SaveWorkspace, SessionInfo, SessionReport, SessionSettings,
+        StopCompare, SyncPresets, ToggleLogPane, ToggleMergeAncestor,
+        ToggleSingleRowToolbar, ToggleWordWrap, menu_bindings,
     },
     options::{self, AppOptions},
     text_diff::{
@@ -230,6 +231,34 @@ pub fn all_commands() -> Vec<CommandSpec> {
             category: "Session",
             default_binding: None,
             action: Some(action::<CompareParentFolders>),
+        },
+        CommandSpec {
+            id: "session.compare_as_text",
+            label: "Compare files using text",
+            category: "Session",
+            default_binding: None,
+            action: Some(action::<CompareUsingText>),
+        },
+        CommandSpec {
+            id: "session.compare_as_table",
+            label: "Compare files using table",
+            category: "Session",
+            default_binding: None,
+            action: Some(action::<CompareUsingTable>),
+        },
+        CommandSpec {
+            id: "session.compare_as_hex",
+            label: "Compare files using hex",
+            category: "Session",
+            default_binding: None,
+            action: Some(action::<CompareUsingHex>),
+        },
+        CommandSpec {
+            id: "session.compare_as_picture",
+            label: "Compare files using picture",
+            category: "Session",
+            default_binding: None,
+            action: Some(action::<CompareUsingPicture>),
         },
         // File
         CommandSpec {
@@ -1015,6 +1044,13 @@ pub fn all_commands() -> Vec<CommandSpec> {
             category: "Tools",
             default_binding: None,
             action: Some(action::<FileFormats>),
+        },
+        CommandSpec {
+            id: "tools.sync_presets",
+            label: "Folder Sync presets…",
+            category: "Tools",
+            default_binding: None,
+            action: Some(action::<SyncPresets>),
         },
         // Help
         CommandSpec {

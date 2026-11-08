@@ -17,26 +17,28 @@
 
 use std::cell::Cell;
 
-use cocomo_lib::{Endpoint, SessionType};
+use cocomo_lib::{Endpoint, SessionConfig, SessionType};
 use gpui::{
     App, AsyncApp, ClickEvent, Context, ElementId, Entity, ExternalPaths,
     FocusHandle, Focusable, FontWeight, KeyBinding, PathPromptOptions, Render,
     SharedString, Subscription, Window, actions,
     assets::IconName,
-    base::Disableable as _,
     component::{
         ActiveTheme, Sizable as _, WindowExt as _,
         button::{Button, ButtonVariant, ButtonVariants as _},
+        checkbox::Checkbox,
         h_flex,
-        input::{Input, InputEvent, InputState},
+        input::{Input, InputEvent, InputState, Textarea, TextareaState},
         menu::{ContextMenuExt as _, PopupMenuItem},
         v_flex,
     },
     div,
     prelude::*,
+    rems,
 };
 
 use crate::{
+    file_formats::FileViewKind,
     log::{self, LogLevel},
     session_manager::{GuiSessionManager, SavedSession},
 };
@@ -63,14 +65,19 @@ pub fn home_bindings() -> Vec<KeyBinding> {
 }
 
 // ---------------------------------------------------------------------------
-// Text Compare prompt flow
+// Launcher prompt flows
 // ---------------------------------------------------------------------------
 
-/// Ask for two files in sequence, then open a Text Compare tab.
+/// Ask for two files in sequence, then open a file-pair tab of the given
+/// view kind.
 ///
 /// The second dialog is only shown after the first file is chosen;
 /// cancelling either step abandons the flow silently.
-fn prompt_text_compare_pair(mgr: Entity<GuiSessionManager>, cx: &mut App) {
+fn prompt_file_pair(
+    kind: FileViewKind,
+    mgr: Entity<GuiSessionManager>,
+    cx: &mut App,
+) {
     let options = |prompt: &'static str| PathPromptOptions {
         files: true,
         directories: false,
@@ -98,7 +105,8 @@ fn prompt_text_compare_pair(mgr: Entity<GuiSessionManager>, cx: &mut App) {
             };
             cx.update(|cx| {
                 mgr.update(cx, |m, cx| {
-                    m.add_text_diff_tab(
+                    m.add_file_pair_tab(
+                        kind,
                         Endpoint::local(left),
                         Endpoint::local(right),
                         None,
@@ -169,6 +177,109 @@ fn prompt_text_merge_triple(mgr: Entity<GuiSessionManager>, cx: &mut App) {
     .detach();
 }
 
+/// Ask for two folders in sequence, then open a Folder Sync tab.
+///
+/// The second dialog is only shown after the first folder is chosen;
+/// cancelling either step abandons the flow silently.
+fn prompt_dir_pair(mgr: Entity<GuiSessionManager>, cx: &mut App) {
+    let options = |prompt: &'static str| PathPromptOptions {
+        files: false,
+        directories: true,
+        multiple: false,
+        prompt: Some(prompt.into()),
+    };
+    let left_receiver = cx.prompt_for_paths(options("Choose the left folder"));
+    cx.spawn(move |cx: &mut AsyncApp| {
+        let cx = cx.clone();
+        async move {
+            let Ok(Ok(Some(paths))) = left_receiver.await else {
+                return;
+            };
+            let Some(left) = paths.into_iter().next() else {
+                return;
+            };
+            let right_receiver = cx.update(|cx| {
+                cx.prompt_for_paths(options("Choose the right folder"))
+            });
+            let Ok(Ok(Some(paths))) = right_receiver.await else {
+                return;
+            };
+            let Some(right) = paths.into_iter().next() else {
+                return;
+            };
+            cx.update(|cx| {
+                mgr.update(cx, |m, cx| {
+                    m.add_folder_tab_with_type(
+                        SessionType::DirSync,
+                        Endpoint::local(left),
+                        Endpoint::local(right),
+                        None,
+                        cx,
+                    );
+                });
+            });
+        }
+    })
+    .detach();
+}
+
+/// Ask for a left, right, and ancestor folder in sequence, then open a
+/// Folder Merge tab.
+///
+/// Unlike a text merge, a folder merge needs an ancestor, so cancelling
+/// the ancestor prompt abandons the flow silently rather than falling
+/// back to a two-way merge.
+fn prompt_dir_triple(mgr: Entity<GuiSessionManager>, cx: &mut App) {
+    let options = |prompt: &'static str| PathPromptOptions {
+        files: false,
+        directories: true,
+        multiple: false,
+        prompt: Some(prompt.into()),
+    };
+    let left_receiver = cx.prompt_for_paths(options("Choose the left folder"));
+    cx.spawn(move |cx: &mut AsyncApp| {
+        let cx = cx.clone();
+        async move {
+            let Ok(Ok(Some(paths))) = left_receiver.await else {
+                return;
+            };
+            let Some(left) = paths.into_iter().next() else {
+                return;
+            };
+            let right_receiver = cx.update(|cx| {
+                cx.prompt_for_paths(options("Choose the right folder"))
+            });
+            let Ok(Ok(Some(paths))) = right_receiver.await else {
+                return;
+            };
+            let Some(right) = paths.into_iter().next() else {
+                return;
+            };
+            let ancestor_receiver = cx.update(|cx| {
+                cx.prompt_for_paths(options("Choose the ancestor folder"))
+            });
+            let Ok(Ok(Some(paths))) = ancestor_receiver.await else {
+                return;
+            };
+            let Some(ancestor) = paths.into_iter().next() else {
+                return;
+            };
+            cx.update(|cx| {
+                mgr.update(cx, |m, cx| {
+                    m.add_folder_tab_with_type(
+                        SessionType::DirMerge,
+                        Endpoint::local(left),
+                        Endpoint::local(right),
+                        Some(Endpoint::local(ancestor)),
+                        cx,
+                    );
+                });
+            });
+        }
+    })
+    .detach();
+}
+
 // ---------------------------------------------------------------------------
 // Launcher cards
 // ---------------------------------------------------------------------------
@@ -183,7 +294,6 @@ fn session_card(
     icon: IconName,
     title: &'static str,
     drop_kind: Option<SessionType>,
-    coming_soon: bool,
     session_manager: Entity<GuiSessionManager>,
     cx: &App,
 ) -> gpui::AnyElement {
@@ -195,23 +305,33 @@ fn session_card(
         .label(title)
         .outline()
         .large();
-    let button = if coming_soon {
-        button.disabled(true).tooltip("Coming soon")
-    } else if drop_kind == Some(SessionType::TextCompare) {
-        let mgr = session_manager.clone();
-        button.on_click(move |_, _, cx| {
-            prompt_text_compare_pair(mgr.clone(), cx);
-        })
-    } else if drop_kind == Some(SessionType::TextMerge) {
-        let mgr = session_manager.clone();
-        button.on_click(move |_, _, cx| {
+    let mgr = session_manager.clone();
+    let button = match drop_kind {
+        Some(SessionType::TextCompare) => button.on_click(move |_, _, cx| {
+            prompt_file_pair(FileViewKind::Text, mgr.clone(), cx);
+        }),
+        Some(SessionType::TableCompare) => button.on_click(move |_, _, cx| {
+            prompt_file_pair(FileViewKind::Table, mgr.clone(), cx);
+        }),
+        Some(SessionType::HexCompare) => button.on_click(move |_, _, cx| {
+            prompt_file_pair(FileViewKind::Hex, mgr.clone(), cx);
+        }),
+        Some(SessionType::PixCompare) => button.on_click(move |_, _, cx| {
+            prompt_file_pair(FileViewKind::Picture, mgr.clone(), cx);
+        }),
+        Some(SessionType::TextMerge) => button.on_click(move |_, _, cx| {
             prompt_text_merge_triple(mgr.clone(), cx);
-        })
-    } else {
-        let mgr = session_manager.clone();
-        button.on_click(move |_, _, cx| {
+        }),
+        Some(SessionType::DirSync) => button.on_click(move |_, _, cx| {
+            prompt_dir_pair(mgr.clone(), cx);
+        }),
+        Some(SessionType::DirMerge) => button.on_click(move |_, _, cx| {
+            prompt_dir_triple(mgr.clone(), cx);
+        }),
+        // Folder Compare (and the Home fallback): an empty folder tab.
+        _ => button.on_click(move |_, _, cx| {
             mgr.update(cx, |m, cx| m.add_new_folder_tab(cx));
-        })
+        }),
     };
 
     let card = div()
@@ -305,6 +425,194 @@ fn open_rename_dialog(
                             }),
                     ),
             )
+    });
+}
+
+/// Working state of an open session-settings dialog.
+///
+/// The dialog builder re-runs on every layer rebuild, so the edited
+/// checkbox values live here rather than in the builder closure.
+struct SettingsDraft {
+    compare_files: bool,
+    compare_structure: bool,
+    ignore_whitespace: bool,
+    show_hidden: bool,
+}
+
+/// One checkbox bound to a `bool` field of the settings draft.
+fn draft_checkbox(
+    id: &'static str,
+    label: &'static str,
+    checked: bool,
+    draft: Entity<SettingsDraft>,
+    set: fn(&mut SettingsDraft, bool),
+) -> Checkbox {
+    Checkbox::new(ElementId::Name(id.into()))
+        .label(label)
+        .checked(checked)
+        .on_click(move |checked, _, cx| {
+            let checked = *checked;
+            draft.update(cx, |d, cx| {
+                set(d, checked);
+                cx.notify();
+            });
+        })
+}
+
+/// Parse name-filter textarea contents into glob patterns: one pattern
+/// per line, trimmed, with empty lines dropped.
+fn parse_name_filter(text: &str) -> Vec<String> {
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Persist an edited session config, then refresh the saved-session list
+/// when the write succeeded.
+fn save_settings(
+    mgr: Entity<GuiSessionManager>,
+    config: SessionConfig,
+    cx: &mut App,
+) {
+    let store = mgr.read(cx).store().clone();
+    let task = store.update(cx, |store, cx| store.save_config(&config, cx));
+    cx.spawn(move |cx: &mut AsyncApp| {
+        let cx = cx.clone();
+        async move {
+            match task.await {
+                Ok(()) => {
+                    cx.update(|cx| {
+                        store.update(cx, |store, cx| {
+                            store.load_recent_sessions(cx);
+                        });
+                    });
+                }
+                Err(e) => {
+                    cx.update(|cx| {
+                        log::push(
+                            LogLevel::Error,
+                            format!("Couldn't save session settings. {e}"),
+                            cx,
+                        );
+                    });
+                }
+            }
+        }
+    })
+    .detach();
+}
+
+/// Open the "Edit settings…" dialog for a saved session.
+///
+/// Edits a subset of the session's settings; Save writes the config back
+/// to its file and reloads the saved-session list.
+fn open_settings_dialog(
+    mgr: Entity<GuiSessionManager>,
+    config: SessionConfig,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    // Created before opening: the dialog builder re-runs on every layer
+    // rebuild, so persistent entities must live outside it.
+    let name_filter = config.settings.name_filter.join("\n");
+    let name_filter_input = cx.new(|cx| {
+        TextareaState::new(window, cx)
+            .placeholder("One glob pattern per line")
+            .default_value(name_filter)
+    });
+    let draft = cx.new(|_| SettingsDraft {
+        compare_files: config.settings.compare_files,
+        compare_structure: config.settings.compare_structure,
+        ignore_whitespace: config.settings.ignore_whitespace,
+        show_hidden: config.settings.show_hidden,
+    });
+    let initial_focus = Cell::new(true);
+    window.open_dialog(cx, move |dialog, window, cx| {
+        if initial_focus.replace(false) {
+            name_filter_input.focus_handle(cx).focus(window, cx);
+        }
+        let body = v_flex()
+            .gap_3()
+            .child(draft_checkbox(
+                "settings_compare_files",
+                "Compare file contents",
+                draft.read(cx).compare_files,
+                draft.clone(),
+                |d, checked| d.compare_files = checked,
+            ))
+            .child(draft_checkbox(
+                "settings_compare_structure",
+                "Compare directory structure",
+                draft.read(cx).compare_structure,
+                draft.clone(),
+                |d, checked| d.compare_structure = checked,
+            ))
+            .child(draft_checkbox(
+                "settings_ignore_whitespace",
+                "Ignore whitespace",
+                draft.read(cx).ignore_whitespace,
+                draft.clone(),
+                |d, checked| d.ignore_whitespace = checked,
+            ))
+            .child(draft_checkbox(
+                "settings_show_hidden",
+                "Show hidden entries",
+                draft.read(cx).show_hidden,
+                draft.clone(),
+                |d, checked| d.show_hidden = checked,
+            ))
+            .child(
+                v_flex()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("Name filter (one glob pattern per line)"),
+                    )
+                    .child(Textarea::new(&name_filter_input).h(rems(5.))),
+            );
+
+        let draft_ok = draft.clone();
+        let filter_ok = name_filter_input.clone();
+        let save_mgr = mgr.clone();
+        let save_config = config.clone();
+        dialog.title("Session settings").child(body).footer(
+            h_flex()
+                .justify_end()
+                .gap_2()
+                .child(
+                    Button::new("settings_cancel").label("Cancel").on_click(
+                        |_, window, cx| {
+                            window.close_dialog(cx);
+                        },
+                    ),
+                )
+                .child(
+                    Button::new("settings_ok")
+                        .label("Save")
+                        .primary()
+                        .on_click(move |_, window, cx| {
+                            let mut config = save_config.clone();
+                            {
+                                let d = draft_ok.read(cx);
+                                config.settings.compare_files =
+                                    d.compare_files;
+                                config.settings.compare_structure =
+                                    d.compare_structure;
+                                config.settings.ignore_whitespace =
+                                    d.ignore_whitespace;
+                                config.settings.show_hidden = d.show_hidden;
+                            }
+                            config.settings.name_filter =
+                                parse_name_filter(&filter_ok.read(cx).value());
+                            save_settings(save_mgr.clone(), config, cx);
+                            window.close_dialog(cx);
+                        }),
+                ),
+        )
     });
 }
 
@@ -464,7 +772,8 @@ impl HomeView {
     }
 
     /// One row of the saved-session list: click selects, double-click
-    /// opens, and the context menu carries rename, delete, and default.
+    /// opens, and the context menu carries rename, settings, delete, and
+    /// default.
     fn saved_row(
         &self,
         index: usize,
@@ -485,6 +794,8 @@ impl HomeView {
         let delete_mgr = self.session_manager.clone();
         let delete_path = path.clone();
         let delete_name = entry.config().name.clone();
+        let settings_mgr = self.session_manager.clone();
+        let settings_config = entry.config().clone();
         let default_mgr = self.session_manager.clone();
         let default_path = path.clone();
 
@@ -533,6 +844,8 @@ impl HomeView {
                 let delete_mgr = delete_mgr.clone();
                 let delete_path = delete_path.clone();
                 let delete_name = delete_name.clone();
+                let settings_mgr = settings_mgr.clone();
+                let settings_config = settings_config.clone();
                 let default_mgr = default_mgr.clone();
                 let default_path = default_path.clone();
                 menu.item(PopupMenuItem::new("Open").on_click(
@@ -556,6 +869,16 @@ impl HomeView {
                             rename_mgr.clone(),
                             rename_path.clone(),
                             rename_name.clone(),
+                            window,
+                            cx,
+                        );
+                    },
+                ))
+                .item(PopupMenuItem::new("Edit settings…").on_click(
+                    move |_, window, cx| {
+                        open_settings_dialog(
+                            settings_mgr.clone(),
+                            settings_config.clone(),
                             window,
                             cx,
                         );
@@ -704,7 +1027,6 @@ impl Render for HomeView {
                 IconName::Folder,
                 "Folder Compare",
                 Some(SessionType::DirCompare),
-                false,
                 mgr.clone(),
                 cx,
             ))
@@ -713,7 +1035,6 @@ impl Render for HomeView {
                 IconName::FileDiff,
                 "Text Compare",
                 Some(SessionType::TextCompare),
-                false,
                 mgr.clone(),
                 cx,
             ))
@@ -722,7 +1043,6 @@ impl Render for HomeView {
                 IconName::Merge,
                 "Text Merge",
                 Some(SessionType::TextMerge),
-                false,
                 mgr.clone(),
                 cx,
             ))
@@ -730,8 +1050,15 @@ impl Render for HomeView {
                 "folder-sync",
                 IconName::FolderSync,
                 "Folder Sync",
-                None,
-                true,
+                Some(SessionType::DirSync),
+                mgr.clone(),
+                cx,
+            ))
+            .child(session_card(
+                "folder-merge",
+                IconName::GitMerge,
+                "Folder Merge",
+                Some(SessionType::DirMerge),
                 mgr.clone(),
                 cx,
             ))
@@ -739,8 +1066,7 @@ impl Render for HomeView {
                 "table-compare",
                 IconName::Table,
                 "Table Compare",
-                None,
-                true,
+                Some(SessionType::TableCompare),
                 mgr.clone(),
                 cx,
             ))
@@ -748,8 +1074,7 @@ impl Render for HomeView {
                 "hex-compare",
                 IconName::Binary,
                 "Hex Compare",
-                None,
-                true,
+                Some(SessionType::HexCompare),
                 mgr.clone(),
                 cx,
             ))
@@ -757,17 +1082,7 @@ impl Render for HomeView {
                 "picture-compare",
                 IconName::Image,
                 "Picture Compare",
-                None,
-                true,
-                mgr.clone(),
-                cx,
-            ))
-            .child(session_card(
-                "registry-compare",
-                IconName::Database,
-                "Registry Compare",
-                None,
-                true,
+                Some(SessionType::PixCompare),
                 mgr.clone(),
                 cx,
             ));
@@ -888,5 +1203,26 @@ impl Render for HomeView {
                     .child(left)
                     .child(right),
             )
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[gpui::test]
+    fn parse_name_filter_splits_trims_and_drops_empties(
+        _cx: &mut gpui::TestAppContext,
+    ) {
+        assert_eq!(
+            parse_name_filter(" *.rs\n*.toml\n\n  \n  README*  \n"),
+            vec!["*.rs".to_string(), "*.toml".into(), "README*".into()]
+        );
+        assert!(parse_name_filter("").is_empty());
+        assert!(parse_name_filter("\n\n").is_empty());
     }
 }

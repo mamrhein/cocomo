@@ -32,12 +32,15 @@ use gpui::{
 };
 
 use crate::{
+    hex_diff::HexDiffView,
     home::HomeView,
     log::{LogBuffer, LogLevel, LogPaneOpen},
     menus::{self, MenuState},
     options::AppOptions,
+    picture_diff::PictureDiffView,
     session_manager::GuiSessionManager,
     state::AppState,
+    table_diff::TableDiffView,
     text_diff::{TextDiffSession, TextDiffView},
     text_merge::{MergeSession, MergeView},
     ui::FolderCompareView,
@@ -93,6 +96,27 @@ impl TabEntity {
         }
     }
 
+    /// Create from a hex compare view.
+    pub fn from_hex_diff(view: Entity<HexDiffView>) -> Self {
+        Self {
+            inner: Box::new(HexDiffTabEntity(view)),
+        }
+    }
+
+    /// Create from a table compare view.
+    pub fn from_table_diff(view: Entity<TableDiffView>) -> Self {
+        Self {
+            inner: Box::new(TableDiffTabEntity(view)),
+        }
+    }
+
+    /// Create from a picture compare view.
+    pub fn from_picture_diff(view: Entity<PictureDiffView>) -> Self {
+        Self {
+            inner: Box::new(PictureDiffTabEntity(view)),
+        }
+    }
+
     /// Get the focus handle.
     pub fn focus_handle(&self, cx: &App) -> FocusHandle {
         self.inner.focus_handle(cx)
@@ -127,6 +151,17 @@ impl TabEntity {
     /// active tab; other tabs return `None`.
     pub fn merge_state(&self, cx: &App) -> Option<Entity<MergeSession>> {
         self.inner.merge_state(cx)
+    }
+
+    /// The file pair this tab compares, if it is a file-pair view (text,
+    /// table, hex, or picture compare).
+    ///
+    /// "Compare files using ▸" re-opens this pair in another view kind.
+    pub fn pair_endpoints(
+        &self,
+        cx: &App,
+    ) -> Option<(cocomo_lib::Endpoint, cocomo_lib::Endpoint)> {
+        self.inner.pair_endpoints(cx)
     }
 
     /// Render this tab's toolbar row 2, or `None` when the view has no
@@ -176,6 +211,12 @@ trait TabEntityInner: Any + Send + Sync {
         None
     }
     fn merge_state(&self, _cx: &App) -> Option<Entity<MergeSession>> {
+        None
+    }
+    fn pair_endpoints(
+        &self,
+        _cx: &App,
+    ) -> Option<(cocomo_lib::Endpoint, cocomo_lib::Endpoint)> {
         None
     }
     fn view_toolbar(
@@ -270,6 +311,13 @@ impl TabEntityInner for TextDiffTabEntity {
         Some(self.0.read(cx).text_state())
     }
 
+    fn pair_endpoints(
+        &self,
+        cx: &App,
+    ) -> Option<(cocomo_lib::Endpoint, cocomo_lib::Endpoint)> {
+        Some(self.0.read(cx).pair_endpoints(cx))
+    }
+
     fn view_toolbar(
         &self,
         window: &mut Window,
@@ -297,6 +345,149 @@ impl TabEntityInner for TextDiffTabEntity {
 }
 
 struct HomeTabEntity(Entity<HomeView>);
+
+struct HexDiffTabEntity(Entity<HexDiffView>);
+
+impl TabEntityInner for HexDiffTabEntity {
+    fn focus_handle(&self, cx: &App) -> FocusHandle {
+        self.0.read(cx).focus_handle(cx)
+    }
+
+    fn any_view(&self) -> AnyView {
+        self.0.clone().into()
+    }
+
+    fn folder_state(&self, _: &App) -> Option<Entity<AppState>> {
+        None
+    }
+
+    fn pair_endpoints(
+        &self,
+        cx: &App,
+    ) -> Option<(cocomo_lib::Endpoint, cocomo_lib::Endpoint)> {
+        Some(self.0.read(cx).pair_endpoints(cx))
+    }
+
+    fn view_toolbar(
+        &self,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<AnyElement> {
+        Some(
+            self.0
+                .update(cx, |view, cx| view.render_view_toolbar(window, cx))
+                .into_any_element(),
+        )
+    }
+
+    fn window_title(&self, cx: &App) -> SharedString {
+        format!("Cocomo — Hex Compare — {}", self.0.read(cx).title(cx)).into()
+    }
+
+    fn set_manager(&self, manager: Entity<GuiSessionManager>, cx: &mut App) {
+        self.0.update(cx, |view, cx| view.set_manager(manager, cx));
+    }
+
+    fn clone_inner(&self) -> Box<dyn TabEntityInner> {
+        Box::new(HexDiffTabEntity(self.0.clone()))
+    }
+}
+
+struct TableDiffTabEntity(Entity<TableDiffView>);
+
+impl TabEntityInner for TableDiffTabEntity {
+    fn focus_handle(&self, cx: &App) -> FocusHandle {
+        self.0.read(cx).focus_handle(cx)
+    }
+
+    fn any_view(&self) -> AnyView {
+        self.0.clone().into()
+    }
+
+    fn folder_state(&self, _: &App) -> Option<Entity<AppState>> {
+        None
+    }
+
+    fn pair_endpoints(
+        &self,
+        cx: &App,
+    ) -> Option<(cocomo_lib::Endpoint, cocomo_lib::Endpoint)> {
+        Some(self.0.read(cx).pair_endpoints(cx))
+    }
+
+    fn view_toolbar(
+        &self,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<AnyElement> {
+        Some(
+            self.0
+                .update(cx, |view, cx| view.render_view_toolbar(window, cx))
+                .into_any_element(),
+        )
+    }
+
+    fn window_title(&self, cx: &App) -> SharedString {
+        format!("Cocomo — Table Compare — {}", self.0.read(cx).title(cx))
+            .into()
+    }
+
+    fn set_manager(&self, manager: Entity<GuiSessionManager>, cx: &mut App) {
+        self.0.update(cx, |view, cx| view.set_manager(manager, cx));
+    }
+
+    fn clone_inner(&self) -> Box<dyn TabEntityInner> {
+        Box::new(TableDiffTabEntity(self.0.clone()))
+    }
+}
+
+struct PictureDiffTabEntity(Entity<PictureDiffView>);
+
+impl TabEntityInner for PictureDiffTabEntity {
+    fn focus_handle(&self, cx: &App) -> FocusHandle {
+        self.0.read(cx).focus_handle(cx)
+    }
+
+    fn any_view(&self) -> AnyView {
+        self.0.clone().into()
+    }
+
+    fn folder_state(&self, _: &App) -> Option<Entity<AppState>> {
+        None
+    }
+
+    fn pair_endpoints(
+        &self,
+        cx: &App,
+    ) -> Option<(cocomo_lib::Endpoint, cocomo_lib::Endpoint)> {
+        Some(self.0.read(cx).pair_endpoints(cx))
+    }
+
+    fn view_toolbar(
+        &self,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<AnyElement> {
+        Some(
+            self.0
+                .update(cx, |view, cx| view.render_view_toolbar(window, cx))
+                .into_any_element(),
+        )
+    }
+
+    fn window_title(&self, cx: &App) -> SharedString {
+        format!("Cocomo — Picture Compare — {}", self.0.read(cx).title(cx))
+            .into()
+    }
+
+    fn set_manager(&self, manager: Entity<GuiSessionManager>, cx: &mut App) {
+        self.0.update(cx, |view, cx| view.set_manager(manager, cx));
+    }
+
+    fn clone_inner(&self) -> Box<dyn TabEntityInner> {
+        Box::new(PictureDiffTabEntity(self.0.clone()))
+    }
+}
 
 struct MergeTabEntity(Entity<MergeView>);
 
@@ -597,6 +788,17 @@ impl Render for WindowRoot {
         // The merged-toolbar layout is a global option; reading it here
         // both drives the View checkmark and the row composition below.
         let single_row = cx.global::<AppOptions>().single_row_toolbar;
+        // "Compare files using ▸" acts on the active file pair, or on the
+        // selected file of a folder tab. Reading the folder selection
+        // here registers the dependency, so selection changes refresh the
+        // menu snapshot.
+        let can_compare_using = active_tab
+            .as_ref()
+            .and_then(|tab| tab.pair_endpoints(cx))
+            .is_some()
+            || folder_state.as_ref().is_some_and(|state| {
+                state.read(cx).selected_endpoints().is_some()
+            });
         let menu_state = folder_state
             .as_ref()
             .map(|state| {
@@ -630,6 +832,7 @@ impl Render for WindowRoot {
                     can_compare_parent: false,
                     can_go_back: state.can_go_back(),
                     can_go_forward: state.can_go_forward(),
+                    can_compare_using,
                     log_open: cx.global::<LogPaneOpen>().0,
                     single_row_toolbar: single_row,
                     is_text_editing: false,
@@ -652,6 +855,7 @@ impl Render for WindowRoot {
                         detail_mode: state.detail_mode(),
                         loading: state.is_loading(),
                         can_compare_parent: state.has_live_parent(cx),
+                        can_compare_using,
                         is_home: active_tab
                             .as_ref()
                             .is_some_and(TabEntity::is_home),
@@ -670,6 +874,7 @@ impl Render for WindowRoot {
                         show_ancestor: state.show_ancestor(),
                         merge_can_take: state.can_take(),
                         merge_has_ancestor: state.has_ancestor(),
+                        can_compare_using,
                         is_home: active_tab
                             .as_ref()
                             .is_some_and(TabEntity::is_home),
@@ -681,6 +886,7 @@ impl Render for WindowRoot {
             })
             .unwrap_or_else(|| MenuState {
                 is_home: active_tab.as_ref().is_some_and(TabEntity::is_home),
+                can_compare_using,
                 log_open: cx.global::<LogPaneOpen>().0,
                 single_row_toolbar: single_row,
                 ..MenuState::empty()

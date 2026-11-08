@@ -43,6 +43,7 @@ use gpui::{
 };
 
 use crate::{
+    file_formats::FileViewKind,
     log::{self, LogLevel},
     tabview::TabEntity,
     workspace::WindowWorkspace,
@@ -834,9 +835,20 @@ impl GuiSessionManager {
         // name is not baked into the state.
         let title = gpui::SharedString::from(config.name.clone());
 
+        // A merge session carries an ancestor endpoint; resolve it with
+        // the same no-prompt rule as the two main sides.
+        let center = config.center.as_ref().and_then(|center| {
+            Endpoint::from_ref(
+                &center.provider,
+                center.path.clone(),
+                &NullPrompter,
+            )
+            .ok()
+        });
+
         let state = cx.new(|cx| {
             crate::state::AppState::from_config(
-                &config, left, right, title, cx,
+                &config, left, right, center, title, cx,
             )
         });
 
@@ -961,6 +973,148 @@ impl GuiSessionManager {
         self.open_sessions.push(session);
         self.active_index = self.open_sessions.len() - 1;
         cx.notify();
+    }
+
+    /// Open a file-pair tab of the given view kind and make it active.
+    ///
+    /// This is the routing point of "Compare files using ▸" and of the
+    /// file-format registry mapping: the same pair re-opens in the text,
+    /// table, hex, or picture view.
+    pub fn add_file_pair_tab(
+        &mut self,
+        kind: FileViewKind,
+        left: Endpoint,
+        right: Endpoint,
+        parent: Option<gpui::WeakEntity<crate::state::AppState>>,
+        cx: &mut Context<Self>,
+    ) {
+        match kind {
+            FileViewKind::Text => {
+                self.add_text_diff_tab(left, right, parent, cx);
+            }
+            FileViewKind::Table => {
+                let mgr = cx.entity().clone();
+                let view = crate::table_diff::new_table_diff_view(
+                    left.clone(),
+                    right.clone(),
+                    Some(mgr),
+                    cx,
+                );
+                self.push_pair_tab(
+                    SessionType::TableCompare,
+                    "table diff",
+                    TabEntity::from_table_diff(view),
+                    left,
+                    right,
+                    cx,
+                );
+            }
+            FileViewKind::Hex => {
+                let mgr = cx.entity().clone();
+                let view = crate::hex_diff::new_hex_diff_view(
+                    left.clone(),
+                    right.clone(),
+                    Some(mgr),
+                    cx,
+                );
+                self.push_pair_tab(
+                    SessionType::HexCompare,
+                    "hex diff",
+                    TabEntity::from_hex_diff(view),
+                    left,
+                    right,
+                    cx,
+                );
+            }
+            FileViewKind::Picture => {
+                let mgr = cx.entity().clone();
+                let view = crate::picture_diff::new_picture_diff_view(
+                    left.clone(),
+                    right.clone(),
+                    Some(mgr),
+                    cx,
+                );
+                self.push_pair_tab(
+                    SessionType::PixCompare,
+                    "picture diff",
+                    TabEntity::from_picture_diff(view),
+                    left,
+                    right,
+                    cx,
+                );
+            }
+        }
+    }
+
+    /// Record a file-pair tab (config + view) in history and activate it.
+    fn push_pair_tab(
+        &mut self,
+        session_type: SessionType,
+        name: &str,
+        tab_entity: TabEntity,
+        left: Endpoint,
+        right: Endpoint,
+        cx: &mut Context<Self>,
+    ) {
+        let config = SessionConfig {
+            name: name.to_string(),
+            session_type,
+            left: ProviderRef {
+                provider: left.provider_ref(),
+                path: left.path().to_path_buf(),
+            },
+            right: ProviderRef {
+                provider: right.provider_ref(),
+                path: right.path().to_path_buf(),
+            },
+            center: None,
+            settings: SessionSettings::default(),
+        };
+        self.record_history(config.clone(), cx);
+        let session = OpenSession {
+            tab_id: next_tab_id(),
+            config,
+            dirty: false,
+            tab_entity,
+        };
+        self.open_sessions.push(session);
+        self.active_index = self.open_sessions.len() - 1;
+        cx.notify();
+    }
+
+    /// Open a folder tab of the given session type (compare, sync, or
+    /// merge) and make it active. `center` is the ancestor of a merge.
+    pub fn add_folder_tab_with_type(
+        &mut self,
+        session_type: SessionType,
+        left: Endpoint,
+        right: Endpoint,
+        center: Option<Endpoint>,
+        cx: &mut Context<Self>,
+    ) {
+        let name = match session_type {
+            SessionType::DirSync => "folder sync",
+            SessionType::DirMerge => "folder merge",
+            _ => "dir diff",
+        };
+        let config = SessionConfig {
+            name: name.to_string(),
+            session_type,
+            left: ProviderRef {
+                provider: left.provider_ref(),
+                path: left.path().to_path_buf(),
+            },
+            right: ProviderRef {
+                provider: right.provider_ref(),
+                path: right.path().to_path_buf(),
+            },
+            center: center.map(|c| ProviderRef {
+                provider: c.provider_ref(),
+                path: c.path().to_path_buf(),
+            }),
+            settings: SessionSettings::default(),
+        };
+        self.open_folder_tab(config, left, right, cx);
     }
 
     /// Add a text diff tab over two in-memory texts ("compare selection
@@ -1104,8 +1258,9 @@ impl GuiSessionManager {
         self.open_folder_tab(config, left, right, cx);
     }
 
-    /// Open a tab for a loaded session config, rebuilding both endpoints
-    /// from the provider refs recorded in it.
+    /// Open a tab for a loaded session config, dispatching on its session
+    /// type and rebuilding all endpoints from the provider refs recorded
+    /// in it.
     ///
     /// Remote refs re-resolve without prompting (same rule as
     /// [`SavedSessionStore::build_session`]); a ref that needs credentials
@@ -1116,112 +1271,72 @@ impl GuiSessionManager {
         cx: &mut Context<Self>,
     ) -> Result<()> {
         let prompter = NullPrompter;
-        let left = Endpoint::from_ref(
-            &config.left.provider,
-            config.left.path.clone(),
-            &prompter,
-        )
-        .with_context(|| {
-            format!(
-                "failed to resolve left endpoint: {}",
-                config.left.path.display()
-            )
-        })?;
-        let right = Endpoint::from_ref(
-            &config.right.provider,
-            config.right.path.clone(),
-            &prompter,
-        )
-        .with_context(|| {
-            format!(
-                "failed to resolve right endpoint: {}",
-                config.right.path.display()
-            )
-        })?;
-        self.open_folder_tab(config, left, right, cx);
+        let resolve = |p: &ProviderRef, what: &str| -> Result<Endpoint> {
+            Endpoint::from_ref(&p.provider, p.path.clone(), &prompter)
+                .with_context(|| {
+                    format!(
+                        "failed to resolve {what} endpoint: {}",
+                        p.path.display()
+                    )
+                })
+        };
+        let left = resolve(&config.left, "left")?;
+        let right = resolve(&config.right, "right")?;
+        match config.session_type {
+            SessionType::TextCompare => {
+                self.add_text_diff_tab(left, right, None, cx);
+            }
+            SessionType::TextMerge => {
+                let ancestor = config
+                    .center
+                    .as_ref()
+                    .map(|c| resolve(c, "ancestor"))
+                    .transpose()?;
+                self.add_text_merge_tab(left, right, ancestor, cx);
+            }
+            SessionType::TableCompare => {
+                self.add_file_pair_tab(
+                    FileViewKind::Table,
+                    left,
+                    right,
+                    None,
+                    cx,
+                );
+            }
+            SessionType::HexCompare => {
+                self.add_file_pair_tab(
+                    FileViewKind::Hex,
+                    left,
+                    right,
+                    None,
+                    cx,
+                );
+            }
+            SessionType::PixCompare => {
+                self.add_file_pair_tab(
+                    FileViewKind::Picture,
+                    left,
+                    right,
+                    None,
+                    cx,
+                );
+            }
+            _ => {
+                self.open_folder_tab(config, left, right, cx);
+            }
+        }
         Ok(())
     }
 
     /// Open a tab for a saved session, dispatching on its session type.
     ///
-    /// Text-compare and text-merge configs open their respective views;
-    /// everything else currently opens as a folder compare.
+    /// Every serializable type opens in its own view; the dispatch lives
+    /// in [`Self::open_session_config`].
     pub fn open_saved(
         &mut self,
         config: SessionConfig,
         cx: &mut Context<Self>,
     ) -> Result<()> {
-        if config.session_type == SessionType::TextCompare {
-            let prompter = NullPrompter;
-            let left = Endpoint::from_ref(
-                &config.left.provider,
-                config.left.path.clone(),
-                &prompter,
-            )
-            .with_context(|| {
-                format!(
-                    "failed to resolve left endpoint: {}",
-                    config.left.path.display()
-                )
-            })?;
-            let right = Endpoint::from_ref(
-                &config.right.provider,
-                config.right.path.clone(),
-                &prompter,
-            )
-            .with_context(|| {
-                format!(
-                    "failed to resolve right endpoint: {}",
-                    config.right.path.display()
-                )
-            })?;
-            self.add_text_diff_tab(left, right, None, cx);
-            return Ok(());
-        }
-        if config.session_type == SessionType::TextMerge {
-            let prompter = NullPrompter;
-            let left = Endpoint::from_ref(
-                &config.left.provider,
-                config.left.path.clone(),
-                &prompter,
-            )
-            .with_context(|| {
-                format!(
-                    "failed to resolve left endpoint: {}",
-                    config.left.path.display()
-                )
-            })?;
-            let right = Endpoint::from_ref(
-                &config.right.provider,
-                config.right.path.clone(),
-                &prompter,
-            )
-            .with_context(|| {
-                format!(
-                    "failed to resolve right endpoint: {}",
-                    config.right.path.display()
-                )
-            })?;
-            let ancestor = config
-                .center
-                .as_ref()
-                .map(|center| {
-                    Endpoint::from_ref(
-                        &center.provider,
-                        center.path.clone(),
-                        &prompter,
-                    )
-                    .with_context(|| {
-                        format!(
-                            "failed to resolve ancestor endpoint: {}",
-                            center.path.display()
-                        )
-                    })
-                })
-                .transpose()?;
-            self.add_text_merge_tab(left, right, ancestor, cx);
-            return Ok(());
-        }
         self.open_session_config(config, cx)
     }
 
@@ -1244,6 +1359,38 @@ impl GuiSessionManager {
                 }
                 SessionType::TextMerge => {
                     self.add_text_merge_tab(left, right, ancestor, cx);
+                }
+                SessionType::TableCompare => {
+                    self.add_file_pair_tab(
+                        FileViewKind::Table,
+                        left,
+                        right,
+                        None,
+                        cx,
+                    );
+                }
+                SessionType::HexCompare => {
+                    self.add_file_pair_tab(
+                        FileViewKind::Hex,
+                        left,
+                        right,
+                        None,
+                        cx,
+                    );
+                }
+                SessionType::PixCompare => {
+                    self.add_file_pair_tab(
+                        FileViewKind::Picture,
+                        left,
+                        right,
+                        None,
+                        cx,
+                    );
+                }
+                SessionType::DirSync | SessionType::DirMerge => {
+                    self.add_folder_tab_with_type(
+                        kind, left, right, ancestor, cx,
+                    );
                 }
                 _ => {
                     let config = SessionConfig {
@@ -1830,17 +1977,28 @@ fn resolve_dropped_paths(
     kind: SessionType,
     paths: &[PathBuf],
 ) -> std::result::Result<(Endpoint, Option<Endpoint>, Endpoint), String> {
-    let is_merge = kind == SessionType::TextMerge;
-    let min = if is_merge { 2 } else { 1 };
-    let max = if is_merge { 3 } else { 2 };
+    let is_text_merge = kind == SessionType::TextMerge;
+    let is_dir_merge = kind == SessionType::DirMerge;
+    let min = if is_dir_merge {
+        3
+    } else if is_text_merge {
+        2
+    } else {
+        1
+    };
+    let max = if is_text_merge || is_dir_merge { 3 } else { 2 };
     if paths.len() < min || paths.len() > max {
-        return Err(if is_merge {
+        return Err(if is_dir_merge {
+            "Drop three folders onto the card to start a merge: left, \
+             ancestor, right."
+                .into()
+        } else if is_text_merge {
             "Drop two or three files onto the card to start a merge.".into()
         } else {
             "Drop one or two items onto the card to start a session.".into()
         });
     }
-    let (left, ancestor, right) = if is_merge {
+    let (left, ancestor, right) = if is_text_merge || is_dir_merge {
         if paths.len() == 2 {
             (&paths[0], None, &paths[1])
         } else {
@@ -1851,8 +2009,10 @@ fn resolve_dropped_paths(
     } else {
         (&paths[0], None, &paths[1])
     };
-    let want_dir =
-        kind != SessionType::TextCompare && kind != SessionType::TextMerge;
+    let want_dir = matches!(
+        kind,
+        SessionType::DirCompare | SessionType::DirSync | SessionType::DirMerge
+    );
     for path in [Some(left), ancestor, Some(right)].into_iter().flatten() {
         let metadata = fs_err::metadata(path)
             .map_err(|e| format!("Couldn't read {}: {e}", path.display()))?;
@@ -1938,6 +2098,54 @@ mod tests {
             assert_eq!(config.session_type, SessionType::Home);
             assert!(!m.active_session().unwrap().dirty);
         });
+    }
+
+    /// `add_file_pair_tab` opens the view matching each kind, and the
+    /// tab reports its pair for "Compare files using ▸".
+    #[gpui::test]
+    fn add_file_pair_tab_opens_the_matching_view(cx: &mut TestAppContext) {
+        let _rt = init_tokio_handle();
+        cx.update(|cx| cx.set_global(crate::log::LogBuffer::default()));
+        let mgr = manager_in(cx, "cocomo-test-file-pair-kinds");
+        let cases = [
+            (
+                crate::file_formats::FileViewKind::Text,
+                SessionType::TextCompare,
+            ),
+            (
+                crate::file_formats::FileViewKind::Table,
+                SessionType::TableCompare,
+            ),
+            (
+                crate::file_formats::FileViewKind::Hex,
+                SessionType::HexCompare,
+            ),
+            (
+                crate::file_formats::FileViewKind::Picture,
+                SessionType::PixCompare,
+            ),
+        ];
+        for (kind, session_type) in cases {
+            mgr.update(cx, |m, cx| {
+                m.add_file_pair_tab(
+                    kind,
+                    Endpoint::local("/pair-left"),
+                    Endpoint::local("/pair-right"),
+                    None,
+                    cx,
+                );
+            });
+            mgr.read_with(cx, |m, cx| {
+                let session = m.active_session().unwrap();
+                assert_eq!(session.config.session_type, session_type);
+                let (left, right) =
+                    session.tab_entity.pair_endpoints(cx).unwrap_or_else(
+                        || panic!("{kind:?} tab must report its pair"),
+                    );
+                assert_eq!(left.path(), std::path::Path::new("/pair-left"));
+                assert_eq!(right.path(), std::path::Path::new("/pair-right"));
+            });
+        }
     }
 
     #[gpui::test]

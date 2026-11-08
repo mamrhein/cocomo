@@ -3125,6 +3125,15 @@ impl TextDiffView {
         self.state.clone()
     }
 
+    /// The compared endpoints, for "Compare files using ▸".
+    pub fn pair_endpoints(
+        &self,
+        cx: &App,
+    ) -> (cocomo_lib::Endpoint, cocomo_lib::Endpoint) {
+        let session = self.state.read(cx);
+        (session.left_endpoint(), session.right_endpoint())
+    }
+
     /// Scroll both panes so the display row is visible.
     fn reveal(&self, target: Option<usize>) {
         if let Some(ix) = target {

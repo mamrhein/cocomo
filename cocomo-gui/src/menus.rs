@@ -95,6 +95,10 @@ actions!(
         SessionSettings,
         ClearSession,
         CompareParentFolders,
+        CompareUsingText,
+        CompareUsingTable,
+        CompareUsingHex,
+        CompareUsingPicture,
         SessionReport,
         SessionInfo,
         MergeFiles,
@@ -112,6 +116,7 @@ actions!(
         Options,
         StopCompare,
         FileFormats,
+        SyncPresets,
         HelpContents,
         About,
         Quit,
@@ -187,6 +192,10 @@ pub struct MenuState {
     pub can_go_back: bool,
     /// Whether the pair can step forward in the session history.
     pub can_go_forward: bool,
+    /// Whether the active view offers a file pair that "Compare files
+    /// using ▸" can re-open in another view kind (a file-pair tab, or a
+    /// folder tab with a file selected).
+    pub can_compare_using: bool,
     /// Whether the log pane is visible (checkmark on the View toggle).
     pub log_open: bool,
     /// Whether the toolbars render in a single merged row (checkmark on
@@ -236,6 +245,7 @@ impl MenuState {
             can_compare_parent: false,
             can_go_back: false,
             can_go_forward: false,
+            can_compare_using: false,
             log_open: true,
             single_row_toolbar: false,
             word_wrap: false,
@@ -370,6 +380,28 @@ fn build_app_menus(
                 )
                 .disabled(!state.can_compare_parent)
             }),
+            // Re-open the active file pair in another compare view; the
+            // items are disabled unless a pair is in reach.
+            Some(MenuItem::submenu(Menu::new("Compare files using").items(
+                items([
+                    show(hidden, "session.compare_as_text", || {
+                        MenuItem::action("Text", CompareUsingText)
+                            .disabled(!state.can_compare_using)
+                    }),
+                    show(hidden, "session.compare_as_table", || {
+                        MenuItem::action("Table", CompareUsingTable)
+                            .disabled(!state.can_compare_using)
+                    }),
+                    show(hidden, "session.compare_as_hex", || {
+                        MenuItem::action("Hex", CompareUsingHex)
+                            .disabled(!state.can_compare_using)
+                    }),
+                    show(hidden, "session.compare_as_picture", || {
+                        MenuItem::action("Picture", CompareUsingPicture)
+                            .disabled(!state.can_compare_using)
+                    }),
+                ]),
+            ))),
         ])),
         Menu::new("File").items(items([
             show(hidden, "file.new_compare", || {
@@ -826,6 +858,9 @@ fn build_app_menus(
             show(hidden, "tools.file_formats", || {
                 MenuItem::action("File formats…", FileFormats)
             }),
+            show(hidden, "tools.sync_presets", || {
+                MenuItem::action("Folder Sync presets…", SyncPresets)
+            }),
         ])),
         Menu::new("Help").items(items([
             show(hidden, "help.contents", || {
@@ -885,6 +920,35 @@ pub fn rebuild_menus(cx: &mut App) {
 /// captured a manager at startup would keep acting on the first window.
 fn active_manager(cx: &App) -> Option<Entity<GuiSessionManager>> {
     crate::windows::active_manager(cx)
+}
+
+/// Re-open the active view's file pair in another file compare view.
+///
+/// The pair comes from the active file-pair tab, or from the selected
+/// entry of a folder tab. With neither in reach the command logs a
+/// warning and does nothing; the menu items are disabled in that case,
+/// so this only guards palette invocations.
+fn compare_active_pair(kind: crate::file_formats::FileViewKind, cx: &mut App) {
+    let Some(mgr) = active_manager(cx) else {
+        return;
+    };
+    let pair = mgr
+        .read(cx)
+        .active_session()
+        .and_then(|s| s.tab_entity.pair_endpoints(cx))
+        .or_else(|| {
+            mgr.read(cx)
+                .active_session()
+                .and_then(|s| s.tab_entity.folder_state(cx))
+                .and_then(|state| state.read(cx).selected_endpoints())
+        });
+    let Some((left, right)) = pair else {
+        log::push(LogLevel::Warning, "No file pair in reach to compare.", cx);
+        return;
+    };
+    mgr.update(cx, |m, cx| {
+        m.add_file_pair_tab(kind, left, right, None, cx);
+    });
 }
 
 /// Register all global menu action handlers with the app.
@@ -1547,6 +1611,31 @@ pub fn register_menu_handlers(cx: &mut App) {
         });
     });
 
+    // Tools menu — the folder-sync presets dialog.
+    cx.on_action(move |_action: &SyncPresets, cx: &mut App| {
+        let Some(window) = cx.active_window() else {
+            return;
+        };
+        let _ = window.update(cx, |_, window, cx| {
+            crate::sync_presets::open_sync_presets_dialog(window, cx);
+        });
+    });
+
+    // Session menu — "Compare files using ▸": re-open the active pair
+    // in the chosen file view kind.
+    cx.on_action(move |_action: &CompareUsingText, cx: &mut App| {
+        compare_active_pair(crate::file_formats::FileViewKind::Text, cx);
+    });
+    cx.on_action(move |_action: &CompareUsingTable, cx: &mut App| {
+        compare_active_pair(crate::file_formats::FileViewKind::Table, cx);
+    });
+    cx.on_action(move |_action: &CompareUsingHex, cx: &mut App| {
+        compare_active_pair(crate::file_formats::FileViewKind::Hex, cx);
+    });
+    cx.on_action(move |_action: &CompareUsingPicture, cx: &mut App| {
+        compare_active_pair(crate::file_formats::FileViewKind::Picture, cx);
+    });
+
     // Help menu — help contents: a static markdown guide. Version and
     // license live in the About dialog.
     cx.on_action(move |_action: &HelpContents, cx: &mut App| {
@@ -1787,6 +1876,50 @@ mod tests {
         assert!(
             hidden_session.items.len() < session.items.len(),
             "hiding two commands must shrink the Session menu"
+        );
+    }
+
+    /// The "Compare files using" submenu carries the four file views,
+    /// and hiding one command removes just that entry.
+    #[test]
+    fn compare_using_submenu_lists_the_four_file_views() {
+        let submenu = |hidden: &HashSet<&'static str>| {
+            build_app_menus(MenuState::empty(), hidden)
+                .into_iter()
+                .find(|m| m.name == "Session")
+                .and_then(|m| {
+                    m.items.into_iter().find_map(|item| match item {
+                        MenuItem::Submenu(menu)
+                            if menu.name == "Compare files using" =>
+                        {
+                            Some(menu)
+                        }
+                        _ => None,
+                    })
+                })
+                .expect("Session menu must carry the compare submenu")
+        };
+        assert_eq!(submenu(&HashSet::new()).items.len(), 4);
+        assert_eq!(
+            submenu(&HashSet::from(["session.compare_as_hex"]))
+                .items
+                .len(),
+            3
+        );
+    }
+
+    /// The Tools menu offers the folder-sync presets dialog.
+    #[test]
+    fn tools_menu_offers_the_sync_presets_dialog() {
+        let menus = build_app_menus(MenuState::empty(), &HashSet::new());
+        let tools = menus.iter().find(|m| m.name == "Tools").unwrap();
+        assert!(
+            tools.items.iter().any(|item| matches!(
+                item,
+                MenuItem::Action { name, .. }
+                    if name == "Folder Sync presets…"
+            )),
+            "Tools menu must offer the Folder Sync presets dialog"
         );
     }
 }

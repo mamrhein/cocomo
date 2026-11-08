@@ -59,9 +59,11 @@ impl FileViewKind {
         }
     }
 
-    /// Whether a view of this kind can be opened today.
+    /// Whether a view of this kind can be opened. All four views ship
+    /// since the new-session-types phase; the flag stays so the format
+    /// switchers keep a uniform `(name, selectable)` shape.
     pub(crate) fn is_available(self) -> bool {
-        matches!(self, Self::Text)
+        true
     }
 }
 

@@ -14,7 +14,12 @@
 //! compare directories asynchronously, and the UI observes this entity
 //! for updates.
 
-use std::{cmp::Ordering, collections::HashSet, sync::Arc, time::Instant};
+use std::{
+    cmp::Ordering,
+    collections::{HashMap, HashSet},
+    sync::Arc,
+    time::Instant,
+};
 
 use cocomo_lib::{
     CancellationToken, CompareConfig, ContentCache, DirComparison, DirEntry,
@@ -28,6 +33,7 @@ use cocomo_lib::{
     },
 };
 use gpui::{App, Context, FocusHandle, SharedString};
+use serde::{Deserialize, Serialize};
 
 use crate::{
     color::Side,
@@ -690,7 +696,10 @@ pub enum BaseSide {
 
 /// A whole-comparison synchronization run offered by the Synchronize
 /// submenu of the row context menu.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+///
+/// Also the payload of a persisted folder-sync preset (see
+/// [`crate::sync_presets`]), hence the serde derives.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SyncKind {
     /// Bring the right side up to date (copy newer and left-only
     /// entries to the right); nothing is deleted.
@@ -708,6 +717,15 @@ pub enum SyncKind {
 }
 
 impl SyncKind {
+    /// All kinds, in menu order.
+    pub const ALL: [Self; 5] = [
+        Self::UpdateRight,
+        Self::UpdateLeft,
+        Self::UpdateBoth,
+        Self::MirrorRight,
+        Self::MirrorLeft,
+    ];
+
     /// Label for the confirmation dialog and the completion notice.
     pub fn label(self) -> &'static str {
         match self {
@@ -924,6 +942,86 @@ pub(crate) fn transfer_plan_for(
 }
 
 // ---------------------------------------------------------------------------
+// Folder merge
+// ---------------------------------------------------------------------------
+
+/// How one path relates across the three sides of a folder merge.
+///
+/// Derived from two ancestor comparisons (ancestor↔left and
+/// ancestor↔right): a path only one side changed can be taken from that
+/// side; a path both sides changed differently is a conflict.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MergeRowStatus {
+    /// All three sides agree, or neither side changed it.
+    Unchanged,
+    /// Only the left differs from the ancestor: safe to take left.
+    TakeLeft,
+    /// Only the right differs from the ancestor: safe to take right.
+    TakeRight,
+    /// Both sides changed the path and they disagree: a conflict.
+    Conflict,
+}
+
+/// Whether an ancestor-comparison status means "this side changed the
+/// path": a difference or an orphan (added/removed) both count.
+fn side_changed(status: Option<DirEntryStatus>) -> bool {
+    status.is_some_and(|s| !s.intersects(DirEntryStatus::EQUAL))
+}
+
+/// Derive per-path merge statuses from the two ancestor comparisons.
+///
+/// `left_changes` and `right_changes` map a path to its status in the
+/// ancestor↔side comparison (absent means the side matches the ancestor).
+/// `both_changed` reports whether the direct left↔right comparison also
+/// finds the two sides disagreeing on the path, which turns a
+/// both-changed path into a conflict rather than a coincidental match.
+pub(crate) fn derive_merge_status(
+    left_changes: &HashMap<String, DirEntryStatus>,
+    right_changes: &HashMap<String, DirEntryStatus>,
+    both_changed: &mut impl FnMut(&str) -> bool,
+) -> HashMap<String, MergeRowStatus> {
+    let mut out = HashMap::new();
+    let paths: HashSet<&String> =
+        left_changes.keys().chain(right_changes.keys()).collect();
+    for path in paths {
+        let left = side_changed(left_changes.get(path).copied());
+        let right = side_changed(right_changes.get(path).copied());
+        let status = match (left, right) {
+            (false, false) => MergeRowStatus::Unchanged,
+            (true, false) => MergeRowStatus::TakeLeft,
+            (false, true) => MergeRowStatus::TakeRight,
+            (true, true) => {
+                if both_changed(path) {
+                    MergeRowStatus::Conflict
+                } else {
+                    // Both sides changed the path the same way; there is
+                    // nothing to reconcile.
+                    MergeRowStatus::Unchanged
+                }
+            }
+        };
+        out.insert(path.clone(), status);
+    }
+    out
+}
+
+/// Collect the paths whose status is not plain equality from a
+/// comparison, keyed by the entry's tree path (already root-relative).
+fn collect_changes(
+    comparison: &DirComparison,
+    out: &mut HashMap<String, DirEntryStatus>,
+) {
+    for entry in &comparison.entries {
+        if !entry.status.intersects(DirEntryStatus::EQUAL) {
+            out.insert(entry_tree_path(entry), entry.status);
+        }
+        if let Some(sub) = &entry.sub_entries {
+            collect_changes(sub, out);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Application state
 // ---------------------------------------------------------------------------
 
@@ -989,6 +1087,11 @@ pub struct AppState {
     name_filter: Option<FilterSet>,
     /// Session type.
     session_type: SessionType,
+    /// Ancestor endpoint of a folder merge session (`DirMerge`).
+    center: Option<Endpoint>,
+    /// Per-path merge status derived from the ancestor comparisons of a
+    /// folder merge; empty until both ancestor scans complete.
+    merge_status: HashMap<String, MergeRowStatus>,
     /// Monotonic counter that invalidates results of stopped or
     /// superseded comparison loads.
     load_revision: u64,
@@ -1048,6 +1151,8 @@ impl AppState {
             filter_current: None,
             name_filter: None,
             session_type: SessionType::DirCompare,
+            center: None,
+            merge_status: HashMap::new(),
             load_revision: 0,
             cancel_token: None,
             content_cache: Arc::new(ContentCache::default_config()),
@@ -1062,6 +1167,7 @@ impl AppState {
         config: &SessionConfig,
         left: Endpoint,
         right: Endpoint,
+        center: Option<Endpoint>,
         title: SharedString,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -1071,6 +1177,16 @@ impl AppState {
             filter_current.as_deref().unwrap_or(""),
             &config.settings.filter_rules,
         );
+        // A sync session only ever acts on rows that differ, so the
+        // same-content categories start (and stay) hidden.
+        let filters = if config.session_type == SessionType::DirSync {
+            DisplayFilters {
+                show_statuses: DirEntryStatus::all()
+                    .difference(DirEntryStatus::EQUAL),
+            }
+        } else {
+            DisplayFilters::default()
+        };
         Self {
             focus_handle: cx.focus_handle(),
             title,
@@ -1082,7 +1198,7 @@ impl AppState {
             tree_rows: Vec::new(),
             expanded: HashSet::new(),
             sparse: false,
-            filters: DisplayFilters::default(),
+            filters,
             selected_index: 0,
             selected_paths: HashSet::new(),
             loading: false,
@@ -1096,6 +1212,8 @@ impl AppState {
             filter_current,
             name_filter,
             session_type: config.session_type,
+            center,
+            merge_status: HashMap::new(),
             load_revision: 0,
             cancel_token: None,
             content_cache: Arc::new(ContentCache::default_config()),
@@ -1246,6 +1364,37 @@ impl AppState {
         self.session_type
     }
 
+    /// The ancestor endpoint of a folder merge session, if any.
+    pub fn center(&self) -> Option<&Endpoint> {
+        self.center.as_ref()
+    }
+
+    /// Whether this session is a folder sync: only actionable rows are
+    /// shown and the same-content filter stays off.
+    pub fn is_sync_mode(&self) -> bool {
+        self.session_type == SessionType::DirSync
+    }
+
+    /// Whether this session is a three-folder merge.
+    pub fn is_merge_mode(&self) -> bool {
+        self.session_type == SessionType::DirMerge
+    }
+
+    /// The merge status of the tree row at `path`, once the ancestor
+    /// scans have completed. `None` outside merge mode or for paths the
+    /// scans do not cover.
+    pub fn merge_row_status(&self, path: &str) -> Option<MergeRowStatus> {
+        self.merge_status.get(path).copied()
+    }
+
+    /// Number of merge rows that both sides changed differently.
+    pub fn merge_conflict_count(&self) -> usize {
+        self.merge_status
+            .values()
+            .filter(|s| **s == MergeRowStatus::Conflict)
+            .count()
+    }
+
     /// Return the session settings.
     pub fn settings(&self) -> &SessionSettings {
         &self.settings
@@ -1269,7 +1418,10 @@ impl AppState {
                 provider: self.right.provider_ref(),
                 path: self.right.path().to_path_buf(),
             },
-            center: None,
+            center: self.center.as_ref().map(|c| ProviderRef {
+                provider: c.provider_ref(),
+                path: c.path().to_path_buf(),
+            }),
             settings: self.settings.clone(),
         }
     }
@@ -1294,6 +1446,7 @@ impl AppState {
         self.loading = true;
         self.busy_label = Some("scanning…".into());
         self.error = None;
+        self.merge_status.clear();
         self.load_revision += 1;
         let revision = self.load_revision;
         let token = CancellationToken::new();
@@ -1372,6 +1525,7 @@ impl AppState {
                                 state.comparison = Some(comparison);
                                 state.recompute_display_order();
                                 state.selected_index = 0;
+                                state.start_merge_scan(cx);
                                 log::push(
                                     LogLevel::Info,
                                     format!(
@@ -1413,7 +1567,128 @@ impl AppState {
         .detach();
     }
 
-    /// Refine the displayed comparison with content hashes in the
+    /// Scan the ancestor against both sides and derive per-path merge
+    /// statuses.
+    ///
+    /// Runs only in merge mode with an ancestor endpoint; the ancestor
+    /// follows the left side's navigation so the three trees stay aligned
+    /// after entering a subfolder. Results land in `merge_status` when
+    /// both scans finish for the current load revision.
+    fn start_merge_scan(&mut self, cx: &mut Context<Self>) {
+        if !self.is_merge_mode() {
+            return;
+        }
+        let Some(center_root) = self.center.clone() else {
+            return;
+        };
+        let mut center = center_root;
+        for step in &self.nav_steps {
+            center = center.join(&step.left);
+        }
+        let left = self.left.clone();
+        let right = self.right.clone();
+        let revision = self.load_revision;
+        let weak = cx.entity().downgrade();
+
+        let join_handle = crate::runtime::spawn_on_tokio(async move {
+            let config = CompareConfig::meta_data_only();
+            async fn scan_pair(
+                config: &CompareConfig,
+                a: Endpoint,
+                b: Endpoint,
+            ) -> std::result::Result<DirComparison, anyhow::Error>
+            {
+                if a.same_provider(&b) {
+                    compare_directories_node(
+                        a.fs(),
+                        a.path(),
+                        b.path(),
+                        config,
+                        None,
+                        None,
+                    )
+                    .await
+                } else {
+                    compare_directories_pair_node(
+                        a.fs(),
+                        b.fs(),
+                        a.path(),
+                        b.path(),
+                        config,
+                        None,
+                        None,
+                    )
+                    .await
+                }
+                .map_err(|e| anyhow::anyhow!("{e}"))
+            }
+            let left_scan = scan_pair(&config, center.clone(), left).await?;
+            let right_scan = scan_pair(&config, center, right).await?;
+            Ok::<_, anyhow::Error>((left_scan, right_scan))
+        });
+
+        cx.spawn(move |_, cx: &mut gpui::AsyncApp| {
+            let async_app = cx.clone();
+            async move {
+                let result = match join_handle.await {
+                    Ok(r) => r,
+                    Err(e) => Err(anyhow::anyhow!("task panicked: {e}")),
+                };
+                async_app.update(|cx| {
+                    let Some(entity) = weak.upgrade() else { return };
+                    entity.update(cx, |state, cx| {
+                        // A newer load owns the row model; drop this
+                        // scan's results.
+                        if revision != state.load_revision {
+                            return;
+                        }
+                        match result {
+                            Ok((left_scan, right_scan)) => {
+                                let mut left_changes = HashMap::new();
+                                let mut right_changes = HashMap::new();
+                                collect_changes(&left_scan, &mut left_changes);
+                                collect_changes(
+                                    &right_scan,
+                                    &mut right_changes,
+                                );
+                                let mut main_changes = HashMap::new();
+                                if let Some(main) = &state.comparison {
+                                    collect_changes(main, &mut main_changes);
+                                }
+                                state.merge_status = derive_merge_status(
+                                    &left_changes,
+                                    &right_changes,
+                                    &mut |path| {
+                                        main_changes.contains_key(path)
+                                    },
+                                );
+                                let conflicts = state.merge_conflict_count();
+                                log::push(
+                                    LogLevel::Info,
+                                    format!(
+                                        "Merge scan completed: {conflicts} \
+                                         conflict(s)"
+                                    ),
+                                    cx,
+                                );
+                                cx.notify();
+                            }
+                            Err(e) => {
+                                log::push(
+                                    LogLevel::Error,
+                                    format!("Merge scan failed: {e}"),
+                                    cx,
+                                );
+                            }
+                        }
+                    });
+                });
+            }
+        })
+        .detach();
+    }
+
+    /// Refine the displayed comparison with content hashes in the background.
     /// background.
     ///
     /// Runs [`compare_content_pair_node`] on the tokio runtime over the
@@ -2520,6 +2795,13 @@ impl AppState {
             StatusCategory::Different => DirEntryStatus::DIFFERENT,
             StatusCategory::Orphan => DirEntryStatus::ORPHAN,
         };
+        // A sync session is defined by showing only actionable rows; the
+        // same-content toggle is inert there.
+        if self.session_type == SessionType::DirSync
+            && category == StatusCategory::Same
+        {
+            return;
+        }
         self.filters.show_statuses ^= mask;
         let selected_name = self.selected_entry().map(|e| e.name.clone());
         self.recompute_display_order();

@@ -87,6 +87,9 @@ pub struct AppOptions {
     /// Per-command personalization, keyed by command id.
     #[serde(default)]
     pub commands: HashMap<String, CommandSetting>,
+    /// Named folder-sync presets, run from the sync view's toolbar.
+    #[serde(default)]
+    pub sync_presets: Vec<crate::sync_presets::SyncPreset>,
 }
 
 impl Default for AppOptions {
@@ -99,6 +102,7 @@ impl Default for AppOptions {
             single_row_toolbar: false,
             colors: ColorOverrides::default(),
             commands: HashMap::new(),
+            sync_presets: Vec::new(),
         }
     }
 }

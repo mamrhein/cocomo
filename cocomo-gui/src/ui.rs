@@ -42,7 +42,6 @@ use gpui::{
 use crate::{
     color::{ColorFields, Side},
     folder_table::FolderTableDelegate,
-    log::{self, LogLevel},
     menus::{
         CopyPathLeft, CopyPathRight, ReloadCompare, SaveSession,
         SelectAllEntries, StopCompare, ToggleShowDifferent, ToggleShowOrphans,
@@ -441,7 +440,45 @@ impl FolderCompareView {
                 }
             });
 
-        Toolbar::new("view-toolbar")
+        // Folder sync sessions run their named presets from row 2. A
+        // preset dispatches the corresponding sync action, so the
+        // confirmation dialog and the run path stay identical to the
+        // Synchronize menu.
+        let is_sync = self.state.read(cx).is_sync_mode();
+        let presets = cx
+            .global::<crate::options::AppOptions>()
+            .sync_presets
+            .clone();
+        let sync_preset_btn = Button::new("row2_sync_preset")
+            .icon(IconName::FolderSync)
+            .ghost()
+            .small()
+            .tooltip("Run a folder sync preset")
+            .accessibility_label("Run a folder sync preset")
+            .dropdown_menu(move |menu, _, _| {
+                if presets.is_empty() {
+                    return menu.label("No presets. Add them under Tools.");
+                }
+                let mut menu = menu;
+                for preset in presets.iter() {
+                    let kind = preset.kind;
+                    menu = menu.item(
+                        PopupMenuItem::new(preset.name.clone()).on_click(
+                            move |_, window, cx| {
+                                window.dispatch_action(
+                                    crate::sync_presets::sync_preset_action(
+                                        kind,
+                                    ),
+                                    cx,
+                                );
+                            },
+                        ),
+                    );
+                }
+                menu
+            });
+
+        let toolbar = Toolbar::new("view-toolbar")
             .child(
                 ToolbarGroup::new("view-toolbar-pair")
                     .label("Pair")
@@ -475,8 +512,17 @@ impl FolderCompareView {
                 ToolbarGroup::new("view-toolbar-reload")
                     .label("Reload")
                     .child(reload_btn),
+            );
+        let toolbar = if is_sync {
+            toolbar.child(
+                ToolbarGroup::new("view-toolbar-sync")
+                    .label("Sync")
+                    .content(h_flex().items_center().child(sync_preset_btn)),
             )
-            .into_any_element()
+        } else {
+            toolbar
+        };
+        toolbar.into_any_element()
     }
 
     /// Handle the select-next action.
@@ -635,23 +681,10 @@ impl FolderCompareView {
             action.left_path.path(),
             cx,
         );
-        if !kind.is_available() {
-            // The table, hex, and picture views arrive in later phases;
-            // say so instead of silently opening the wrong editor.
-            log::push(
-                LogLevel::Info,
-                format!(
-                    "The {kind:?} view is not available yet; {} was not \
-                     opened.",
-                    action.left_path.display()
-                ),
-                cx,
-            );
-            return;
-        }
         let parent = self.state.downgrade();
         self.session_manager.update(cx, |mgr, cx| {
-            mgr.add_text_diff_tab(
+            mgr.add_file_pair_tab(
+                kind,
                 action.left_path.clone(),
                 right_path,
                 Some(parent),
