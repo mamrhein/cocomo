@@ -1442,6 +1442,14 @@ impl AppState {
         if self.loading {
             return;
         }
+        // A side without a path (a session started from a single CLI
+        // path) has nothing to compare against; the view stays empty
+        // until both path bars carry a path.
+        if self.left.path().as_os_str().is_empty()
+            || self.right.path().as_os_str().is_empty()
+        {
+            return;
+        }
 
         self.loading = true;
         self.busy_label = Some("scanning…".into());
