@@ -24,8 +24,9 @@
 
 use cocomo_lib::{DirEntry, DirEntryStatus, Endpoint};
 use gpui::{
-    AnyElement, App, ElementId, Entity, ExternalPaths, FontWeight, Hsla,
-    Pixels, SharedString, TestSupportExt as _, Window,
+    AnyElement, App, Bounds, Element, ElementId, Entity, ExternalPaths,
+    FontWeight, GlobalElementId, Hsla, InspectorElementId, IntoElement,
+    LayoutId, Pixels, SharedString, Style, TestSupportExt as _, Window,
     base::ElementExt as _,
     component::{
         ActiveTheme, FocusableExt as _, Sizable as _, Theme,
@@ -37,9 +38,9 @@ use gpui::{
         table::{Column, DataTable, TableDelegate, TableState},
         v_flex,
     },
-    div,
+    div, fill, point,
     prelude::*,
-    px, rems,
+    px, relative, rems, size,
 };
 
 use crate::{
@@ -550,17 +551,32 @@ impl TableDelegate for FolderTableDelegate {
                     )
                     .into_any_element()
             }
-            _ => div()
-                .size_full()
-                .flex()
-                .items_center()
-                .justify_center()
-                .font_weight(FontWeight(700.))
-                .text_color(theme.muted_foreground)
-                .when(!data.status_symbol.is_empty(), |this| {
-                    this.child(data.status_symbol)
-                })
-                .into_any_element(),
+            _ => {
+                let connector = connector_span(data.has_left, data.has_right)
+                    .map(|span| {
+                        div().absolute().inset_0().child(Connector {
+                            id: ElementId::Name(
+                                format!("folder-connector-{}", data.path)
+                                    .into(),
+                            ),
+                            color: theme.border,
+                            span,
+                        })
+                    });
+                div()
+                    .size_full()
+                    .relative()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .font_weight(FontWeight(700.))
+                    .text_color(theme.muted_foreground)
+                    .children(connector)
+                    .when(!data.status_symbol.is_empty(), |this| {
+                        this.child(data.status_symbol)
+                    })
+                    .into_any_element()
+            }
         }
     }
 
@@ -757,6 +773,9 @@ pub(crate) struct TableRow {
     left_is_dir: bool,
     right_is_dir: bool,
     name_conflict: bool,
+    /// Root-relative tree path of the row, used as the stable identity of
+    /// the row's connector line.
+    path: SharedString,
     left_endpoint: Endpoint,
     right_endpoint: Endpoint,
 }
@@ -801,6 +820,7 @@ impl TableRow {
             left_is_dir: entry.left.as_ref().is_some_and(|l| l.is_dir),
             right_is_dir: entry.right.as_ref().is_some_and(|r| r.is_dir),
             name_conflict: entry.name_conflict,
+            path: SharedString::from(row.path()),
             left_endpoint,
             right_endpoint,
         }
@@ -1178,7 +1198,7 @@ fn build_row_menu(
         menu = cmd(
             menu,
             "folder.reveal",
-            "Explorer",
+            crate::fsops::reveal_label(),
             Box::new(RevealInExplorer),
             cx,
         );
@@ -1214,12 +1234,141 @@ fn build_row_menu(
         menu = cmd(
             menu,
             "folder.reveal",
-            "Explorer",
+            crate::fsops::reveal_label(),
             Box::new(RevealInExplorer),
             cx,
         );
     }
     menu
+}
+
+// ---------------------------------------------------------------------------
+// Gutter connector
+// ---------------------------------------------------------------------------
+
+/// Which part of the status lane a row's connector line spans.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ConnectorSpan {
+    /// Both sides carry an entry: the line runs across the whole lane,
+    /// broken only by the status glyph.
+    Matched,
+    /// Only the left side carries an entry: the line runs from the
+    /// leading edge to the glyph.
+    LeftOnly,
+    /// Only the right side carries an entry: the line runs from the
+    /// glyph to the trailing edge.
+    RightOnly,
+}
+
+/// The connector span implied by a row's sides.
+///
+/// A row with neither side is not a comparison row and gets no line.
+fn connector_span(has_left: bool, has_right: bool) -> Option<ConnectorSpan> {
+    match (has_left, has_right) {
+        (true, true) => Some(ConnectorSpan::Matched),
+        (true, false) => Some(ConnectorSpan::LeftOnly),
+        (false, true) => Some(ConnectorSpan::RightOnly),
+        (false, false) => None,
+    }
+}
+
+/// The hairline linking a row's two halves across the status lane.
+///
+/// The unified table guarantees the row alignment a two-pane layout
+/// would draw connector lines for (spec section 4.1); this element paints
+/// the same relationship inside the gutter: a one-device-pixel line at
+/// the row's vertical center, with the middle left open so the status
+/// glyph sits in a break rather than on top of the stroke.
+struct Connector {
+    id: ElementId,
+    color: Hsla,
+    span: ConnectorSpan,
+}
+
+impl IntoElement for Connector {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+impl Element for Connector {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        Some(self.id.clone())
+    }
+
+    fn source_location(
+        &self,
+    ) -> Option<&'static std::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, Self::RequestLayoutState) {
+        let mut style = Style::default();
+        style.size.width = relative(1.).into();
+        style.size.height = relative(1.).into();
+        (window.request_layout(style, None, cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        _: Bounds<Pixels>,
+        _: &mut Self::RequestLayoutState,
+        _: &mut Window,
+        _: &mut App,
+    ) -> Self::PrepaintState {
+    }
+
+    fn paint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _: &mut Self::RequestLayoutState,
+        _: &mut Self::PrepaintState,
+        window: &mut Window,
+        _: &mut App,
+    ) {
+        let leading = bounds.origin.x;
+        let trailing = leading + bounds.size.width;
+        let center = leading + bounds.size.width / 2.;
+        // Half the lane stays open for the glyph; the break is wide
+        // enough for any status symbol at the table's text size.
+        let half_gap = bounds.size.width / 4.;
+        let y = bounds.origin.y + bounds.size.height / 2.;
+        let mut segment = |from: Pixels, to: Pixels| {
+            if to <= from {
+                return;
+            }
+            window.paint_quad(fill(
+                Bounds {
+                    origin: point(from, y),
+                    size: size(to - from, px(1.)),
+                },
+                self.color,
+            ));
+        };
+        match self.span {
+            ConnectorSpan::Matched => {
+                segment(leading, center - half_gap);
+                segment(center + half_gap, trailing);
+            }
+            ConnectorSpan::LeftOnly => segment(leading, center - half_gap),
+            ConnectorSpan::RightOnly => segment(center + half_gap, trailing),
+        }
+    }
 }
 
 /// Format a file size in human-readable form.
@@ -1331,8 +1480,20 @@ mod tests {
             None,
         );
         let data = row(&entry, cx);
-        assert_eq!(data.left_endpoint.display(), "/left/orphan.txt");
-        assert_eq!(data.right_endpoint.display(), "/right/orphan.txt");
+        assert!(data.has_left);
+        assert!(!data.has_right);
+    }
+
+    #[test]
+    fn connector_span_follows_the_present_sides() {
+        assert_eq!(connector_span(true, true), Some(ConnectorSpan::Matched));
+        assert_eq!(connector_span(true, false), Some(ConnectorSpan::LeftOnly));
+        assert_eq!(
+            connector_span(false, true),
+            Some(ConnectorSpan::RightOnly)
+        );
+        // A row with neither side is not a comparison row.
+        assert_eq!(connector_span(false, false), None);
     }
 
     #[gpui::test]

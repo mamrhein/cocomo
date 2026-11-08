@@ -49,7 +49,7 @@ use crate::{
         ToggleShowSame,
     },
     session_manager::GuiSessionManager,
-    state::{AppState, BaseSide, StatusCategory},
+    state::{AppState, BaseSide, StatusCategory, entry_endpoints},
 };
 
 // ---------------------------------------------------------------------------
@@ -1375,10 +1375,17 @@ impl FolderCompareView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let endpoint = match self.state.read(cx).selected_endpoints() {
-            Some((left, _)) => left,
-            None => return,
+        // Reveal the side that actually carries the entry; an orphan's
+        // other half is a path that exists nowhere.
+        let endpoint = {
+            let state = self.state.read(cx);
+            state.selected_entry().map(|entry| {
+                let (left, right) =
+                    entry_endpoints(entry, state.left(), state.right());
+                if entry.left.is_some() { left } else { right }
+            })
         };
+        let Some(endpoint) = endpoint else { return };
         if let Err(e) = crate::fsops::reveal_in_explorer(&endpoint) {
             self.state.update(cx, |state, cx| {
                 state.set_notice(e.clone(), cx);

@@ -445,6 +445,14 @@ fn entry_is_dir(entry: &DirEntry) -> bool {
         || entry.right.as_ref().is_some_and(|r| r.is_dir)
 }
 
+/// Whether the `side` half of `entry` is a directory.
+fn side_is_dir(entry: &DirEntry, side: Side) -> bool {
+    match side {
+        Side::Left => entry.left.as_ref().is_some_and(|l| l.is_dir),
+        Side::Right => entry.right.as_ref().is_some_and(|r| r.is_dir),
+    }
+}
+
 /// The expansion key of an entry: its side path relative to the
 /// comparison root, preferring the left side.
 fn entry_tree_path(entry: &DirEntry) -> String {
@@ -2160,9 +2168,9 @@ impl AppState {
         Some(entry_endpoints(entry, &self.left, &self.right))
     }
 
-    /// Run a local filesystem operation on the tokio runtime, then
-    /// re-compare so the panes reflect the change. Failures land in the
-    /// notice and the log, mirroring [`Self::run_transfer`].
+    /// Run a filesystem operation on the tokio runtime, then re-compare
+    /// so the panes reflect the change. Failures land in the notice and
+    /// the log, mirroring [`Self::run_transfer`].
     fn run_fs_op(
         &mut self,
         busy: &'static str,
@@ -2217,6 +2225,10 @@ impl AppState {
 
     /// Set the modification time of the selected entry to now, on every
     /// side that has it.
+    ///
+    /// No provider can set a modification time, so a remote side fails
+    /// the whole command up front: touching the local side first would
+    /// leave the pair half-updated with only an error to show for it.
     pub fn touch_selected(&mut self, cx: &mut Context<Self>) {
         let Some((left, right)) = self.selected_endpoints() else {
             return;
@@ -2224,6 +2236,13 @@ impl AppState {
         let has_left = self.selected_entry().is_some_and(|e| e.left.is_some());
         let has_right =
             self.selected_entry().is_some_and(|e| e.right.is_some());
+        if (has_left && !left.is_local()) || (has_right && !right.is_local()) {
+            self.set_notice(
+                "Touch is only supported for local folders".to_string(),
+                cx,
+            );
+            return;
+        }
         self.run_fs_op(
             "Touching…",
             "Touched the selected entry",
@@ -2312,6 +2331,10 @@ impl AppState {
 
     /// Create a new folder with the same name inside both sides' current
     /// directories, backing the context menu's New Folder command.
+    ///
+    /// The name is decided on the left side and reproduced on the right,
+    /// which fails when the right side already carries that name. Both
+    /// sides go through the provider, so a remote side is supported.
     pub fn new_folder_both(&mut self, cx: &mut Context<Self>) {
         let left = self.left.clone();
         let right = self.right.clone();
@@ -2320,16 +2343,7 @@ impl AppState {
             "Created a new folder on both sides",
             async move {
                 let name = crate::fsops::create_folder(left).await?;
-                let target = right.path().join(&name);
-                if fs_err::tokio::symlink_metadata(&target).await.is_ok() {
-                    return Err(format!(
-                        "New Folder failed: {} already exists",
-                        target.display()
-                    ));
-                }
-                fs_err::tokio::create_dir_all(&target)
-                    .await
-                    .map_err(|e| format!("New Folder failed: {e}"))
+                crate::fsops::create_folder_named(right, &name).await
             },
             cx,
         );
