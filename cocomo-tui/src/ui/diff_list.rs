@@ -22,7 +22,9 @@
 //!
 //! Clicking a row selects it: the row→index mapping reuses the
 //! `tui-widget-list` hit test cached in the shared list state, so variable
-//! heights and the scroll offset are already accounted for.
+//! heights and the scroll offset are already accounted for. Scrolling the
+//! wheel moves the session-owned selection by [`super::WHEEL_ROWS`] rows
+//! per notch; the window follows the cursor.
 
 use std::sync::Arc;
 
@@ -40,7 +42,7 @@ use ratatui_kit::{
 };
 
 use super::{
-    mouse_enabled,
+    WHEEL_ROWS, mouse_enabled,
     rows::{DiffGutter, TextDiffRow},
     theme::CocomoTheme,
 };
@@ -132,6 +134,9 @@ pub(super) struct SessionDiffListProps {
     pub(super) right_name: String,
     /// Called with the row index when a diff row is clicked.
     pub(super) on_select: Handler<'static, usize>,
+    /// Called with a signed row delta when the mouse wheel scrolls over
+    /// the diff list.
+    pub(super) on_scroll: Handler<'static, isize>,
 }
 
 /// Side-by-side diff list with a themed border, file-name header, and a
@@ -157,33 +162,59 @@ pub(super) fn SessionDiffList(
     // inert and the click bubbles here. The hit test runs in screen
     // coordinates against the viewport cached by the last render, which is
     // what `PointerEvent::position` carries for a non-scrolled component.
-    // Registration is gated on the app's mouse-capture flag and must stay
-    // above the early return below (stable hook order).
+    // The wheel is handled here for the same reason: with `active: false`
+    // the list's own wheel handling is inert, so scrolling moves the
+    // session selection through `on_scroll`. Registration is gated on the
+    // app's mouse-capture flag and must stay above the early return below
+    // (stable hook order).
     if mouse_enabled() {
         let mut on_select = props.on_select.take();
+        let mut on_scroll = props.on_scroll.take();
         let list = list_state;
         let total = props.rows.len();
         hooks.use_pointer(PointerOptions::default(), move |ev| {
-            let PointerKind::Click {
-                button: MouseButton::Left,
-                ..
-            } = ev.kind
-            else {
-                return EventResult::Ignored;
-            };
-            // Collect the hit before calling the handler so no read guard
-            // is held across the state mutation.
-            let hit = match list.read().hit_test(ev.position.x, ev.position.y)
-            {
-                Some(Hit::Item(index)) if index < total => Some(index),
-                _ => None,
-            };
-            match hit {
-                Some(index) => {
-                    on_select(index);
-                    EventResult::Consumed
+            match ev.kind {
+                PointerKind::Click {
+                    button: MouseButton::Left,
+                    ..
+                } => {
+                    // Collect the hit before calling the handler so no
+                    // read guard is held across the state mutation.
+                    let hit = match list
+                        .read()
+                        .hit_test(ev.position.x, ev.position.y)
+                    {
+                        Some(Hit::Item(index)) if index < total => Some(index),
+                        _ => None,
+                    };
+                    match hit {
+                        Some(index) => {
+                            on_select(index);
+                            EventResult::Consumed
+                        }
+                        None => EventResult::Ignored,
+                    }
                 }
-                None => EventResult::Ignored,
+                // The wheel navigates (like repeated j/k): the session
+                // owns the selection and the `VirtualList` window follows
+                // it. Consume only when there are rows to move through.
+                PointerKind::ScrollUp => {
+                    if total > 0 {
+                        on_scroll(-WHEEL_ROWS);
+                        EventResult::Consumed
+                    } else {
+                        EventResult::Ignored
+                    }
+                }
+                PointerKind::ScrollDown => {
+                    if total > 0 {
+                        on_scroll(WHEEL_ROWS);
+                        EventResult::Consumed
+                    } else {
+                        EventResult::Ignored
+                    }
+                }
+                _ => EventResult::Ignored,
             }
         });
     }

@@ -1308,20 +1308,28 @@ fn execute(cmd: Cmd, session: &mut SessionView) -> SessionAction {
 }
 
 /// Move the selection by `delta` rows, clamped to the session's row count.
-fn navigate(session: &mut SessionView, delta: isize) {
+///
+/// `delta` is typically ±1 (j/k, arrow keys); the mouse wheel passes larger
+/// magnitudes. Without a selection, a forward move starts at the first row
+/// and a backward move stays a no-op (matching the single-step behavior).
+pub(crate) fn navigate(session: &mut SessionView, delta: isize) {
     let rows = session.row_count();
-    if delta > 0 {
-        if let Some(selected) = session.ui.table_state.selected() {
-            if selected + 1 < rows {
-                session.set_cursor(Some(selected + 1));
+    if rows == 0 {
+        return;
+    }
+    match session.ui.table_state.selected() {
+        Some(selected) => {
+            let target =
+                (selected as isize + delta).clamp(0, rows as isize - 1);
+            if target as usize != selected {
+                session.set_cursor(Some(target as usize));
             }
-        } else if rows > 0 {
-            session.set_cursor(Some(0));
         }
-    } else if let Some(selected) =
-        session.ui.table_state.selected().filter(|s| *s > 0)
-    {
-        session.set_cursor(Some(selected - 1));
+        None => {
+            if delta > 0 {
+                session.set_cursor(Some(0));
+            }
+        }
     }
 }
 
@@ -2045,6 +2053,26 @@ mod tests {
         // Clamped at the bottom.
         assert_eq!(session.ui.table_state.selected(), Some(9));
         press(&mut session, KeyCode::Char('g'));
+        assert_eq!(session.ui.table_state.selected(), Some(0));
+    }
+
+    #[test]
+    fn navigate_moves_multiple_rows_and_clamps() {
+        // The mouse wheel drives `navigate` with magnitudes > 1; the
+        // selection clamps at both ends instead of wrapping.
+        let mut session = text_session();
+        navigate(&mut session, 3);
+        assert_eq!(session.ui.table_state.selected(), Some(0));
+        navigate(&mut session, 3);
+        assert_eq!(session.ui.table_state.selected(), Some(3));
+        navigate(&mut session, 3);
+        assert_eq!(session.ui.table_state.selected(), Some(6));
+        // Overshooting the last row clamps to it (the session has 10 rows).
+        navigate(&mut session, 3);
+        assert_eq!(session.ui.table_state.selected(), Some(9));
+        navigate(&mut session, -5);
+        assert_eq!(session.ui.table_state.selected(), Some(4));
+        navigate(&mut session, -10);
         assert_eq!(session.ui.table_state.selected(), Some(0));
     }
 

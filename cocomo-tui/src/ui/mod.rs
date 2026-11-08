@@ -18,6 +18,12 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
+/// Rows the selection moves per mouse-wheel notch in the main views.
+///
+/// The wheel navigates like repeated j/k presses; a small multiplier keeps
+/// long diff lists scrollable without skipping past the wanted row.
+pub(crate) const WHEEL_ROWS: isize = 3;
+
 /// Whether the app entry enabled terminal mouse capture.
 ///
 /// ratatui-kit keeps `SystemContext::mouse_enabled` crate-private, so the

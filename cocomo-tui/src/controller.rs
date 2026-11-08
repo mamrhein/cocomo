@@ -39,7 +39,7 @@ use ratatui_kit::crossterm::event::KeyEvent;
 
 use crate::{
     error::{Result, TuiError},
-    keys::{self, Cmd, dialog_choice, handle_session_key},
+    keys::{self, Cmd, dialog_choice, handle_session_key, navigate},
     menu::{self, MenuState},
     session_store::session_to_config,
     state::{
@@ -1268,6 +1268,19 @@ pub(crate) fn extend_selection(index: usize) {
             session.ui.selection_anchor = session.ui.table_state.selected();
         }
         session.ui.table_state.select(Some(index));
+    }
+}
+
+/// Scroll the active session's selection by `delta` rows (mouse wheel).
+///
+/// A wheel notch is a navigation move, not a drag: the selection moves
+/// exactly like repeated j/k presses (see [`navigate`]), so the anchor is
+/// cleared and the windowing in the views follows the cursor.
+pub(crate) fn scroll_active(delta: isize) {
+    let state = APP_STATE.state();
+    let mut app = state.write();
+    if let Some(session) = app.active_mut() {
+        navigate(session, delta);
     }
 }
 
