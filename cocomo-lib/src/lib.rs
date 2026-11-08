@@ -147,8 +147,9 @@ pub use sync::{
     plan_sync_pair, sync_directories, sync_directories_pair,
 };
 pub use text::{
-    AlignmentMode, LineInfo, TextCompareSettings, TextDiff, TextDifference,
-    Token, WhitespaceMode, compare_texts, lines_equal,
+    AlignmentMode, LineInfo, MergedDiffRow, MergedRowStatus,
+    TextCompareSettings, TextDiff, TextDifference, Token, WhitespaceMode,
+    compare_texts, lines_equal,
 };
 // Re-exported so callers can build cancellation tokens without depending
 // on `tokio-util` directly.

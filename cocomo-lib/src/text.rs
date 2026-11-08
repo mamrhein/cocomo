@@ -13,6 +13,11 @@
 //! items that describe added, removed, and changed lines. Supports
 //! syntax-aware comparison via [`Grammar`][crate::grammar::Grammar] and
 //! configurable normalization through [`TextCompareSettings`].
+//!
+//! [`TextDiff::merged_rows`] additionally derives the aligned side-by-side
+//! row model used by diff viewers: one [`MergedDiffRow`] per display row,
+//! with a blank (`None`) cell wherever the other side carries the
+//! difference.
 
 use std::{collections::HashSet, fmt};
 
@@ -233,6 +238,42 @@ impl fmt::Display for TextDifference {
     }
 }
 
+/// Alignment status of one row in a merged side-by-side view.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum MergedRowStatus {
+    /// Both sides show the same line.
+    #[default]
+    Same,
+    /// Both sides show a line and both participate in the same
+    /// difference.
+    Changed,
+    /// Only the right side carries the line.
+    Inserted,
+    /// Only the left side carries the line.
+    Deleted,
+}
+
+impl MergedRowStatus {
+    /// Whether the row participates in a difference.
+    pub fn is_difference(self) -> bool {
+        self != Self::Same
+    }
+}
+
+/// One row of the aligned side-by-side view derived from a [`TextDiff`].
+///
+/// The cell of the side that lacks a line at this position is `None`; the
+/// viewer renders it as a blank filler cell.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct MergedDiffRow {
+    /// Left (old) line, `None` for an inserted row.
+    pub left: Option<LineInfo>,
+    /// Right (new) line, `None` for a deleted row.
+    pub right: Option<LineInfo>,
+    /// Alignment status of the row.
+    pub status: MergedRowStatus,
+}
+
 /// Result of a text comparison containing the sequence of differences.
 #[derive(Clone, Debug, Default)]
 pub struct TextDiff {
@@ -244,6 +285,12 @@ pub struct TextDiff {
     pub right_line_count: usize,
     /// Highest importance level among all differences.
     pub max_importance: Importance,
+    /// Grammar-classified left lines that participated in the comparison,
+    /// in file order, with their original 1-based line numbers. Skipped
+    /// lines (blank or comment, per the settings) are absent.
+    pub left_filtered: Vec<LineInfo>,
+    /// Right counterpart of [`Self::left_filtered`].
+    pub right_filtered: Vec<LineInfo>,
 }
 
 impl TextDiff {
@@ -295,40 +342,225 @@ impl TextDiff {
         (left_numbers, right_numbers)
     }
 
-    /// Return the first row index (0-based) of each contiguous difference
-    /// group in a side-by-side view where row `i` shows line `i + 1` of each
-    /// side.
+    /// Return the aligned side-by-side rows for a viewer: one
+    /// [`MergedDiffRow`] per display row, with blank (`None`) counterpart
+    /// cells for inserted and deleted lines.
     ///
-    /// These are the jump targets for next/previous-difference navigation: a
-    /// row belongs to a difference when its line number appears in
-    /// [`Self::difference_line_numbers`], and adjacent such rows collapse
-    /// into a single group.
-    pub fn group_starts(&self) -> Vec<usize> {
-        // A row is a difference row exactly when its 1-based line number is
-        // part of a difference; collect those rows in ascending order.
-        let mut diff_rows: Vec<usize> = self
-            .difference_line_numbers()
-            .into_iter()
-            .filter(|&n| n > 0)
-            .map(|n| n - 1)
-            .collect();
-        diff_rows.sort_unstable();
-
-        // Keep only the first row of each run of consecutive rows.
-        let mut groups: Vec<usize> = Vec::new();
-        let mut prev: Option<usize> = None;
-        for row in diff_rows {
-            if prev.is_none_or(|p| row != p + 1) {
-                groups.push(row);
+    /// The rows are derived from [`Self::differences`] and the comparison's
+    /// line lists ([`Self::left_filtered`] / [`Self::right_filtered`], or
+    /// just the line counts for a hand-built diff), so a viewer never has
+    /// to re-derive the alignment itself.
+    ///
+    /// `LinesChanged` blocks pair their removed and added lines
+    /// positionally; the remainder of the longer half is emitted as
+    /// `Deleted`/`Inserted` filler rows. The rare
+    /// [`TextDifference::BlankLine`] variant carries no line numbers and is
+    /// skipped.
+    pub fn merged_rows(&self) -> Vec<MergedDiffRow> {
+        let mut rows = Vec::new();
+        // Cursors are 0-based line numbers in the *raw* files; the filtered
+        // indices advance only over lines that took part in the comparison.
+        let (mut l, mut r) = (1usize, 1usize);
+        let (mut li, mut ri) = (0usize, 0usize);
+        for diff in &self.differences {
+            match diff {
+                TextDifference::LineDifferent(left, right) => {
+                    Self::push_context(
+                        &mut rows,
+                        &mut l,
+                        &mut r,
+                        &mut li,
+                        &mut ri,
+                        left.number,
+                        right.number,
+                        &self.left_filtered,
+                        &self.right_filtered,
+                    );
+                    rows.push(MergedDiffRow {
+                        left: Some(left.clone()),
+                        right: Some(right.clone()),
+                        status: MergedRowStatus::Changed,
+                    });
+                    l += 1;
+                    r += 1;
+                    li += 1;
+                    ri += 1;
+                }
+                TextDifference::LinesAdded(start, lines) => {
+                    Self::push_context(
+                        &mut rows,
+                        &mut l,
+                        &mut r,
+                        &mut li,
+                        &mut ri,
+                        *start,
+                        *start,
+                        &self.left_filtered,
+                        &self.right_filtered,
+                    );
+                    for line in lines {
+                        rows.push(MergedDiffRow {
+                            left: None,
+                            right: Some(line.clone()),
+                            status: MergedRowStatus::Inserted,
+                        });
+                        r += 1;
+                        ri += 1;
+                    }
+                }
+                TextDifference::LinesRemoved(start, lines) => {
+                    Self::push_context(
+                        &mut rows,
+                        &mut l,
+                        &mut r,
+                        &mut li,
+                        &mut ri,
+                        *start,
+                        *start,
+                        &self.left_filtered,
+                        &self.right_filtered,
+                    );
+                    for line in lines {
+                        rows.push(MergedDiffRow {
+                            left: Some(line.clone()),
+                            right: None,
+                            status: MergedRowStatus::Deleted,
+                        });
+                        l += 1;
+                        li += 1;
+                    }
+                }
+                TextDifference::LinesChanged(start, removed, added) => {
+                    // Keep the right cursor's filtered partner aligned
+                    // with the removed block's start.
+                    let right_target = *start + r.saturating_sub(l);
+                    Self::push_context(
+                        &mut rows,
+                        &mut l,
+                        &mut r,
+                        &mut li,
+                        &mut ri,
+                        *start,
+                        right_target,
+                        &self.left_filtered,
+                        &self.right_filtered,
+                    );
+                    let paired = removed.len().min(added.len());
+                    for i in 0..paired {
+                        rows.push(MergedDiffRow {
+                            left: Some(removed[i].clone()),
+                            right: Some(added[i].clone()),
+                            status: MergedRowStatus::Changed,
+                        });
+                    }
+                    for line in &removed[paired..] {
+                        rows.push(MergedDiffRow {
+                            left: Some(line.clone()),
+                            right: None,
+                            status: MergedRowStatus::Deleted,
+                        });
+                    }
+                    for line in &added[paired..] {
+                        rows.push(MergedDiffRow {
+                            left: None,
+                            right: Some(line.clone()),
+                            status: MergedRowStatus::Inserted,
+                        });
+                    }
+                    l += removed.len();
+                    r += added.len();
+                    li += removed.len();
+                    ri += added.len();
+                }
+                // A blank-line classification difference carries no line
+                // numbers to align on; ignore it.
+                TextDifference::BlankLine => {}
             }
-            prev = Some(row);
+        }
+        Self::push_context(
+            &mut rows,
+            &mut l,
+            &mut r,
+            &mut li,
+            &mut ri,
+            self.left_line_count + 1,
+            self.right_line_count + 1,
+            &self.left_filtered,
+            &self.right_filtered,
+        );
+        rows
+    }
+
+    /// Emit aligned context rows until both raw line cursors reach their
+    /// (exclusive) targets. Pairwise rows are `Same`; when one side still
+    /// has lines before its target, the leftovers are emitted as
+    /// `Deleted`/`Inserted` filler rows.
+    ///
+    /// A side's current line takes its content from the filtered list when
+    /// it took part in the comparison there (advancing the filtered
+    /// index), and is rebuilt as a plain unclassified line otherwise
+    /// (settings-skipped lines are absent from the filtered lists).
+    #[allow(clippy::too_many_arguments)]
+    fn push_context(
+        rows: &mut Vec<MergedDiffRow>,
+        l: &mut usize,
+        r: &mut usize,
+        li: &mut usize,
+        ri: &mut usize,
+        left_target: usize,
+        right_target: usize,
+        left_filtered: &[LineInfo],
+        right_filtered: &[LineInfo],
+    ) {
+        while *l < left_target || *r < right_target {
+            let left = if *l < left_target {
+                Some(take_filtered_line(left_filtered, li, *l))
+            } else {
+                None
+            };
+            let right = if *r < right_target {
+                Some(take_filtered_line(right_filtered, ri, *r))
+            } else {
+                None
+            };
+            let status = match (&left, &right) {
+                (Some(_), Some(_)) => MergedRowStatus::Same,
+                (Some(_), None) => MergedRowStatus::Deleted,
+                (None, Some(_)) => MergedRowStatus::Inserted,
+                (None, None) => unreachable!("loop guard advances a side"),
+            };
+            rows.push(MergedDiffRow {
+                left,
+                right,
+                status,
+            });
+            *l += usize::from(*l < left_target);
+            *r += usize::from(*r < right_target);
+        }
+    }
+
+    /// Return the first merged-row index (0-based, as produced by
+    /// [`Self::merged_rows`]) of each contiguous difference group.
+    ///
+    /// These are the jump targets for next/previous-difference navigation:
+    /// a merged row belongs to a difference when its status reports one,
+    /// and adjacent such rows collapse into a single group.
+    pub fn group_starts(&self) -> Vec<usize> {
+        let mut groups: Vec<usize> = Vec::new();
+        let mut prev_diff = false;
+        for (i, row) in self.merged_rows().iter().enumerate() {
+            let is_diff = row.status.is_difference();
+            if is_diff && !prev_diff {
+                groups.push(i);
+            }
+            prev_diff = is_diff;
         }
         groups
     }
 
-    /// Return `(group, total)` for the row under the cursor: the 1-based index
-    /// of the difference group the row falls in, and the total number of
-    /// groups.
+    /// Return `(group, total)` for the merged row under the cursor: the
+    /// 1-based index of the difference group the row falls in, and the
+    /// total number of groups.
     ///
     /// Returns `(0, total)` when `row` precedes the first group and `(0, 0)`
     /// when there are no differences.
@@ -473,12 +705,47 @@ pub fn compare_texts(
     // Flush remaining changes at end of input.
     flush_changes(&mut differences, left_start, removed_buf, added_buf);
 
+    // Tokenize the lines that survived filtering for the merged row model
+    // (the difference blocks own the classification of the differing
+    // lines).
+    let left_filtered = left_filtered
+        .iter()
+        .map(|(num, raw)| {
+            LineInfo::new(*num, (*raw).to_string()).with_grammar(grammar)
+        })
+        .collect();
+    let right_filtered = right_filtered
+        .iter()
+        .map(|(num, raw)| {
+            LineInfo::new(*num, (*raw).to_string()).with_grammar(grammar)
+        })
+        .collect();
+
     TextDiff {
         differences,
         left_line_count: left_lines.len(),
         right_line_count: right_lines.len(),
         max_importance,
+        left_filtered,
+        right_filtered,
     }
+}
+
+/// Take the filtered line at the current filtered index when it is the
+/// cursor's raw line number, advancing the index; otherwise build a plain
+/// unclassified line for a settings-skipped raw line.
+fn take_filtered_line(
+    filtered: &[LineInfo],
+    idx: &mut usize,
+    number: usize,
+) -> LineInfo {
+    if let Some(info) = filtered.get(*idx)
+        && info.number == number
+    {
+        *idx += 1;
+        return info.clone();
+    }
+    LineInfo::new(number, String::new())
 }
 
 /// Wrapper around a normalized line that implements `PartialEq` with optional
@@ -712,33 +979,17 @@ mod tests {
         assert!(!diff.is_empty());
     }
 
-    /// A diff with line 3 differing, lines 4 and 5 added, line 7 differing.
-    fn grouped_diff() -> TextDiff {
-        TextDiff {
-            differences: vec![
-                TextDifference::LineDifferent(
-                    LineInfo::new(3, "a".into()),
-                    LineInfo::new(3, "b".into()),
-                ),
-                TextDifference::LinesAdded(
-                    4,
-                    vec![
-                        LineInfo::new(4, "c".into()),
-                        LineInfo::new(5, "d".into()),
-                    ],
-                ),
-                TextDifference::LineDifferent(
-                    LineInfo::new(7, "e".into()),
-                    LineInfo::new(7, "f".into()),
-                ),
-            ],
-            ..Default::default()
-        }
+    /// A diff with line 3 differing, lines 4 and 5 added on the right, and
+    /// line 7 (left) / line 9 (right) differing.
+    fn navigation_diff() -> TextDiff {
+        let left = "l1\nl2\nA\nl4\nl5\nl6\nB\nl8\nl9\nl10\n";
+        let right = "l1\nl2\nB\nX\nY\nl4\nl5\nl6\nA\nl8\nl9\nl10\n";
+        compare_texts(left, right, &default_settings())
     }
 
     #[test]
     fn difference_line_numbers_collects_both_sides() {
-        let numbers = grouped_diff().difference_line_numbers();
+        let numbers = navigation_diff().difference_line_numbers();
         for n in [3, 4, 5, 7] {
             assert!(numbers.contains(&n), "missing line {n}");
         }
@@ -748,17 +999,19 @@ mod tests {
 
     #[test]
     fn difference_line_numbers_by_side_splits_sides() {
-        let (left, right) = grouped_diff().difference_line_numbers_by_side();
-        // Lines 3 and 7 differ on both sides, lines 4 and 5 were added on
-        // the right only.
+        let (left, right) =
+            navigation_diff().difference_line_numbers_by_side();
+        // Line 3 differs on both sides (left 3 ↔ right 8), lines 4 and 5
+        // were added on the right only, line 7 (left) pairs with line 9
+        // (right).
         assert_eq!(left, HashSet::from([3, 7]));
-        assert_eq!(right, HashSet::from([3, 4, 5, 7]));
+        assert_eq!(right, HashSet::from([3, 4, 5, 9]));
     }
 
     #[test]
     fn group_starts_merges_contiguous_rows() {
-        // Diff rows 2, 3, 4 (0-based) form one group, row 6 another.
-        assert_eq!(grouped_diff().group_starts(), vec![2, 6]);
+        // Merged rows 2, 3, 4 (0-based) form one group, row 8 another.
+        assert_eq!(navigation_diff().group_starts(), vec![2, 8]);
     }
 
     #[test]
@@ -768,15 +1021,122 @@ mod tests {
 
     #[test]
     fn position_of_reports_one_based_group() {
-        let diff = grouped_diff();
+        let diff = navigation_diff();
         // Before the first group.
         assert_eq!(diff.position_of(0), (0, 2));
         assert_eq!(diff.position_of(3), (1, 2));
-        assert_eq!(diff.position_of(9), (2, 2));
+        assert_eq!(diff.position_of(11), (2, 2));
     }
 
     #[test]
     fn position_of_without_differences_is_zero() {
         assert_eq!(TextDiff::default().position_of(0), (0, 0));
+    }
+
+    #[test]
+    fn merged_rows_pad_insertions_with_blank_left_cells() {
+        let diff =
+            compare_texts("a\nb\n", "a\nx\ny\nb\n", &default_settings());
+        let rows = diff.merged_rows();
+        assert_eq!(rows.len(), 4);
+        assert_eq!(rows[0].status, MergedRowStatus::Same);
+        assert_eq!(rows[1].status, MergedRowStatus::Inserted);
+        assert_eq!(rows[1].left, None);
+        assert_eq!(
+            rows[1]
+                .right
+                .as_ref()
+                .map(|l| (l.number, l.content.as_str())),
+            Some((2, "x"))
+        );
+        assert_eq!(rows[2].status, MergedRowStatus::Inserted);
+        // The trailing context line stays paired after the block; the
+        // right line number reflects the shift caused by the insertion.
+        assert_eq!(rows[3].status, MergedRowStatus::Same);
+        assert_eq!(rows[3].left.as_ref().map(|l| l.number), Some(2));
+        assert_eq!(rows[3].right.as_ref().map(|l| l.number), Some(4));
+        assert_eq!(
+            rows[3].right.as_ref().map(|l| l.content.as_str()),
+            Some("b")
+        );
+    }
+
+    #[test]
+    fn merged_rows_pad_deletions_with_blank_right_cells() {
+        let diff = compare_texts("a\nx\nb\n", "a\nb\n", &default_settings());
+        let rows = diff.merged_rows();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[1].status, MergedRowStatus::Deleted);
+        assert_eq!(rows[1].right, None);
+        assert_eq!(
+            rows[1]
+                .left
+                .as_ref()
+                .map(|l| (l.number, l.content.as_str())),
+            Some((2, "x"))
+        );
+        assert_eq!(rows[2].status, MergedRowStatus::Same);
+    }
+
+    #[test]
+    fn merged_rows_pair_changed_blocks_and_pad_the_remainder() {
+        // One left line is replaced by two right lines.
+        let diff = compare_texts("a\nb\n", "a\nx\ny\n", &default_settings());
+        let rows = diff.merged_rows();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].status, MergedRowStatus::Same);
+        // The exact hunk shape depends on the LCS; what must hold is one
+        // Changed row followed by one Inserted filler row.
+        let statuses: Vec<MergedRowStatus> =
+            rows.iter().map(|row| row.status).collect();
+        assert!(
+            statuses.contains(&MergedRowStatus::Changed)
+                && statuses.contains(&MergedRowStatus::Inserted),
+            "unexpected statuses: {statuses:?}"
+        );
+        let changed = rows
+            .iter()
+            .find(|row| row.status == MergedRowStatus::Changed)
+            .unwrap();
+        assert!(changed.left.is_some() && changed.right.is_some());
+    }
+
+    #[test]
+    fn merged_rows_pair_skipped_context_lines() {
+        // With blank lines ignored, the blank context row must still be
+        // paired on both sides in the merged view.
+        let mut settings = default_settings();
+        settings.ignore_blank_lines = true;
+        let diff = compare_texts("a\n\nb\n", "a\n\nB\n", &settings);
+        assert!(!diff.is_empty());
+        let rows = diff.merged_rows();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[1].status, MergedRowStatus::Same);
+        assert_eq!(rows[1].left.as_ref().map(|l| l.number), Some(2));
+        assert_eq!(rows[1].right.as_ref().map(|l| l.number), Some(2));
+        assert_eq!(rows[2].status, MergedRowStatus::Changed);
+    }
+
+    #[test]
+    fn merged_rows_of_handbuilt_diff_fall_back_to_empty_context() {
+        // A hand-built diff carries no filtered line lists; context rows
+        // still align by line number, with empty placeholder content.
+        let diff = TextDiff {
+            differences: vec![TextDifference::LinesAdded(
+                2,
+                vec![LineInfo::new(2, "x".into())],
+            )],
+            left_line_count: 2,
+            right_line_count: 3,
+            ..Default::default()
+        };
+        let rows = diff.merged_rows();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].status, MergedRowStatus::Same);
+        assert_eq!(rows[0].left.as_ref().map(|l| l.number), Some(1));
+        assert_eq!(rows[1].status, MergedRowStatus::Inserted);
+        assert_eq!(rows[2].status, MergedRowStatus::Same);
+        assert_eq!(rows[2].left.as_ref().map(|l| l.number), Some(2));
+        assert_eq!(rows[2].right.as_ref().map(|l| l.number), Some(3));
     }
 }
