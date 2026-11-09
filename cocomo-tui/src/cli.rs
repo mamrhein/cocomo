@@ -35,11 +35,10 @@ use crate::{controller::compare, error::TuiError, state::SessionView};
 #[command(name = "cocomo-tui", version, about)]
 pub(crate) struct Cli {
     /// Left directory path or URL (e.g. `ftp://host/pub/src`).
-    #[arg(requires = "right")]
-    pub left: Option<String>,
+    pub left: String,
 
     /// Right directory path or URL (e.g. `ftp://host/pub/src`).
-    pub right: Option<String>,
+    pub right: String,
 
     /// Compare file content (using hashing).
     #[arg(short = 'c', long, default_value_t = false)]
@@ -51,13 +50,13 @@ pub(crate) struct Cli {
 }
 
 /// The startup decision derived from the parsed [`Cli`] arguments.
+///
+/// A missing side never reaches this enum: both sides are required
+/// positionals, so clap reports the usage error and exits before the UI is
+/// set up.
 pub(crate) enum Startup {
-    /// No paths were given: start at the welcome screen.
-    Welcome,
-
-    /// The paths were given and the initial comparison succeeded: start
-    /// with this session. Boxed to keep the enum small (`SessionView` is
-    /// a large struct).
+    /// The initial comparison succeeded: start with this session. Boxed to
+    /// keep the enum small (`SessionView` is a large struct).
     Session(Box<SessionView>),
 
     /// The paths were valid but the initial comparison failed: start at
@@ -98,17 +97,10 @@ impl Cli {
     /// endpoints is reported as [`Startup::ComparisonFailed`] so the UI can
     /// show it.
     pub(crate) async fn startup(&self) -> anyhow::Result<Startup> {
-        // clap's `requires` guarantees the positional pair comes together,
-        // so anything but "both present" means "no paths given".
-        let (Some(left), Some(right)) =
-            (self.left.as_deref(), self.right.as_deref())
-        else {
-            return Ok(Startup::Welcome);
-        };
-
-        let left = resolve_startup_side(left, self.profile.as_deref()).await?;
+        let left =
+            resolve_startup_side(&self.left, self.profile.as_deref()).await?;
         let right =
-            resolve_startup_side(right, self.profile.as_deref()).await?;
+            resolve_startup_side(&self.right, self.profile.as_deref()).await?;
 
         // Validate that both endpoints exist and are of the same type.
         let left_meta = left.fs().metadata_path(left.path()).await?;
@@ -144,26 +136,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn half_specified_pair_is_a_parse_error() {
-        assert!(Cli::try_parse_from(["cocomo-tui", "/a"]).is_err());
+    fn no_paths_is_a_parse_error() {
+        assert!(Cli::try_parse_from(["cocomo-tui"]).is_err());
     }
 
     #[test]
-    fn no_paths_parses() {
-        let cli = Cli::try_parse_from(["cocomo-tui"]).unwrap();
-        assert!(cli.left.is_none());
-        assert!(cli.right.is_none());
-        assert!(!cli.content);
-        assert!(cli.profile.is_none());
+    fn half_specified_pair_is_a_parse_error() {
+        assert!(Cli::try_parse_from(["cocomo-tui", "/a"]).is_err());
     }
 
     #[test]
     fn full_pair_parses() {
         let cli =
             Cli::try_parse_from(["cocomo-tui", "/a", "/b", "-c"]).unwrap();
-        assert_eq!(cli.left.as_deref(), Some("/a"));
-        assert_eq!(cli.right.as_deref(), Some("/b"));
+        assert_eq!(cli.left, "/a");
+        assert_eq!(cli.right, "/b");
         assert!(cli.content);
+        assert!(cli.profile.is_none());
     }
 
     #[test]
@@ -176,15 +165,9 @@ mod tests {
             "prod",
         ])
         .unwrap();
-        assert_eq!(cli.left.as_deref(), Some("ftp://host.example/pub"));
-        assert_eq!(cli.right.as_deref(), Some("./mirror"));
+        assert_eq!(cli.left, "ftp://host.example/pub");
+        assert_eq!(cli.right, "./mirror");
         assert_eq!(cli.profile.as_deref(), Some("prod"));
-    }
-
-    #[tokio::test]
-    async fn no_paths_starts_at_the_welcome_screen() {
-        let cli = Cli::try_parse_from(["cocomo-tui"]).unwrap();
-        assert!(matches!(cli.startup().await.unwrap(), Startup::Welcome));
     }
 
     #[tokio::test]

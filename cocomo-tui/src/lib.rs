@@ -91,6 +91,9 @@ impl Drop for KeyboardEnhancementGuard {
 /// Parse the CLI arguments, seed the global [`APP_STATE`], and run the root
 /// [`App`] component on the full screen.
 ///
+/// Both sides are required positionals, so a missing one ends the process
+/// with clap's usage error before any terminal mode is entered.
+///
 /// All startup policy lives in [`cli::Cli::startup`]; this function only
 /// translates the resulting [`Startup`] decision into the initial
 /// [`AppState`] and enters the render loop.
@@ -99,7 +102,6 @@ pub async fn run() -> Result<()> {
 
     let mut app = AppState::new();
     match cli.startup().await? {
-        Startup::Welcome => {}
         Startup::Session(session) => app.add_session(*session),
         Startup::ComparisonFailed(err) => {
             app.error_message = Some(format!("Comparison failed: {err}"));

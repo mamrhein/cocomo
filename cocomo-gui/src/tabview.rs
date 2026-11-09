@@ -597,6 +597,11 @@ pub struct WindowRoot {
     /// Observer of the shared saved-session store, so the Sessions
     /// dropdown reflects saves and deletes made from any window.
     _store_subscription: Subscription,
+    /// Observer of the OS light/dark appearance, so a "Follow system"
+    /// preference tracks OS switches (and, on Linux, learns the real
+    /// appearance once the portal's first reply lands after window
+    /// creation).
+    _appearance_subscription: Subscription,
 }
 
 impl WindowRoot {
@@ -636,6 +641,13 @@ impl WindowRoot {
         let store = crate::session_manager::shared_store(cx);
         let _store_subscription = cx.observe(&store, |_, _, cx| cx.notify());
 
+        // OS light/dark changes are reported per window; sync the
+        // component theme while the preference tracks the system.
+        let _appearance_subscription =
+            window.observe_window_appearance(|window, cx| {
+                crate::theme::sync_if_system(window, cx);
+            });
+
         // Windows and Linux have no native menu bar, so the window
         // renders the kit's own at its top edge. It loads the current
         // menus on creation and re-registers for later rebuilds.
@@ -655,6 +667,7 @@ impl WindowRoot {
             app_menu_bar,
             _log_subscriptions,
             _store_subscription,
+            _appearance_subscription,
         }
     }
 
