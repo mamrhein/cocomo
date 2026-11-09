@@ -10,9 +10,11 @@
 //! Root `App` component: menu bar with its dropdown, tab bar, active view,
 //! shortcut overlay, and error modal.
 
+use std::time::{Duration, Instant};
+
 use ratatui_kit::{
     crossterm::event::{
-        Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton,
+        Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton,
         MouseEventKind,
     },
     prelude::*,
@@ -53,6 +55,58 @@ use crate::{
 /// the terminal origin; both the dropdown geometry and the click hit-test
 /// are anchored here.
 const BAR_ORIGIN: Position = Position { x: 0, y: 0 };
+
+/// Window in which a key press after `Esc` counts as an `Esc`-prefixed
+/// menu accelerator (`Esc s` instead of `Alt+S`). One second, matching
+/// vim's default `timeoutlen`, so a deliberate two-key gesture never
+/// falls out of the window.
+const ESC_ACCEL_WINDOW: Duration = Duration::from_millis(1000);
+
+/// What the shell does with the pending-`Esc` state after one key press.
+#[derive(Debug, PartialEq)]
+enum EscPrefix {
+    /// An unmodified menu accel pressed within [`ESC_ACCEL_WINDOW`] of an
+    /// `Esc` press: open the menu at this bar index.
+    Open(usize),
+    /// A bare `Esc`; remember this instant as the pending prefix.
+    Pending(Instant),
+    /// Anything else; drop the pending prefix.
+    None,
+}
+
+/// Pure decision of the `Esc`-prefix menu fallback, so the timing rule is
+/// unit-testable without a terminal.
+///
+/// Terminals that cannot report the Alt modifier (macOS Option without
+/// Option-as-Meta, and without the kitty keyboard protocol) deliver
+/// `Alt+<letter>` as a layout-dependent composed character, which no
+/// portable binding can match. `Esc` is the one key that always arrives
+/// intact, so `Esc` followed quickly by a menu accelerator opens the same
+/// menu. The `Esc` itself is never claimed here: it keeps flowing to its
+/// normal handler (`Cancel`, `MenuClose`, …).
+fn esc_prefix(
+    key: KeyEvent,
+    esc_at: Option<Instant>,
+    now: Instant,
+) -> EscPrefix {
+    if key.modifiers != KeyModifiers::NONE {
+        return EscPrefix::None;
+    }
+    match key.code {
+        KeyCode::Esc => EscPrefix::Pending(now),
+        KeyCode::Char(c)
+            if esc_at.is_some_and(|at| {
+                now.saturating_duration_since(at) < ESC_ACCEL_WINDOW
+            }) =>
+        {
+            match crate::menu::menu_index_by_accel(c) {
+                Some(index) => EscPrefix::Open(index),
+                None => EscPrefix::None,
+            }
+        }
+        _ => EscPrefix::None,
+    }
+}
 
 /// What the caller must do after a menu command was run.
 ///
@@ -151,6 +205,9 @@ pub(crate) fn App(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let app_state = hooks.use_atom(&APP_STATE);
     let mut exit = hooks.use_exit();
     let theme = hooks.use_component_theme::<CocomoTheme>();
+    // Timestamp of the last bare `Esc`, for the `Esc <accel>` menu
+    // fallback (see `esc_prefix`).
+    let mut esc_at = hooks.use_state(|| Option::<Instant>::None);
 
     // The framework's automatic `Ctrl+C` exit would end the session
     // without warning, so it is disabled in favour of a double-press
@@ -287,6 +344,18 @@ pub(crate) fn App(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             };
             if key.kind != KeyEventKind::Press {
                 return EventResult::Ignored;
+            }
+            // `Esc <accel>` menu fallback (see `esc_prefix`): claim only
+            // the accel; the `Esc` itself keeps flowing to the handlers
+            // below so `Cancel` and friends stay intact.
+            match esc_prefix(key, esc_at.get(), Instant::now()) {
+                EscPrefix::Open(index) => {
+                    esc_at.set(None);
+                    controller::toggle_menu(index);
+                    return EventResult::Consumed;
+                }
+                EscPrefix::Pending(at) => esc_at.set(Some(at)),
+                EscPrefix::None => esc_at.set(None),
             }
             let Some(cmd) = keys::lookup(KeyScope::Global, key) else {
                 return EventResult::Ignored;
@@ -479,6 +548,85 @@ pub(crate) fn App(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             }
         }
     )
+}
+
+#[cfg(test)]
+mod esc_prefix_tests {
+    use super::*;
+
+    fn key(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
+        KeyEvent::new(code, modifiers)
+    }
+
+    #[test]
+    fn esc_then_accel_opens_the_matching_menu() {
+        let now = Instant::now();
+        assert_eq!(
+            esc_prefix(
+                key(KeyCode::Char('s'), KeyModifiers::NONE),
+                Some(now),
+                now
+            ),
+            EscPrefix::Open(0)
+        );
+    }
+
+    #[test]
+    fn esc_then_non_accel_clears_the_prefix() {
+        let now = Instant::now();
+        assert_eq!(
+            esc_prefix(
+                key(KeyCode::Char('x'), KeyModifiers::NONE),
+                Some(now),
+                now
+            ),
+            EscPrefix::None
+        );
+    }
+
+    #[test]
+    fn accel_outside_the_window_is_a_plain_key() {
+        let now = Instant::now();
+        let late = now - (ESC_ACCEL_WINDOW + Duration::from_millis(1));
+        assert_eq!(
+            esc_prefix(
+                key(KeyCode::Char('s'), KeyModifiers::NONE),
+                Some(late),
+                now
+            ),
+            EscPrefix::None
+        );
+    }
+
+    #[test]
+    fn bare_esc_becomes_the_pending_prefix() {
+        let now = Instant::now();
+        assert_eq!(
+            esc_prefix(key(KeyCode::Esc, KeyModifiers::NONE), None, now),
+            EscPrefix::Pending(now)
+        );
+    }
+
+    #[test]
+    fn modified_keys_never_touch_the_prefix() {
+        let now = Instant::now();
+        assert_eq!(
+            esc_prefix(
+                key(KeyCode::Esc, KeyModifiers::CONTROL),
+                Some(now),
+                now
+            ),
+            EscPrefix::None
+        );
+        assert_eq!(
+            esc_prefix(
+                key(KeyCode::Char('s'), KeyModifiers::ALT),
+                Some(now),
+                now
+            ),
+            EscPrefix::None
+        );
+    }
 }
 
 #[cfg(test)]

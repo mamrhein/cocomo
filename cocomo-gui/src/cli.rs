@@ -14,6 +14,10 @@
 //! an [`Endpoint`], and validate the pair — so `main` only has to seed the
 //! session manager and open the window.
 //!
+//! Zero, one, or two paths are accepted: none opens the welcome screen,
+//! one opens the view matching the node type with only the left side set,
+//! and two open the pair in that view.
+//!
 //! Unlike the TUI, the GUI does not run the initial comparison eagerly:
 //! the folder-compare view loads its comparison asynchronously and
 //! surfaces failures in the UI (see [`crate::state::AppState`]), which
@@ -41,11 +45,11 @@ use cocomo_lib::{
 #[derive(Parser, Debug)]
 #[command(name = "cocomo-gui", version, about)]
 pub(crate) struct Cli {
-    /// Left directory path or URL (e.g. `ftp://host/pub/src`).
-    #[arg(requires = "right")]
+    /// Left directory or file path or URL (e.g. `ftp://host/pub/src`). A
+    /// single path opens the matching view with an empty right side.
     pub left: Option<String>,
 
-    /// Right directory path or URL (e.g. `ftp://host/pub/src`).
+    /// Right directory or file path or URL (e.g. `ftp://host/pub/src`).
     pub right: Option<String>,
 
     /// Compare file content (using hashing).
@@ -63,18 +67,28 @@ pub(crate) enum Startup {
     /// for launching new sessions and reopening saved ones.
     Welcome,
 
-    /// A valid directory pair was given: open a folder-compare tab for
-    /// these endpoints. The comparison itself runs asynchronously once
-    /// the tab is rendered.
-    Session {
-        /// Left-side directory endpoint.
-        left: Endpoint,
-        /// Right-side directory endpoint.
-        right: Endpoint,
-        /// Whether to compare file content (hashing) instead of using
-        /// metadata only.
-        content: bool,
-    },
+    /// Valid paths were given: open a tab for them at startup. Boxed to
+    /// keep the enum small (`StartupSession` is larger than the other
+    /// variants' payloads).
+    Session(Box<StartupSession>),
+}
+
+/// The session a run starts with: the view's sides and compare mode.
+///
+/// The comparison itself runs asynchronously once the tab is rendered.
+pub(crate) struct StartupSession {
+    /// Left-side endpoint.
+    pub left: Endpoint,
+    /// Right-side endpoint; `None` when only one path was given, leaving
+    /// the right side of the view empty for the user to fill in.
+    pub right: Option<Endpoint>,
+    /// Whether the given nodes are directories: `true` opens the
+    /// folder-compare view, `false` the file view the left file's format
+    /// maps to.
+    pub is_dir: bool,
+    /// Whether to compare file content (hashing) instead of using
+    /// metadata only.
+    pub content: bool,
 }
 
 /// Resolve one startup argument into an [`Endpoint`].
@@ -99,51 +113,55 @@ async fn resolve_startup_side(
 
 impl Cli {
     /// Resolve the parsed arguments into a [`Startup`] decision: resolve
-    /// both sides to endpoints and validate them.
+    /// the given sides to endpoints and validate them.
     ///
     /// Must be called with a tokio runtime entered (the GUI creates its
     /// runtime before resolving startup so remote providers can connect).
     ///
     /// Argument-level problems (an unparsable URL, an endpoint that
-    /// cannot be resolved or is not a directory) are returned as errors
-    /// so the binary exits with a message; a comparison that fails later
-    /// on otherwise valid endpoints is surfaced in the UI by the
+    /// cannot be resolved, a mixed directory/file pair) are returned as
+    /// errors so the binary exits with a message; a comparison that fails
+    /// later on otherwise valid endpoints is surfaced in the UI by the
     /// session's [`AppState`](crate::state::AppState).
     pub(crate) async fn startup(&self) -> Result<Startup> {
-        // clap's `requires` guarantees the positional pair comes together,
-        // so anything but "both present" means "no paths given".
-        let (Some(left), Some(right)) =
-            (self.left.as_deref(), self.right.as_deref())
-        else {
+        let profile = self.profile.as_deref();
+        // clap fills the positionals in order, so a missing left means no
+        // paths were given at all.
+        let Some(left) = self.left.as_deref() else {
             return Ok(Startup::Welcome);
         };
 
-        let left = resolve_startup_side(left, self.profile.as_deref()).await?;
-        let right =
-            resolve_startup_side(right, self.profile.as_deref()).await?;
-
-        // Validate that both endpoints exist and are of the same type.
+        let left = resolve_startup_side(left, profile).await?;
         let left_meta = left.fs().metadata_path(left.path()).await?;
+
+        // One path: the view opens with only the left side set.
+        let Some(right) = self.right.as_deref() else {
+            return Ok(Startup::Session(Box::new(StartupSession {
+                left,
+                right: None,
+                is_dir: left_meta.is_dir,
+                content: self.content,
+            })));
+        };
+
+        let right = resolve_startup_side(right, profile).await?;
         let right_meta = right.fs().metadata_path(right.path()).await?;
 
-        if left_meta.is_file() && right_meta.is_file() {
-            return Err(anyhow::anyhow!(
-                "Comparing individual files is not yet implemented. Please \
-                 provide directories."
-            ));
-        }
-
-        if !left_meta.is_dir || !right_meta.is_dir {
+        // Validate that both endpoints exist and are of the same type.
+        let same_kind = (left_meta.is_dir && right_meta.is_dir)
+            || (left_meta.is_file() && right_meta.is_file());
+        if !same_kind {
             return Err(anyhow::anyhow!(
                 "Both paths must be directories, or both must be files."
             ));
         }
 
-        Ok(Startup::Session {
+        Ok(Startup::Session(Box::new(StartupSession {
             left,
-            right,
+            right: Some(right),
+            is_dir: left_meta.is_dir,
             content: self.content,
-        })
+        })))
     }
 }
 
@@ -152,8 +170,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn half_specified_pair_is_a_parse_error() {
-        assert!(Cli::try_parse_from(["cocomo-gui", "/a"]).is_err());
+    fn single_path_parses() {
+        let cli = Cli::try_parse_from(["cocomo-gui", "/a"]).unwrap();
+        assert_eq!(cli.left.as_deref(), Some("/a"));
+        assert!(cli.right.is_none());
     }
 
     #[test]
@@ -205,10 +225,38 @@ mod tests {
             right.path().to_str().unwrap(),
         ])
         .unwrap();
-        assert!(matches!(
-            cli.startup().await.unwrap(),
-            Startup::Session { .. }
-        ));
+        let Startup::Session(session) = cli.startup().await.unwrap() else {
+            panic!("a directory pair must start a session");
+        };
+        assert!(session.is_dir);
+        assert!(session.right.is_some());
+    }
+
+    #[tokio::test]
+    async fn one_directory_leaves_the_right_side_empty() {
+        let left = tempfile::tempdir().unwrap();
+        let cli =
+            Cli::try_parse_from(["cocomo-gui", left.path().to_str().unwrap()])
+                .unwrap();
+        let Startup::Session(session) = cli.startup().await.unwrap() else {
+            panic!("a single directory must start a session");
+        };
+        assert!(session.is_dir);
+        assert!(session.right.is_none());
+    }
+
+    #[tokio::test]
+    async fn one_file_leaves_the_right_side_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("left.txt");
+        fs_err::tokio::write(&file, b"a").await.unwrap();
+        let cli = Cli::try_parse_from(["cocomo-gui", file.to_str().unwrap()])
+            .unwrap();
+        let Startup::Session(session) = cli.startup().await.unwrap() else {
+            panic!("a single file must start a session");
+        };
+        assert!(!session.is_dir);
+        assert!(session.right.is_none());
     }
 
     #[tokio::test]
@@ -221,10 +269,20 @@ mod tests {
             &format!("file://{}", right.path().display()),
         ])
         .unwrap();
-        assert!(matches!(
-            cli.startup().await.unwrap(),
-            Startup::Session { .. }
-        ));
+        assert!(matches!(cli.startup().await.unwrap(), Startup::Session(_)));
+    }
+
+    #[tokio::test]
+    async fn missing_single_path_is_a_startup_error() {
+        let cli = Cli::try_parse_from(["cocomo-gui", "/definitely-not-here"])
+            .unwrap();
+        let Err(err) = cli.startup().await else {
+            panic!("a missing path must fail startup");
+        };
+        assert!(
+            err.to_string().contains("definitely-not-here"),
+            "error should name the offending path: {err}"
+        );
     }
 
     #[tokio::test]
@@ -264,7 +322,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn two_files_are_rejected() {
+    async fn two_files_start_a_file_session() {
         let dir = tempfile::tempdir().unwrap();
         let left = dir.path().join("left.txt");
         let right = dir.path().join("right.txt");
@@ -276,12 +334,30 @@ mod tests {
             right.to_str().unwrap(),
         ])
         .unwrap();
+        let Startup::Session(session) = cli.startup().await.unwrap() else {
+            panic!("a file pair must start a session");
+        };
+        assert!(!session.is_dir);
+        assert!(session.right.is_some());
+    }
+
+    #[tokio::test]
+    async fn mixed_dir_and_file_pair_is_a_startup_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("left.txt");
+        fs_err::tokio::write(&file, b"a").await.unwrap();
+        let cli = Cli::try_parse_from([
+            "cocomo-gui",
+            dir.path().to_str().unwrap(),
+            file.to_str().unwrap(),
+        ])
+        .unwrap();
         let Err(err) = cli.startup().await else {
-            panic!("a file pair must fail startup");
+            panic!("a mixed pair must fail startup");
         };
         assert!(
-            err.to_string().contains("not yet implemented"),
-            "error should explain that files are unsupported: {err}"
+            err.to_string().contains("both must be files"),
+            "error should explain the expected types: {err}"
         );
     }
 }

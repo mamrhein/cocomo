@@ -45,6 +45,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use clap::Parser;
+use cocomo_lib::Endpoint;
 use gpui::{
     App, AppContext as _, AsyncApp, Bounds, Entity, QuitMode, WindowBounds,
     WindowId, WindowOptions, application as create_application,
@@ -52,7 +53,8 @@ use gpui::{
 };
 
 use crate::{
-    cli::{Cli, Startup},
+    cli::{Cli, Startup, StartupSession},
+    file_formats::FileFormatRegistry,
     menus::{register_menu_handlers, set_app_menus},
     options::AppOptions,
     session_manager::{GuiSessionManager, create_window_manager},
@@ -168,15 +170,25 @@ fn on_window_closed(id: WindowId, cx: &mut App) {
 /// cleanly is offered back the sessions it had open when it died.
 fn open_initial_windows(startup: Startup, crashed: bool, cx: &mut App) {
     match startup {
-        Startup::Session {
-            left,
-            right,
-            content,
-        } => {
+        Startup::Session(startup) => {
+            let StartupSession {
+                left,
+                right,
+                is_dir,
+                content,
+            } = *startup;
+            // An unset right side opens on an empty path: the view's path
+            // bar shows its placeholder and the user fills the side in.
+            let right = right.unwrap_or_else(|| Endpoint::local(""));
             let manager = create_window_manager(cx);
             open_window(manager.clone(), cx);
             manager.update(cx, |m, cx| {
-                m.add_folder_tab(left, right, content, cx);
+                if is_dir {
+                    m.add_folder_tab(left, right, content, cx);
+                } else {
+                    let kind = FileFormatRegistry::view_kind(left.path(), cx);
+                    m.add_file_pair_tab(kind, left, right, None, cx);
+                }
             });
         }
         Startup::Welcome => {

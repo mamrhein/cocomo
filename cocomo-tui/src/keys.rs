@@ -829,49 +829,51 @@ const KEYMAP: &[KeyBinding] = &[
         help: None,
     },
     // -- Alt accelerators: one per menu, opening its dropdown directly.
-    //    A test keeps these in sync with `menu::MENUS`; they carry no help
-    //    label because the menu bar itself renders the accels. --
+    //    A test keeps these in sync with `menu::MENUS`. macOS terminals
+    //    frequently deliver Option+letter as a composed character, so the
+    //    help labels advertise the portable `Esc <accel>` fallback (see
+    //    `ui::app::esc_prefix`); the menu bar renders the same accels. --
     KeyBinding {
         key: KeyCode::Char('s'),
         modifiers: ALT,
         scope: KeyScope::Global,
         cmd: Cmd::MenuOpen(0),
-        help: None,
+        help: Some(("Esc s", "sessions menu")),
     },
     KeyBinding {
         key: KeyCode::Char('c'),
         modifiers: ALT,
         scope: KeyScope::Global,
         cmd: Cmd::MenuOpen(1),
-        help: None,
+        help: Some(("Esc c", "compare menu")),
     },
     KeyBinding {
         key: KeyCode::Char('y'),
         modifiers: ALT,
         scope: KeyScope::Global,
         cmd: Cmd::MenuOpen(2),
-        help: None,
+        help: Some(("Esc y", "sync menu")),
     },
     KeyBinding {
         key: KeyCode::Char('v'),
         modifiers: ALT,
         scope: KeyScope::Global,
         cmd: Cmd::MenuOpen(3),
-        help: None,
+        help: Some(("Esc v", "view menu")),
     },
     KeyBinding {
         key: KeyCode::Char('f'),
         modifiers: ALT,
         scope: KeyScope::Global,
         cmd: Cmd::MenuOpen(4),
-        help: None,
+        help: Some(("Esc f", "filter menu")),
     },
     KeyBinding {
         key: KeyCode::Char('h'),
         modifiers: ALT,
         scope: KeyScope::Global,
         cmd: Cmd::MenuOpen(5),
-        help: None,
+        help: Some(("Esc h", "help menu")),
     },
     KeyBinding {
         key: KeyCode::Char('q'),
@@ -2898,8 +2900,10 @@ mod tests {
         for label in ["j/k", "g/G", "n/N", "Ctrl+W", "Tab", "q"] {
             assert!(text.contains(label), "missing `{label}` in `{text}`");
         }
-        // Dir-only labels must not appear in the text help bar.
-        assert!(!text.contains("filter"));
+        // Dir-only labels must not appear in the text help bar. (Not
+        // `filter`: the global `Esc f` menu accel legitimately mentions
+        // the Filter menu in both views.)
+        assert!(!text.contains("hidden"));
     }
 
     #[test]

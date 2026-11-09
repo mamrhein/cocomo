@@ -326,6 +326,14 @@ pub fn menu_at(bar_index: usize) -> Option<&'static MenuDef> {
     MENUS.get(bar_index)
 }
 
+/// Index of the menu whose accelerator is `c` (case-insensitive).
+///
+/// Used by the shell's `Esc`-prefix fallback (`Esc s` as a stand-in for
+/// `Alt+S`) in terminals that cannot report the Alt modifier.
+pub fn menu_index_by_accel(c: char) -> Option<usize> {
+    MENUS.iter().position(|m| m.accel.eq_ignore_ascii_case(&c))
+}
+
 /// The open menu of the menu bar.
 ///
 /// `None` in [`crate::state::AppState::menu`] means no dropdown is open;
@@ -551,6 +559,18 @@ mod tests {
                 item: 0
             })
         );
+    }
+
+    #[test]
+    fn every_accel_resolves_to_its_menu() {
+        for (index, menu) in MENUS.iter().enumerate() {
+            assert_eq!(menu_index_by_accel(menu.accel), Some(index));
+            assert_eq!(
+                menu_index_by_accel(menu.accel.to_ascii_uppercase()),
+                Some(index)
+            );
+        }
+        assert_eq!(menu_index_by_accel('x'), None);
     }
 
     #[test]
