@@ -45,8 +45,13 @@ use anyhow::Result;
 use clap::Parser;
 use ratatui_kit::{
     crossterm::{
-        event::{DisableBracketedPaste, EnableBracketedPaste},
+        event::{
+            DisableBracketedPaste, EnableBracketedPaste,
+            KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
+            PushKeyboardEnhancementFlags,
+        },
         execute,
+        terminal::supports_keyboard_enhancement,
     },
     prelude::*,
 };
@@ -66,6 +71,20 @@ struct BracketedPasteGuard;
 impl Drop for BracketedPasteGuard {
     fn drop(&mut self) {
         let _ = execute!(std::io::stdout(), DisableBracketedPaste);
+    }
+}
+
+/// Pops the kitty keyboard enhancement flags again when it goes out of
+/// scope.
+///
+/// Only ever constructed after the flags were pushed; popping is
+/// best-effort: terminals that reset the protocol on exit ignore the
+/// sequence.
+struct KeyboardEnhancementGuard;
+
+impl Drop for KeyboardEnhancementGuard {
+    fn drop(&mut self) {
+        let _ = execute!(std::io::stdout(), PopKeyboardEnhancementFlags);
     }
 }
 
@@ -96,6 +115,25 @@ pub async fn run() -> Result<()> {
     set_mouse_enabled();
     let _paste_guard = BracketedPasteGuard;
     let _ = execute!(std::io::stdout(), EnableBracketedPaste);
+
+    // Progressive keyboard enhancement: kitty-protocol terminals (kitty,
+    // WezTerm, Ghostty, Zed's terminal, ...) then report Option/Alt as a
+    // key modifier instead of the keyboard layout's composed character,
+    // so the `Alt+<accel>` menu shortcuts work on every layout. The query
+    // must run before the framework's `EventStream` starts reading stdin.
+    // Terminals without support (Terminal.app, iTerm2) keep the legacy
+    // encoding; there the shell's `Esc <accel>` fallback covers the menus.
+    let _keyboard_guard = if supports_keyboard_enhancement().unwrap_or(false) {
+        let _ = execute!(
+            std::io::stdout(),
+            PushKeyboardEnhancementFlags(
+                KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+            )
+        );
+        Some(KeyboardEnhancementGuard)
+    } else {
+        None
+    };
 
     // Inject the app palette at the root so every component (framework
     // built-ins and `CocomoTheme` readers alike) resolves its styles from
