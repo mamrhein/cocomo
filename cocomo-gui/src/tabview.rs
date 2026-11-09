@@ -17,6 +17,8 @@
 
 use std::any::Any;
 
+#[cfg(not(target_os = "macos"))]
+use gpui::component::menu::AppMenuBar;
 use gpui::{
     AnyElement, AnyView, App, Context, ElementId, Entity, FocusHandle, Render,
     SharedString, Subscription, Window,
@@ -29,6 +31,7 @@ use gpui::{
     },
     div,
     prelude::*,
+    rems,
 };
 
 use crate::{
@@ -582,9 +585,12 @@ pub struct WindowRoot {
     nav_stack_state: Entity<NavStackState>,
     /// Last known active tab index, for diffing against the session manager.
     last_active_index: usize,
-    /// Last menu snapshot pushed to the native menu bar, so the bar is
-    /// rebuilt only when it actually changes.
+    /// Last menu snapshot pushed to the menu bar, so the bar is rebuilt
+    /// only when it actually changes.
     last_menu_state: Option<MenuState>,
+    /// The in-window menu bar, rendered on platforms without a native one.
+    #[cfg(not(target_os = "macos"))]
+    app_menu_bar: Entity<AppMenuBar>,
     /// Observers of the log globals, so log lines and pane toggles
     /// re-render the log pane.
     _log_subscriptions: Vec<Subscription>,
@@ -630,11 +636,23 @@ impl WindowRoot {
         let store = crate::session_manager::shared_store(cx);
         let _store_subscription = cx.observe(&store, |_, _, cx| cx.notify());
 
+        // Windows and Linux have no native menu bar, so the window
+        // renders the kit's own at its top edge. It loads the current
+        // menus on creation and re-registers for later rebuilds.
+        #[cfg(not(target_os = "macos"))]
+        let app_menu_bar = {
+            let bar = AppMenuBar::new(cx);
+            menus::register_menu_bar(bar.clone(), cx);
+            bar
+        };
+
         Self {
             session_manager,
             nav_stack_state: cx.new(|_| NavStackState::new()),
             last_active_index: 0,
             last_menu_state: None,
+            #[cfg(not(target_os = "macos"))]
+            app_menu_bar,
             _log_subscriptions,
             _store_subscription,
         }
@@ -932,13 +950,26 @@ impl Render for WindowRoot {
             col.into_any_element()
         };
 
-        div()
+        let shell = div()
             .flex()
             .flex_col()
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
-            .text_sm()
+            .text_sm();
+
+        // On Windows and Linux the menu bar is the window's first row,
+        // above the toolbars, mirroring the native macOS placement.
+        #[cfg(not(target_os = "macos"))]
+        let shell = shell.child(
+            div()
+                .w_full()
+                .flex_shrink_0()
+                .h(rems(2.))
+                .child(self.app_menu_bar.clone()),
+        );
+
+        shell
             .child(toolbar_band)
             .child(tab_bar_element)
             .child(

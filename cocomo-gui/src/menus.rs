@@ -18,6 +18,8 @@
 use std::{cell::Cell, collections::HashSet};
 
 use cocomo_lib::Endpoint;
+#[cfg(not(target_os = "macos"))]
+use gpui::component::menu::AppMenuBar;
 use gpui::{
     App, AppContext as _, AsyncApp, BorrowAppContext as _, ElementId, Entity,
     Focusable as _, KeyBinding, Menu, MenuItem, PathPromptOptions,
@@ -896,11 +898,65 @@ pub fn set_app_menus(cx: &mut App) {
     refresh_view_menus(state, cx);
 }
 
+/// Live in-window menu bars, one per open window.
+///
+/// `cx.set_menus` only reaches the native macOS bar. On Windows and Linux
+/// every window renders the kit's `AppMenuBar`, which reads the component
+/// layer's `GlobalState` copy of the menus; this registry lets
+/// `refresh_view_menus` reload each window's bar after the copy changes.
+#[cfg(not(target_os = "macos"))]
+#[derive(Default)]
+struct MenuBars(Vec<gpui::WeakEntity<AppMenuBar>>);
+
+#[cfg(not(target_os = "macos"))]
+impl gpui::Global for MenuBars {}
+
+/// Register a window's in-window menu bar so menu rebuilds reload it.
+#[cfg(not(target_os = "macos"))]
+pub fn register_menu_bar(bar: Entity<AppMenuBar>, cx: &mut App) {
+    if cx.try_global::<MenuBars>().is_none() {
+        cx.set_global(MenuBars::default());
+    }
+    let bars = cx.global_mut::<MenuBars>();
+    bars.0.retain(|bar| bar.upgrade().is_some());
+    bars.0.push(bar.downgrade());
+}
+
+/// Reload every live in-window menu bar from the component layer's copy.
+#[cfg(not(target_os = "macos"))]
+fn reload_menu_bars(cx: &mut App) {
+    if cx.try_global::<MenuBars>().is_none() {
+        // No window has registered a bar yet; the first bar loads the
+        // menus when it is created.
+        return;
+    }
+    let bars = {
+        let bars = cx.global_mut::<MenuBars>();
+        bars.0.retain(|bar| bar.upgrade().is_some());
+        bars.0.clone()
+    };
+    for bar in bars {
+        _ = bar.update(cx, |bar, cx| bar.reload(cx));
+    }
+}
+
 /// Rebuild the menu bar so enabled states and checkmarks reflect the
 /// active tab. Called by the window root whenever the snapshot changes.
 pub fn refresh_view_menus(state: MenuState, cx: &mut App) {
     let hidden = hidden_command_ids(cx);
     cx.set_menus(build_app_menus(state, &hidden));
+    // Keep the component layer's copy of the menus current for the
+    // in-window bars on Windows and Linux. The copy is rebuilt from the
+    // same inputs as the platform menus, so the two never diverge.
+    #[cfg(not(target_os = "macos"))]
+    {
+        let owned = build_app_menus(state, &hidden)
+            .into_iter()
+            .map(Menu::owned)
+            .collect::<Vec<_>>();
+        gpui::component::GlobalState::global_mut(cx).set_app_menus(owned);
+        reload_menu_bars(cx);
+    }
     cx.set_global(LastMenuState(state));
 }
 
@@ -1935,5 +1991,31 @@ mod tests {
             )),
             "Tools menu must offer the Folder Sync presets dialog"
         );
+    }
+
+    /// On platforms without a native menu bar, `refresh_view_menus` must
+    /// mirror the rebuilt menus into the component layer so the
+    /// window-rendered `AppMenuBar` has them to display.
+    #[cfg(not(target_os = "macos"))]
+    #[gpui::test]
+    fn refresh_view_menus_feeds_the_in_window_bars(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            gpui::init(cx);
+            cx.set_global(crate::options::AppOptions::default());
+            cx.set_global(crate::log::LogPaneOpen(true));
+            set_app_menus(cx);
+            let menus = gpui::component::GlobalState::global(cx).app_menus();
+            assert!(
+                menus.iter().any(|menu| menu.name == "Session"),
+                "the component layer must hold the rebuilt menu bar"
+            );
+            let view = menus.iter().find(|menu| menu.name == "View").unwrap();
+            assert!(
+                !view.items.is_empty(),
+                "the View menu must carry items for the in-window bar"
+            );
+        });
     }
 }
