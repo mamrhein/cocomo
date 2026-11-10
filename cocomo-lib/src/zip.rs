@@ -198,7 +198,11 @@ fn build_tree(
         let Ok(entry) = zip.by_index(index) else {
             continue;
         };
-        let key = normalize_key(entry.name());
+        // Skip entries whose name cannot be decoded.
+        let Ok(name) = entry.name() else {
+            continue;
+        };
+        let key = normalize_key(&name);
         if key.is_empty() {
             continue;
         }
