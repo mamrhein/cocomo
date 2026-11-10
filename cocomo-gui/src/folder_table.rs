@@ -146,6 +146,9 @@ pub(crate) fn render_folder_table(
                 .flex_1()
                 .min_h_0()
                 .relative()
+                // Table data reads best in the theme's monospace font;
+                // the rest of the UI keeps the proportional font.
+                .font_family(theme.mono_font_family.clone())
                 // Size the content-fitted columns and stretch both Name
                 // columns to the available width. The hook runs every
                 // frame; both steps only report a change when a width
@@ -832,7 +835,8 @@ fn format_modified_label(modified: &str) -> String {
 
 /// Width of `text` in the table's inherited text style.
 ///
-/// Cells inherit the component root's font family at a 1 rem size, so
+/// Cells inherit the table wrapper's monospace font family at a 1 rem
+/// size, and the measurement runs inside that wrapper's text style, so
 /// measuring with the window's current text style reproduces the
 /// rendered metrics of a size or date cell.
 fn measure_text(text: &str, window: &Window) -> Pixels {

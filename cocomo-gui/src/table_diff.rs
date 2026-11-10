@@ -917,9 +917,14 @@ impl Render for TableDiffView {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let table_state = self.ensure_table_state(window, cx);
-        let (theme_bg, theme_fg, muted) = {
+        let (theme_bg, theme_fg, muted, mono) = {
             let theme = cx.theme();
-            (theme.background, theme.foreground, theme.muted_foreground)
+            (
+                theme.background,
+                theme.foreground,
+                theme.muted_foreground,
+                theme.mono_font_family.clone(),
+            )
         };
         let session = self.state.read(cx);
         let focus_handle = session.focus_handle();
@@ -942,6 +947,9 @@ impl Render for TableDiffView {
             div()
                 .flex_1()
                 .min_h_0()
+                // Table data reads best in the theme's monospace font;
+                // the rest of the UI keeps the proportional font.
+                .font_family(mono)
                 .child(
                     DataTable::new(&table_state)
                         .with_size(ROW_HEIGHT)
