@@ -31,7 +31,6 @@ use gpui::{
     },
     div,
     prelude::*,
-    rems,
 };
 
 use crate::{

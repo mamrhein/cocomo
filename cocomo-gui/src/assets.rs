@@ -14,8 +14,8 @@
 //! buttons — stay blank. This module composes the three sources the app
 //! needs into a single one:
 //!
-//! 1. the app's own SVGs from `resources/icons` (the display-filter preset
-//!    glyphs),
+//! 1. the app's own SVGs and the raster app icon from `resources/icons` (the
+//!    display-filter preset glyphs and `app-icon-256.png`),
 //! 2. the Lucide catalog icons the UI uses beyond the default component
 //!    bundle, selected at compile time via `icon_assets!`,
 //! 3. the default component bundle for everything the framework itself
@@ -25,21 +25,28 @@
 //! an error rather than `None`, so the app-owned sources must be
 //! consulted before it.
 
-use std::borrow::Cow;
+use std::{
+    borrow::Cow,
+    io::Cursor,
+    sync::{Arc, OnceLock},
+};
 
 use gpui::{
     AssetSource, Result, SharedString,
     assets::{Assets as ComponentAssets, icon_assets},
 };
+use image::RgbaImage;
 use rust_embed::RustEmbed;
 
 /// The app's own icons, embedded from `resources/` at build time.
 ///
 /// Keys are relative to the embedded folder root, e.g. the layer files
-/// `icons/left-newer/older.svg` and `icons/left-newer/newer.svg`.
+/// `icons/left-newer/older.svg` and the raster app icon
+/// `icons/app-icon-256.png`.
 #[derive(RustEmbed)]
 #[folder = "./resources"]
 #[include = "icons/**/*.svg"]
+#[include = "icons/app-icon-256.png"]
 struct AppIcons;
 
 // Lucide catalog icons used by the UI that the default component bundle
@@ -106,10 +113,36 @@ impl AssetSource for AppAssets {
     }
 }
 
+/// The application icon as an RGBA image for `WindowOptions::icon`.
+///
+/// Only X11 honors a runtime window icon; on macOS and Windows the icon
+/// comes from the app bundle respectively the icon resource embedded by
+/// `build.rs`. Decoded once and cached; `None` if the embedded PNG is
+/// unreadable (the window then simply keeps the platform default).
+pub fn app_icon() -> Option<Arc<RgbaImage>> {
+    static ICON: OnceLock<Option<Arc<RgbaImage>>> = OnceLock::new();
+    ICON.get_or_init(|| {
+        let file = AppIcons::get("icons/app-icon-256.png")?;
+        let reader = image::ImageReader::with_format(
+            Cursor::new(file.data.as_ref()),
+            image::ImageFormat::Png,
+        );
+        reader.decode().ok().map(|img| Arc::new(img.to_rgba8()))
+    })
+    .clone()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::state::FilterPreset;
+
+    #[test]
+    fn app_icon_decodes_to_256_pixels() {
+        let icon = app_icon().expect("embedded app icon must decode");
+        assert_eq!(icon.width(), 256);
+        assert_eq!(icon.height(), 256);
+    }
 
     /// Every preset glyph layer the UI stacks, derived from
     /// [`FilterPreset`] so the served assets and the preset definitions

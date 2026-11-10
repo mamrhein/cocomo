@@ -225,6 +225,9 @@ fn open_window(manager: Entity<GuiSessionManager>, cx: &mut App) {
         WindowOptions {
             focus: true,
             window_bounds: Some(WindowBounds::Windowed(bounds)),
+            // Honored on X11 only; macOS and Windows take the icon from
+            // the bundle respectively the exe resource (see `build.rs`).
+            icon: crate::assets::app_icon(),
             ..Default::default()
         },
         cx,

@@ -15,9 +15,21 @@ license-file = "../LICENSE.TXT"
 keywords = ["compare", "copy", "directory", "file", "move"]
 categories = ["filesystem", "gui"]
 
+# `cargo bundle` (cargo-bundle) macOS/.app metadata; the icon is the
+# icns derived from resources/icons/app-icon.svg.
+[package.metadata.bundle]
+name = "cocomo"
+identifier = "de.adrhinum.cocomo"
+icon = ["resources/icons/app-icon.icns"]
+short_description = "COmpare, COpy & MOve directories and files."
+category = "public.app-category.utilities"
+
 [[bin]]
 name = "cocomo-gui"
 path = "src/main.rs"
+
+[build-dependencies]
+winresource = "0.1"
 
 [dependencies]
 anyhow = "1"
