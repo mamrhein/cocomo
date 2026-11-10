@@ -1784,6 +1784,7 @@ impl FolderCompareView {
                 .col_selectable(false)
                 .cell_selectable(false)
                 .sortable(false)
+                .col_resizable(false)
                 .col_movable(false)
                 .loop_selection(false)
             });
@@ -1809,7 +1810,9 @@ impl FolderCompareView {
             self._state_subscription =
                 Some(cx.observe(&self.state, |this, _, cx| {
                     if let Some(table) = this.table_state.as_ref() {
-                        table.update(cx, |table, cx| table.refresh(cx));
+                        table.update(cx, |table, cx| {
+                            table.refresh(cx);
+                        });
                     }
                 }));
             self.table_state = Some(table_state.clone());
@@ -2051,15 +2054,17 @@ fn status_indicator(status: &DirEntryStatus) -> &'static str {
 
 /// Compact display for an RFC 3339 modification timestamp.
 ///
-/// Renders `2026-10-27T21:50:51+01:00` as `2026-10-27 21:50`; seconds and
-/// offset carry no comparison signal and the full string would dominate
-/// the date lanes. Anything shorter than a timestamp is passed through.
+/// Renders `2026-10-27T21:50:51+01:00` as `2026-10-27 21:50:51`; the
+/// offset carries no comparison signal and is dropped. Seconds are kept
+/// because a same-minute modification difference is exactly what the
+/// comparison reports. Anything shorter than a timestamp is passed
+/// through.
 pub(crate) fn format_modified(modified: &str) -> String {
-    if modified.len() >= 16
+    if modified.len() >= 19
         && modified.is_char_boundary(10)
-        && modified.is_char_boundary(16)
+        && modified.is_char_boundary(19)
     {
-        format!("{} {}", &modified[..10], &modified[11..16])
+        format!("{} {}", &modified[..10], &modified[11..19])
     } else {
         modified.to_string()
     }
@@ -2654,10 +2659,10 @@ mod tests {
     }
 
     #[test]
-    fn format_modified_keeps_date_and_minutes() {
+    fn format_modified_keeps_date_and_time() {
         assert_eq!(
             format_modified("2026-10-27T21:50:51+01:00"),
-            "2026-10-27 21:50"
+            "2026-10-27 21:50:51"
         );
         // Values that are not full timestamps pass through unchanged.
         assert_eq!(format_modified(""), "");
