@@ -68,6 +68,43 @@ fn default_true() -> bool {
     true
 }
 
+/// Which light/dark mode the app uses.
+///
+/// gpui-component's `ThemeMode` has only `Light` and `Dark`; following
+/// the OS is resolved by the application against the platform
+/// appearance (see [`crate::theme`]).
+#[derive(
+    Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum ThemePreference {
+    /// Follow the operating system's light/dark setting.
+    #[default]
+    System,
+    /// Always light, regardless of the OS.
+    Light,
+    /// Always dark, regardless of the OS.
+    Dark,
+}
+
+impl ThemePreference {
+    /// Display label for the Options dialog.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::System => "Follow system",
+            Self::Light => "Light",
+            Self::Dark => "Dark",
+        }
+    }
+}
+
+/// The theme preferences in display order.
+const THEME_PREFERENCES: [ThemePreference; 3] = [
+    ThemePreference::System,
+    ThemePreference::Light,
+    ThemePreference::Dark,
+];
+
 /// The persisted application preferences.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct AppOptions {
@@ -81,6 +118,9 @@ pub struct AppOptions {
     /// horizontal row instead of stacking them.
     #[serde(default)]
     pub single_row_toolbar: bool,
+    /// Which light/dark mode to use.
+    #[serde(default)]
+    pub theme: ThemePreference,
     /// Global row-color overrides (spec section 7.1).
     #[serde(default)]
     pub colors: ColorOverrides,
@@ -100,6 +140,7 @@ impl Default for AppOptions {
             restore_workspace_on_launch: true,
             auto_save_sessions: true,
             single_row_toolbar: false,
+            theme: ThemePreference::default(),
             colors: ColorOverrides::default(),
             commands: HashMap::new(),
             sync_presets: Vec::new(),
@@ -330,11 +371,37 @@ fn render_general_page(draft: &Entity<OptionsDraft>, cx: &App) -> AnyElement {
             })
     };
 
+    let theme = draft.read(cx).working.theme;
+    let theme_row = {
+        let draft_theme = draft.clone();
+        h_flex()
+            .items_center()
+            .gap_2()
+            .child(Label::new("Theme:").text_sm())
+            .children(THEME_PREFERENCES.iter().enumerate().map(|(i, pref)| {
+                let pref = *pref;
+                let draft_btn = draft_theme.clone();
+                Button::new(("options_theme", i))
+                    .label(pref.label())
+                    .ghost()
+                    .small()
+                    .selected(pref == theme)
+                    .accessibility_label(pref.label())
+                    .on_click(move |_, _, cx| {
+                        draft_btn.update(cx, |d, cx| {
+                            d.working.theme = pref;
+                            cx.notify();
+                        });
+                    })
+            }))
+    };
+
     v_flex()
         .gap_3()
         .child(restore_switch)
         .child(auto_save_switch)
         .child(single_row_switch)
+        .child(theme_row)
         .child(
             div()
                 .text_xs()
@@ -608,6 +675,9 @@ fn apply_options(draft: Entity<OptionsDraft>, cx: &mut App) {
         return;
     }
     cx.set_global(options);
+    // The theme global is set from the just-saved preference; `Theme`
+    // changes refresh every window, so no extra repaint is needed.
+    crate::theme::apply(cx);
     commands::rebuild_keymap(cx);
     menus::rebuild_menus(cx);
     crate::windows::refresh_all_windows(cx);
@@ -682,6 +752,7 @@ mod tests {
                 binding: Some("cmd-s".to_string()),
             },
         );
+        options.theme = ThemePreference::Dark;
         let text = serde_json::to_string(&options).unwrap();
         let back: AppOptions = serde_json::from_str(&text).unwrap();
         assert_eq!(back.colors.important.as_deref(), Some("#ff0000"));
@@ -689,6 +760,7 @@ mod tests {
             back.command_binding("session.save"),
             Some("cmd-s".to_string().as_str())
         );
+        assert_eq!(back.theme, ThemePreference::Dark);
     }
 
     #[test]
@@ -697,5 +769,6 @@ mod tests {
             serde_json::from_str(r#"{"colors": {}}"#).unwrap();
         assert!(back.restore_workspace_on_launch);
         assert!(back.auto_save_sessions);
+        assert_eq!(back.theme, ThemePreference::System);
     }
 }

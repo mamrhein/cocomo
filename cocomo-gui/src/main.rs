@@ -37,6 +37,7 @@ mod table_diff;
 mod tabview;
 mod text_diff;
 mod text_merge;
+mod theme;
 mod ui;
 mod windows;
 mod workspace;
@@ -111,6 +112,10 @@ fn main() -> Result<()> {
             cx.set_global(log::LogPaneOpen(true));
             file_formats::FileFormatRegistry::init_global(cx);
             options::init_global(cx);
+            // Apply the persisted light/dark choice over the framework's
+            // light default. OS switches are tracked per window by the
+            // appearance observer in `WindowRoot`; see `theme`.
+            theme::apply(cx);
             windows::WindowRegistry::init_global(cx);
 
             // Record that a run is live and learn whether the last one ended
@@ -223,7 +228,14 @@ fn open_window(manager: Entity<GuiSessionManager>, cx: &mut App) {
             ..Default::default()
         },
         cx,
-        |window, cx| cx.new(|cx| WindowRoot::new(manager.clone(), window, cx)),
+        |window, cx| {
+            // On Linux the portal's first appearance reply can still be
+            // in flight at startup, so each window re-syncs the theme
+            // from its own view of the OS on creation (a no-op while a
+            // manual theme is set; see `theme::sync_if_system`).
+            theme::sync_if_system(window, cx);
+            cx.new(|cx| WindowRoot::new(manager.clone(), window, cx))
+        },
     )
     .expect("failed to open window")
     .0;
