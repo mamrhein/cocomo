@@ -1,5 +1,20 @@
 # Icons
 
+## App icon
+
+`app-icon.svg` is the application icon (512×512 rounded tile). It mirrors
+the status-icon language below: two panes with five circle rows — left
+newer (red/gray), right newer (gray/red), same (rings), left orphan (blue,
+right side empty) and right orphan (left side empty, blue) — bridged by
+two translucent triple-chevron figures: the upper points right, the lower
+points left; the heads partially overlap (darker behind lighter) and the
+lightest head leads each figure. `app-icon-256.png` is a 256×256 raster
+derived from the SVG for packaging, along with `app-icon.icns` (macOS,
+types 16 px through 1024 px @2x) and `app-icon.ico` (Windows, PNG entries
+16/32/48/64/128/256); only the SVG is embedded into the binary.
+
+## Status icons
+
 Status icons for the directory comparison. Each icon shows two columns of
 circles: left column = left side, right column = right side.
 

@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <title>cocomo — compare, copy &amp; move directories and files</title>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2b333f"/>
+      <stop offset="1" stop-color="#161b22"/>
+    </linearGradient>
+  </defs>
+
+  <!-- App tile: rounded square, macOS-style corner ratio (~22.5%). -->
+  <rect x="0" y="0" width="512" height="512" rx="115" fill="url(#bg)"/>
+
+  <!-- The two comparison panes. -->
+  <rect x="64"  y="72" width="168" height="368" rx="28"
+        fill="#ffffff" fill-opacity="0.08"
+        stroke="#ffffff" stroke-opacity="0.22" stroke-width="4"/>
+  <rect x="280" y="72" width="168" height="368" rx="28"
+        fill="#ffffff" fill-opacity="0.08"
+        stroke="#ffffff" stroke-opacity="0.22" stroke-width="4"/>
+
+  <!-- Row 1: left newer — red on the left, its older gray counterpart
+       on the right. -->
+  <circle cx="148" cy="120" r="32" fill="#e5484d"/>
+  <circle cx="364" cy="120" r="32" fill="#9b9b9b"/>
+
+  <!-- Row 2: right newer — mirrored pair. -->
+  <circle cx="148" cy="188" r="32" fill="#9b9b9b"/>
+  <circle cx="364" cy="188" r="32" fill="#e5484d"/>
+
+  <!-- Row 3: same — hollow rings on both sides. -->
+  <circle cx="148" cy="256" r="26" fill="none" stroke="#b6bcc6" stroke-width="11"/>
+  <circle cx="364" cy="256" r="26" fill="none" stroke="#b6bcc6" stroke-width="11"/>
+
+  <!-- Rows 4 and 5: orphans — a blue circle only on the side where the
+       entry exists; the missing side stays empty. -->
+  <circle cx="148" cy="324" r="32" fill="#3b82f6"/>
+  <circle cx="364" cy="392" r="32" fill="#3b82f6"/>
+
+  <!-- Two stacked triple-chevron figures bridging both panes: the
+       upper points right, the lower points left. The heads are thick
+       and spaced so each darker head slips partially under the next
+       lighter one; the lightest head leads each figure (right in the
+       upper, left in the lower). Group-level opacity keeps the overlaps
+       a uniform tone instead of stacking per-shape translucency. -->
+  <g opacity="0.85">
+    <!-- Upper figure: right-pointing, lightest head at the right. -->
+    <path d="M270 202 L206 154 L206 180 L246 202 L206 224 L206 250 Z"
+          fill="#238636"/>
+    <path d="M288 202 L224 154 L224 180 L264 202 L224 224 L224 250 Z"
+          fill="#3fb950"/>
+    <path d="M306 202 L242 154 L242 180 L282 202 L242 224 L242 250 Z"
+          fill="#7ee787"/>
+    <!-- Lower figure: left-pointing, lightest head at the left (drawn
+         last so it lies over the darker ones). -->
+    <path d="M242 310 L306 262 L306 288 L266 310 L306 332 L306 358 Z"
+          fill="#238636"/>
+    <path d="M224 310 L288 262 L288 288 L248 310 L288 332 L288 358 Z"
+          fill="#3fb950"/>
+    <path d="M206 310 L270 262 L270 288 L230 310 L270 332 L270 358 Z"
+          fill="#7ee787"/>
+  </g>
+</svg>
