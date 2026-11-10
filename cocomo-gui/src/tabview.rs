@@ -17,8 +17,6 @@
 
 use std::any::Any;
 
-#[cfg(not(target_os = "macos"))]
-use gpui::component::menu::AppMenuBar;
 use gpui::{
     AnyElement, AnyView, App, Context, ElementId, Entity, FocusHandle, Render,
     SharedString, Subscription, Window,
@@ -32,6 +30,8 @@ use gpui::{
     div,
     prelude::*,
 };
+#[cfg(not(target_os = "macos"))]
+use gpui::{component::menu::AppMenuBar, rems};
 
 use crate::{
     hex_diff::HexDiffView,
