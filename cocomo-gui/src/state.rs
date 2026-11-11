@@ -55,13 +55,17 @@ pub enum SortKey {
     Status,
     /// Entry name, case-insensitive.
     Name,
-    /// Left-side size; entries missing on the left sort last.
+    /// Left-side size; entries missing on the left are ordered by their
+    /// right-side size.
     SizeLeft,
-    /// Right-side size; entries missing on the right sort last.
+    /// Right-side size; entries missing on the right are ordered by their
+    /// left-side size.
     SizeRight,
-    /// Left-side modification time; entries missing on the left sort last.
+    /// Left-side modification time; entries missing on the left are
+    /// ordered by their right-side time.
     DateLeft,
-    /// Right-side modification time; entries missing on the right sort last.
+    /// Right-side modification time; entries missing on the right are
+    /// ordered by their left-side time.
     DateRight,
 }
 
@@ -293,10 +297,15 @@ impl DisplayFilters {
 ///
 /// Entries hidden by `filters` or rejected by `name_filter` are excluded
 /// outright. Directories always pass the name filter so the tree stays
-/// navigable; the pattern applies to files. Missing side values always
-/// sort last regardless of direction, so an orphan never jumps to the top
-/// of a size or date sort. Ties break on name, which keeps the order
-/// stable and predictable across re-sorts.
+/// navigable; the pattern applies to files. Directories precede the files
+/// of their level in both directions: the sort key reorders within the
+/// directory and file groups but never scatters a branch through the file
+/// list, so sorting cannot destroy the tree structure. For the size and
+/// date keys an entry missing the sorted side falls back to the other
+/// side's value, so orphans are ordered by the size and date they
+/// actually have; only an entry missing on both sides sorts last. Ties
+/// break on name, which keeps the order stable and predictable across
+/// re-sorts.
 fn compute_display_order(
     entries: &[DirEntry],
     key: SortKey,
@@ -309,6 +318,10 @@ fn compute_display_order(
         .collect();
     order.sort_by(|&a, &b| {
         let (ea, eb) = (&entries[a], &entries[b]);
+        // Dirs-first is a structural grouping, not a sort: it is not
+        // affected by `descending`, so even a descending sort cannot
+        // interleave the files into the directory run.
+        let group = entry_is_dir(eb).cmp(&entry_is_dir(ea));
         let ord = match key {
             SortKey::Status => {
                 apply_direction(ea.status.cmp(&eb.status), descending)
@@ -317,27 +330,27 @@ fn compute_display_order(
                 apply_direction(name_cmp(&ea.name, &eb.name), descending)
             }
             SortKey::SizeLeft => option_cmp(
-                side_size(ea, true),
-                side_size(eb, true),
+                sort_size(ea, true),
+                sort_size(eb, true),
                 descending,
             ),
             SortKey::SizeRight => option_cmp(
-                side_size(ea, false),
-                side_size(eb, false),
+                sort_size(ea, false),
+                sort_size(eb, false),
                 descending,
             ),
             SortKey::DateLeft => option_cmp(
-                side_modified(ea, true),
-                side_modified(eb, true),
+                sort_modified(ea, true),
+                sort_modified(eb, true),
                 descending,
             ),
             SortKey::DateRight => option_cmp(
-                side_modified(ea, false),
-                side_modified(eb, false),
+                sort_modified(ea, false),
+                sort_modified(eb, false),
                 descending,
             ),
         };
-        ord.then_with(|| name_cmp(&ea.name, &eb.name))
+        group.then(ord).then_with(|| name_cmp(&ea.name, &eb.name))
     });
     order
 }
@@ -591,9 +604,22 @@ fn side_size(entry: &DirEntry, left: bool) -> Option<u64> {
     side.as_ref().map(|s| s.size)
 }
 
+/// The size to order by: the requested side's, falling back to the other
+/// side so an orphan is ordered by the size it has instead of being
+/// pinned to the end of its level.
+fn sort_size(entry: &DirEntry, left: bool) -> Option<u64> {
+    side_size(entry, left).or_else(|| side_size(entry, !left))
+}
+
 fn side_modified(entry: &DirEntry, left: bool) -> Option<&str> {
     let side = if left { &entry.left } else { &entry.right };
     side.as_ref().map(|s| s.modified.as_str())
+}
+
+/// The modified time to order by; like [`sort_size`], an orphan falls
+/// back to the side that exists.
+fn sort_modified(entry: &DirEntry, left: bool) -> Option<&str> {
+    side_modified(entry, left).or_else(|| side_modified(entry, !left))
 }
 
 /// Absolute endpoints for an entry's two sides.
@@ -3414,7 +3440,7 @@ mod tests {
     }
 
     #[test]
-    fn size_sort_keeps_missing_sides_last_in_both_directions() {
+    fn size_sort_orders_orphans_by_their_existing_side() {
         let entries = sample_entries();
         let filters = DisplayFilters::default();
         let asc = compute_display_order(
@@ -3424,7 +3450,8 @@ mod tests {
             &filters,
             None,
         );
-        // Left sizes: 100, 200, 300; bravo.txt has no left side → last.
+        // Left sizes: 100, 200, 300; bravo.txt has no left side and
+        // orders by its right size (500) instead of being pinned last.
         assert_eq!(
             names_in_order(&entries, &asc),
             ["Alpha.txt", "charlie.txt", "delta.txt", "bravo.txt"]
@@ -3438,7 +3465,81 @@ mod tests {
         );
         assert_eq!(
             names_in_order(&entries, &desc),
-            ["delta.txt", "charlie.txt", "Alpha.txt", "bravo.txt"]
+            ["bravo.txt", "delta.txt", "charlie.txt", "Alpha.txt"]
+        );
+        // The right-side key mirrors the fallback: charlie.txt (left
+        // orphan) orders by its left size (200).
+        let asc = compute_display_order(
+            &entries,
+            SortKey::SizeRight,
+            false,
+            &filters,
+            None,
+        );
+        assert_eq!(
+            names_in_order(&entries, &asc),
+            ["Alpha.txt", "charlie.txt", "delta.txt", "bravo.txt"]
+        );
+    }
+
+    #[test]
+    fn size_sort_keeps_directories_before_files_in_both_directions() {
+        let mut entries = sample_entries();
+        entries.push(entry(
+            "sub",
+            DirEntryStatus::Same,
+            Some(dir_info("sub")),
+            Some(dir_info("sub")),
+        ));
+        let filters = DisplayFilters::default();
+        // The directory leads the level even though its size would place
+        // it among the smallest files; the key orders within the groups.
+        let asc = compute_display_order(
+            &entries,
+            SortKey::SizeLeft,
+            false,
+            &filters,
+            None,
+        );
+        assert_eq!(
+            names_in_order(&entries, &asc),
+            ["sub", "Alpha.txt", "charlie.txt", "delta.txt", "bravo.txt"]
+        );
+        let desc = compute_display_order(
+            &entries,
+            SortKey::SizeLeft,
+            true,
+            &filters,
+            None,
+        );
+        assert_eq!(
+            names_in_order(&entries, &desc),
+            ["sub", "bravo.txt", "delta.txt", "charlie.txt", "Alpha.txt"]
+        );
+    }
+
+    #[test]
+    fn name_sort_keeps_directories_before_files() {
+        let mut entries = sample_entries();
+        entries.push(entry(
+            "sub",
+            DirEntryStatus::Same,
+            Some(dir_info("sub")),
+            Some(dir_info("sub")),
+        ));
+        // Even the name sort keeps the tree skeleton grouped: `sub`
+        // leads instead of interleaving between `charlie.txt` and
+        // `delta.txt`.
+        let asc = compute_display_order(
+            &entries,
+            SortKey::Name,
+            false,
+            &DisplayFilters::default(),
+            None,
+        );
+        assert_eq!(
+            names_in_order(&entries, &asc),
+            ["sub", "Alpha.txt", "bravo.txt", "charlie.txt", "delta.txt"]
         );
     }
 
@@ -3452,11 +3553,11 @@ mod tests {
             &DisplayFilters::default(),
             None,
         );
-        // Right dates: Alpha 01-01, delta 01-04, bravo 01-05; charlie has
-        // no right side → last.
+        // Right dates: Alpha 01-01, delta 01-04, bravo 01-05; charlie
+        // has no right side and orders by its left date (01-02).
         assert_eq!(
             names_in_order(&entries, &asc),
-            ["Alpha.txt", "delta.txt", "bravo.txt", "charlie.txt"]
+            ["Alpha.txt", "charlie.txt", "delta.txt", "bravo.txt"]
         );
     }
 
@@ -4300,15 +4401,15 @@ mod tests {
         });
 
         state.update(cx, |state, _cx| {
-            // Name ascending: row 2 is the left-only directory `lonely`,
-            // so only the left re-root applies; row 1 is a file, where
-            // none apply.
+            // Dirs-first name order: row 1 is the left-only directory
+            // `lonely`, so only the left re-root applies; row 2 is a
+            // file, where none apply.
             state.go_back(_cx);
-            state.select_row(2, _cx);
+            state.select_row(1, _cx);
             assert!(state.can_set_base_folder(BaseSide::Left));
             assert!(!state.can_set_base_folder(BaseSide::Right));
             assert!(!state.can_set_base_folder(BaseSide::Both));
-            state.select_row(1, _cx);
+            state.select_row(2, _cx);
             assert!(!state.can_set_base_folder(BaseSide::Left));
         });
     }
@@ -4723,11 +4824,11 @@ mod tests {
         });
 
         cx.update(|cx| {
-            // Expand and select the child row (name order: aaa.txt, sub,
-            // sub/inner.txt).
+            // Expand and select the child row (dirs-first name order:
+            // sub, sub/inner.txt, aaa.txt).
             state.update(cx, |state, cx| {
                 state.toggle_expanded("sub", cx);
-                state.select_row(2, cx);
+                state.select_row(1, cx);
             });
             assert_eq!(
                 state.read(cx).selected_entry().unwrap().name,
@@ -4744,6 +4845,72 @@ mod tests {
             let state_r = state.read(cx);
             assert!(state_r.is_expanded("sub"));
             assert_eq!(state_r.selected_entry().unwrap().name, "inner.txt");
+        });
+    }
+
+    #[gpui::test]
+    fn size_sort_keeps_an_expanded_subtree_under_its_directory(
+        cx: &mut TestAppContext,
+    ) {
+        init_log_globals(cx);
+        let state = cx.new(|cx| {
+            let mut state = AppState::new(
+                Endpoint::local("/left"),
+                Endpoint::local("/right"),
+                "test".into(),
+                cx,
+            );
+            state.set_comparison_for_test(comparison(vec![
+                dir_with_sub(
+                    "sub",
+                    DirEntryStatus::Same,
+                    comparison(vec![entry(
+                        "big.txt",
+                        DirEntryStatus::Same,
+                        Some(info("sub/big.txt", 900, "")),
+                        Some(info("sub/big.txt", 900, "")),
+                    )]),
+                ),
+                entry(
+                    "aaa.txt",
+                    DirEntryStatus::Same,
+                    Some(info("aaa.txt", 1, "")),
+                    Some(info("aaa.txt", 1, "")),
+                ),
+                entry(
+                    "zzz.txt",
+                    DirEntryStatus::Same,
+                    Some(info("zzz.txt", 500, "")),
+                    Some(info("zzz.txt", 500, "")),
+                ),
+            ]));
+            state
+        });
+
+        cx.update(|cx| {
+            state.update(cx, |state, cx| {
+                state.toggle_expanded("sub", cx);
+                // First click activates `SizeLeft` ascending, the second
+                // reverses it.
+                state.set_sort(SortKey::SizeLeft, cx);
+                state.set_sort(SortKey::SizeLeft, cx);
+            });
+            let state = state.read(cx);
+            // Descending size would float `zzz.txt` above the (size-0)
+            // directory; the dirs-first grouping keeps the subtree
+            // directly below its parent, with the files ordered below.
+            let rows: Vec<(&str, usize)> = (0..state.entry_count())
+                .map(|i| {
+                    (
+                        state.entry_at(i).unwrap().name.as_str(),
+                        state.row_at(i).unwrap().depth(),
+                    )
+                })
+                .collect();
+            assert_eq!(
+                rows,
+                [("sub", 0), ("big.txt", 1), ("zzz.txt", 0), ("aaa.txt", 0),]
+            );
         });
     }
 
