@@ -5292,7 +5292,7 @@ pub(crate) fn new_text_diff_view(
     // The grammar (when the caller supplies one) drives classification and
     // editor highlighting; otherwise the language is detected from the
     // endpoints' extensions.
-    let title = format!("{} vs {}", base_name(&left), base_name(&right));
+    let title = left.pair_title(&right);
     let session = cx.new(|cx| {
         TextDiffSession::new(left, right, title.into(), parent, manager, cx)
     });
@@ -5313,15 +5313,6 @@ pub(crate) fn new_text_diff_view_from_texts(
         TextDiffSession::from_texts(left_text, right_text, title, manager, cx)
     });
     cx.new(|cx| TextDiffView::new(session, cx))
-}
-
-/// File name of an endpoint, for the tab title.
-fn base_name(endpoint: &Endpoint) -> String {
-    endpoint
-        .path()
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| endpoint.display())
 }
 
 // ---------------------------------------------------------------------------

@@ -841,34 +841,12 @@ impl SessionCore {
     /// Create the core for a session comparing `left` with `right`, deriving
     /// the tab title from the two endpoints.
     fn new(left: Endpoint, right: Endpoint) -> Self {
-        let name = Self::tab_title_for(&left, &right);
+        let name = left.pair_title(&right);
         Self {
             id: NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed),
             name,
             left,
             right,
-        }
-    }
-
-    /// Generate a short tab title from the two endpoints' entry names.
-    ///
-    /// When both sides share the same name the pair carries no extra
-    /// information, so the title is shortened to the single name.
-    fn tab_title_for(left: &Endpoint, right: &Endpoint) -> String {
-        let left_name = left
-            .path()
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| "…".to_string());
-        let right_name = right
-            .path()
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| "…".to_string());
-        if left_name == right_name {
-            left_name
-        } else {
-            format!("{left_name} vs {right_name}")
         }
     }
 }

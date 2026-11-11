@@ -281,6 +281,29 @@ impl Endpoint {
         self.url.to_string()
     }
 
+    /// Short display title for this endpoint paired with `other`, used by
+    /// the frontends as the session name and tab title.
+    ///
+    /// The title combines the two sides' entry names. When both sides
+    /// share the same name the pair carries no extra information, so the
+    /// title is shortened to the single name.
+    pub fn pair_title(&self, other: &Endpoint) -> String {
+        let entry_name = |endpoint: &Endpoint| {
+            endpoint
+                .path()
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "…".to_string())
+        };
+        let left_name = entry_name(self);
+        let right_name = entry_name(other);
+        if left_name == right_name {
+            left_name
+        } else {
+            format!("{left_name} vs {right_name}")
+        }
+    }
+
     /// The same endpoint located at `path`.
     ///
     /// For zip endpoints `path` is a location inside the archive; the
@@ -387,6 +410,27 @@ impl PartialEq for Endpoint {
 mod tests {
     use super::*;
     use crate::NullPrompter;
+
+    #[test]
+    fn pair_title_joins_the_entry_names() {
+        let left = Endpoint::local("/a/b");
+        let right = Endpoint::local("/x/y");
+        assert_eq!(left.pair_title(&right), "b vs y");
+    }
+
+    #[test]
+    fn pair_title_shortens_when_names_are_equal() {
+        let left = Endpoint::local("/a/b");
+        let right = Endpoint::local("/x/b");
+        assert_eq!(left.pair_title(&right), "b");
+    }
+
+    #[test]
+    fn pair_title_falls_back_for_paths_without_a_file_name() {
+        let left = Endpoint::local("/");
+        let right = Endpoint::local("/x/y");
+        assert_eq!(left.pair_title(&right), "… vs y");
+    }
 
     #[test]
     fn bare_paths_share_the_local_identity() {

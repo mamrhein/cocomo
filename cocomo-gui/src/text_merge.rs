@@ -743,12 +743,8 @@ impl MergeSession {
     ) {
         self.ancestor = Some(ancestor.clone());
         self.show_ancestor = true;
-        self.title = format!(
-            "{} vs {} (3-way)",
-            base_name(&self.left),
-            base_name(&self.right)
-        )
-        .into();
+        self.title =
+            format!("{} (3-way)", self.left.pair_title(&self.right)).into();
         if let Some(manager) = &self.manager {
             manager.update(cx, |m, cx| {
                 m.set_active_merge_ancestor(&ancestor, cx)
@@ -2274,15 +2270,6 @@ impl Render for MergeView {
 // Factory
 // ---------------------------------------------------------------------------
 
-/// Base name of an endpoint path, falling back to its full display form.
-fn base_name(endpoint: &Endpoint) -> String {
-    endpoint
-        .path()
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| endpoint.display())
-}
-
 /// Create a merge view entity for the given endpoints.
 pub(crate) fn new_text_merge_view(
     left: Endpoint,
@@ -2292,10 +2279,8 @@ pub(crate) fn new_text_merge_view(
     cx: &mut App,
 ) -> Entity<MergeView> {
     let title = match &ancestor {
-        Some(_) => {
-            format!("{} vs {} (3-way)", base_name(&left), base_name(&right))
-        }
-        None => format!("{} vs {}", base_name(&left), base_name(&right)),
+        Some(_) => format!("{} (3-way)", left.pair_title(&right)),
+        None => left.pair_title(&right),
     }
     .into();
     let session = cx.new(|cx| {

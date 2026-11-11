@@ -1021,7 +1021,7 @@ pub(crate) fn new_table_diff_view(
     manager: Option<Entity<GuiSessionManager>>,
     cx: &mut App,
 ) -> Entity<TableDiffView> {
-    let title = format!("{} vs {}", base_name(&left), base_name(&right));
+    let title = left.pair_title(&right);
     let session = cx.new(|cx| {
         TableDiffSession::new(left, right, title.into(), manager, cx)
     });

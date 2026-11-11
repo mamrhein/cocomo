@@ -900,7 +900,7 @@ impl GuiSessionManager {
         );
 
         let config = SessionConfig {
-            name: "text diff".to_string(),
+            name: left.pair_title(&right),
             session_type: SessionType::TextCompare,
             left: ProviderRef {
                 provider: left.provider_ref(),
@@ -948,7 +948,7 @@ impl GuiSessionManager {
         );
 
         let config = SessionConfig {
-            name: "text merge".to_string(),
+            name: left.pair_title(&right),
             session_type: SessionType::TextMerge,
             left: ProviderRef {
                 provider: left.provider_ref(),
@@ -1006,7 +1006,6 @@ impl GuiSessionManager {
                 );
                 self.push_pair_tab(
                     SessionType::TableCompare,
-                    "table diff",
                     TabEntity::from_table_diff(view),
                     left,
                     right,
@@ -1023,7 +1022,6 @@ impl GuiSessionManager {
                 );
                 self.push_pair_tab(
                     SessionType::HexCompare,
-                    "hex diff",
                     TabEntity::from_hex_diff(view),
                     left,
                     right,
@@ -1040,7 +1038,6 @@ impl GuiSessionManager {
                 );
                 self.push_pair_tab(
                     SessionType::PixCompare,
-                    "picture diff",
                     TabEntity::from_picture_diff(view),
                     left,
                     right,
@@ -1054,14 +1051,13 @@ impl GuiSessionManager {
     fn push_pair_tab(
         &mut self,
         session_type: SessionType,
-        name: &str,
         tab_entity: TabEntity,
         left: Endpoint,
         right: Endpoint,
         cx: &mut Context<Self>,
     ) {
         let config = SessionConfig {
-            name: name.to_string(),
+            name: left.pair_title(&right),
             session_type,
             left: ProviderRef {
                 provider: left.provider_ref(),
@@ -1096,13 +1092,8 @@ impl GuiSessionManager {
         center: Option<Endpoint>,
         cx: &mut Context<Self>,
     ) {
-        let name = match session_type {
-            SessionType::DirSync => "folder sync",
-            SessionType::DirMerge => "folder merge",
-            _ => "dir diff",
-        };
         let config = SessionConfig {
-            name: name.to_string(),
+            name: left.pair_title(&right),
             session_type,
             left: ProviderRef {
                 provider: left.provider_ref(),
@@ -1243,7 +1234,7 @@ impl GuiSessionManager {
         cx: &mut Context<Self>,
     ) {
         let config = SessionConfig {
-            name: "dir diff".to_string(),
+            name: left.pair_title(&right),
             session_type: SessionType::DirCompare,
             left: ProviderRef {
                 provider: left.provider_ref(),
@@ -1445,7 +1436,7 @@ impl GuiSessionManager {
                 }
                 _ => {
                     let config = SessionConfig {
-                        name: "dir diff".to_string(),
+                        name: left.pair_title(&right),
                         session_type: SessionType::DirCompare,
                         left: ProviderRef {
                             provider: left.provider_ref(),
