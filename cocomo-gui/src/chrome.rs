@@ -502,7 +502,7 @@ pub fn toolbar_element(
         });
 
     // Ops: reconcile the selected entry toward either side. The
-    // confirmation flow is shared with the Actions menu commands.
+    // confirmation flow is shared with the File menu commands.
     let can_copy_right = active_state.as_ref().is_some_and(|state| {
         state.read(cx).can_transfer(TransferAction::CopyRight)
     });
@@ -727,10 +727,10 @@ pub fn toolbar_element(
     }
 
     let mut ops_group = ToolbarGroup::new("toolbar-ops").label("Operations");
-    if commands::is_visible("actions.copy_right", cx) {
+    if commands::is_visible("file.copy_right", cx) {
         ops_group = ops_group.child(copy_right_btn);
     }
-    if commands::is_visible("actions.copy_left", cx) {
+    if commands::is_visible("file.copy_left", cx) {
         ops_group = ops_group.child(copy_left_btn);
     }
     if commands::is_visible("toolbar.expand", cx) {

@@ -2318,7 +2318,7 @@ impl AppState {
     }
 
     /// Whether the selected entry can be reconciled with `action`, for
-    /// the enabled state of the Actions menu commands.
+    /// the enabled state of the File menu commands.
     pub fn can_transfer(&self, action: TransferAction) -> bool {
         self.transfer_plan(action).is_some()
     }

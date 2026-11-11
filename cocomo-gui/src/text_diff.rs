@@ -5225,7 +5225,7 @@ fn render_diff_row(
                     }
                     menu = menu.separator();
                     if crate::commands::is_visible(
-                        "actions.copy_section_right",
+                        "file.copy_section_right",
                         cx,
                     ) {
                         menu = menu.menu(
@@ -5234,7 +5234,7 @@ fn render_diff_row(
                         );
                     }
                     if crate::commands::is_visible(
-                        "actions.copy_section_left",
+                        "file.copy_section_left",
                         cx,
                     ) {
                         menu = menu.menu(
@@ -5251,7 +5251,7 @@ fn render_diff_row(
                     }
                     if menu_flags.can_copy_file_next {
                         if crate::commands::is_visible(
-                            "actions.copy_file_right_next",
+                            "file.copy_file_right_next",
                             cx,
                         ) {
                             menu = menu.menu(
@@ -5260,7 +5260,7 @@ fn render_diff_row(
                             );
                         }
                         if crate::commands::is_visible(
-                            "actions.copy_file_left_next",
+                            "file.copy_file_left_next",
                             cx,
                         ) {
                             menu = menu.menu(

@@ -13,7 +13,7 @@
 //! recurring sync routine (say "Deploy" = mirror to right) is one click in
 //! the sync view's toolbar instead of a submenu hunt. Presets persist in
 //! [`crate::options::AppOptions`] alongside the other application
-//! preferences; the Tools menu dialog ([`open_sync_presets_dialog`])
+//! preferences; the Options menu dialog ([`open_sync_presets_dialog`])
 //! manages the list.
 
 use gpui::{
@@ -240,7 +240,7 @@ impl Render for SyncPresetsBody {
     }
 }
 
-/// Open the folder-sync presets dialog (Tools menu).
+/// Open the folder-sync presets dialog (Options menu).
 pub(crate) fn open_sync_presets_dialog(window: &mut Window, cx: &mut App) {
     let body = cx.new(|cx| SyncPresetsBody::new(window, cx));
     window.open_dialog(cx, move |dialog, _, _| {

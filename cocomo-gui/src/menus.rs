@@ -9,11 +9,14 @@
 
 //! Application menu bar definitions and global action handlers.
 //!
-//! Provides the main menu structure (Session, File, Edit, Actions,
-//! Search, View, Tools, Help) per the UI spec, and registers the global
-//! action handlers on the App. Commands whose operations arrive in later
-//! phases are present but disabled, so the menu never promises an action
-//! that does nothing.
+//! Provides the unified menu bar (Sessions, File / Folder, Edit, Merge,
+//! Search, View, Options, Help) per the menu-structure proposal. The
+//! File / Folder entry is titled after the active view, the Merge menu
+//! only appears on a merge tab, and a base menu whose items do not apply
+//! to the active view is hidden entirely. The module also registers the
+//! global action handlers on the App. Commands whose operations arrive
+//! in later phases are present but disabled, so the menu never promises
+//! an action that does nothing.
 
 use std::{cell::Cell, collections::HashSet};
 
@@ -61,7 +64,7 @@ use crate::{
         SaveMergeOutput, SetMergeAncestor, TakeAncestor, TakeLeft, TakeRight,
     },
     ui::{
-        CopyToFolder, CopyToLeft, CopyToRight, DeleteLeftSide,
+        CopyToFolder, CopyToLeft, CopyToRight, DeleteBothSide, DeleteLeftSide,
         DeleteRightSide, ExchangeEntry, GoBack, GoForward, MoveToFolder,
         MoveToLeft, MoveToRight, NextDifference, PrevDifference, SwapSides,
         SyncMirrorLeft, SyncMirrorRight, SyncUpdateBoth, SyncUpdateLeft,
@@ -134,6 +137,9 @@ actions!(
 ///
 /// Reload lives on `cmd-shift-r`: plain `cmd-r` is the copy-to-right
 /// command the spec assigns it, bound with the folder-view bindings.
+/// `alt-/` is the unified search accelerator: the menu bar has no menu
+/// accelerators, so it dispatches the Search menu's primary command
+/// (next difference) directly.
 pub fn menu_bindings() -> Vec<KeyBinding> {
     vec![
         KeyBinding::new("cmd-n", NewCompare, None),
@@ -142,6 +148,7 @@ pub fn menu_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("cmd-shift-s", SaveSessionAs, None),
         KeyBinding::new("cmd-w", CloseSession, None),
         KeyBinding::new("cmd-shift-r", ReloadCompare, None),
+        KeyBinding::new("alt-/", NextDifference, None),
     ]
 }
 
@@ -287,6 +294,64 @@ fn items<const N: usize>(entries: [Option<MenuItem>; N]) -> Vec<MenuItem> {
     entries.into_iter().flatten().collect()
 }
 
+/// Concatenate menu groups, separated by separator lines.
+///
+/// Empty groups drop out without leaving a dangling line, so a group
+/// whose items are all hidden or do not apply to the active view does
+/// not fragment the menu.
+fn groups(parts: Vec<Vec<MenuItem>>) -> Vec<MenuItem> {
+    let mut out: Vec<MenuItem> = Vec::new();
+    for part in parts {
+        if part.is_empty() {
+            continue;
+        }
+        if !out.is_empty() {
+            out.push(MenuItem::separator());
+        }
+        out.extend(part);
+    }
+    out
+}
+
+/// A submenu item, or `None` when every entry was hidden.
+fn submenu(name: &'static str, entries: Vec<MenuItem>) -> Option<MenuItem> {
+    (!entries.is_empty())
+        .then(|| MenuItem::submenu(Menu::new(name).items(entries)))
+}
+
+/// A menu group, or empty when `cond` does not hold.
+///
+/// Feeds [`groups`], which drops empty groups instead of leaving a
+/// dangling separator line.
+fn when(cond: bool, part: impl FnOnce() -> Vec<MenuItem>) -> Vec<MenuItem> {
+    cond.then(part).unwrap_or_default()
+}
+
+/// The "Open with" submenu shared by the File / Folder menu's open
+/// groups; its commands need a concrete file to act on.
+fn open_with_submenu(
+    hidden: &HashSet<&'static str>,
+    can_open_file: bool,
+) -> Option<MenuItem> {
+    submenu(
+        "Open with",
+        items([
+            show(hidden, "file.open_with_app", || {
+                MenuItem::action("Associated app", OpenWithAssociatedApp)
+                    .disabled(!can_open_file)
+            }),
+            show(hidden, "file.open_with_text_edit", || {
+                MenuItem::action("Text edit", OpenWithTextEdit)
+                    .disabled(!can_open_file)
+            }),
+            show(hidden, "file.open_with_text_patch", || {
+                MenuItem::action("Text patch", OpenWithTextPatch)
+                    .disabled(!can_open_file)
+            }),
+        ]),
+    )
+}
+
 /// The ids of every command the user has hidden.
 fn hidden_command_ids(cx: &App) -> HashSet<&'static str> {
     let opts = cx.global::<crate::options::AppOptions>();
@@ -301,26 +366,36 @@ fn hidden_command_ids(cx: &App) -> HashSet<&'static str> {
 ///
 /// `hidden` holds the command ids the user turned off; their items are
 /// left out entirely rather than disabled, which is what "hide" means.
+/// A base menu whose items do not apply to the active view is omitted
+/// from the bar entirely.
 fn build_app_menus(
     state: MenuState,
     hidden: &HashSet<&'static str>,
 ) -> Vec<Menu> {
-    let no_folder = !state.is_folder;
-    let off = |allowed: bool| no_folder || !allowed;
-    // While Home is active there is no session to save or reload, and the
-    // view-specific menus (Edit, Actions, Search) have nothing to act on,
-    // so they are hidden entirely. The View menu stays: its log pane
-    // toggle works from every view.
     let is_home = state.is_home;
     // The Open with commands need a concrete file: the focused pane of a
     // text compare, or the selected entry of a folder compare.
     let can_open_file =
         state.is_text || (state.is_folder && state.has_selection);
+    // A tab the File / Folder menu can act on: Home has neither a file
+    // pair nor a folder pair, so the menu is hidden there.
+    let has_file_view = state.is_folder || state.is_text || state.is_merge;
 
-    let mut menus = vec![
-        Menu::new("Session").items(items([
+    // Sessions: every session-related command; Quit closes the run.
+    let sessions = Menu::new("Sessions").items(groups(vec![
+        items([
+            show(hidden, "session.new_compare", || {
+                MenuItem::action("New compare…", NewCompare)
+            }),
+            show(hidden, "session.open", || {
+                MenuItem::action("Open session…", OpenSession)
+            }),
+        ]),
+        // The save group needs a live session; Home has none.
+        items([
             show(hidden, "session.save", || {
-                MenuItem::action("Save session", SaveSession).disabled(is_home)
+                MenuItem::action("Save session…", SaveSession)
+                    .disabled(is_home)
             }),
             show(hidden, "session.save_as", || {
                 MenuItem::action("Save session as…", SaveSessionAs)
@@ -336,16 +411,17 @@ fn build_app_menus(
                 MenuItem::action("Clear session", ClearSession)
                     .disabled(!(state.is_folder || state.is_text))
             }),
-            Some(MenuItem::separator()),
+        ]),
+        items([
             show(hidden, "session.back", || {
-                MenuItem::action("Back", GoBack)
-                    .disabled(off(state.can_go_back))
+                MenuItem::action("Back", GoBack).disabled(!state.can_go_back)
             }),
             show(hidden, "session.forward", || {
                 MenuItem::action("Forward", GoForward)
-                    .disabled(off(state.can_go_forward))
+                    .disabled(!state.can_go_forward)
             }),
-            Some(MenuItem::separator()),
+        ]),
+        items([
             show(hidden, "session.swap_sides", || {
                 MenuItem::action("Swap sides", SwapSides)
                     .disabled(!(state.is_folder || state.is_text))
@@ -358,7 +434,8 @@ fn build_app_menus(
                 MenuItem::action("Stop comparison", StopCompare)
                     .disabled(!state.loading)
             }),
-            Some(MenuItem::separator()),
+        ]),
+        items([
             show(hidden, "session.report", || {
                 MenuItem::action("Report…", SessionReport)
                     .disabled(!state.is_text)
@@ -366,7 +443,8 @@ fn build_app_menus(
             show(hidden, "session.info", || {
                 MenuItem::action("Info…", SessionInfo).disabled(!state.is_text)
             }),
-            Some(MenuItem::separator()),
+        ]),
+        items([
             // Merging needs a text compare tab to seed left and right;
             // the ancestor stays empty until three-file merges arrive from
             // the Home card or a folder merge.
@@ -385,7 +463,8 @@ fn build_app_menus(
             }),
             // Re-open the active file pair in another compare view; the
             // items are disabled unless a pair is in reach.
-            Some(MenuItem::submenu(Menu::new("Compare files using").items(
+            submenu(
+                "Compare files using",
                 items([
                     show(hidden, "session.compare_as_text", || {
                         MenuItem::action("Text", CompareUsingText)
@@ -404,98 +483,229 @@ fn build_app_menus(
                             .disabled(!state.can_compare_using)
                     }),
                 ]),
-            ))),
-        ])),
-        Menu::new("File").items(items([
-            show(hidden, "file.new_compare", || {
-                MenuItem::action("New compare…", NewCompare)
+            ),
+        ]),
+        items([
+            show(hidden, "session.close", || {
+                MenuItem::action("Close session", CloseSession)
             }),
-            show(hidden, "file.open_session", || {
-                MenuItem::action("Open session…", OpenSession)
+            show(hidden, "session.close_all", || {
+                MenuItem::action("Close all sessions", CloseAllSessions)
             }),
-            Some(MenuItem::separator()),
+        ]),
+        // Workspace commands act on the whole run, not the active tab,
+        // so they stay available from every view.
+        items([
+            show(hidden, "session.save_workspace", || {
+                MenuItem::action("Save workspace", SaveWorkspace)
+            }),
+            show(hidden, "session.restore_workspace", || {
+                MenuItem::action("Restore workspace", RestoreWorkspace)
+            }),
+        ]),
+        items([show(hidden, "session.quit", || {
+            MenuItem::action("Quit", Quit)
+        })]),
+    ]));
+
+    // File / Folder: one bar entry titled after the active view. The
+    // open and save groups serve text and merge tabs, the reconcile,
+    // to-folder, and sync groups serve folder tabs.
+    let file_items = has_file_view.then(|| {
+        groups(vec![
             // Open file… retargets the focused pane of a text compare;
             // the Open with commands act on the focused file (text) or
             // the selected entry (folder).
-            show(hidden, "file.open_file", || {
-                MenuItem::action("Open file…", OpenFile)
-                    .disabled(!state.is_text)
+            if state.is_text {
+                items([
+                    show(hidden, "file.open_file", || {
+                        MenuItem::action("Open file…", OpenFile)
+                    }),
+                    show(hidden, "file.open_clipboard", || {
+                        MenuItem::action("Open clipboard", OpenClipboard)
+                    }),
+                    open_with_submenu(hidden, can_open_file),
+                ])
+            } else {
+                items([open_with_submenu(hidden, can_open_file)])
+            },
+            // Saving writes the focused side's edited buffer; a merge
+            // keeps the group but only its output can be saved so far.
+            when(state.is_text || state.is_merge, || {
+                items([
+                    show(hidden, "file.save_file", || {
+                        MenuItem::action("Save file", SaveFile)
+                            .disabled(!(state.is_text && state.can_save_file))
+                    }),
+                    show(hidden, "file.save_file_as", || {
+                        MenuItem::action("Save file as…", SaveFileAs)
+                            .disabled(!(state.is_text && state.can_save_file))
+                    }),
+                ])
             }),
-            show(hidden, "file.open_clipboard", || {
-                MenuItem::action("Open clipboard", OpenClipboard)
-                    .disabled(!state.is_text)
+            // Each reconcile command is enabled only when the selected
+            // entry's shape allows it; enabling otherwise would promise
+            // a no-op. Overwriting copies, moves, and deletes confirm in
+            // the handler before running.
+            when(state.is_folder, || {
+                items([
+                    submenu(
+                        "Copy",
+                        items([
+                            show(hidden, "file.copy_right", || {
+                                MenuItem::action("Left to right", CopyToRight)
+                                    .disabled(!state.can_copy_right)
+                            }),
+                            show(hidden, "file.copy_left", || {
+                                MenuItem::action("Right to left", CopyToLeft)
+                                    .disabled(!state.can_copy_left)
+                            }),
+                        ]),
+                    ),
+                    submenu(
+                        "Move",
+                        items([
+                            show(hidden, "file.move_right", || {
+                                MenuItem::action("Left to right", MoveToRight)
+                                    .disabled(!state.can_move_right)
+                            }),
+                            show(hidden, "file.move_left", || {
+                                MenuItem::action("Right to left", MoveToLeft)
+                                    .disabled(!state.can_move_left)
+                            }),
+                        ]),
+                    ),
+                    submenu(
+                        "Delete",
+                        items([
+                            show(hidden, "file.delete_left", || {
+                                MenuItem::action("Left", DeleteLeftSide)
+                                    .disabled(!state.can_delete_left)
+                            }),
+                            show(hidden, "file.delete_right", || {
+                                MenuItem::action("Right", DeleteRightSide)
+                                    .disabled(!state.can_delete_right)
+                            }),
+                            // The delete-both handler lands with the
+                            // next phase; until then the item honestly
+                            // stays disabled.
+                            show(hidden, "file.delete_both", || {
+                                MenuItem::action("Both", DeleteBothSide)
+                                    .disabled(true)
+                            }),
+                        ]),
+                    ),
+                    show(hidden, "file.exchange", || {
+                        MenuItem::action("Exchange", ExchangeEntry)
+                            .disabled(!state.can_exchange)
+                    }),
+                ])
             }),
-            Some(MenuItem::submenu(Menu::new("Open with").items(items([
-                show(hidden, "file.open_with_app", || {
-                    MenuItem::action("Associated app", OpenWithAssociatedApp)
-                        .disabled(!can_open_file)
-                }),
-                show(hidden, "file.open_with_text_edit", || {
-                    MenuItem::action("Text edit", OpenWithTextEdit)
-                        .disabled(!can_open_file)
-                }),
-                show(hidden, "file.open_with_text_patch", || {
-                    MenuItem::action("Text patch", OpenWithTextPatch)
-                        .disabled(!can_open_file)
-                }),
-            ])))),
-            Some(MenuItem::separator()),
-            show(hidden, "file.save_file", || {
-                MenuItem::action("Save file", SaveFile)
-                    .disabled(!(state.is_text && state.can_save_file))
+            when(state.is_folder, || {
+                items([
+                    show(hidden, "file.copy_to_folder", || {
+                        MenuItem::action("Copy to folder…", CopyToFolder)
+                            .disabled(!state.has_selection)
+                    }),
+                    show(hidden, "file.move_to_folder", || {
+                        MenuItem::action("Move to folder…", MoveToFolder)
+                            .disabled(!state.has_selection)
+                    }),
+                ])
             }),
-            show(hidden, "file.save_file_as", || {
-                MenuItem::action("Save file as…", SaveFileAs)
-                    .disabled(!(state.is_text && state.can_save_file))
+            // Whole-comparison sync runs; each confirms first because
+            // mirror deletes the target side's extras.
+            when(state.is_folder, || {
+                items([
+                    submenu(
+                        "Update",
+                        items([
+                            show(hidden, "file.sync_update_left", || {
+                                MenuItem::action("Left", SyncUpdateLeft)
+                                    .disabled(!state.can_sync)
+                            }),
+                            show(hidden, "file.sync_update_right", || {
+                                MenuItem::action("Right", SyncUpdateRight)
+                                    .disabled(!state.can_sync)
+                            }),
+                            show(hidden, "file.sync_update_both", || {
+                                MenuItem::action("Both", SyncUpdateBoth)
+                                    .disabled(!state.can_sync)
+                            }),
+                        ]),
+                    ),
+                    submenu(
+                        "Mirror",
+                        items([
+                            show(hidden, "file.sync_mirror_left", || {
+                                MenuItem::action("Left", SyncMirrorLeft)
+                                    .disabled(!state.can_sync)
+                            }),
+                            show(hidden, "file.sync_mirror_right", || {
+                                MenuItem::action("Right", SyncMirrorRight)
+                                    .disabled(!state.can_sync)
+                            }),
+                        ]),
+                    ),
+                ])
             }),
-            Some(MenuItem::separator()),
-            show(hidden, "file.close_session", || {
-                MenuItem::action("Close session", CloseSession)
+            // Text-sync commands: copy this pair's file and step the
+            // parent folder session to its next difference.
+            when(state.is_text, || {
+                items([
+                    show(hidden, "file.copy_file_right_next", || {
+                        MenuItem::action(
+                            "Copy file to right and open next",
+                            CopyFileRightNext,
+                        )
+                    }),
+                    show(hidden, "file.copy_file_left_next", || {
+                        MenuItem::action(
+                            "Copy file to left and open next",
+                            CopyFileLeftNext,
+                        )
+                    }),
+                ])
             }),
-            show(hidden, "file.close_all", || {
-                MenuItem::action("Close all sessions", CloseAllSessions)
-            }),
-            Some(MenuItem::separator()),
-            // Workspace commands act on the whole run, not the active tab,
-            // so they stay available from every view.
-            show(hidden, "file.save_workspace", || {
-                MenuItem::action("Save workspace", SaveWorkspace)
-            }),
-            show(hidden, "file.restore_workspace", || {
-                MenuItem::action("Restore workspace", RestoreWorkspace)
-            }),
-            Some(MenuItem::separator()),
-            show(hidden, "file.quit", || MenuItem::action("Quit", Quit)),
-        ])),
-    ];
+        ])
+    });
+    let mut menus = vec![sessions];
+    if let Some(items) = file_items {
+        let title = if state.is_folder { "Folder" } else { "File" };
+        menus.push(Menu::new(title).items(items));
+    }
 
-    if !is_home {
-        // Text-editing commands act on the focused editor and are only
-        // meaningful while the text view is in edit mode.
-        let edit_off = !(state.is_text && state.is_text_editing);
-        menus.extend([
-            Menu::new("Edit").items(items([
+    // The Edit menu is view-specific: folder views offer path copying and
+    // entry selection, text views the full editing set; merge and home
+    // views have nothing to edit, so the menu stays hidden there.
+    if state.is_folder {
+        menus.push(Menu::new("Edit").items(groups(vec![
+            items([
                 show(hidden, "edit.copy_path_left", || {
                     MenuItem::action("Copy left path", CopyPathLeft)
-                        .disabled(no_folder)
                 }),
                 show(hidden, "edit.copy_path_right", || {
                     MenuItem::action("Copy right path", CopyPathRight)
-                        .disabled(no_folder)
                 }),
-                Some(MenuItem::separator()),
-                show(hidden, "edit.select_all_entries", || {
-                    MenuItem::action("Select all entries", SelectAllEntries)
-                        .disabled(no_folder)
-                }),
-                Some(MenuItem::separator()),
+            ]),
+            items([show(hidden, "edit.select_all_entries", || {
+                MenuItem::action("Select all entries", SelectAllEntries)
+            })]),
+        ])));
+    } else if state.is_text {
+        // Text-editing commands act on the focused editor and are only
+        // meaningful while the text view is in edit mode.
+        let edit_off = !(state.is_text && state.is_text_editing);
+        menus.push(Menu::new("Edit").items(groups(vec![
+            items([
                 show(hidden, "edit.undo", || {
                     MenuItem::action("Undo", TextUndo).disabled(edit_off)
                 }),
                 show(hidden, "edit.redo", || {
                     MenuItem::action("Redo", TextRedo).disabled(edit_off)
                 }),
-                Some(MenuItem::separator()),
+            ]),
+            items([
                 show(hidden, "edit.cut", || {
                     MenuItem::action("Cut", TextCut).disabled(edit_off)
                 }),
@@ -508,7 +718,8 @@ fn build_app_menus(
                 show(hidden, "edit.delete", || {
                     MenuItem::action("Delete", TextDelete).disabled(edit_off)
                 }),
-                Some(MenuItem::separator()),
+            ]),
+            items([
                 show(hidden, "edit.select_all_text", || {
                     MenuItem::action("Select all text", TextSelectAll)
                         .disabled(edit_off)
@@ -517,7 +728,8 @@ fn build_app_menus(
                     MenuItem::action("Select section", SelectSection)
                         .disabled(edit_off)
                 }),
-                Some(MenuItem::separator()),
+            ]),
+            items([
                 show(hidden, "edit.delete_line", || {
                     MenuItem::action("Delete line", DeleteLine)
                         .disabled(edit_off)
@@ -547,55 +759,58 @@ fn build_app_menus(
                 show(hidden, "edit.outdent", || {
                     MenuItem::action("Outdent", TextOutdent).disabled(edit_off)
                 }),
-                Some(MenuItem::separator()),
-                Some(MenuItem::submenu(Menu::new("Convert file").items(
-                    items([
-                        show(hidden, "edit.convert_trim", || {
-                            MenuItem::action(
-                                "Trim trailing whitespace",
-                                ConvertTrimTrailing,
-                            )
-                            .disabled(edit_off)
-                        }),
-                        show(hidden, "edit.convert_spaces_to_tabs", || {
-                            MenuItem::action(
-                                "Spaces to tabs",
-                                ConvertSpacesToTabs,
-                            )
-                            .disabled(edit_off)
-                        }),
-                        show(hidden, "edit.convert_tabs_to_spaces", || {
-                            MenuItem::action(
-                                "Tabs to spaces",
-                                ConvertTabsToSpaces,
-                            )
-                            .disabled(edit_off)
-                        }),
-                        Some(MenuItem::separator()),
-                        show(hidden, "edit.convert_endings_pc", || {
-                            MenuItem::action(
-                                "Line endings: PC",
-                                ConvertEndingsPc,
-                            )
-                            .disabled(edit_off)
-                        }),
-                        show(hidden, "edit.convert_endings_mac", || {
-                            MenuItem::action(
-                                "Line endings: Mac",
-                                ConvertEndingsMac,
-                            )
-                            .disabled(edit_off)
-                        }),
-                        show(hidden, "edit.convert_endings_unix", || {
-                            MenuItem::action(
-                                "Line endings: Unix",
-                                ConvertEndingsUnix,
-                            )
-                            .disabled(edit_off)
-                        }),
-                    ]),
-                ))),
-                Some(MenuItem::separator()),
+            ]),
+            submenu(
+                "Convert file",
+                items([
+                    show(hidden, "edit.convert_trim", || {
+                        MenuItem::action(
+                            "Trim trailing whitespace",
+                            ConvertTrimTrailing,
+                        )
+                        .disabled(edit_off)
+                    }),
+                    show(hidden, "edit.convert_spaces_to_tabs", || {
+                        MenuItem::action(
+                            "Spaces to tabs",
+                            ConvertSpacesToTabs,
+                        )
+                        .disabled(edit_off)
+                    }),
+                    show(hidden, "edit.convert_tabs_to_spaces", || {
+                        MenuItem::action(
+                            "Tabs to spaces",
+                            ConvertTabsToSpaces,
+                        )
+                        .disabled(edit_off)
+                    }),
+                    Some(MenuItem::separator()),
+                    show(hidden, "edit.convert_endings_pc", || {
+                        MenuItem::action(
+                            "Line endings: PC",
+                            ConvertEndingsPc,
+                        )
+                        .disabled(edit_off)
+                    }),
+                    show(hidden, "edit.convert_endings_mac", || {
+                        MenuItem::action(
+                            "Line endings: Mac",
+                            ConvertEndingsMac,
+                        )
+                        .disabled(edit_off)
+                    }),
+                    show(hidden, "edit.convert_endings_unix", || {
+                        MenuItem::action(
+                            "Line endings: Unix",
+                            ConvertEndingsUnix,
+                        )
+                        .disabled(edit_off)
+                    }),
+                ]),
+            )
+            .into_iter()
+            .collect(),
+            items([
                 show(hidden, "edit.compare_selection", || {
                     MenuItem::action(
                         "Compare selection to clipboard",
@@ -620,229 +835,149 @@ fn build_app_menus(
                     MenuItem::action("Isolate section", IsolateSelection)
                         .disabled(!state.is_text)
                 }),
-            ])),
-            Menu::new("Actions").items(items([
-                // Each reconcile command is enabled only when the
-                // selected entry's shape allows it; enabling otherwise
-                // would promise a no-op. Overwriting copies, moves, and
-                // deletes confirm in the handler before running.
-                show(hidden, "actions.copy_right", || {
-                    MenuItem::action("Copy to right", CopyToRight)
-                        .disabled(off(state.can_copy_right))
-                }),
-                show(hidden, "actions.copy_left", || {
-                    MenuItem::action("Copy to left", CopyToLeft)
-                        .disabled(off(state.can_copy_left))
-                }),
-                Some(MenuItem::separator()),
-                show(hidden, "actions.move_right", || {
-                    MenuItem::action("Move to right", MoveToRight)
-                        .disabled(off(state.can_move_right))
-                }),
-                show(hidden, "actions.move_left", || {
-                    MenuItem::action("Move to left", MoveToLeft)
-                        .disabled(off(state.can_move_left))
-                }),
-                Some(MenuItem::separator()),
-                show(hidden, "actions.delete_right", || {
-                    MenuItem::action("Delete from right", DeleteRightSide)
-                        .disabled(off(state.can_delete_right))
-                }),
-                show(hidden, "actions.delete_left", || {
-                    MenuItem::action("Delete from left", DeleteLeftSide)
-                        .disabled(off(state.can_delete_left))
-                }),
-                show(hidden, "actions.exchange", || {
-                    MenuItem::action("Exchange", ExchangeEntry)
-                        .disabled(off(state.can_exchange))
-                }),
-                Some(MenuItem::separator()),
-                show(hidden, "actions.copy_to_folder", || {
-                    MenuItem::action("Copy to folder…", CopyToFolder)
-                        .disabled(off(state.has_selection))
-                }),
-                show(hidden, "actions.move_to_folder", || {
-                    MenuItem::action("Move to folder…", MoveToFolder)
-                        .disabled(off(state.has_selection))
-                }),
-                Some(MenuItem::separator()),
-                // Whole-comparison sync runs; each confirms first because
-                // mirror deletes the target side's extras.
-                Some(MenuItem::submenu(Menu::new("Synchronize").items(
-                    items([
-                        show(hidden, "actions.sync_update_right", || {
-                            MenuItem::action("Update right", SyncUpdateRight)
-                                .disabled(off(state.can_sync))
-                        }),
-                        show(hidden, "actions.sync_update_left", || {
-                            MenuItem::action("Update left", SyncUpdateLeft)
-                                .disabled(off(state.can_sync))
-                        }),
-                        show(hidden, "actions.sync_update_both", || {
-                            MenuItem::action("Update both", SyncUpdateBoth)
-                                .disabled(off(state.can_sync))
-                        }),
-                        Some(MenuItem::separator()),
-                        show(hidden, "actions.sync_mirror_right", || {
-                            MenuItem::action(
-                                "Mirror to right",
-                                SyncMirrorRight,
-                            )
-                            .disabled(off(state.can_sync))
-                        }),
-                        show(hidden, "actions.sync_mirror_left", || {
-                            MenuItem::action("Mirror to left", SyncMirrorLeft)
-                                .disabled(off(state.can_sync))
-                        }),
-                    ]),
-                ))),
-                Some(MenuItem::separator()),
-                // Text-sync commands: copy this pair's file and step the
-                // parent folder session to its next difference.
-                show(hidden, "actions.copy_file_right_next", || {
-                    MenuItem::action(
-                        "Copy file to right and open next",
-                        CopyFileRightNext,
-                    )
-                    .disabled(!state.is_text)
-                }),
-                show(hidden, "actions.copy_file_left_next", || {
-                    MenuItem::action(
-                        "Copy file to left and open next",
-                        CopyFileLeftNext,
-                    )
-                    .disabled(!state.is_text)
-                }),
-                Some(MenuItem::separator()),
-                // Merge commands act on the focused merge view's selected
-                // section; the ancestor command needs a three-way merge.
-                show(hidden, "actions.take_left", || {
+            ]),
+        ])));
+    }
+
+    // The Merge menu is a merge-tab exclusive addition; its take commands
+    // act on the selected conflict section.
+    if state.is_merge {
+        menus.push(Menu::new("Merge").items(groups(vec![
+            items([
+                show(hidden, "merge.take_left", || {
                     MenuItem::action("Take left", TakeLeft)
-                        .disabled(!(state.is_merge && state.merge_can_take))
+                        .disabled(!state.merge_can_take)
                 }),
-                show(hidden, "actions.take_right", || {
+                show(hidden, "merge.take_right", || {
                     MenuItem::action("Take right", TakeRight)
-                        .disabled(!(state.is_merge && state.merge_can_take))
+                        .disabled(!state.merge_can_take)
                 }),
-                show(hidden, "actions.take_ancestor", || {
+                show(hidden, "merge.take_ancestor", || {
                     MenuItem::action("Take ancestor", TakeAncestor).disabled(
-                        !(state.is_merge
-                            && state.merge_can_take
-                            && state.merge_has_ancestor),
+                        !(state.merge_can_take && state.merge_has_ancestor),
                     )
                 }),
-                Some(MenuItem::separator()),
-                show(hidden, "actions.save_merge_output", || {
+            ]),
+            items([
+                show(hidden, "merge.save_output", || {
                     MenuItem::action("Save merge output…", SaveMergeOutput)
-                        .disabled(!state.is_merge)
                 }),
-                // Adding a base file is only meaningful for a two-way merge;
-                // a three-way merge already has an ancestor.
-                show(hidden, "actions.set_ancestor", || {
+                // Adding a base file is only meaningful for a two-way
+                // merge; a three-way merge already has an ancestor.
+                show(hidden, "merge.set_ancestor", || {
                     MenuItem::action("Set ancestor…", SetMergeAncestor)
-                        .disabled(
-                            !(state.is_merge && !state.merge_has_ancestor),
-                        )
+                        .disabled(state.merge_has_ancestor)
                 }),
-            ])),
-            Menu::new("Search").items(items([
+            ]),
+        ])));
+    }
+
+    // The Search menu hides itself on merge and home views; the
+    // next/previous commands have nothing to step there.
+    if state.is_folder || state.is_text {
+        menus.push(Menu::new("Search").items(groups(vec![
+            items([
                 show(hidden, "search.next_difference", || {
                     MenuItem::action("Next difference", NextDifference)
-                        .disabled(!(state.is_folder || state.is_text))
                 }),
                 show(hidden, "search.prev_difference", || {
                     MenuItem::action("Previous difference", PrevDifference)
-                        .disabled(!(state.is_folder || state.is_text))
                 }),
-                Some(MenuItem::separator()),
-                show(hidden, "search.next_section", || {
-                    MenuItem::action("Next difference section", NextSection)
-                        .disabled(!state.is_text)
-                }),
-                show(hidden, "search.prev_section", || {
-                    MenuItem::action(
-                        "Previous difference section",
-                        PrevSection,
-                    )
-                    .disabled(!state.is_text)
-                }),
-                Some(MenuItem::separator()),
-                // Next/Previous Difference Files step the *parent* folder
-                // session of a child text compare; they need a live parent.
-                show(hidden, "search.next_difference_files", || {
-                    MenuItem::action(
-                        "Next difference files",
-                        NextDifferenceFiles,
-                    )
-                    .disabled(!state.can_compare_parent)
-                }),
-                show(hidden, "search.prev_difference_files", || {
-                    MenuItem::action(
-                        "Previous difference files",
-                        PrevDifferenceFiles,
-                    )
-                    .disabled(!state.can_compare_parent)
-                }),
-                // Find filename and Replace arrive with the search UI
-                // (later phase); their registry entries stay hidden until
-                // then.
-            ])),
-        ]);
+            ]),
+            // Sections only exist in a text compare; difference files are
+            // the parent folder session's entries, so they need a live
+            // parent. Find filename and Replace arrive with the search UI
+            // (phase 2); their registry entries stay hidden until then.
+            when(state.is_text, || {
+                items([
+                    show(hidden, "search.next_section", || {
+                        MenuItem::action(
+                            "Next difference section",
+                            NextSection,
+                        )
+                    }),
+                    show(hidden, "search.prev_section", || {
+                        MenuItem::action(
+                            "Previous difference section",
+                            PrevSection,
+                        )
+                    }),
+                ])
+            }),
+            when(state.is_text, || {
+                items([
+                    show(hidden, "search.next_difference_files", || {
+                        MenuItem::action(
+                            "Next difference files",
+                            NextDifferenceFiles,
+                        )
+                        .disabled(!state.can_compare_parent)
+                    }),
+                    show(hidden, "search.prev_difference_files", || {
+                        MenuItem::action(
+                            "Previous difference files",
+                            PrevDifferenceFiles,
+                        )
+                        .disabled(!state.can_compare_parent)
+                    }),
+                ])
+            }),
+        ])));
     }
 
-    menus.extend([
-        Menu::new("View").items(items([
-            // Word wrap and thumbnails are text-view-only; the focused
-            // text or merge view handles the actions.
-            show(hidden, "view.word_wrap", || {
+    menus.push(Menu::new("View").items(groups(vec![
+        // Word wrap spans text and merge views; the focused view handles
+        // the action.
+        when(state.is_text || state.is_merge, || {
+            items([show(hidden, "view.word_wrap", || {
                 MenuItem::action("Word wrap", ToggleWordWrap)
-                    .disabled(!(state.is_text || state.is_merge))
                     .checked(state.word_wrap)
-            }),
-            show(hidden, "view.show_ancestor", || {
+            })])
+        }),
+        when(state.is_merge, || {
+            items([show(hidden, "view.show_ancestor", || {
                 MenuItem::action("Show ancestor pane", ToggleMergeAncestor)
-                    .disabled(!state.is_merge)
                     .checked(state.show_ancestor)
-            }),
-            Some(MenuItem::separator()),
-            // Detail pane modes are text-compare-only; the focused text
-            // view handles the actions.
-            show(hidden, "view.details_text", || {
-                MenuItem::action(
-                    "Text details",
-                    SetDetailMode {
-                        mode: DetailMode::Text,
-                    },
-                )
-                .disabled(!state.is_text)
-                .checked(state.detail_mode == DetailMode::Text)
-            }),
-            show(hidden, "view.details_hex", || {
-                MenuItem::action(
-                    "Hex details",
-                    SetDetailMode {
-                        mode: DetailMode::Hex,
-                    },
-                )
-                .disabled(!state.is_text)
-                .checked(state.detail_mode == DetailMode::Hex)
-            }),
-            show(hidden, "view.details_alignment", || {
-                MenuItem::action(
-                    "Alignment details",
-                    SetDetailMode {
-                        mode: DetailMode::Alignment,
-                    },
-                )
-                .disabled(!state.is_text)
-                .checked(state.detail_mode == DetailMode::Alignment)
-            }),
-            show(hidden, "view.thumbnails", || {
-                MenuItem::action("Show thumbnails", ShowThumbnails)
-                    .disabled(!state.is_text)
-                    .checked(state.show_thumbnails)
-            }),
-            Some(MenuItem::separator()),
+            })])
+        }),
+        // Detail pane modes are text-compare-only.
+        when(state.is_text, || {
+            items([
+                show(hidden, "view.details_text", || {
+                    MenuItem::action(
+                        "Text details",
+                        SetDetailMode {
+                            mode: DetailMode::Text,
+                        },
+                    )
+                    .checked(state.detail_mode == DetailMode::Text)
+                }),
+                show(hidden, "view.details_hex", || {
+                    MenuItem::action(
+                        "Hex details",
+                        SetDetailMode {
+                            mode: DetailMode::Hex,
+                        },
+                    )
+                    .checked(state.detail_mode == DetailMode::Hex)
+                }),
+                show(hidden, "view.details_alignment", || {
+                    MenuItem::action(
+                        "Alignment details",
+                        SetDetailMode {
+                            mode: DetailMode::Alignment,
+                        },
+                    )
+                    .checked(state.detail_mode == DetailMode::Alignment)
+                }),
+                show(hidden, "view.thumbnails", || {
+                    MenuItem::action("Show thumbnails", ShowThumbnails)
+                        .checked(state.show_thumbnails)
+                }),
+            ])
+        }),
+        // Window furniture is available from every view, home included.
+        items([
             show(hidden, "view.log_pane", || {
                 MenuItem::action("Log pane", ToggleLogPane)
                     .checked(state.log_open)
@@ -853,30 +988,33 @@ fn build_app_menus(
                 MenuItem::action("Single-row toolbar", ToggleSingleRowToolbar)
                     .checked(state.single_row_toolbar)
             }),
-        ])),
-        Menu::new("Tools").items(items([
-            show(hidden, "tools.options", || {
-                MenuItem::action("Options…", Options)
-            }),
-            show(hidden, "tools.file_formats", || {
-                MenuItem::action("File formats…", FileFormats)
-            }),
-            show(hidden, "tools.sync_presets", || {
-                MenuItem::action("Folder Sync presets…", SyncPresets)
-            }),
-            show(hidden, "tools.profiles", || {
-                MenuItem::action("Profiles…", Profiles)
-            }),
-        ])),
-        Menu::new("Help").items(items([
-            show(hidden, "help.contents", || {
-                MenuItem::action("Help contents", HelpContents)
-            }),
-            show(hidden, "help.about", || {
-                MenuItem::action("About cocomo", About)
-            }),
-        ])),
-    ]);
+        ]),
+    ])));
+
+    menus.push(Menu::new("Options").items(items([
+        show(hidden, "options.open", || {
+            MenuItem::action("Options…", Options)
+        }),
+        show(hidden, "options.file_formats", || {
+            MenuItem::action("File formats…", FileFormats)
+        }),
+        show(hidden, "options.sync_presets", || {
+            MenuItem::action("Folder Sync presets…", SyncPresets)
+        }),
+        show(hidden, "options.profiles", || {
+            MenuItem::action("Profiles…", Profiles)
+        }),
+    ])));
+
+    menus.push(Menu::new("Help").items(items([
+        show(hidden, "help.contents", || {
+            MenuItem::action("Help contents", HelpContents)
+        }),
+        show(hidden, "help.about", || {
+            MenuItem::action("About cocomo", About)
+        }),
+    ])));
+
     menus
 }
 
@@ -1080,7 +1218,7 @@ pub fn register_menu_handlers(cx: &mut App) {
         .detach();
     });
 
-    // Session menu — save. Mark the session clean once the file write
+    // Sessions menu — save. Mark the session clean once the file write
     // succeeded, so the close prompt only appears for genuinely unsaved
     // work.
     cx.on_action(move |_action: &SaveSession, cx: &mut App| {
@@ -1124,7 +1262,7 @@ pub fn register_menu_handlers(cx: &mut App) {
         .detach();
     });
 
-    // Session menu — save as: ask for a name, then persist under it.
+    // Sessions menu — save as: ask for a name, then persist under it.
     cx.on_action(move |_action: &SaveSessionAs, cx: &mut App| {
         let Some(mgr) = active_manager(cx) else {
             return;
@@ -1284,7 +1422,7 @@ pub fn register_menu_handlers(cx: &mut App) {
         crate::windows::refresh_all_windows(cx);
     });
 
-    // Session menu — reload is handled by the focused folder view; the
+    // Sessions menu — reload is handled by the focused folder view; the
     // global handler only records dispatches that reached no view.
     cx.on_action(move |_action: &ReloadCompare, cx: &mut App| {
         log::push(LogLevel::Info, "Reload comparison dispatched", cx);
@@ -1314,7 +1452,7 @@ pub fn register_menu_handlers(cx: &mut App) {
         session.update(cx, |s, cx| s.save_side(side, true, cx));
     });
 
-    // Session menu — merge the active text compare's pair in a new merge
+    // Sessions menu — merge the active text compare's pair in a new merge
     // tab (two-way: no ancestor is known from a plain comparison).
     cx.on_action(move |_action: &MergeFiles, cx: &mut App| {
         let Some(mgr) = active_manager(cx) else {
@@ -1351,7 +1489,7 @@ pub fn register_menu_handlers(cx: &mut App) {
         });
     });
 
-    // Session menu — clear the active folder or text session: drop the
+    // Sessions menu — clear the active folder or text session: drop the
     // comparison and selection, keep the endpoints so the session can be
     // reloaded.
     cx.on_action(move |_action: &ClearSession, cx: &mut App| {
@@ -1365,7 +1503,7 @@ pub fn register_menu_handlers(cx: &mut App) {
         }
     });
 
-    // Session menu — step from a text compare back to the folder session
+    // Sessions menu — step from a text compare back to the folder session
     // it was opened from.
     cx.on_action(move |_action: &CompareParentFolders, cx: &mut App| {
         let Some(mgr) = active_manager(cx) else {
@@ -1651,7 +1789,7 @@ pub fn register_menu_handlers(cx: &mut App) {
         .detach();
     });
 
-    // Tools menu — the application-options dialog.
+    // Options menu — the application-options dialog.
     cx.on_action(move |_action: &Options, cx: &mut App| {
         let Some(window) = cx.active_window() else {
             return;
@@ -1661,7 +1799,7 @@ pub fn register_menu_handlers(cx: &mut App) {
         });
     });
 
-    // Tools menu — the file-format registry dialog.
+    // Options menu — the file-format registry dialog.
     cx.on_action(move |_action: &FileFormats, cx: &mut App| {
         let Some(window) = cx.active_window() else {
             return;
@@ -1671,7 +1809,7 @@ pub fn register_menu_handlers(cx: &mut App) {
         });
     });
 
-    // Tools menu — the folder-sync presets dialog.
+    // Options menu — the folder-sync presets dialog.
     cx.on_action(move |_action: &SyncPresets, cx: &mut App| {
         let Some(window) = cx.active_window() else {
             return;
@@ -1681,7 +1819,7 @@ pub fn register_menu_handlers(cx: &mut App) {
         });
     });
 
-    // Tools menu — the profile management dialog.
+    // Options menu — the profile management dialog.
     cx.on_action(move |_action: &Profiles, cx: &mut App| {
         let Some(window) = cx.active_window() else {
             return;
@@ -1691,7 +1829,7 @@ pub fn register_menu_handlers(cx: &mut App) {
         });
     });
 
-    // Session menu — "Compare files using ▸": re-open the active pair
+    // Sessions menu — "Compare files using ▸": re-open the active pair
     // in the chosen file view kind.
     cx.on_action(move |_action: &CompareUsingText, cx: &mut App| {
         compare_active_pair(crate::file_formats::FileViewKind::Text, cx);
@@ -1860,14 +1998,14 @@ to open a two-pane diff.
 
 ## Text merge
 
-**Session ▸ Merge files** opens the active pair as a three-pane merge.
-**Actions ▸ Take left/right/ancestor** adopts a section from one pane;
+**Sessions ▸ Merge files** opens the active pair as a three-pane merge.
+**Merge ▸ Take left/right/ancestor** adopts a section from one pane;
 **Save merge output** writes the result.
 
 ## Personalization
 
-**Tools ▸ Options ▸ Commands** lists every command: re-bind its
-shortcut, unbind it, or hide it from the menus entirely. **Tools ▸ File
+**Options ▸ Options ▸ Commands** lists every command: re-bind its
+shortcut, unbind it, or hide it from the menus entirely. **Options ▸ File
 formats** controls which view opens each file type.
 
 ## Keyboard shortcuts
@@ -1937,16 +2075,27 @@ mod tests {
     #[test]
     fn hidden_commands_leave_their_items_out() {
         let visible = build_app_menus(MenuState::empty(), &HashSet::new());
-        let session = visible.iter().find(|m| m.name == "Session").unwrap();
+        let session = visible.iter().find(|m| m.name == "Sessions").unwrap();
         let all = build_app_menus(
             MenuState::empty(),
             &HashSet::from(["session.save", "session.save_as"]),
         );
-        let hidden_session = all.iter().find(|m| m.name == "Session").unwrap();
+        let hidden_session =
+            all.iter().find(|m| m.name == "Sessions").unwrap();
         assert!(
             hidden_session.items.len() < session.items.len(),
-            "hiding two commands must shrink the Session menu"
+            "hiding two commands must shrink the Sessions menu"
         );
+    }
+
+    /// Home has no file pair, no folder pair, and nothing to search,
+    /// so only the always-present menus appear in the bar.
+    #[test]
+    fn home_hides_the_view_specific_menus() {
+        let menus = build_app_menus(MenuState::empty(), &HashSet::new());
+        let names: Vec<String> =
+            menus.iter().map(|m| m.name.to_string()).collect();
+        assert_eq!(names, ["Sessions", "View", "Options", "Help"]);
     }
 
     /// The "Compare files using" submenu carries the four file views,
@@ -1956,7 +2105,7 @@ mod tests {
         let submenu = |hidden: &HashSet<&'static str>| {
             build_app_menus(MenuState::empty(), hidden)
                 .into_iter()
-                .find(|m| m.name == "Session")
+                .find(|m| m.name == "Sessions")
                 .and_then(|m| {
                     m.items.into_iter().find_map(|item| match item {
                         MenuItem::Submenu(menu)
@@ -1967,7 +2116,7 @@ mod tests {
                         _ => None,
                     })
                 })
-                .expect("Session menu must carry the compare submenu")
+                .expect("Sessions menu must carry the compare submenu")
         };
         assert_eq!(submenu(&HashSet::new()).items.len(), 4);
         assert_eq!(
@@ -1978,18 +2127,18 @@ mod tests {
         );
     }
 
-    /// The Tools menu offers the folder-sync presets dialog.
+    /// The Options menu offers the folder-sync presets dialog.
     #[test]
-    fn tools_menu_offers_the_sync_presets_dialog() {
+    fn options_menu_offers_the_sync_presets_dialog() {
         let menus = build_app_menus(MenuState::empty(), &HashSet::new());
-        let tools = menus.iter().find(|m| m.name == "Tools").unwrap();
+        let options = menus.iter().find(|m| m.name == "Options").unwrap();
         assert!(
-            tools.items.iter().any(|item| matches!(
+            options.items.iter().any(|item| matches!(
                 item,
                 MenuItem::Action { name, .. }
                     if name == "Folder Sync presets…"
             )),
-            "Tools menu must offer the Folder Sync presets dialog"
+            "Options menu must offer the Folder Sync presets dialog"
         );
     }
 
@@ -2008,7 +2157,7 @@ mod tests {
             set_app_menus(cx);
             let menus = gpui::component::GlobalState::global(cx).app_menus();
             assert!(
-                menus.iter().any(|menu| menu.name == "Session"),
+                menus.iter().any(|menu| menu.name == "Sessions"),
                 "the component layer must hold the rebuilt menu bar"
             );
             let view = menus.iter().find(|menu| menu.name == "View").unwrap();

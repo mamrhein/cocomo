@@ -1369,14 +1369,14 @@ fn build_row_menu(
         if row.has_left {
             menu = cmd(
                 menu,
-                "actions.copy_right",
+                "file.copy_right",
                 "Copy to right",
                 Box::new(CopyToRight),
                 cx,
             );
             menu = cmd(
                 menu,
-                "actions.move_right",
+                "file.move_right",
                 "Move to right",
                 Box::new(MoveToRight),
                 cx,
@@ -1385,14 +1385,14 @@ fn build_row_menu(
         if row.has_right {
             menu = cmd(
                 menu,
-                "actions.copy_left",
+                "file.copy_left",
                 "Copy to left",
                 Box::new(CopyToLeft),
                 cx,
             );
             menu = cmd(
                 menu,
-                "actions.move_left",
+                "file.move_left",
                 "Move to left",
                 Box::new(MoveToLeft),
                 cx,
@@ -1401,7 +1401,7 @@ fn build_row_menu(
         if row.has_left && row.has_right {
             menu = cmd(
                 menu,
-                "actions.exchange",
+                "file.exchange",
                 "Exchange",
                 Box::new(ExchangeEntry),
                 cx,
@@ -1411,7 +1411,7 @@ fn build_row_menu(
     if row.has_left ^ row.has_right {
         menu = cmd(
             menu,
-            "actions.copy_to_other_side",
+            "file.copy_to_other_side",
             "Copy to other side",
             Box::new(CopyToOtherSide),
             cx,
@@ -1419,14 +1419,14 @@ fn build_row_menu(
     }
     menu = cmd(
         menu,
-        "actions.copy_to_folder",
+        "file.copy_to_folder",
         "Copy to folder…",
         Box::new(CopyToFolder),
         cx,
     );
     menu = cmd(
         menu,
-        "actions.move_to_folder",
+        "file.move_to_folder",
         "Move to folder…",
         Box::new(MoveToFolder),
         cx,
@@ -1435,7 +1435,7 @@ fn build_row_menu(
         if row.has_left {
             menu = cmd(
                 menu,
-                "actions.delete_left",
+                "file.delete_left",
                 "Delete from left",
                 Box::new(DeleteLeftSide),
                 cx,
@@ -1444,7 +1444,7 @@ fn build_row_menu(
         if row.has_right {
             menu = cmd(
                 menu,
-                "actions.delete_right",
+                "file.delete_right",
                 "Delete from right",
                 Box::new(DeleteRightSide),
                 cx,
@@ -1502,11 +1502,11 @@ fn build_row_menu(
         cx,
     );
     let sync_ids = [
-        "actions.sync_update_right",
-        "actions.sync_update_left",
-        "actions.sync_update_both",
-        "actions.sync_mirror_right",
-        "actions.sync_mirror_left",
+        "file.sync_update_right",
+        "file.sync_update_left",
+        "file.sync_update_both",
+        "file.sync_mirror_right",
+        "file.sync_mirror_left",
     ];
     if sync_ids
         .iter()
@@ -1514,20 +1514,20 @@ fn build_row_menu(
     {
         let synchronize = PopupMenu::build(window, cx, |menu, _, cx| {
             let mut menu = menu;
-            if crate::commands::is_visible("actions.sync_update_right", cx) {
+            if crate::commands::is_visible("file.sync_update_right", cx) {
                 menu = menu.menu("Update Right", Box::new(SyncUpdateRight));
             }
-            if crate::commands::is_visible("actions.sync_update_left", cx) {
+            if crate::commands::is_visible("file.sync_update_left", cx) {
                 menu = menu.menu("Update Left", Box::new(SyncUpdateLeft));
             }
-            if crate::commands::is_visible("actions.sync_update_both", cx) {
+            if crate::commands::is_visible("file.sync_update_both", cx) {
                 menu = menu.menu("Update Both", Box::new(SyncUpdateBoth));
             }
             menu = menu.separator();
-            if crate::commands::is_visible("actions.sync_mirror_right", cx) {
+            if crate::commands::is_visible("file.sync_mirror_right", cx) {
                 menu = menu.menu("Mirror to Right", Box::new(SyncMirrorRight));
             }
-            if crate::commands::is_visible("actions.sync_mirror_left", cx) {
+            if crate::commands::is_visible("file.sync_mirror_left", cx) {
                 menu = menu.menu("Mirror to Left", Box::new(SyncMirrorLeft));
             }
             menu

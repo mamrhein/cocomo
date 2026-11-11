@@ -75,6 +75,7 @@ actions!(
         ExchangeEntry,
         DeleteLeftSide,
         DeleteRightSide,
+        DeleteBothSide,
         CopyToFolder,
         MoveToFolder,
         RenameEntry,
@@ -457,7 +458,7 @@ impl FolderCompareView {
             .accessibility_label("Run a folder sync preset")
             .dropdown_menu(move |menu, _, _| {
                 if presets.is_empty() {
-                    return menu.label("No presets. Add them under Tools.");
+                    return menu.label("No presets. Add them under Options.");
                 }
                 let mut menu = menu;
                 for preset in presets.iter() {

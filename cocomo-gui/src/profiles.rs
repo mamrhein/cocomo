@@ -7,7 +7,7 @@
 // $Source$
 // $Revision$
 
-//! Profile management: the Tools ▸ Profiles dialog.
+//! Profile management: the Options ▸ Profiles dialog.
 //!
 //! Profiles are the durable credential store for remote endpoints: the
 //! resolver chain (see [`cocomo_lib::resolver`]) consults the profile
@@ -604,7 +604,7 @@ impl Render for ProfilesBody {
     }
 }
 
-/// Open the Profiles dialog (Tools menu).
+/// Open the Profiles dialog (Options menu).
 pub(crate) fn open_profiles_dialog(window: &mut Window, cx: &mut App) {
     let body = cx.new(|cx| ProfilesBody::new(window, cx));
     window.open_dialog(cx, move |dialog, _, _| {

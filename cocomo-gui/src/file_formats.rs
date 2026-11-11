@@ -12,7 +12,7 @@
 //! Maps a file name to the view kind used to open it: the text compare
 //! view today, and the table, hex, or picture views as they arrive.
 //! The registry is a global with sensible defaults and is user-extensible
-//! through the Tools menu ("File formats...").
+//! through the Options menu ("File formats...").
 
 use std::path::Path;
 
@@ -419,7 +419,7 @@ impl FileFormatsBody {
     }
 }
 
-/// Open the "File formats" management dialog (Tools menu).
+/// Open the "File formats" management dialog (Options menu).
 pub(crate) fn open_file_formats_dialog(window: &mut Window, cx: &mut App) {
     let body = cx.new(|cx| FileFormatsBody::new(window, cx));
     window.open_dialog(cx, move |dialog, _, _| {
