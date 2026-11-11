@@ -18,7 +18,7 @@
 //! overrides from [`ColorOverrides`] taking precedence (the personalization
 //! hook of spec section 7.1).
 
-use cocomo_lib::{ColorOverrides, DirEntry, DirEntryStatus};
+use cocomo_lib::{ColorOverrides, DirEntry, DirEntryStatus, StatusColor};
 use gpui::{
     App, Entity, Hsla, IntoElement, Rgba, Window,
     component::{
@@ -159,24 +159,31 @@ pub fn side_role(entry: &DirEntry, side: Side, ignored: bool) -> ColorRole {
     }
 }
 
-/// Gutter icon for a row, per spec section 4.2.
+/// Status glyph and color role for a row's status lane.
 ///
-/// The gutter icon is coarser than the row coloring: it marks *that*
-/// something differs (`~` content, `≠` name/type attributes, `=` same,
-/// `|` orphan, `*` filtered/ignored), leaving the important-vs-minor
-/// distinction to the colors.
-pub fn gutter_icon(entry: &DirEntry, ignored: bool) -> &'static str {
+/// The glyph and color follow the lib's [`DirEntryStatus::symbol`], the
+/// mapping shared with the TUI and the CLI, so every frontend shows the
+/// same marker for a status bitmap (`≡`/`=` gray, `▶`/`◀`/`?`/`!` red,
+/// `▶`/`◀` blue for orphans). The two GUI-only states override it: an
+/// ignored entry shows `*` in the neutral color and a name clash shows
+/// `≠` in the difference color, neither of which the bitmap carries.
+pub fn status_glyph(
+    entry: &DirEntry,
+    ignored: bool,
+) -> (&'static str, ColorRole) {
     if ignored {
-        return "*";
+        return ("*", ColorRole::Neutral);
     }
     if entry.name_conflict {
-        return "≠";
+        return ("≠", ColorRole::Important);
     }
-    match status_category(&entry.status) {
-        crate::state::StatusCategory::Same => "=",
-        crate::state::StatusCategory::Orphan => "|",
-        crate::state::StatusCategory::Different => "~",
-    }
+    let (glyph, color) = entry.status.symbol();
+    let role = match color {
+        StatusColor::Equal => ColorRole::Neutral,
+        StatusColor::Different => ColorRole::Important,
+        StatusColor::Orphan => ColorRole::Orphan,
+    };
+    (glyph, role)
 }
 
 // ---------------------------------------------------------------------------
@@ -394,33 +401,85 @@ mod tests {
     }
 
     #[test]
-    fn gutter_icon_covers_every_gutter_state() {
+    fn status_glyph_follows_the_lib_symbols() {
         let different = make_entry(
             DirEntryStatus::DIFFERENT,
             Some(info("a.txt", "")),
             Some(info("a.txt", "")),
         );
-        assert_eq!(gutter_icon(&different, false), "~");
-        assert_eq!(gutter_icon(&different, true), "*");
+        assert_eq!(
+            status_glyph(&different, false),
+            ("?", ColorRole::Important)
+        );
+        assert_eq!(status_glyph(&different, true), ("*", ColorRole::Neutral));
 
         let same = DirEntry {
             status: DirEntryStatus::Same,
             ..different.clone()
         };
-        assert_eq!(gutter_icon(&same, false), "=");
+        assert_eq!(status_glyph(&same, false), ("≡", ColorRole::Neutral));
 
-        let orphan = DirEntry {
+        let equal = DirEntry {
+            status: DirEntryStatus::Equal,
+            ..different.clone()
+        };
+        assert_eq!(status_glyph(&equal, false), ("=", ColorRole::Neutral));
+
+        let left_newer = DirEntry {
+            status: DirEntryStatus::LeftNewer,
+            ..different.clone()
+        };
+        assert_eq!(
+            status_glyph(&left_newer, false),
+            ("▶", ColorRole::Important)
+        );
+
+        let right_newer = DirEntry {
+            status: DirEntryStatus::RightNewer,
+            ..different.clone()
+        };
+        assert_eq!(
+            status_glyph(&right_newer, false),
+            ("◀", ColorRole::Important)
+        );
+
+        // The orphan arrows reuse the newer-side glyphs but take the
+        // orphan color.
+        let left_orphan = DirEntry {
+            status: DirEntryStatus::LeftOrphan,
+            right: None,
+            ..different.clone()
+        };
+        assert_eq!(
+            status_glyph(&left_orphan, false),
+            ("▶", ColorRole::Orphan)
+        );
+
+        let right_orphan = DirEntry {
             status: DirEntryStatus::RightOrphan,
             left: None,
             ..different.clone()
         };
-        assert_eq!(gutter_icon(&orphan, false), "|");
+        assert_eq!(
+            status_glyph(&right_orphan, false),
+            ("◀", ColorRole::Orphan)
+        );
+
+        // An aggregated multi-bit bitmap resolves to the generic marker.
+        let aggregated = DirEntry {
+            status: DirEntryStatus::Equal | DirEntryStatus::LeftOrphan,
+            ..different.clone()
+        };
+        assert_eq!(
+            status_glyph(&aggregated, false),
+            ("!", ColorRole::Important)
+        );
 
         let clash = DirEntry {
             name_conflict: true,
             ..different
         };
-        assert_eq!(gutter_icon(&clash, false), "≠");
+        assert_eq!(status_glyph(&clash, false), ("≠", ColorRole::Important));
     }
 
     #[test]

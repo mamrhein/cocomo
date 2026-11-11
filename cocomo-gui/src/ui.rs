@@ -2017,7 +2017,7 @@ fn status_lane() -> Div {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum StatusRole {
     /// Entry matches on both sides.
-    Success,
+    Equal,
     /// Entry differs or cannot be reconciled.
     Danger,
     /// Entry exists on only one side.
@@ -2026,9 +2026,13 @@ enum StatusRole {
 
 impl StatusRole {
     /// Resolve this role to a color from the active theme.
+    ///
+    /// Equal entries stay muted rather than turning green: the TUI and the
+    /// CLI render them in the neutral foreground color, and the folder
+    /// table's status lane follows that role, so the legend has to agree.
     fn color(self, theme: &Theme) -> Hsla {
         match self {
-            Self::Success => theme.success,
+            Self::Equal => theme.muted_foreground,
             Self::Danger => theme.danger,
             Self::Info => theme.info,
         }
@@ -2041,7 +2045,7 @@ impl StatusRole {
 /// agree on which statuses are equal, different, or orphaned.
 fn status_role(status: &DirEntryStatus) -> StatusRole {
     match status.symbol().1 {
-        StatusColor::Equal => StatusRole::Success,
+        StatusColor::Equal => StatusRole::Equal,
         StatusColor::Different => StatusRole::Danger,
         StatusColor::Orphan => StatusRole::Info,
     }
@@ -2632,8 +2636,8 @@ mod tests {
 
     #[test]
     fn status_role_maps_every_status() {
-        assert_eq!(status_role(&DirEntryStatus::Same), StatusRole::Success);
-        assert_eq!(status_role(&DirEntryStatus::Equal), StatusRole::Success);
+        assert_eq!(status_role(&DirEntryStatus::Same), StatusRole::Equal);
+        assert_eq!(status_role(&DirEntryStatus::Equal), StatusRole::Equal);
         assert_eq!(
             status_role(&DirEntryStatus::LeftNewer),
             StatusRole::Danger

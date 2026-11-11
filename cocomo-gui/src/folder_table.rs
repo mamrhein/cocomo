@@ -726,6 +726,13 @@ impl TableDelegate for FolderTableDelegate {
                         .text_color(role.resolve(theme, &data.overrides))
                         .child(glyph)
                 });
+                // The status glyph carries the lib symbol, tinted by its
+                // color role, as in the TUI's status column.
+                let (glyph, role) = data.status_glyph;
+                let status_glyph = div()
+                    .flex_shrink_0()
+                    .text_color(role.resolve(theme, &data.overrides))
+                    .child(glyph);
                 div()
                     .size_full()
                     .relative()
@@ -734,11 +741,8 @@ impl TableDelegate for FolderTableDelegate {
                     .justify_center()
                     .gap_1()
                     .font_weight(FontWeight(700.))
-                    .text_color(theme.muted_foreground)
                     .children(connector)
-                    .when(!data.status_symbol.is_empty(), |this| {
-                        this.child(data.status_symbol)
-                    })
+                    .child(status_glyph)
                     .children(merge_glyph)
                     .into_any_element()
             }
@@ -771,7 +775,7 @@ impl TableDelegate for FolderTableDelegate {
                 .as_deref()
                 .map(|m| format_modified_label(m).into()),
             COL_STATUS => {
-                let mut label = data.status_symbol.to_string();
+                let mut label = data.status_glyph.0.to_string();
                 if let Some((glyph, _)) = data.merge_glyph {
                     if !label.is_empty() {
                         label.push(' ');
@@ -998,8 +1002,11 @@ pub(crate) struct TableRow {
     left_role: color::ColorRole,
     right_role: color::ColorRole,
     overrides: cocomo_lib::ColorOverrides,
-    /// Coarse status glyph (`~`, `=`, `|`, `≠`, `*`).
-    status_symbol: &'static str,
+    /// Status glyph (`≡`, `=`, `▶`, `◀`, `?`, `!`, plus the GUI-only `≠`
+    /// and `*`) and its color role, as resolved by the lib's
+    /// [`DirEntryStatus::symbol`] so the lane matches the TUI's status
+    /// column.
+    status_glyph: (&'static str, color::ColorRole),
     /// Merge-decision glyph (`L`, `R`, `!`) and its color role, set only
     /// in merge mode for paths the ancestor scans cover.
     merge_glyph: Option<(&'static str, color::ColorRole)>,
@@ -1058,7 +1065,7 @@ impl TableRow {
             left_role: color::side_role(entry, Side::Left, ignored),
             right_role: color::side_role(entry, Side::Right, ignored),
             overrides: overrides.clone(),
-            status_symbol: color::gutter_icon(entry, ignored),
+            status_glyph: color::status_glyph(entry, ignored),
             merge_glyph: merge_glyph(merge_status),
             has_left: entry.left.is_some(),
             has_right: entry.right.is_some(),
@@ -1919,14 +1926,17 @@ mod tests {
     }
 
     #[gpui::test]
-    fn orphan_rows_carry_the_pipe_symbol(cx: &mut TestAppContext) {
+    fn status_glyphs_match_the_tui_symbols(cx: &mut TestAppContext) {
         let left_orphan = entry(
             "orphan.txt",
             DirEntryStatus::LeftOrphan,
             Some(info("orphan.txt", false)),
             None,
         );
-        assert_eq!(row(&left_orphan, cx).status_symbol, "|");
+        assert_eq!(
+            row(&left_orphan, cx).status_glyph,
+            ("▶", color::ColorRole::Orphan)
+        );
 
         let right_orphan = entry(
             "orphan.txt",
@@ -1934,16 +1944,33 @@ mod tests {
             None,
             Some(info("orphan.txt", false)),
         );
-        assert_eq!(row(&right_orphan, cx).status_symbol, "|");
+        assert_eq!(
+            row(&right_orphan, cx).status_glyph,
+            ("◀", color::ColorRole::Orphan)
+        );
 
-        // A matched difference still carries its glyph.
-        let different = entry(
+        // A matched difference carries the lib's direction marker.
+        let left_newer = entry(
             "a.txt",
-            DirEntryStatus::DIFFERENT,
+            DirEntryStatus::LeftNewer,
             Some(info("a.txt", false)),
             Some(info("a.txt", false)),
         );
-        assert_eq!(row(&different, cx).status_symbol, "~");
+        assert_eq!(
+            row(&left_newer, cx).status_glyph,
+            ("▶", color::ColorRole::Important)
+        );
+
+        let same = entry(
+            "a.txt",
+            DirEntryStatus::Same,
+            Some(info("a.txt", false)),
+            Some(info("a.txt", false)),
+        );
+        assert_eq!(
+            row(&same, cx).status_glyph,
+            ("≡", color::ColorRole::Neutral)
+        );
     }
 
     #[gpui::test]
