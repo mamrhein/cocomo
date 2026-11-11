@@ -129,9 +129,12 @@ pub(crate) fn render_folder_table(
 ) -> AnyElement {
     let theme = cx.theme().clone();
     // The base-dir bar's left half spans exactly the table's left group
-    // (Name, Size, Modified, status lane) so its right half lines up
-    // with the table's right group.
-    let left_half = table_state.read(cx).delegate().left_half_width();
+    // (Name, Size, Modified) and its right half lines up with the
+    // table's right group, with the status lane's width kept as a gap
+    // between the two halves.
+    let delegate = table_state.read(cx).delegate();
+    let left_group = delegate.left_group_width();
+    let status_lane = delegate.status_width();
     let fill_table = table_state.clone();
 
     v_flex()
@@ -139,7 +142,13 @@ pub(crate) fn render_folder_table(
         .min_h_0()
         .bg(theme.background)
         .child(render_base_dir_bar(
-            state, left_path, right_path, left_half, &theme, cx,
+            state,
+            left_path,
+            right_path,
+            left_group,
+            status_lane,
+            &theme,
+            cx,
         ))
         .child(
             div()
@@ -182,14 +191,16 @@ pub(crate) fn render_folder_table(
 /// the right path on the trailing edge, each editable and with its own
 /// history dropdown and new-folder command.
 ///
-/// `left_width` is the table's left-group width; the left half of the
-/// bar takes it verbatim so the right half starts where the table's
-/// right side's Name column starts.
+/// `left_width` is the table's left-group width (without the status
+/// lane) and `gap_width` the status lane's width; together they make the
+/// left half stop where the status lane begins and the right half start
+/// where the table's right side's Name column starts.
 fn render_base_dir_bar(
     state: &Entity<AppState>,
     left_path: &Entity<InputState>,
     right_path: &Entity<InputState>,
     left_width: Pixels,
+    gap_width: Pixels,
     theme: &Theme,
     cx: &mut App,
 ) -> AnyElement {
@@ -205,7 +216,9 @@ fn render_base_dir_bar(
             Some(left_width),
             cx,
         ))
-        .child(div().h_full().w_px().bg(theme.border).flex_shrink_0())
+        // The gap above the table's status lane, separating the two
+        // path halves.
+        .child(div().w(gap_width).flex_shrink_0())
         .child(path_cell(Side::Right, state, right_path, None, cx))
         .into_any_element()
 }
@@ -436,13 +449,23 @@ impl FolderTableDelegate {
         Some(TableRow::new(row_ix, row, entry, state, &overrides))
     }
 
-    /// Width of the table's left half: the left side's `Name`, `Size`,
-    /// and `Modified` columns plus the status lane. The base-dir bar
-    /// uses it to align its right half with the table's right group.
-    pub(crate) fn left_half_width(&self) -> Pixels {
-        self.columns[..RIGHT_NAME_IX]
+    /// Width of the table's left group: the left side's `Name`, `Size`,
+    /// and `Modified` columns, without the status lane. The base-dir
+    /// bar uses it to size its left half.
+    pub(crate) fn left_group_width(&self) -> Pixels {
+        self.columns[..RIGHT_NAME_IX - 1]
             .iter()
             .fold(px(0.), |sum, col| sum + col.width)
+    }
+
+    /// Width of the unlabeled status lane between the two sides' column
+    /// groups. The base-dir bar uses it as the gap between its halves.
+    pub(crate) fn status_width(&self) -> Pixels {
+        self.columns
+            .iter()
+            .find(|col| col.key == COL_STATUS)
+            .expect("column defined in `new`")
+            .width
     }
 
     /// Size the `Size` and `Modified` columns to the worst-case cell
@@ -2057,14 +2080,22 @@ mod tests {
     }
 
     #[gpui::test]
-    fn left_half_width_covers_the_left_group_and_status_lane(
+    fn left_group_width_and_status_width_split_the_left_half(
         cx: &mut TestAppContext,
     ) {
         let delegate = test_delegate(cx);
-        // Name (16) + Size (5) + Modified (11) + status (1.75) rems at
-        // a 16 px rem basis. The Size and Modified entries are the
-        // placeholders; the real widths are measured from the data.
-        assert_eq!(delegate.left_half_width(), px(540.));
+        // Name (16) + Size (5) + Modified (11) rems at a 16 px rem
+        // basis, without the status lane. The Size and Modified entries
+        // are the placeholders; the real widths are measured from the
+        // data.
+        assert_eq!(delegate.left_group_width(), px(512.));
+        // The status lane (1.75 rems) is the bar's gap; together the
+        // two widths still end where the right Name column starts.
+        assert_eq!(delegate.status_width(), px(28.));
+        assert_eq!(
+            delegate.left_group_width() + delegate.status_width(),
+            px(540.)
+        );
     }
 
     #[gpui::test]
