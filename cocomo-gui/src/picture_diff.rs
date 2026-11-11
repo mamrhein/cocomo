@@ -628,6 +628,9 @@ fn render_panes(
     h_flex()
         .flex_1()
         .min_h_0()
+        // `h_flex` centers on the cross axis; the panes own a scroll
+        // region that must resolve against the row's height.
+        .items_stretch()
         .w_full()
         .child(image_pane(
             left_name.into(),

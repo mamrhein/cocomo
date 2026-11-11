@@ -9,7 +9,7 @@
 
 use std::{collections::HashMap, io::Write};
 
-use cocomo_lib::compare::{DirEntry, DirEntryStatus};
+use cocomo_lib::compare::{DirEntry, DirEntryStatus, SummaryBucket};
 
 use super::filter::{should_show_entry, should_show_in_tree};
 use crate::cli::{DirCompareArgs, SummaryMode};
@@ -30,12 +30,11 @@ impl Summary {
         self.by_status.values().sum()
     }
 
-    /// Return the number of visible entries whose status bitmap
-    /// intersects `mask`.
-    fn count_matching(&self, mask: DirEntryStatus) -> usize {
+    /// Return the number of visible entries in `bucket`.
+    fn count_in_bucket(&self, bucket: SummaryBucket) -> usize {
         self.by_status
             .iter()
-            .filter(|(status, _)| status.intersects(mask))
+            .filter(|(status, _)| status.summary_bucket() == bucket)
             .map(|(_, count)| *count)
             .sum()
     }
@@ -43,17 +42,18 @@ impl Summary {
     /// Return the number of visible entries whose sides are identical or
     /// equal.
     pub(super) fn same_count(&self) -> usize {
-        self.count_matching(DirEntryStatus::EQUAL)
+        self.count_in_bucket(SummaryBucket::Same)
     }
 
-    /// Return the number of visible entries whose sides differ.
+    /// Return the number of visible entries whose sides differ, directly
+    /// or somewhere in the subtree.
     pub(super) fn different_count(&self) -> usize {
-        self.count_matching(DirEntryStatus::DIFFERENT)
+        self.count_in_bucket(SummaryBucket::Different)
     }
 
-    /// Return the number of visible orphan entries.
+    /// Return the number of visible entries that exist on only one side.
     pub(super) fn orphan_count(&self) -> usize {
-        self.count_matching(DirEntryStatus::ORPHAN)
+        self.count_in_bucket(SummaryBucket::Orphan)
     }
 
     /// Return the count for a specific status, or zero if absent.
@@ -240,12 +240,16 @@ pub(super) fn print_summary_to_vec(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
+    use cocomo_lib::compare::DirEntryStatus;
+
     use super::{
         super::test_helpers::{
             make_nested_comparison, make_nested_comparison_with_hidden,
             make_test_comparison,
         },
-        collect_and_count, print_summary_to_vec,
+        Summary, collect_and_count, print_summary_to_vec,
     };
     use crate::cli::{DirCompareArgs, SummaryMode};
 
@@ -457,5 +461,33 @@ mod tests {
             })
             .count();
         assert_eq!(row_count, summary.total());
+    }
+
+    #[test]
+    fn summary_buckets_are_mutually_exclusive() {
+        // A shared directory whose subtree differs carries an aggregated
+        // bitmap; it must land in exactly one bucket (`different`), not
+        // in `same` and `orphans` as well.
+        let mut by_status = HashMap::new();
+        by_status.insert(
+            DirEntryStatus::Equal
+                | DirEntryStatus::LeftNewer
+                | DirEntryStatus::LeftOrphan,
+            1,
+        );
+        by_status.insert(DirEntryStatus::RightOrphan, 1);
+        by_status.insert(DirEntryStatus::Equal, 2);
+        let summary = Summary { by_status };
+        assert_eq!(summary.total(), 4);
+        assert_eq!(summary.same_count(), 2);
+        assert_eq!(summary.different_count(), 1);
+        assert_eq!(summary.orphan_count(), 1);
+        assert_eq!(
+            summary.same_count()
+                + summary.different_count()
+                + summary.orphan_count(),
+            summary.total(),
+            "the buckets must partition the visible entries"
+        );
     }
 }

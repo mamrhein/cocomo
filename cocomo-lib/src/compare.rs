@@ -69,6 +69,20 @@ bitflags! {
     }
 }
 
+/// The mutually exclusive summary bucket of a status bitmap.
+///
+/// The summary counts (`same` / `different` / `orphans`) partition the
+/// entries, so they add up to the total; a bitmap is classified once.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SummaryBucket {
+    /// The sides are identical or equal.
+    Same,
+    /// The sides differ, directly or somewhere in the subtree.
+    Different,
+    /// The entry itself exists on only one side.
+    Orphan,
+}
+
 impl DirEntryStatus {
     /// The sides are identical or equal.
     pub const EQUAL: Self = Self::Same.union(Self::Equal);
@@ -95,6 +109,25 @@ impl DirEntryStatus {
             out |= Self::LeftOrphan;
         }
         out
+    }
+
+    /// The summary bucket this bitmap falls into.
+    ///
+    /// A pure orphan (exactly one orphan bit, the status of an entry that
+    /// is itself missing on one side) is an `Orphan`. Any other bitmap
+    /// carrying a newer-side or orphan bit — typically the aggregated
+    /// status of a directory whose subtree differs — is `Different`.
+    /// Everything else (`Same`, `Equal`, or a directory whose whole
+    /// subtree is equal) is `Same`. The buckets are disjoint, so the
+    /// summary counts add up to the total.
+    pub fn summary_bucket(self) -> SummaryBucket {
+        if self == Self::LeftOrphan || self == Self::RightOrphan {
+            SummaryBucket::Orphan
+        } else if self.intersects(Self::DIFFERENT | Self::ORPHAN) {
+            SummaryBucket::Different
+        } else {
+            SummaryBucket::Same
+        }
     }
 
     /// The display symbol and color role for this status bitmap.
@@ -274,28 +307,29 @@ impl DirComparison {
         self.entries.len()
     }
 
-    /// Return the number of entries whose status bitmap intersects `mask`.
-    fn count_matching(&self, mask: DirEntryStatus) -> usize {
+    /// Return the number of entries in `bucket`.
+    fn count_in_bucket(&self, bucket: SummaryBucket) -> usize {
         self.counts
             .iter()
-            .filter(|(status, _)| !status.intersection(mask).is_empty())
+            .filter(|(status, _)| status.summary_bucket() == bucket)
             .map(|(_, count)| *count)
             .sum()
     }
 
     /// Return the number of entries whose sides are identical or equal.
     pub fn same_count(&self) -> usize {
-        self.count_matching(DirEntryStatus::EQUAL)
+        self.count_in_bucket(SummaryBucket::Same)
     }
 
-    /// Return the number of entries whose sides differ.
+    /// Return the number of entries whose sides differ, directly or
+    /// somewhere in the subtree.
     pub fn different_count(&self) -> usize {
-        self.count_matching(DirEntryStatus::DIFFERENT)
+        self.count_in_bucket(SummaryBucket::Different)
     }
 
-    /// Return the number of orphan entries.
+    /// Return the number of entries that exist on only one side.
     pub fn orphan_count(&self) -> usize {
-        self.count_matching(DirEntryStatus::ORPHAN)
+        self.count_in_bucket(SummaryBucket::Orphan)
     }
 
     /// Exchange the two sides of the comparison in place: every entry's
@@ -1138,6 +1172,63 @@ mod tests {
 
     use super::*;
     use crate::{FsError, FsOperation, local::LocalFs, mockfs::MockFs};
+
+    #[test]
+    fn summary_bucket_classifies_pure_orphans_and_aggregates() {
+        assert_eq!(
+            DirEntryStatus::LeftOrphan.summary_bucket(),
+            SummaryBucket::Orphan
+        );
+        assert_eq!(
+            DirEntryStatus::RightOrphan.summary_bucket(),
+            SummaryBucket::Orphan
+        );
+        assert_eq!(DirEntryStatus::Same.summary_bucket(), SummaryBucket::Same);
+        assert_eq!(
+            DirEntryStatus::Equal.summary_bucket(),
+            SummaryBucket::Same
+        );
+        assert_eq!(
+            DirEntryStatus::DIFFERENT.summary_bucket(),
+            SummaryBucket::Different
+        );
+        // A shared directory with an orphan in its subtree is not itself
+        // an orphan; it counts as different.
+        assert_eq!(
+            (DirEntryStatus::Equal | DirEntryStatus::LeftOrphan)
+                .summary_bucket(),
+            SummaryBucket::Different
+        );
+    }
+
+    #[test]
+    fn summary_counts_partition_the_total() {
+        // Aggregated directory bitmaps must be counted once, so the
+        // buckets add up to the total.
+        let counts = HashMap::from([
+            (DirEntryStatus::Equal, 2),
+            (DirEntryStatus::Same, 1),
+            (DirEntryStatus::Equal | DirEntryStatus::LeftNewer, 1),
+            (DirEntryStatus::Equal | DirEntryStatus::LeftOrphan, 1),
+            (DirEntryStatus::LeftOrphan, 2),
+            (DirEntryStatus::RightOrphan, 1),
+        ]);
+        let total: usize = counts.values().sum();
+        let comparison = DirComparison {
+            entries: vec![],
+            counts,
+            errors: vec![],
+        };
+        assert_eq!(comparison.same_count(), 3);
+        assert_eq!(comparison.different_count(), 2);
+        assert_eq!(comparison.orphan_count(), 3);
+        assert_eq!(
+            comparison.same_count()
+                + comparison.different_count()
+                + comparison.orphan_count(),
+            total
+        );
+    }
 
     #[test]
     fn status_swapped_flips_directions() {

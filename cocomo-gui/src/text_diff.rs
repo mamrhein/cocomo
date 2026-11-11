@@ -4520,8 +4520,13 @@ impl Render for TextDiffView {
                     .min_h_0()
                     .when_some(strip, |row, strip| row.child(strip))
                     .child(
+                        // `h_flex` centers on the cross axis, so the panes
+                        // column needs `h_full` to resolve the lists against
+                        // the row's height instead of collapsing to content
+                        // height (a 0px list viewport).
                         div()
                             .flex_1()
+                            .h_full()
                             .min_w_0()
                             .min_h_0()
                             .overflow_hidden()
@@ -6218,6 +6223,60 @@ mod tests {
             let s = session.read(cx);
             assert!(s.is_word_wrap());
             assert!(s.is_show_thumbnail());
+        });
+    }
+
+    /// Regression: the diff lists must resolve against the row's height.
+    /// `h_flex` centers its children on the cross axis, so without
+    /// `h_full` on the panes wrapper the resizable group collapses to a
+    /// 0px-tall list viewport and both panes render blank even though the
+    /// model has rows.
+    #[gpui::test]
+    fn diff_list_viewport_gets_a_nonzero_height(cx: &mut TestAppContext) {
+        use gpui::{Bounds, WindowBounds, WindowOptions, test::TestWindowExt};
+
+        cx.update(|cx| {
+            gpui::init(cx);
+            // The view reads the options global when it renders.
+            cx.set_global(crate::options::AppOptions::default());
+        });
+
+        let session = cx
+            .new(|cx| TextDiffSession::for_test("a\nb\nc\n", "a\nX\nc\n", cx));
+        let (window, view) = cx.update(|cx| {
+            gpui::open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(
+                        Bounds::maximized(None, cx),
+                    )),
+                    ..Default::default()
+                },
+                cx,
+                |_, cx| cx.new(|cx| TextDiffView::new(session.clone(), cx)),
+            )
+            .expect("failed to open the test window")
+        });
+
+        // Two frames: the resizable group settles its panel sizes on the
+        // frame after its first prepaint.
+        for _ in 0..2 {
+            cx.update_window(window, |_, window, cx| {
+                window.render_frame(cx);
+            })
+            .expect("failed to render the test window");
+        }
+
+        cx.update(|cx| {
+            let view = view.read(cx);
+            for (side, list) in
+                [("left", &view.left_list), ("right", &view.right_list)]
+            {
+                let height = list.viewport_bounds().size.height;
+                assert!(
+                    height.as_f32() > 0.,
+                    "the {side} diff list viewport collapsed to {height:?}"
+                );
+            }
         });
     }
 

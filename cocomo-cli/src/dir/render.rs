@@ -310,55 +310,51 @@ pub(super) fn escape_csv_field(field: &str) -> String {
     }
 }
 
+/// Serialize one comparison entry to its JSON object form.
+///
+/// `is_dir` is derived from either side, so an orphan directory that only
+/// exists on the right is still reported as a directory.
+pub(super) fn entry_to_json(entry: &DirEntry) -> serde_json::Value {
+    let mut obj = serde_json::Map::new();
+    obj.insert(
+        "status".into(),
+        serde_json::Value::String(entry.status.to_string()),
+    );
+    obj.insert("name".into(), serde_json::json!(entry.name));
+    obj.insert("is_dir".into(), serde_json::json!(is_dir_entry(entry)));
+
+    if let Some(ref left) = entry.left {
+        let mut lo = serde_json::Map::new();
+        lo.insert("size".into(), serde_json::json!(left.size));
+        lo.insert("modified".into(), serde_json::json!(left.modified));
+        lo.insert("path".into(), serde_json::json!(left.path));
+        if let Some(ref h) = left.hash {
+            lo.insert("hash".into(), serde_json::json!(h));
+        }
+        obj.insert("left".into(), serde_json::Value::Object(lo));
+    } else {
+        obj.insert("left".into(), serde_json::Value::Null);
+    }
+
+    if let Some(ref right) = entry.right {
+        let mut ro = serde_json::Map::new();
+        ro.insert("size".into(), serde_json::json!(right.size));
+        ro.insert("modified".into(), serde_json::json!(right.modified));
+        ro.insert("path".into(), serde_json::json!(right.path));
+        if let Some(ref h) = right.hash {
+            ro.insert("hash".into(), serde_json::json!(h));
+        }
+        obj.insert("right".into(), serde_json::Value::Object(ro));
+    } else {
+        obj.insert("right".into(), serde_json::Value::Null);
+    }
+
+    serde_json::Value::Object(obj)
+}
+
 pub(super) fn print_comparison_json(entries: &[DirEntry], summary: &Summary) {
-    let json_entries: Vec<serde_json::Value> = entries
-        .iter()
-        .map(|entry| {
-            let mut obj = serde_json::Map::new();
-            obj.insert(
-                "status".into(),
-                serde_json::Value::String(entry.status.to_string()),
-            );
-            obj.insert("name".into(), serde_json::json!(entry.name));
-            obj.insert(
-                "is_dir".into(),
-                serde_json::json!(
-                    entry.left.as_ref().map(|l| l.is_dir).unwrap_or(false)
-                ),
-            );
-
-            if let Some(ref left) = entry.left {
-                let mut lo = serde_json::Map::new();
-                lo.insert("size".into(), serde_json::json!(left.size));
-                lo.insert("modified".into(), serde_json::json!(left.modified));
-                lo.insert("path".into(), serde_json::json!(left.path));
-                if let Some(ref h) = left.hash {
-                    lo.insert("hash".into(), serde_json::json!(h));
-                }
-                obj.insert("left".into(), serde_json::Value::Object(lo));
-            } else {
-                obj.insert("left".into(), serde_json::Value::Null);
-            }
-
-            if let Some(ref right) = entry.right {
-                let mut ro = serde_json::Map::new();
-                ro.insert("size".into(), serde_json::json!(right.size));
-                ro.insert(
-                    "modified".into(),
-                    serde_json::json!(right.modified),
-                );
-                ro.insert("path".into(), serde_json::json!(right.path));
-                if let Some(ref h) = right.hash {
-                    ro.insert("hash".into(), serde_json::json!(h));
-                }
-                obj.insert("right".into(), serde_json::Value::Object(ro));
-            } else {
-                obj.insert("right".into(), serde_json::Value::Null);
-            }
-
-            serde_json::Value::Object(obj)
-        })
-        .collect();
+    let json_entries: Vec<serde_json::Value> =
+        entries.iter().map(entry_to_json).collect();
 
     let summary_json = serde_json::json!({
         "total": summary.total(),
@@ -391,7 +387,8 @@ mod tests {
             display::Colorizer,
             test_helpers::{make_nested_comparison, make_test_comparison},
         },
-        render_comparison_tree_to_vec, render_tree_entries_to_vec,
+        entry_to_json, render_comparison_tree_to_vec,
+        render_tree_entries_to_vec,
     };
     use crate::cli::{ColorMode, DirCompareArgs, SortField};
 
@@ -649,6 +646,52 @@ mod tests {
         assert_eq!(
             names,
             vec!["diff.txt", "only_left.txt", "only_right.txt", "same.txt"]
+        );
+    }
+
+    #[test]
+    fn json_is_dir_detects_a_right_only_directory() {
+        // An orphan directory exists on one side only; `is_dir` must be
+        // derived from either side, not just the left one.
+        let dir_right_only = DirEntry {
+            name: "def".to_string(),
+            status: DirEntryStatus::RightOrphan,
+            left: None,
+            right: Some(EntryInfo {
+                name: "def".to_string(),
+                path: "def".to_string(),
+                size: 7,
+                modified: String::new(),
+                is_dir: true,
+                hash: None,
+            }),
+            center: None,
+            sub_entries: None,
+            name_conflict: false,
+        };
+        let json = entry_to_json(&dir_right_only);
+        assert_eq!(json["is_dir"], serde_json::json!(true));
+
+        // A left-only file stays a non-directory.
+        let file_left_only = DirEntry {
+            name: "a.txt".to_string(),
+            status: DirEntryStatus::LeftOrphan,
+            left: Some(EntryInfo {
+                name: "a.txt".to_string(),
+                path: "a.txt".to_string(),
+                size: 1,
+                modified: String::new(),
+                is_dir: false,
+                hash: None,
+            }),
+            right: None,
+            center: None,
+            sub_entries: None,
+            name_conflict: false,
+        };
+        assert_eq!(
+            entry_to_json(&file_left_only)["is_dir"],
+            serde_json::json!(false)
         );
     }
 }
