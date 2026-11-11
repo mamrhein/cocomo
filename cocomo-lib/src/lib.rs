@@ -96,8 +96,8 @@ pub mod zip;
 // Re-exports for convenience.
 pub use compare::{
     CompareConfig, DirComparison, DirEntry, DirEntryStatus, EntryInfo,
-    StatusColor, compare_content_pair_node, compare_directories_node,
-    compare_directories_pair_node,
+    StatusColor, SummaryBucket, compare_content_pair_node,
+    compare_directories_node, compare_directories_pair_node,
 };
 pub use error::{FsError, FsOperation, Result};
 pub use file::FsFile;

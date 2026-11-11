@@ -336,11 +336,13 @@ mod dir_compare {
             .stdout(predicate::str::contains("top_orphan"))
             .stdout(predicate::str::contains("inner"))
             .stdout(predicate::str::contains("g.txt"))
-            // The six orphan nodes plus the shared `sub/` directory,
-            // whose aggregated bitmap carries `Equal | LeftOrphan` from
-            // its orphaned subtree and therefore intersects the orphan
-            // mask.
-            .stdout(predicate::str::contains("7 orphans"));
+            // The six orphan nodes count as orphans; the shared `sub/`
+            // directory, whose aggregated bitmap carries `Equal |
+            // LeftOrphan` from its orphaned subtree, counts once as
+            // different, so the buckets add up to the total.
+            .stdout(predicate::str::contains(
+                "7 total, 0 same, 1 different, 6 orphans",
+            ));
     }
 
     #[test]
