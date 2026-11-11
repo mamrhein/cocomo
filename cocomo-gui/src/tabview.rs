@@ -670,25 +670,18 @@ impl WindowRoot {
         }
     }
 
-    /// Render the collapsible log pane: a header row with the entry count
-    /// and a collapse toggle, plus the recorded lines when open.
+    /// Render the log pane: a header row with the entry count and a
+    /// collapse toggle, plus the recorded lines.
+    ///
+    /// Hidden means fully removed: no head line, no border, no reserved
+    /// space. The View menu's Show log pane item brings it back.
     fn render_log_pane(&self, cx: &App) -> impl IntoElement {
+        if !cx.global::<LogPaneOpen>().0 {
+            return div().into_any_element();
+        }
         let theme = cx.theme();
-        let open = cx.global::<LogPaneOpen>().0;
         let buffer = cx.global::<LogBuffer>();
-        let (label, icon, tooltip) = if open {
-            (
-                format!("Log — {}", buffer.len()),
-                IconName::PanelBottomClose,
-                "Collapse log pane",
-            )
-        } else {
-            (
-                format!("Log — {}", buffer.len()),
-                IconName::PanelBottomOpen,
-                "Expand log pane",
-            )
-        };
+        let label = format!("Log — {}", buffer.len());
 
         v_flex()
             .flex_shrink_0()
@@ -710,11 +703,11 @@ impl WindowRoot {
                     )
                     .child(
                         Button::new("log_pane_toggle")
-                            .icon(icon)
+                            .icon(IconName::PanelBottomClose)
                             .ghost()
                             .small()
-                            .tooltip(tooltip)
-                            .accessibility_label(tooltip)
+                            .tooltip("Collapse log pane")
+                            .accessibility_label("Collapse log pane")
                             .on_click(|_, _, cx| {
                                 cx.update_global::<LogPaneOpen, _>(
                                     |open, _| open.0 = !open.0,
@@ -722,40 +715,39 @@ impl WindowRoot {
                             }),
                     ),
             )
-            .when(open, |pane| {
-                pane.child(
-                    div()
-                        .id(ElementId::Name("log-scroll".into()))
-                        .h_32()
-                        .overflow_y_scroll()
-                        .px_3()
-                        .py_1()
-                        .text_xs()
-                        .font_family(theme.mono_font_family.clone())
-                        .children(buffer.entries().map(|entry| {
-                            let color = match entry.level {
-                                LogLevel::Info => theme.muted_foreground,
-                                LogLevel::Warning => theme.warning,
-                                LogLevel::Error => theme.danger,
-                            };
-                            h_flex()
-                                .gap_2()
-                                .child(
-                                    div()
-                                        .w_12()
-                                        .flex_shrink_0()
-                                        .text_color(color)
-                                        .child(entry.level.label()),
-                                )
-                                .child(
-                                    div()
-                                        .min_w_0()
-                                        .text_color(theme.foreground)
-                                        .child(entry.message.clone()),
-                                )
-                        })),
-                )
-            })
+            .child(
+                div()
+                    .id(ElementId::Name("log-scroll".into()))
+                    .h_32()
+                    .overflow_y_scroll()
+                    .px_3()
+                    .py_1()
+                    .text_xs()
+                    .font_family(theme.mono_font_family.clone())
+                    .children(buffer.entries().map(|entry| {
+                        let color = match entry.level {
+                            LogLevel::Info => theme.muted_foreground,
+                            LogLevel::Warning => theme.warning,
+                            LogLevel::Error => theme.danger,
+                        };
+                        h_flex()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .w_12()
+                                    .flex_shrink_0()
+                                    .text_color(color)
+                                    .child(entry.level.label()),
+                            )
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .text_color(theme.foreground)
+                                    .child(entry.message.clone()),
+                            )
+                    })),
+            )
+            .into_any_element()
     }
 }
 
@@ -858,6 +850,9 @@ impl Render for WindowRoot {
                         .can_transfer(TransferAction::DeleteRight),
                     can_exchange: state.can_exchange(),
                     has_selection: state.selected_entry().is_some(),
+                    selected_is_dir: state.selected_is_dir(),
+                    show_hidden: state.show_hidden(),
+                    show_statuses: state.filters().show_statuses,
                     can_sync: state.has_comparison(),
                     can_compare_parent: false,
                     can_go_back: state.can_go_back(),

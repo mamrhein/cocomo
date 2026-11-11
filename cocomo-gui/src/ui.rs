@@ -43,12 +43,14 @@ use crate::{
     color::{ColorFields, Side},
     folder_table::FolderTableDelegate,
     menus::{
-        CopyPathLeft, CopyPathRight, ReloadCompare, SaveSession,
-        SelectAllEntries, StopCompare, ToggleShowDifferent, ToggleShowOrphans,
-        ToggleShowSame,
+        CollapseAll, CollapseDir, CopyPathLeft, CopyPathRight, ExpandAll,
+        ExpandDir, ReloadCompare, SaveSession, SelectAllEntries,
+        ShowAllFilters, StopCompare, ToggleShowDifferent, ToggleShowHidden,
+        ToggleShowLeftNewer, ToggleShowLeftOnly, ToggleShowOrphans,
+        ToggleShowRightNewer, ToggleShowRightOnly, ToggleShowSame,
     },
     session_manager::GuiSessionManager,
-    state::{AppState, BaseSide, StatusCategory, entry_endpoints},
+    state::{AppState, BaseSide, StatusFilter, entry_endpoints},
 };
 
 // ---------------------------------------------------------------------------
@@ -928,6 +930,18 @@ impl FolderCompareView {
         self.run_transfer_action(TransferAction::DeleteRight, window, cx);
     }
 
+    /// Handle delete-both: remove the entry from both sides in one
+    /// batched transfer, after the same confirmation as the single-side
+    /// deletes.
+    fn handle_delete_both(
+        &mut self,
+        _: &DeleteBothSide,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        run_delete_both_action(self.state.clone(), window, cx);
+    }
+
     /// Handle the set-base-folder actions: re-root the session at the
     /// selected entry for the requested side(s).
     fn handle_set_base(
@@ -1466,8 +1480,9 @@ impl FolderCompareView {
         }
     }
 
-    /// Handle a display-filter toggle dispatched from the View menu or the
-    /// toolbar filter dropdown. The filter state lives in [`AppState`].
+    /// Handle a display-filter toggle dispatched from the View menu. The
+    /// filter state lives in [`AppState`]; the toggle flips one status
+    /// group (umbrella groups flip both side-specific bits).
     fn handle_toggle_show_same(
         &mut self,
         _: &ToggleShowSame,
@@ -1475,7 +1490,7 @@ impl FolderCompareView {
         cx: &mut Context<Self>,
     ) {
         self.state.update(cx, |state, cx| {
-            state.toggle_filter(StatusCategory::Same, cx);
+            state.toggle_status_filter(StatusFilter::Equal, cx);
         });
     }
 
@@ -1487,7 +1502,31 @@ impl FolderCompareView {
         cx: &mut Context<Self>,
     ) {
         self.state.update(cx, |state, cx| {
-            state.toggle_filter(StatusCategory::Different, cx);
+            state.toggle_status_filter(StatusFilter::Different, cx);
+        });
+    }
+
+    /// Handle the show-left-newer filter toggle.
+    fn handle_toggle_show_left_newer(
+        &mut self,
+        _: &ToggleShowLeftNewer,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.state.update(cx, |state, cx| {
+            state.toggle_status_filter(StatusFilter::LeftNewer, cx);
+        });
+    }
+
+    /// Handle the show-right-newer filter toggle.
+    fn handle_toggle_show_right_newer(
+        &mut self,
+        _: &ToggleShowRightNewer,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.state.update(cx, |state, cx| {
+            state.toggle_status_filter(StatusFilter::RightNewer, cx);
         });
     }
 
@@ -1499,8 +1538,117 @@ impl FolderCompareView {
         cx: &mut Context<Self>,
     ) {
         self.state.update(cx, |state, cx| {
-            state.toggle_filter(StatusCategory::Orphan, cx);
+            state.toggle_status_filter(StatusFilter::Orphans, cx);
         });
+    }
+
+    /// Handle the show-left-only filter toggle.
+    fn handle_toggle_show_left_only(
+        &mut self,
+        _: &ToggleShowLeftOnly,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.state.update(cx, |state, cx| {
+            state.toggle_status_filter(StatusFilter::LeftOnly, cx);
+        });
+    }
+
+    /// Handle the show-right-only filter toggle.
+    fn handle_toggle_show_right_only(
+        &mut self,
+        _: &ToggleShowRightOnly,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.state.update(cx, |state, cx| {
+            state.toggle_status_filter(StatusFilter::RightOnly, cx);
+        });
+    }
+
+    /// Handle the show-hidden-items filter toggle.
+    fn handle_toggle_show_hidden(
+        &mut self,
+        _: &ToggleShowHidden,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.state.update(cx, |state, cx| {
+            state.toggle_show_hidden(cx);
+        });
+    }
+
+    /// Handle Show all: reset every display filter to visible.
+    fn handle_show_all(
+        &mut self,
+        _: &ShowAllFilters,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.state
+            .update(cx, |state, cx| state.show_all_filters(cx));
+    }
+
+    /// Expand or collapse the selected directory, backing the View menu's
+    /// separate Expand/Collapse directory items.
+    fn handle_dir_expansion(
+        &mut self,
+        expanded: bool,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let index = self.state.read(cx).selected_index();
+        let path = {
+            let state = self.state.read(cx);
+            if !state.selected_is_dir() {
+                return;
+            }
+            state.row_at(index).map(|row| row.path().to_string())
+        };
+        let Some(path) = path else { return };
+        self.state.update(cx, |state, cx| {
+            state.set_dir_expanded(&path, expanded, cx);
+        });
+    }
+
+    /// Handle Expand directory.
+    fn handle_expand_dir(
+        &mut self,
+        _: &ExpandDir,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.handle_dir_expansion(true, window, cx);
+    }
+
+    /// Handle Collapse directory.
+    fn handle_collapse_dir(
+        &mut self,
+        _: &CollapseDir,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.handle_dir_expansion(false, window, cx);
+    }
+
+    /// Handle Expand all.
+    fn handle_expand_all(
+        &mut self,
+        _: &ExpandAll,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.state.update(cx, |state, cx| state.expand_all(cx));
+    }
+
+    /// Handle Collapse all.
+    fn handle_collapse_all(
+        &mut self,
+        _: &CollapseAll,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.state.update(cx, |state, cx| state.collapse_all(cx));
     }
 
     // -----------------------------------------------------------------------
@@ -1562,6 +1710,7 @@ impl Render for FolderCompareView {
             .on_action(cx.listener(Self::handle_move_to_right))
             .on_action(cx.listener(Self::handle_delete_left))
             .on_action(cx.listener(Self::handle_delete_right))
+            .on_action(cx.listener(Self::handle_delete_both))
             .on_action(cx.listener(Self::handle_set_base_left))
             .on_action(cx.listener(Self::handle_set_base_right))
             .on_action(cx.listener(Self::handle_set_base_both))
@@ -1590,10 +1739,21 @@ impl Render for FolderCompareView {
             .on_action(cx.listener(Self::handle_sync_mirror_right))
             .on_action(cx.listener(Self::handle_sync_mirror_left))
             .on_action(cx.listener(Self::handle_reveal))
-            // Display filters (View menu and toolbar filter dropdown).
+            // Display filters (View menu; shares the show-mask with the
+            // toolbar preset buttons).
             .on_action(cx.listener(Self::handle_toggle_show_same))
             .on_action(cx.listener(Self::handle_toggle_show_different))
+            .on_action(cx.listener(Self::handle_toggle_show_left_newer))
+            .on_action(cx.listener(Self::handle_toggle_show_right_newer))
             .on_action(cx.listener(Self::handle_toggle_show_orphans))
+            .on_action(cx.listener(Self::handle_toggle_show_left_only))
+            .on_action(cx.listener(Self::handle_toggle_show_right_only))
+            .on_action(cx.listener(Self::handle_toggle_show_hidden))
+            .on_action(cx.listener(Self::handle_show_all))
+            .on_action(cx.listener(Self::handle_expand_dir))
+            .on_action(cx.listener(Self::handle_collapse_dir))
+            .on_action(cx.listener(Self::handle_expand_all))
+            .on_action(cx.listener(Self::handle_collapse_all))
             // Menu-dispatched actions that need view context.
             .on_action(cx.listener(Self::handle_reload_compare))
             .on_action(cx.listener(Self::handle_stop_compare))
@@ -2238,6 +2398,51 @@ pub(crate) fn run_transfer_action(
             });
             true
         })
+    });
+}
+
+/// Run the delete-from-both-sides command on the selected entry of
+/// `state`.
+///
+/// Deletes always confirm; both side items then execute in one batched
+/// transfer so a failure on either side surfaces through the same busy
+/// and notice flow as a single-side delete. Shared by the view's action
+/// handler and the row context menu.
+pub(crate) fn run_delete_both_action(
+    state: Entity<AppState>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let name = state
+        .read(cx)
+        .delete_both_items()
+        .and_then(|mut items| items.pop())
+        .map(|item| item.name);
+    let Some(name) = name else {
+        state.update(cx, |state, cx| {
+            state.explain_blocked_transfer(cx);
+        });
+        return;
+    };
+    window.open_alert_dialog(cx, move |alert, _, _| {
+        // Clone per builder call: the builder is an `Fn` closure
+        // that may run on every layer rebuild.
+        let state = state.clone();
+        alert
+            .confirm()
+            .title("Delete from both sides?")
+            .description(format!(
+                "\"{name}\" is removed from both sides. This cannot be \
+                 undone."
+            ))
+            .ok_text("Delete")
+            .ok_variant(ButtonVariant::Danger)
+            .on_ok(move |_, _, cx| {
+                state.update(cx, |state, cx| {
+                    state.run_delete_both(cx);
+                });
+                true
+            })
     });
 }
 

@@ -20,7 +20,7 @@
 
 use std::{cell::Cell, collections::HashSet};
 
-use cocomo_lib::Endpoint;
+use cocomo_lib::{DirEntryStatus, Endpoint};
 #[cfg(not(target_os = "macos"))]
 use gpui::component::menu::AppMenuBar;
 use gpui::{
@@ -51,6 +51,7 @@ use crate::{
     color::Side,
     log::{self, LogLevel, LogPaneOpen},
     session_manager::GuiSessionManager,
+    state::StatusFilter,
     text_diff::{
         AlignWithAnchor, ClearAlignments, CompareSelectionToClipboard,
         ConvertEndingsMac, ConvertEndingsPc, ConvertEndingsUnix,
@@ -93,7 +94,17 @@ actions!(
         SelectAllEntries,
         ToggleShowSame,
         ToggleShowDifferent,
+        ToggleShowLeftNewer,
+        ToggleShowRightNewer,
         ToggleShowOrphans,
+        ToggleShowLeftOnly,
+        ToggleShowRightOnly,
+        ToggleShowHidden,
+        ShowAllFilters,
+        ExpandDir,
+        CollapseDir,
+        ExpandAll,
+        CollapseAll,
         ToggleWordWrap,
         ToggleLogPane,
         ToggleSingleRowToolbar,
@@ -208,6 +219,15 @@ pub struct MenuState {
     pub can_compare_using: bool,
     /// Whether the log pane is visible (checkmark on the View toggle).
     pub log_open: bool,
+    /// Whether the selected folder entry is a directory (enables the
+    /// View menu's Expand/Collapse directory items).
+    pub selected_is_dir: bool,
+    /// Whether hidden (dot-prefixed) entries are visible (drives the
+    /// View menu's hidden-items Show/Hide label).
+    pub show_hidden: bool,
+    /// The status show-mask the View menu's filter toggles read and
+    /// flip (drives their Show/Hide labels).
+    pub show_statuses: DirEntryStatus,
     /// Whether the toolbars render in a single merged row (checkmark on
     /// the View toggle).
     pub single_row_toolbar: bool,
@@ -257,6 +277,9 @@ impl MenuState {
             can_go_forward: false,
             can_compare_using: false,
             log_open: true,
+            selected_is_dir: false,
+            show_hidden: true,
+            show_statuses: DirEntryStatus::all(),
             single_row_toolbar: false,
             word_wrap: false,
             show_thumbnails: false,
@@ -325,6 +348,15 @@ fn submenu(name: &'static str, entries: Vec<MenuItem>) -> Option<MenuItem> {
 /// dangling separator line.
 fn when(cond: bool, part: impl FnOnce() -> Vec<MenuItem>) -> Vec<MenuItem> {
     cond.then(part).unwrap_or_default()
+}
+
+/// Label of a View-menu filter toggle.
+///
+/// The label states the result of invoking the item, so the pair reads
+/// `Show …` while the group is filtered out and `Hide …` while it is
+/// shown (matching the log-pane toggle; no checkmark is needed).
+fn filter_label(shown: bool, group: &str) -> SharedString {
+    format!("{} {group} items", if shown { "Hide" } else { "Show" }).into()
 }
 
 /// The "Open with" submenu shared by the File / Folder menu's open
@@ -586,12 +618,12 @@ fn build_app_menus(
                                 MenuItem::action("Right", DeleteRightSide)
                                     .disabled(!state.can_delete_right)
                             }),
-                            // The delete-both handler lands with the
-                            // next phase; until then the item honestly
-                            // stays disabled.
                             show(hidden, "file.delete_both", || {
                                 MenuItem::action("Both", DeleteBothSide)
-                                    .disabled(true)
+                                    .disabled(
+                                        !(state.can_delete_left
+                                            && state.can_delete_right),
+                                    )
                             }),
                         ]),
                     ),
@@ -926,6 +958,109 @@ fn build_app_menus(
     }
 
     menus.push(Menu::new("View").items(groups(vec![
+        // Folder tree commands: the directory pair acts on the
+        // selection, the all pair on the whole loaded tree. Both share
+        // the expansion state with the toolbar's structure controls.
+        when(state.is_folder, || {
+            items([
+                show(hidden, "view.expand_dir", || {
+                    MenuItem::action("Expand directory", ExpandDir)
+                        .disabled(!state.selected_is_dir)
+                }),
+                show(hidden, "view.collapse_dir", || {
+                    MenuItem::action("Collapse directory", CollapseDir)
+                        .disabled(!state.selected_is_dir)
+                }),
+                show(hidden, "view.expand_all", || {
+                    MenuItem::action("Expand all", ExpandAll)
+                }),
+                show(hidden, "view.collapse_all", || {
+                    MenuItem::action("Collapse all", CollapseAll)
+                }),
+            ])
+        }),
+        // Display-filter toggles share the show-mask with the toolbar's
+        // preset buttons: one toggle per status group (side-specific
+        // sub-groups plus their umbrellas), mirroring the TUI's filter
+        // rows, so every status the toolbar can isolate is also
+        // reachable from the menu.
+        when(state.is_folder, || {
+            let shown = state.show_statuses;
+            items([
+                show(hidden, "view.show_hidden", || {
+                    MenuItem::action(
+                        filter_label(state.show_hidden, "hidden"),
+                        ToggleShowHidden,
+                    )
+                }),
+                show(hidden, "view.show_same", || {
+                    MenuItem::action(
+                        filter_label(
+                            StatusFilter::Equal.is_shown(shown),
+                            "identical",
+                        ),
+                        ToggleShowSame,
+                    )
+                }),
+                show(hidden, "view.show_different", || {
+                    MenuItem::action(
+                        filter_label(
+                            StatusFilter::Different.is_shown(shown),
+                            "different",
+                        ),
+                        ToggleShowDifferent,
+                    )
+                }),
+                show(hidden, "view.show_left_newer", || {
+                    MenuItem::action(
+                        filter_label(
+                            StatusFilter::LeftNewer.is_shown(shown),
+                            "left newer",
+                        ),
+                        ToggleShowLeftNewer,
+                    )
+                }),
+                show(hidden, "view.show_right_newer", || {
+                    MenuItem::action(
+                        filter_label(
+                            StatusFilter::RightNewer.is_shown(shown),
+                            "right newer",
+                        ),
+                        ToggleShowRightNewer,
+                    )
+                }),
+                show(hidden, "view.show_orphans", || {
+                    MenuItem::action(
+                        filter_label(
+                            StatusFilter::Orphans.is_shown(shown),
+                            "orphan",
+                        ),
+                        ToggleShowOrphans,
+                    )
+                }),
+                show(hidden, "view.show_left_only", || {
+                    MenuItem::action(
+                        filter_label(
+                            StatusFilter::LeftOnly.is_shown(shown),
+                            "left-only",
+                        ),
+                        ToggleShowLeftOnly,
+                    )
+                }),
+                show(hidden, "view.show_right_only", || {
+                    MenuItem::action(
+                        filter_label(
+                            StatusFilter::RightOnly.is_shown(shown),
+                            "right-only",
+                        ),
+                        ToggleShowRightOnly,
+                    )
+                }),
+                show(hidden, "view.show_all", || {
+                    MenuItem::action("Show all", ShowAllFilters)
+                }),
+            ])
+        }),
         // Word wrap spans text and merge views; the focused view handles
         // the action.
         when(state.is_text || state.is_merge, || {
@@ -979,8 +1114,16 @@ fn build_app_menus(
         // Window furniture is available from every view, home included.
         items([
             show(hidden, "view.log_pane", || {
-                MenuItem::action("Log pane", ToggleLogPane)
-                    .checked(state.log_open)
+                // The label states the result of invoking the item, so
+                // it reads as a Show/Hide pair instead of a checkmark.
+                MenuItem::action(
+                    if state.log_open {
+                        "Hide log pane"
+                    } else {
+                        "Show log pane"
+                    },
+                    ToggleLogPane,
+                )
             }),
             // The single-row layout is an application option; the global
             // handler toggles and persists it for every window.
@@ -2139,6 +2282,100 @@ mod tests {
                     if name == "Folder Sync presets…"
             )),
             "Options menu must offer the Folder Sync presets dialog"
+        );
+    }
+
+    /// On a folder tab the View menu carries the tree and filter
+    /// groups; every filter toggle reads Hide while its group is shown,
+    /// and the log pane item reads as a Hide/Show pair.
+    #[test]
+    fn folder_view_menu_carries_the_tree_and_filter_groups() {
+        let menus = build_app_menus(
+            MenuState {
+                is_folder: true,
+                ..MenuState::empty()
+            },
+            &HashSet::new(),
+        );
+        let view = menus.iter().find(|m| m.name == "View").unwrap();
+        let has = |target: &str| {
+            view.items.iter().any(|item| {
+                matches!(item, MenuItem::Action { name, .. } if name == target)
+            })
+        };
+        for expected in [
+            "Expand directory",
+            "Collapse directory",
+            "Expand all",
+            "Collapse all",
+            // The default snapshot shows everything, so every toggle
+            // offers hiding its group.
+            "Hide hidden items",
+            "Hide identical items",
+            "Hide different items",
+            "Hide left newer items",
+            "Hide right newer items",
+            "Hide orphan items",
+            "Hide left-only items",
+            "Hide right-only items",
+            "Show all",
+            // The snapshot starts with the pane open, so the item
+            // offers hiding it.
+            "Hide log pane",
+        ] {
+            assert!(has(expected), "View menu must carry {expected}");
+        }
+    }
+
+    /// A filtered snapshot flips the affected toggles to `Show …`,
+    /// including the umbrellas of partially hidden side-specific groups.
+    #[test]
+    fn filter_toggles_read_show_for_filtered_groups() {
+        let menus = build_app_menus(
+            MenuState {
+                is_folder: true,
+                show_hidden: false,
+                show_statuses: DirEntryStatus::all()
+                    .difference(DirEntryStatus::LeftNewer)
+                    .difference(DirEntryStatus::RightOrphan),
+                ..MenuState::empty()
+            },
+            &HashSet::new(),
+        );
+        let view = menus.iter().find(|m| m.name == "View").unwrap();
+        let has = |target: &str| {
+            view.items.iter().any(|item| {
+                matches!(item, MenuItem::Action { name, .. } if name == target)
+            })
+        };
+        for expected in [
+            "Show hidden items",
+            "Show left newer items",
+            "Show right-only items",
+            // Partial umbrellas count as filtered out.
+            "Show different items",
+            "Show orphan items",
+        ] {
+            assert!(has(expected), "View menu must carry {expected}");
+        }
+        assert!(
+            has("Hide identical items"),
+            "an untouched group must still offer hiding"
+        );
+    }
+
+    /// Without a folder tab the tree and filter groups have nothing to
+    /// act on and stay out of the View menu.
+    #[test]
+    fn view_menu_drops_folder_groups_without_a_folder_tab() {
+        let menus = build_app_menus(MenuState::empty(), &HashSet::new());
+        let view = menus.iter().find(|m| m.name == "View").unwrap();
+        assert!(
+            !view.items.iter().any(|item| matches!(
+                item,
+                MenuItem::Action { name, .. } if name == "Expand directory"
+            )),
+            "tree commands must not appear without a folder tab"
         );
     }
 

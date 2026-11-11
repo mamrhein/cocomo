@@ -106,6 +106,64 @@ pub fn status_category(status: &DirEntryStatus) -> StatusCategory {
     }
 }
 
+/// A status group whose visibility the View menu toggles.
+///
+/// Mirrors the TUI's filter rows: an umbrella target (identical,
+/// different, orphan) covers both of its side-specific sub-bits, a sub
+/// target covers one side. Umbrella state is derived from the show-mask
+/// (checked with `contains`, never stored), so a partial umbrella — one
+/// sub-bit shown, its sibling hidden — reads as filtered out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StatusFilter {
+    /// Entries that are identical or equal (umbrella over both equal
+    /// bits).
+    Equal,
+    /// Entries that differ, either side newer (umbrella over both
+    /// direction bits).
+    Different,
+    /// The left side has the newer modification date.
+    LeftNewer,
+    /// The right side has the newer modification date.
+    RightNewer,
+    /// Entries that exist on only one side (umbrella over both orphan
+    /// bits).
+    Orphans,
+    /// Entries that exist only on the left side.
+    LeftOnly,
+    /// Entries that exist only on the right side.
+    RightOnly,
+}
+
+impl StatusFilter {
+    /// The show-mask bits this toggle controls.
+    pub fn mask(self) -> DirEntryStatus {
+        match self {
+            Self::Equal => DirEntryStatus::EQUAL,
+            Self::Different => DirEntryStatus::DIFFERENT,
+            Self::LeftNewer => DirEntryStatus::LeftNewer,
+            Self::RightNewer => DirEntryStatus::RightNewer,
+            Self::Orphans => DirEntryStatus::ORPHAN,
+            Self::LeftOnly => DirEntryStatus::LeftOrphan,
+            Self::RightOnly => DirEntryStatus::RightOrphan,
+        }
+    }
+
+    /// Whether the given show-mask currently displays this status group.
+    pub fn is_shown(self, show_statuses: DirEntryStatus) -> bool {
+        show_statuses.contains(self.mask())
+    }
+
+    /// The show-mask after toggling this group: an umbrella sets or
+    /// clears both sub-bits together, a sub target flips its one bit.
+    pub fn toggle(self, show_statuses: DirEntryStatus) -> DirEntryStatus {
+        if self.is_shown(show_statuses) {
+            show_statuses.difference(self.mask())
+        } else {
+            show_statuses.union(self.mask())
+        }
+    }
+}
+
 /// A named display-filter combination offered by the toolbar's preset
 /// picker.
 ///
@@ -245,15 +303,19 @@ impl FilterPreset {
                 DirEntryStatus::RightNewer | DirEntryStatus::RightOrphan
             }
         };
-        DisplayFilters { show_statuses }
+        DisplayFilters {
+            show_statuses,
+            show_hidden: true,
+        }
     }
 
-    /// The preset whose filters equal `filters`, or `None` when the
-    /// current combination is one the picker cannot express.
+    /// The preset whose status mask equals `filters`, or `None` when the
+    /// current combination is one the picker cannot express. Hidden
+    /// display is not part of a preset, so it does not affect matching.
     pub fn matching(filters: &DisplayFilters) -> Option<Self> {
-        Self::ALL
-            .into_iter()
-            .find(|preset| &preset.filters() == filters)
+        Self::ALL.into_iter().find(|preset| {
+            preset.filters().show_statuses == filters.show_statuses
+        })
     }
 }
 
@@ -268,12 +330,15 @@ impl FilterPreset {
 pub struct DisplayFilters {
     /// The set of status bits to show.
     pub show_statuses: DirEntryStatus,
+    /// Whether dot-prefixed entries appear in the table.
+    pub show_hidden: bool,
 }
 
 impl Default for DisplayFilters {
     fn default() -> Self {
         Self {
             show_statuses: DirEntryStatus::all(),
+            show_hidden: true,
         }
     }
 }
@@ -283,8 +348,12 @@ impl DisplayFilters {
     ///
     /// For directory entries this reads the aggregated bitmap, so a dir
     /// survives a "differences only" filter exactly when its subtree
-    /// carries a shown status bit.
+    /// carries a shown status bit. Dot-prefixed entries drop out when
+    /// hidden items are off.
     pub fn shows_entry(&self, entry: &DirEntry) -> bool {
+        if !self.show_hidden && entry.name.starts_with('.') {
+            return false;
+        }
         !entry.status.intersection(self.show_statuses).is_empty()
     }
 }
@@ -1209,6 +1278,7 @@ impl AppState {
             DisplayFilters {
                 show_statuses: DirEntryStatus::all()
                     .difference(DirEntryStatus::EQUAL),
+                ..DisplayFilters::default()
             }
         } else {
             DisplayFilters::default()
@@ -1295,6 +1365,20 @@ impl AppState {
     /// Return the active display filters.
     pub fn filters(&self) -> DisplayFilters {
         self.filters
+    }
+
+    /// Whether dot-prefixed entries appear in the table.
+    pub fn show_hidden(&self) -> bool {
+        self.filters.show_hidden
+    }
+
+    /// Whether the selected entry is a directory on either side, for the
+    /// View menu's tree-command enabled state.
+    pub fn selected_is_dir(&self) -> bool {
+        self.selected_entry().is_some_and(|e| {
+            e.left.as_ref().is_some_and(|l| l.is_dir)
+                || e.right.as_ref().is_some_and(|r| r.is_dir)
+        })
     }
 
     /// Return the directories entered since the session roots.
@@ -2386,21 +2470,60 @@ impl AppState {
 
     /// Execute a previously planned transfer on the selected entry, then
     /// re-compare so the table reflects the transfer.
-    ///
-    /// Runs on the tokio runtime through the node-based provider API,
-    /// which needs the tokio reactor, like the comparison itself.
     pub fn run_transfer(
         &mut self,
         plan: TransferPlan,
         cx: &mut Context<Self>,
     ) {
-        if self.loading {
-            return;
-        }
         let TransferPlan {
             item, busy, done, ..
         } = plan;
-        let name = item.name.clone();
+        self.run_transfer_items(vec![item], busy, done, cx);
+    }
+
+    /// The two delete items that remove the selected entry from both
+    /// sides, or `None` when either side lacks the entry or the entry's
+    /// shape blocks deleting (name clash, equal content).
+    pub fn delete_both_items(&self) -> Option<Vec<TransferItem>> {
+        let entry = self.selected_entry()?;
+        let left = transfer_plan_for(entry, TransferAction::DeleteLeft)?;
+        let right = transfer_plan_for(entry, TransferAction::DeleteRight)?;
+        Some(vec![left.item, right.item])
+    }
+
+    /// Delete the selected entry from both sides in one batched
+    /// transfer.
+    pub fn run_delete_both(&mut self, cx: &mut Context<Self>) {
+        let Some(items) = self.delete_both_items() else {
+            return;
+        };
+        self.run_transfer_items(
+            items,
+            "Deleting from both sides…",
+            "Deleted from both sides",
+            cx,
+        );
+    }
+
+    /// Execute a batch of transfers on the current pair, then re-compare
+    /// so the table reflects them.
+    ///
+    /// A batch shares one busy/notice cycle: delete-both submits both
+    /// side items together so a provider failure on either side surfaces
+    /// through the same message. Runs on the tokio runtime through the
+    /// node-based provider API, which needs the tokio reactor, like the
+    /// comparison itself.
+    fn run_transfer_items(
+        &mut self,
+        items: Vec<TransferItem>,
+        busy: &'static str,
+        done: &'static str,
+        cx: &mut Context<Self>,
+    ) {
+        if self.loading {
+            return;
+        }
+        let name = items.first().map(|i| i.name.clone()).unwrap_or_default();
         self.loading = true;
         self.busy_label = Some(busy.into());
         self.notice = None;
@@ -2417,7 +2540,7 @@ impl AppState {
                 FsPair::Separate(left.fs(), right.fs())
             };
             let result =
-                execute_transfers(&[item], left.path(), right.path(), pair)
+                execute_transfers(&items, left.path(), right.path(), pair)
                     .await;
             if result.is_ok() {
                 Ok(())
@@ -2850,29 +2973,29 @@ impl AppState {
         cx.notify();
     }
 
-    /// Toggle the visibility of a status category.
+    /// Toggle the visibility of a status group.
+    ///
+    /// Umbrella groups flip both side-specific bits together; sub
+    /// toggles flip one bit and the umbrella state falls out of the
+    /// `contains` rule, matching the View menu labels and the TUI's
+    /// filter rows.
     ///
     /// Selection follows the same entry across the change when it stays
     /// visible (domain identity, not row index), matching the guidance to
     /// preserve selection across filtering.
-    pub fn toggle_filter(
+    pub fn toggle_status_filter(
         &mut self,
-        category: StatusCategory,
+        filter: StatusFilter,
         cx: &mut Context<Self>,
     ) {
-        let mask = match category {
-            StatusCategory::Same => DirEntryStatus::EQUAL,
-            StatusCategory::Different => DirEntryStatus::DIFFERENT,
-            StatusCategory::Orphan => DirEntryStatus::ORPHAN,
-        };
         // A sync session is defined by showing only actionable rows; the
         // same-content toggle is inert there.
         if self.session_type == SessionType::DirSync
-            && category == StatusCategory::Same
+            && filter == StatusFilter::Equal
         {
             return;
         }
-        self.filters.show_statuses ^= mask;
+        self.filters.show_statuses = filter.toggle(self.filters.show_statuses);
         let selected_name = self.selected_entry().map(|e| e.name.clone());
         self.recompute_display_order();
         self.selected_index = selected_name
@@ -2884,7 +3007,7 @@ impl AppState {
 
     /// The preset the toolbar's picker shows for the current filters,
     /// or `None` when the combination is custom (reachable through the
-    /// category toggles).
+    /// View menu's filter toggles).
     pub fn filter_preset(&self) -> Option<FilterPreset> {
         FilterPreset::matching(&self.filters)
     }
@@ -2899,11 +3022,42 @@ impl AppState {
         preset: FilterPreset,
         cx: &mut Context<Self>,
     ) {
-        let filters = preset.filters();
+        // Presets select a status group only; hidden display is a
+        // separate dimension the user set independently.
+        let mut filters = preset.filters();
+        filters.show_hidden = self.filters.show_hidden;
         if filters == self.filters {
             return;
         }
         self.filters = filters;
+        let selected_name = self.selected_entry().map(|e| e.name.clone());
+        self.recompute_display_order();
+        self.selected_index = selected_name
+            .as_deref()
+            .and_then(|name| self.display_index_of_name(name))
+            .unwrap_or(0);
+        cx.notify();
+    }
+
+    /// Toggle the display of hidden (dot-prefixed) entries, keeping the
+    /// selection on the same entry when it stays visible.
+    pub fn toggle_show_hidden(&mut self, cx: &mut Context<Self>) {
+        self.filters.show_hidden = !self.filters.show_hidden;
+        let selected_name = self.selected_entry().map(|e| e.name.clone());
+        self.recompute_display_order();
+        self.selected_index = selected_name
+            .as_deref()
+            .and_then(|name| self.display_index_of_name(name))
+            .unwrap_or(0);
+        cx.notify();
+    }
+
+    /// Reset every display filter: all status bits and hidden entries.
+    pub fn show_all_filters(&mut self, cx: &mut Context<Self>) {
+        if self.filters == DisplayFilters::default() {
+            return;
+        }
+        self.filters = DisplayFilters::default();
         let selected_name = self.selected_entry().map(|e| e.name.clone());
         self.recompute_display_order();
         self.selected_index = selected_name
@@ -3059,6 +3213,32 @@ impl AppState {
     pub fn toggle_expanded(&mut self, path: &str, cx: &mut Context<Self>) {
         if !self.expanded.remove(path) {
             self.expanded.insert(path.to_string());
+        }
+        let selected_name = self.selected_entry().map(|e| e.name.clone());
+        self.recompute_display_order();
+        self.selected_index = selected_name
+            .as_deref()
+            .and_then(|name| self.display_index_of_name(name))
+            .unwrap_or(0);
+        cx.notify();
+    }
+
+    /// Set the expansion state of the directory at `path`. A no-op when
+    /// the directory already has that state, so the menu's separate
+    /// Expand and Collapse items never toggle each other by accident.
+    pub fn set_dir_expanded(
+        &mut self,
+        path: &str,
+        expanded: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let changed = if expanded {
+            self.expanded.insert(path.to_string())
+        } else {
+            self.expanded.remove(path)
+        };
+        if !changed {
+            return;
         }
         let selected_name = self.selected_entry().map(|e| e.name.clone());
         self.recompute_display_order();
@@ -3602,6 +3782,7 @@ mod tests {
         let entries = sample_entries();
         let filters = DisplayFilters {
             show_statuses: DirEntryStatus::all() ^ DirEntryStatus::EQUAL,
+            ..DisplayFilters::default()
         };
         let order = compute_display_order(
             &entries,
@@ -3887,8 +4068,32 @@ mod tests {
         assert_eq!(right.display(), "/right/other/sub");
     }
 
+    /// A pure unit test of the umbrella/sub toggle semantics behind the
+    /// View menu's filter items.
+    #[test]
+    fn status_filter_umbrella_and_sub_toggles() {
+        let all = DirEntryStatus::all();
+        // Hiding an umbrella clears both sub-bits together.
+        let hidden = StatusFilter::Different.toggle(all);
+        assert!(!StatusFilter::Different.is_shown(hidden));
+        assert!(!StatusFilter::LeftNewer.is_shown(hidden));
+        assert!(!StatusFilter::RightNewer.is_shown(hidden));
+
+        // A sub toggle flips one bit; its umbrella reads unchecked while
+        // the sibling stays hidden.
+        let partial = StatusFilter::LeftNewer.toggle(hidden);
+        assert!(StatusFilter::LeftNewer.is_shown(partial));
+        assert!(!StatusFilter::RightNewer.is_shown(partial));
+        assert!(!StatusFilter::Different.is_shown(partial));
+
+        // Toggling a partial umbrella shows both sub-bits again.
+        let restored = StatusFilter::Different.toggle(partial);
+        assert!(StatusFilter::Different.is_shown(restored));
+        assert_eq!(restored, all);
+    }
+
     #[gpui::test]
-    fn toggle_filter_hides_a_category_and_restores_selection(
+    fn toggle_status_filter_hides_a_group_and_restores_selection(
         cx: &mut TestAppContext,
     ) {
         let state = cx.new(|cx| {
@@ -3905,10 +4110,10 @@ mod tests {
         state.update(cx, |state, cx| {
             // Name ascending: Alpha.txt (Same) is the first row.
             state.select_row(0, cx);
-            state.toggle_filter(StatusCategory::Same, cx);
+            state.toggle_status_filter(StatusFilter::Equal, cx);
 
             assert_eq!(state.entry_count(), 3);
-            // Hiding the Same category from "All" lands exactly on the
+            // Hiding the identical group from "All" lands exactly on the
             // "No identical" preset.
             assert_eq!(state.filter_preset(), Some(FilterPreset::NoSame));
             // The selected Same entry vanished; selection falls back to
@@ -3919,13 +4124,13 @@ mod tests {
             // A visible selection survives toggling another filter.
             state.select_row(2, cx);
             assert_eq!(state.selected_entry().unwrap().name, "delta.txt");
-            state.toggle_filter(StatusCategory::Orphan, cx);
+            state.toggle_status_filter(StatusFilter::Orphans, cx);
             assert_eq!(state.entry_count(), 1);
             assert_eq!(state.selected_entry().unwrap().name, "delta.txt");
 
             // Restoring both filters brings every row back.
-            state.toggle_filter(StatusCategory::Orphan, cx);
-            state.toggle_filter(StatusCategory::Same, cx);
+            state.toggle_status_filter(StatusFilter::Orphans, cx);
+            state.toggle_status_filter(StatusFilter::Equal, cx);
             assert_eq!(state.entry_count(), 4);
             assert_eq!(state.filter_preset(), Some(FilterPreset::All));
         });
@@ -4038,7 +4243,7 @@ mod tests {
             state
         });
         state.update(cx, |state, cx| {
-            state.toggle_filter(StatusCategory::Orphan, cx);
+            state.toggle_status_filter(StatusFilter::Orphans, cx);
             // Visible: Alpha.txt (Same), delta.txt (RightNewer).
             state.select_row(0, cx);
             state.select_next_difference(cx);
@@ -4520,7 +4725,7 @@ mod tests {
                 (4, 1, 1, 2)
             );
 
-            state.toggle_filter(StatusCategory::Same, cx);
+            state.toggle_status_filter(StatusFilter::Equal, cx);
 
             let summary = state.visible_summary();
             assert_eq!(
@@ -4602,6 +4807,218 @@ mod tests {
         cx.update(|cx| {
             state.update(cx, |state, cx| state.toggle_expanded("sub", cx));
             assert_eq!(state.read(cx).entry_count(), 2);
+        });
+    }
+
+    /// The View menu's separate Expand/Collapse directory items must
+    /// never toggle each other: setting the current state again is a
+    /// no-op.
+    #[gpui::test]
+    fn set_dir_expanded_sets_without_toggling(cx: &mut TestAppContext) {
+        init_log_globals(cx);
+        let state = cx.new(|cx| {
+            let mut state = AppState::new(
+                Endpoint::local("/left"),
+                Endpoint::local("/right"),
+                "test".into(),
+                cx,
+            );
+            state.set_comparison_for_test(comparison(vec![
+                dir_with_sub(
+                    "sub",
+                    DirEntryStatus::DIFFERENT,
+                    comparison(vec![entry(
+                        "inner.txt",
+                        DirEntryStatus::DIFFERENT,
+                        Some(info("sub/inner.txt", 1, "")),
+                        Some(info("sub/inner.txt", 2, "")),
+                    )]),
+                ),
+                entry(
+                    "top.txt",
+                    DirEntryStatus::Same,
+                    Some(info("top.txt", 1, "")),
+                    Some(info("top.txt", 1, "")),
+                ),
+            ]));
+            state
+        });
+
+        // Expanding twice stays expanded.
+        cx.update(|cx| {
+            state.update(cx, |state, cx| {
+                state.set_dir_expanded("sub", true, cx);
+            });
+            state.update(cx, |state, cx| {
+                state.set_dir_expanded("sub", true, cx);
+            });
+            assert!(state.read(cx).is_expanded("sub"));
+            assert_eq!(state.read(cx).entry_count(), 3);
+        });
+
+        // Collapsing twice stays collapsed.
+        cx.update(|cx| {
+            state.update(cx, |state, cx| {
+                state.set_dir_expanded("sub", false, cx);
+            });
+            state.update(cx, |state, cx| {
+                state.set_dir_expanded("sub", false, cx);
+            });
+            assert!(!state.read(cx).is_expanded("sub"));
+            assert_eq!(state.read(cx).entry_count(), 2);
+        });
+    }
+
+    /// The hidden-items filter removes dot-prefixed rows from every
+    /// level, and Show all brings them back.
+    #[gpui::test]
+    fn hidden_toggle_hides_dot_prefixed_rows(cx: &mut TestAppContext) {
+        init_log_globals(cx);
+        let state = cx.new(|cx| {
+            let mut state = AppState::new(
+                Endpoint::local("/left"),
+                Endpoint::local("/right"),
+                "test".into(),
+                cx,
+            );
+            state.set_comparison_for_test(comparison(vec![
+                entry(
+                    ".dotfile",
+                    DirEntryStatus::DIFFERENT,
+                    Some(info(".dotfile", 1, "")),
+                    Some(info(".dotfile", 2, "")),
+                ),
+                entry(
+                    "plain.txt",
+                    DirEntryStatus::Same,
+                    Some(info("plain.txt", 1, "")),
+                    Some(info("plain.txt", 1, "")),
+                ),
+            ]));
+            state
+        });
+
+        cx.update(|cx| {
+            assert!(state.read(cx).show_hidden());
+            assert_eq!(state.read(cx).entry_count(), 2);
+            state.update(cx, |state, cx| state.toggle_show_hidden(cx));
+            assert!(!state.read(cx).show_hidden());
+            assert_eq!(state.read(cx).entry_count(), 1);
+
+            state.update(cx, |state, cx| state.show_all_filters(cx));
+            assert!(state.read(cx).show_hidden());
+            assert_eq!(state.read(cx).entry_count(), 2);
+        });
+    }
+
+    /// Show all resets the filter toggles as well, and the label
+    /// readers track the toggles.
+    #[gpui::test]
+    fn show_all_resets_filter_toggles(cx: &mut TestAppContext) {
+        init_log_globals(cx);
+        let state = cx.new(|cx| {
+            let mut state = AppState::new(
+                Endpoint::local("/left"),
+                Endpoint::local("/right"),
+                "test".into(),
+                cx,
+            );
+            state.set_comparison_for_test(comparison(vec![entry(
+                "same.txt",
+                DirEntryStatus::Same,
+                Some(info("same.txt", 1, "")),
+                Some(info("same.txt", 1, "")),
+            )]));
+            state
+        });
+
+        cx.update(|cx| {
+            assert!(
+                StatusFilter::Equal
+                    .is_shown(state.read(cx).filters().show_statuses)
+            );
+            state.update(cx, |state, cx| {
+                state.toggle_status_filter(StatusFilter::Equal, cx);
+            });
+            assert!(
+                !StatusFilter::Equal
+                    .is_shown(state.read(cx).filters().show_statuses)
+            );
+            assert_eq!(state.read(cx).entry_count(), 0);
+
+            state.update(cx, |state, cx| state.show_all_filters(cx));
+            assert!(
+                StatusFilter::Equal
+                    .is_shown(state.read(cx).filters().show_statuses)
+            );
+            assert_eq!(state.read(cx).entry_count(), 1);
+        });
+    }
+
+    /// Delete-both is offered exactly when both single-side deletes are:
+    /// the entry exists on both sides and its shape allows deleting.
+    #[gpui::test]
+    fn delete_both_items_require_the_entry_on_both_sides(
+        cx: &mut TestAppContext,
+    ) {
+        init_log_globals(cx);
+        fn differing(
+            cx: &mut TestAppContext,
+            entries: Vec<DirEntry>,
+        ) -> gpui::Entity<AppState> {
+            cx.new(|cx| {
+                let mut state = AppState::new(
+                    Endpoint::local("/left"),
+                    Endpoint::local("/right"),
+                    "test".into(),
+                    cx,
+                );
+                state.set_comparison_for_test(comparison(entries));
+                state
+            })
+        }
+
+        let both = differing(
+            cx,
+            vec![entry(
+                "pair.txt",
+                DirEntryStatus::DIFFERENT,
+                Some(info("pair.txt", 1, "")),
+                Some(info("pair.txt", 2, "")),
+            )],
+        );
+        both.update(cx, |state, _cx| {
+            let items = state.delete_both_items().expect("both sides exist");
+            assert_eq!(items.len(), 2);
+            assert!(items.iter().all(|i| i.name == "pair.txt"));
+        });
+
+        // A left-only orphan has no right side to delete from.
+        let orphan = differing(
+            cx,
+            vec![entry(
+                "only-left.txt",
+                DirEntryStatus::LeftOrphan,
+                Some(info("only-left.txt", 1, "")),
+                None,
+            )],
+        );
+        orphan.update(cx, |state, _cx| {
+            assert!(state.delete_both_items().is_none());
+        });
+
+        // Equal content is not deletable through reconciliation at all.
+        let equal = differing(
+            cx,
+            vec![entry(
+                "equal.txt",
+                DirEntryStatus::Same,
+                Some(info("equal.txt", 1, "")),
+                Some(info("equal.txt", 1, "")),
+            )],
+        );
+        equal.update(cx, |state, _cx| {
+            assert!(state.delete_both_items().is_none());
         });
     }
 

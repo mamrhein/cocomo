@@ -53,10 +53,10 @@ use crate::{
     state::{AppState, MergeRowStatus, SortKey, TreeRow, entry_endpoints},
     ui::{
         CompareContentsHash, CompareContentsMeta, CopyFilename, CopyToFolder,
-        CopyToLeft, CopyToOtherSide, CopyToRight, DeleteLeftSide,
-        DeleteRightSide, ExchangeEntry, ExcludeEntry, MoveToFolder,
-        MoveToLeft, MoveToRight, NewFolder, OpenDirDiff, OpenFileDiff,
-        OpenMerge, QuickCompare, RefreshSelection, RenameEntry,
+        CopyToLeft, CopyToOtherSide, CopyToRight, DeleteBothSide,
+        DeleteLeftSide, DeleteRightSide, ExchangeEntry, ExcludeEntry,
+        MoveToFolder, MoveToLeft, MoveToRight, NewFolder, OpenDirDiff,
+        OpenFileDiff, OpenMerge, QuickCompare, RefreshSelection, RenameEntry,
         RevealInExplorer, SetBaseBoth, SetBaseLeft, SetBaseRight, SetSidePath,
         ShowAttributes, SyncMirrorLeft, SyncMirrorRight, SyncUpdateBoth,
         SyncUpdateLeft, SyncUpdateRight, ToggleIgnored, TouchEntry,
@@ -1447,6 +1447,15 @@ fn build_row_menu(
                 "file.delete_right",
                 "Delete from right",
                 Box::new(DeleteRightSide),
+                cx,
+            );
+        }
+        if row.has_left && row.has_right {
+            menu = cmd(
+                menu,
+                "file.delete_both",
+                "Delete from both sides",
+                Box::new(DeleteBothSide),
                 cx,
             );
         }
