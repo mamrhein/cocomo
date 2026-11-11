@@ -2121,12 +2121,48 @@ impl AppState {
     /// Swap the two sides of the comparison, keeping the navigation
     /// position: the entered steps stay, with their side segments
     /// exchanged.
+    ///
+    /// The displayed comparison is mirrored in place (side metadata,
+    /// status directions, count keys, and merge statuses), so no reload
+    /// is needed; recomputing the display order re-applies the current
+    /// sort and filters to the mirrored statuses. An in-flight
+    /// comparison computes the old orientation, so it is aborted rather
+    /// than kept running.
     pub fn swap_sides(&mut self, cx: &mut Context<Self>) {
+        if self.loading {
+            self.stop(cx);
+        }
         self.swap_sides_in_place();
+        if let Some(comparison) = &mut self.comparison {
+            comparison.swap_sides();
+        }
+        for status in self.merge_status.values_mut() {
+            *status = match *status {
+                MergeRowStatus::TakeLeft => MergeRowStatus::TakeRight,
+                MergeRowStatus::TakeRight => MergeRowStatus::TakeLeft,
+                other => other,
+            };
+        }
         self.notice = None;
-        self.expanded.clear();
         self.record_history();
-        self.load_comparison(cx);
+        log::push(
+            LogLevel::Info,
+            format!(
+                "Sides swapped: {} ↔ {}",
+                self.left.display(),
+                self.right.display()
+            ),
+            cx,
+        );
+        // The cursor follows the same entry by name across the
+        // recomputation, as for filter and expansion changes.
+        let selected_name = self.selected_entry().map(|e| e.name.clone());
+        self.recompute_display_order();
+        self.selected_index = selected_name
+            .as_deref()
+            .and_then(|name| self.display_index_of_name(name))
+            .unwrap_or(0);
+        cx.notify();
     }
 
     /// Exchange the sides' endpoints, roots, and step segments without
@@ -4027,9 +4063,9 @@ mod tests {
         });
 
         state.update(cx, |state, _| {
-            // Exercise the pure bookkeeping half of the swap; the reload
-            // it triggers in the public method needs the tokio bridge and
-            // is covered by the manual pass.
+            // Exercise the pure bookkeeping half of the swap; the
+            // public method mirrors the comparison in place and is
+            // covered by the dedicated swap test below.
             state.nav_steps.push(NavStep {
                 label: "sub".into(),
                 left: "sub".into(),
@@ -4044,6 +4080,51 @@ mod tests {
             assert_eq!(state.root_right.display(), "/left");
             assert_eq!(state.nav_steps[0].left, "other/sub");
             assert_eq!(state.nav_steps[0].right, "sub");
+        });
+    }
+
+    #[gpui::test]
+    fn swap_sides_mirrors_comparison_and_reapplies_filters(
+        cx: &mut TestAppContext,
+    ) {
+        init_log_globals(cx);
+        let state = cx.new(|cx| {
+            AppState::new(
+                Endpoint::local("/left"),
+                Endpoint::local("/right"),
+                "test".into(),
+                cx,
+            )
+        });
+
+        state.update(cx, |state, cx| {
+            state.set_comparison_for_test(comparison(sample_entries()));
+            // The sample has no left-newer entry, so the preset hides
+            // every row before the swap.
+            state.set_filter_preset(FilterPreset::LeftNewer, cx);
+            assert!(state.tree_rows.is_empty());
+
+            state.swap_sides(cx);
+
+            // No reload: the displayed comparison was mirrored in place.
+            assert!(!state.loading);
+            // delta.txt was right-newer and is now the only visible
+            // left-newer row.
+            assert_eq!(state.tree_rows.len(), 1);
+            let entry = state.selected_entry().unwrap();
+            assert_eq!(entry.name, "delta.txt");
+            assert_eq!(entry.status, DirEntryStatus::LeftNewer);
+            // The side metadata followed the swap.
+            assert_eq!(entry.left.as_ref().unwrap().size, 400);
+            assert_eq!(entry.right.as_ref().unwrap().size, 300);
+
+            // The left orphan became a right orphan.
+            let entries = &state.comparison.as_ref().unwrap().entries;
+            let charlie =
+                entries.iter().find(|e| e.name == "charlie.txt").unwrap();
+            assert_eq!(charlie.status, DirEntryStatus::RightOrphan);
+            assert!(charlie.left.is_none());
+            assert!(charlie.right.is_some());
         });
     }
 

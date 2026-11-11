@@ -77,6 +77,26 @@ impl DirEntryStatus {
     /// One of the sides is empty.
     pub const ORPHAN: Self = Self::LeftOrphan.union(Self::RightOrphan);
 
+    /// The status with the two sides exchanged: the newer and orphan
+    /// directions flip, the symmetric bits stay. An involution, so
+    /// applying it twice restores the original bitmap.
+    pub fn swapped(self) -> Self {
+        let mut out = self.intersection(Self::Same | Self::Equal);
+        if self.contains(Self::LeftNewer) {
+            out |= Self::RightNewer;
+        }
+        if self.contains(Self::RightNewer) {
+            out |= Self::LeftNewer;
+        }
+        if self.contains(Self::LeftOrphan) {
+            out |= Self::RightOrphan;
+        }
+        if self.contains(Self::RightOrphan) {
+            out |= Self::LeftOrphan;
+        }
+        out
+    }
+
     /// The display symbol and color role for this status bitmap.
     ///
     /// A single-bit status shows its variant's symbol; the exact
@@ -222,6 +242,21 @@ pub struct DirEntry {
     pub name_conflict: bool,
 }
 
+impl DirEntry {
+    /// Exchange the entry's two sides: side metadata, status direction,
+    /// and the sub-comparison of a directory. The ancestor (`center`)
+    /// side is not a compared side and stays untouched.
+    pub fn swap_sides(&mut self) {
+        std::mem::swap(&mut self.left, &mut self.right);
+        self.status = self.status.swapped();
+        if let Some(sub) = self.sub_entries.take() {
+            let mut sub = Arc::unwrap_or_clone(sub);
+            sub.swap_sides();
+            self.sub_entries = Some(Arc::new(sub));
+        }
+    }
+}
+
 /// Result of comparing two (or three) directory trees.
 #[derive(Clone, Debug, Default)]
 pub struct DirComparison {
@@ -261,6 +296,23 @@ impl DirComparison {
     /// Return the number of orphan entries.
     pub fn orphan_count(&self) -> usize {
         self.count_matching(DirEntryStatus::ORPHAN)
+    }
+
+    /// Exchange the two sides of the comparison in place: every entry's
+    /// side metadata and status direction are mirrored and the count
+    /// keys follow, so the result matches a fresh comparison of the
+    /// swapped pair without touching the filesystem again.
+    pub fn swap_sides(&mut self) {
+        for entry in &mut self.entries {
+            entry.swap_sides();
+        }
+        // Mirroring is a bijection on status bitmaps, so no count keys
+        // collide.
+        self.counts = self
+            .counts
+            .iter()
+            .map(|(status, count)| (status.swapped(), *count))
+            .collect();
     }
 }
 
@@ -1086,6 +1138,129 @@ mod tests {
 
     use super::*;
     use crate::{FsError, FsOperation, local::LocalFs, mockfs::MockFs};
+
+    #[test]
+    fn status_swapped_flips_directions() {
+        assert_eq!(
+            DirEntryStatus::LeftNewer.swapped(),
+            DirEntryStatus::RightNewer
+        );
+        assert_eq!(
+            DirEntryStatus::RightNewer.swapped(),
+            DirEntryStatus::LeftNewer
+        );
+        assert_eq!(
+            DirEntryStatus::LeftOrphan.swapped(),
+            DirEntryStatus::RightOrphan
+        );
+        assert_eq!(
+            DirEntryStatus::RightOrphan.swapped(),
+            DirEntryStatus::LeftOrphan
+        );
+        // Symmetric statuses stay as they are.
+        assert_eq!(DirEntryStatus::Same.swapped(), DirEntryStatus::Same);
+        assert_eq!(DirEntryStatus::Equal.swapped(), DirEntryStatus::Equal);
+        assert_eq!(
+            DirEntryStatus::DIFFERENT.swapped(),
+            DirEntryStatus::DIFFERENT
+        );
+        // Aggregated bitmaps mirror bit by bit and the operation is an
+        // involution.
+        let agg = DirEntryStatus::Same
+            | DirEntryStatus::LeftNewer
+            | DirEntryStatus::RightOrphan;
+        assert_eq!(
+            agg.swapped(),
+            DirEntryStatus::Same
+                | DirEntryStatus::RightNewer
+                | DirEntryStatus::LeftOrphan
+        );
+        assert_eq!(agg.swapped().swapped(), agg);
+    }
+
+    fn side_info(path: &str, size: u64) -> EntryInfo {
+        EntryInfo {
+            name: path.rsplit('/').next().unwrap_or(path).to_string(),
+            path: path.to_string(),
+            size,
+            modified: String::new(),
+            is_dir: false,
+            hash: None,
+        }
+    }
+
+    #[test]
+    fn comparison_swap_sides_mirrors_entries_counts_and_subtrees() {
+        let sub = DirComparison {
+            entries: vec![DirEntry {
+                name: "inner.txt".to_string(),
+                status: DirEntryStatus::LeftOrphan,
+                left: Some(side_info("inner.txt", 7)),
+                right: None,
+                center: None,
+                sub_entries: None,
+                name_conflict: false,
+            }],
+            counts: HashMap::from([(DirEntryStatus::LeftOrphan, 1)]),
+            errors: Vec::new(),
+        };
+        let mut comparison = DirComparison {
+            entries: vec![
+                DirEntry {
+                    name: "newer.txt".to_string(),
+                    status: DirEntryStatus::RightNewer,
+                    left: Some(side_info("newer.txt", 1)),
+                    right: Some(side_info("newer.txt", 2)),
+                    center: Some(side_info("ancestor/newer.txt", 1)),
+                    sub_entries: None,
+                    name_conflict: false,
+                },
+                DirEntry {
+                    name: "dir".to_string(),
+                    status: DirEntryStatus::LeftOrphan,
+                    left: Some(EntryInfo {
+                        is_dir: true,
+                        ..side_info("dir", 0)
+                    }),
+                    right: None,
+                    center: None,
+                    sub_entries: Some(Arc::new(sub)),
+                    name_conflict: false,
+                },
+            ],
+            counts: HashMap::from([
+                (DirEntryStatus::RightNewer, 1),
+                (DirEntryStatus::LeftOrphan, 1),
+            ]),
+            errors: Vec::new(),
+        };
+
+        comparison.swap_sides();
+
+        let newer = &comparison.entries[0];
+        assert_eq!(newer.status, DirEntryStatus::LeftNewer);
+        assert_eq!(newer.left.as_ref().unwrap().size, 2);
+        assert_eq!(newer.right.as_ref().unwrap().size, 1);
+        // The ancestor is not a compared side and stays untouched.
+        assert_eq!(newer.center.as_ref().unwrap().path, "ancestor/newer.txt");
+
+        let dir = &comparison.entries[1];
+        assert_eq!(dir.status, DirEntryStatus::RightOrphan);
+        assert!(dir.left.is_none());
+        let swapped_sub = dir.sub_entries.as_ref().unwrap();
+        let inner = &swapped_sub.entries[0];
+        assert_eq!(inner.status, DirEntryStatus::RightOrphan);
+        assert_eq!(inner.right.as_ref().unwrap().size, 7);
+        assert_eq!(swapped_sub.counts[&DirEntryStatus::RightOrphan], 1);
+
+        assert_eq!(comparison.counts[&DirEntryStatus::LeftNewer], 1);
+        assert_eq!(comparison.counts[&DirEntryStatus::RightOrphan], 1);
+
+        // Swapping a second time restores the original orientation.
+        comparison.swap_sides();
+        assert_eq!(comparison.entries[0].status, DirEntryStatus::RightNewer);
+        assert_eq!(comparison.entries[0].left.as_ref().unwrap().size, 1);
+    }
 
     fn make_test_dirs() -> (std::path::PathBuf, std::path::PathBuf) {
         let base = env::temp_dir()
