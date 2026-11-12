@@ -40,7 +40,7 @@ use ratatui_kit::crossterm::event::KeyEvent;
 use crate::{
     error::{Result, TuiError},
     keys::{self, Cmd, dialog_choice, handle_session_key, navigate},
-    menu::{self, MenuState},
+    menu::{self, MenuEntry, MenuState},
     session_store::session_to_config,
     state::{
         APP_STATE, AppState, NamePattern, SessionAction, SessionContent,
@@ -1308,22 +1308,46 @@ pub(crate) fn toggle_menu(bar_index: usize) {
     }
 }
 
-/// Switch to the next (`delta > 0`) or previous menu (←/→), wrapping
-/// around the bar.
-///
-/// When no menu is open yet, the keys open the first (forward) or last
-/// (backward) menu, so the bar stays reachable before any dropdown is
-/// shown.
-pub(crate) fn switch_menu(delta: isize) {
-    let state = APP_STATE.state();
-    let mut app = state.write();
+/// [`switch_menu_locked`] for the open menu, or open the first (forward)
+/// or last (backward) menu of the active view's bar when none is open yet,
+/// so the bar stays reachable before any dropdown is shown.
+fn switch_menu_locked(app: &mut AppState, delta: isize) {
+    let bar = menu::bar_indices(app.menu_view());
     match &mut app.menu {
-        Some(menu) => menu.switch_menu(delta),
+        Some(menu) => menu.switch_menu(delta, &bar),
         None => {
-            app.menu =
-                MenuState::open(if delta > 0 { 0 } else { menu::count() - 1 });
+            let index = if delta > 0 { bar.first() } else { bar.last() };
+            app.menu = index.and_then(|&i| MenuState::open(i));
         }
     }
+}
+
+/// Move one step left in the menu bar (`←`).
+///
+/// While a submenu flyout is open, the key closes the flyout instead of
+/// leaving the menu.
+pub(crate) fn menu_prev() {
+    let state = APP_STATE.state();
+    let mut app = state.write();
+    if let Some(menu) = app.menu.as_mut()
+        && menu.leave_submenu()
+    {
+        return;
+    }
+    switch_menu_locked(&mut app, -1);
+}
+
+/// Move one step right in the menu bar (`→`).
+///
+/// While the highlighted row is a submenu parent, the key opens its
+/// flyout instead of leaving the menu.
+pub(crate) fn menu_next() {
+    let state = APP_STATE.state();
+    let mut app = state.write();
+    if app.menu.as_mut().is_some_and(MenuState::enter_submenu) {
+        return;
+    }
+    switch_menu_locked(&mut app, 1);
 }
 
 /// Move the highlighted dropdown item by `delta`.
@@ -1344,7 +1368,9 @@ pub(crate) fn close_menu() {
 /// a dropdown row).
 ///
 /// A row the open menu does not have is reported as handled without
-/// touching the state, so a stale click cannot move the highlight.
+/// touching the state, so a stale click cannot move the highlight. Clicks
+/// on a separator are inert; clicking a submenu parent opens its flyout
+/// instead of confirming.
 pub(crate) fn pick_menu_item(item: usize) -> MenuOutcome {
     {
         let state = APP_STATE.state();
@@ -1352,31 +1378,74 @@ pub(crate) fn pick_menu_item(item: usize) -> MenuOutcome {
         let Some(menu) = app.menu.as_mut() else {
             return MenuOutcome::Handled;
         };
-        if menu.menu().is_none_or(|def| item >= def.items.len()) {
+        let Some(entry) = menu.menu().and_then(|def| def.entries.get(item))
+        else {
+            return MenuOutcome::Handled;
+        };
+        match entry {
+            MenuEntry::Separator => return MenuOutcome::Handled,
+            MenuEntry::SubMenu { .. } => {
+                menu.item = item;
+                menu.enter_submenu();
+                return MenuOutcome::Handled;
+            }
+            MenuEntry::Item(_) => menu.item = item,
+        }
+        menu.sub = None;
+    }
+    confirm_menu_item()
+}
+
+/// Move the submenu highlight to the flyout row `item` and confirm it (a
+/// click on a flyout row).
+pub(crate) fn pick_submenu_item(item: usize) -> MenuOutcome {
+    {
+        let state = APP_STATE.state();
+        let mut app = state.write();
+        let Some(menu) = app.menu.as_mut() else {
+            return MenuOutcome::Handled;
+        };
+        let clickable = menu.sub.is_some()
+            && menu.sub_entries().is_some_and(|children| {
+                matches!(children.get(item), Some(MenuEntry::Item(_)))
+            });
+        if !clickable {
             return MenuOutcome::Handled;
         }
-        menu.item = item;
+        menu.sub = Some(item);
     }
     confirm_menu_item()
 }
 
 /// Execute the highlighted dropdown item and close the dropdown.
 ///
-/// Quit and close-tab are reported to the caller as [`MenuOutcome`];
-/// help and the shortcut overlay need no session, and directory-only
-/// items are skipped when a text session is active. Everything else runs
+/// Confirming a submenu parent opens its flyout and leaves the dropdown
+/// open. Quit and close-tab are reported to the caller as
+/// [`MenuOutcome`]; help and the shortcut overlay need no session, and
+/// items unavailable in the active view are skipped. Everything else runs
 /// through the shared [`keys::run_menu_command`] dispatch, so menu and
 /// keyboard cannot drift apart.
 pub(crate) fn confirm_menu_item() -> MenuOutcome {
     let action = {
         let state = APP_STATE.state();
         let mut app = state.write();
-        let Some(menu) = app.menu.take() else {
+        let Some(mut menu) = app.menu else {
             return MenuOutcome::Handled;
         };
+        // Enter a submenu parent instead of running anything.
+        if menu.sub.is_none()
+            && matches!(menu.current_entry(), Some(MenuEntry::SubMenu { .. }))
+        {
+            menu.enter_submenu();
+            app.menu = Some(menu);
+            return MenuOutcome::Handled;
+        }
+        app.menu = None;
         let Some(item) = menu.current() else {
             return MenuOutcome::Handled;
         };
+        // Resolve the view before `active_mut` reborrows the app.
+        let view = app.menu_view();
         match item.cmd {
             Cmd::Quit => return MenuOutcome::Quit,
             Cmd::CloseTab => return MenuOutcome::CloseTab,
@@ -1389,12 +1458,12 @@ pub(crate) fn confirm_menu_item() -> MenuOutcome {
                 return MenuOutcome::Handled;
             }
             cmd => {
+                if !item.available(view) {
+                    return MenuOutcome::Handled;
+                }
                 let Some(session) = app.active_mut() else {
                     return MenuOutcome::Handled;
                 };
-                if item.requires_dir && !session.content.is_dir() {
-                    return MenuOutcome::Handled;
-                }
                 keys::run_menu_command(session, cmd)
             }
         }
@@ -1690,7 +1759,8 @@ mod tests {
             APP_STATE.state().read().menu,
             Some(MenuState {
                 bar_index: 1,
-                item: 0
+                item: 0,
+                sub: None,
             })
         );
         // An unknown index closes the menu instead of panicking.
@@ -1718,23 +1788,24 @@ mod tests {
     }
 
     #[test]
-    fn switch_menu_opens_from_a_closed_bar() {
+    fn menu_navigation_opens_from_a_closed_bar() {
         APP_STATE.set(AppState::new());
-        switch_menu(1);
+        menu_next();
         assert_eq!(
             APP_STATE.state().read().menu,
             Some(MenuState {
                 bar_index: 0,
-                item: 0
+                item: 0,
+                sub: None,
             })
         );
         // With a menu open, the keys wrap around the bar.
-        switch_menu(-1);
+        menu_prev();
         assert_eq!(
             APP_STATE.state().read().menu.map(|m| m.bar_index),
             Some(menu::count() - 1)
         );
-        switch_menu(1);
+        menu_next();
         assert_eq!(
             APP_STATE.state().read().menu.map(|m| m.bar_index),
             Some(0)
@@ -1865,24 +1936,26 @@ mod tests {
         APP_STATE.set(dir_app_state());
         let sessions = menu::menu_at(menu_index("Sessions")).unwrap();
         let quit = sessions
-            .items
+            .entries
             .iter()
-            .position(|i| i.cmd == Cmd::Quit)
+            .position(|e| e.cmd() == Some(Cmd::Quit))
             .unwrap();
         let close = sessions
-            .items
+            .entries
             .iter()
-            .position(|i| i.cmd == Cmd::CloseTab)
+            .position(|e| e.cmd() == Some(Cmd::CloseTab))
             .unwrap();
         APP_STATE.state().write().menu = Some(MenuState {
             bar_index: menu_index("Sessions"),
             item: quit,
+            sub: None,
         });
         assert_eq!(confirm_menu_item(), MenuOutcome::Quit);
         assert_eq!(APP_STATE.state().read().menu, None);
         APP_STATE.state().write().menu = Some(MenuState {
             bar_index: menu_index("Sessions"),
             item: close,
+            sub: None,
         });
         assert_eq!(confirm_menu_item(), MenuOutcome::CloseTab);
         assert_eq!(APP_STATE.state().read().menu, None);
@@ -1894,15 +1967,16 @@ mod tests {
         open_menu(menu_index("Sessions"));
         // A row the dropdown does not have changes neither the highlight
         // nor the open state.
-        let rows = menu::menu_at(menu_index("Sessions")).unwrap().items.len();
+        let rows =
+            menu::menu_at(menu_index("Sessions")).unwrap().entries.len();
         assert_eq!(pick_menu_item(rows), MenuOutcome::Handled);
         assert_eq!(APP_STATE.state().read().menu.unwrap().item, 0);
         // The quit row is reported to the caller, and the dropdown closes.
         let quit = menu::menu_at(menu_index("Sessions"))
             .unwrap()
-            .items
+            .entries
             .iter()
-            .position(|i| i.cmd == Cmd::Quit)
+            .position(|e| e.cmd() == Some(Cmd::Quit))
             .unwrap();
         assert_eq!(pick_menu_item(quit), MenuOutcome::Quit);
         assert_eq!(APP_STATE.state().read().menu, None);

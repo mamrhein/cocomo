@@ -7,12 +7,13 @@
 // $Source$
 // $Revision$
 
-//! Top menu bar and its dropdowns.
+//! Top menu bar, its dropdowns, and submenu flyouts.
 //!
-//! Titles and items come from [`crate::menu::MENUS`]; each title renders
+//! Titles and entries come from [`crate::menu::MENUS`]; each title renders
 //! with its Alt accelerator underlined, and [`MenuDropdown`] draws the open
-//! menu as a positioned overlay. Both the bar and the dropdown share the
-//! geometry helpers here ([`menu_title`], [`dropdown_rect`],
+//! menu as a positioned overlay ([`MenuFlyout`] draws its open submenu).
+//! The bar, the dropdown and the flyout share the geometry helpers here
+//! ([`menu_title`], [`dropdown_rect`], [`flyout_rect`],
 //! [`dropdown_hit_item`]), so the rendered layout and the mouse hit-testing
 //! in the App shell cannot drift apart.
 
@@ -35,7 +36,7 @@ use super::{
 };
 use crate::{
     keys::key_hint,
-    menu::{MenuDef, MenuItemDef, MenuState, item_label},
+    menu::{MenuDef, MenuEntry, MenuState, MenuView, item_label},
 };
 
 /// Width of the `" | "` divider between menu items.
@@ -67,62 +68,101 @@ pub(super) fn menu_title(menu: &MenuDef) -> Line<'static> {
     )
 }
 
-/// Column widths of the label and key-hint parts of `def`'s dropdown.
+/// The dropdown label of `entry`, `None` for separators. Submenu parents
+/// carry a right-pointing pointer to advertise their flyout.
+fn entry_label(
+    entry: &MenuEntry,
+    display: Option<&DisplayFilters>,
+) -> Option<String> {
+    match entry {
+        MenuEntry::Item(item) => Some(item_label(item, display)),
+        MenuEntry::SubMenu { label, .. } => Some(format!("{label} \u{25b8}")),
+        MenuEntry::Separator => None,
+    }
+}
+
+/// Column widths of the label and key-hint parts of a dropdown listing
+/// `entries` (separators do not contribute).
 ///
-/// Labels are measured through [`item_label`] because visibility toggles
+/// Labels are measured through [`entry_label`] because visibility toggles
 /// render a state-dependent `show`/`hide` prefix; `display` is the active
 /// session's filter state (`None` without a directory session).
 fn content_widths(
-    def: &MenuDef,
+    entries: &[MenuEntry],
     display: Option<&DisplayFilters>,
 ) -> (u16, u16) {
     let mut label_width = 0u16;
     let mut hint_width = 0u16;
-    for item in def.items {
-        label_width =
-            label_width.max(item_label(item, display).chars().count() as u16);
-        if let Some(hint) = key_hint(item.cmd) {
+    for entry in entries {
+        if let Some(label) = entry_label(entry, display) {
+            label_width = label_width.max(label.chars().count() as u16);
+        }
+        if let Some(hint) = entry.cmd().and_then(key_hint) {
             hint_width = hint_width.max(hint.chars().count() as u16);
         }
     }
     (label_width, hint_width)
 }
 
-/// The screen rectangle the dropdown of `menu` is drawn in.
+/// Width of the hint column (including its two-cell gap), `0` when no
+/// entry has a hint.
+fn hint_columns(hint_width: u16) -> u16 {
+    if hint_width > 0 { hint_width + 2 } else { 0 }
+}
+
+/// The screen rectangle the dropdown of `def` is drawn in.
 ///
-/// `bar_origin` is the screen position of the menu bar's first cell; the
+/// `titles` are the rendered bar titles, `bar_pos` the index of `def`
+/// among them (the visible bar may be a subset of [`crate::menu::MENUS`]);
+/// `bar_origin` is the screen position of the menu bar's first cell. The
 /// dropdown is anchored under its title's text (one cell past the tab's
 /// left padding) and opens directly below the bar. `display` is the active
 /// session's filter state, needed to size the state-dependent Filter
-/// labels. An unknown menu yields [`Rect::ZERO`].
+/// labels.
 pub(super) fn dropdown_rect(
     titles: &[Line<'static>],
-    menu: MenuState,
+    def: &MenuDef,
+    bar_pos: usize,
     bar_origin: Position,
     display: Option<&DisplayFilters>,
 ) -> Rect {
-    let Some(def) = menu.menu() else {
-        return Rect::ZERO;
-    };
-    let (label_width, hint_width) = content_widths(def, display);
-    // The hint column only exists when at least one item has a hint, and
-    // is separated from the labels by two cells. The row itself is
-    // `▸ label… hint `, the box adds two border columns.
-    let hint_columns = if hint_width > 0 { hint_width + 2 } else { 0 };
+    let (label_width, hint_width) = content_widths(def.entries, display);
+    // The row itself is `▸ label… hint `, the box adds two border columns.
     Rect {
         x: bar_origin.x
-            + tabs_item_x(titles, menu.bar_index, DIVIDER_WIDTH).unwrap_or(0)
+            + tabs_item_x(titles, bar_pos, DIVIDER_WIDTH).unwrap_or(0)
             + 1,
         y: bar_origin.y + 1,
-        width: label_width + hint_columns + 5,
-        height: def.items.len() as u16 + 2,
+        width: label_width + hint_columns(hint_width) + 5,
+        height: def.entries.len() as u16 + 2,
+    }
+}
+
+/// The screen rectangle the flyout of `children` is drawn in.
+///
+/// `parent_row` is the dropdown row of the highlighted submenu parent (as
+/// [`MenuState::item`], counting from the dropdown's top border row); the
+/// flyout opens to the right of the dropdown, aligned with its parent row.
+pub(super) fn flyout_rect(
+    children: &[MenuEntry],
+    parent_row: usize,
+    dropdown: Rect,
+    display: Option<&DisplayFilters>,
+) -> Rect {
+    let (label_width, hint_width) = content_widths(children, display);
+    Rect {
+        x: dropdown.x + dropdown.width - 1,
+        y: dropdown.y + parent_row as u16,
+        width: label_width + hint_columns(hint_width) + 5,
+        height: children.len() as u16 + 2,
     }
 }
 
 /// The dropdown item under `pos`, `None` outside the list.
 ///
 /// The title border row and the bottom border row are not items, so a click
-/// there only closes the dropdown.
+/// there only closes the dropdown. Works for both dropdown and flyout
+/// boxes.
 pub(super) fn dropdown_hit_item(rect: Rect, pos: Position) -> Option<usize> {
     if !rect.contains(pos) {
         return None;
@@ -209,23 +249,23 @@ pub(super) struct MenuDropdownProps {
     pub(super) menu: Option<MenuState>,
     /// Screen rectangle from [`dropdown_rect`].
     pub(super) rect: Rect,
-    /// Whether the active session is a directory comparison. Items that
-    /// require one are rendered dimmed while it is not.
-    pub(super) dir_active: bool,
+    /// The active session's view (`None` on the welcome screen). Entries
+    /// that are not available there are rendered dimmed.
+    pub(super) view: Option<MenuView>,
     /// The active session's display filters, used to resolve the
     /// state-dependent `show`/`hide` labels (`None` without a directory
     /// session).
     pub(super) display: Option<DisplayFilters>,
 }
 
-/// Dropdown listing the items of the open menu.
+/// Dropdown listing the entries of the open menu.
 ///
 /// Drawn as a `Positioned` overlay, so it takes no room in the flex layout
 /// and floats above the main view. Every row shows the selection pointer,
-/// the item label and — when the keymap labels the command — its key hint,
+/// the entry label and — when the keymap labels the command — its key hint,
 /// right-aligned in a shared column and underlined so it reads without
-/// color. The row the keyboard cursor addresses carries the theme's
-/// highlight style.
+/// color. Separator rows render as a full-width rule. The row the keyboard
+/// cursor addresses carries the theme's highlight style.
 #[component]
 pub(super) fn MenuDropdown(
     props: &MenuDropdownProps,
@@ -239,7 +279,7 @@ pub(super) fn MenuDropdown(
         return element!(Fragment).into_any();
     };
     let (label_width, hint_width) =
-        content_widths(def, props.display.as_ref());
+        content_widths(def.entries, props.display.as_ref());
     let rect = props.rect;
     element!(
         Positioned(
@@ -253,16 +293,84 @@ pub(super) fn MenuDropdown(
                 flex_direction: Direction::Vertical,
                 border_style: theme.border,
             ) {
-                for (index, item) in def.items.iter().enumerate() {
+                for (index, entry) in def.entries.iter().enumerate() {
                     Text(
                         key: index,
                         text: dropdown_row(
-                            item,
-                            &item_label(item, props.display.as_ref()),
+                            entry,
                             index == menu.item,
                             label_width,
                             hint_width,
-                            props.dir_active,
+                            props.view,
+                            props.display.as_ref(),
+                            theme,
+                        ),
+                    )
+                }
+            }
+        }
+    )
+    .into_any()
+}
+
+/// Props for [`MenuFlyout`].
+#[derive(Default, Props)]
+pub(super) struct MenuFlyoutProps {
+    /// The open menu; nothing is rendered unless its submenu flyout is
+    /// open (`MenuState::sub`).
+    pub(super) menu: Option<MenuState>,
+    /// Screen rectangle from [`flyout_rect`].
+    pub(super) rect: Rect,
+    /// The active session's view (`None` on the welcome screen).
+    pub(super) view: Option<MenuView>,
+    /// The active session's display filters.
+    pub(super) display: Option<DisplayFilters>,
+}
+
+/// Flyout listing the children of the highlighted submenu parent.
+///
+/// A second `Positioned` overlay owned by the same input layer as its
+/// parent dropdown; it renders only while [`MenuState::sub`] is `Some`.
+#[component]
+pub(super) fn MenuFlyout(
+    props: &MenuFlyoutProps,
+    hooks: Hooks,
+) -> impl Into<AnyElement<'static>> {
+    let theme = hooks.use_component_theme::<CocomoTheme>();
+    let Some(menu) = props.menu else {
+        return element!(Fragment).into_any();
+    };
+    let Some(sub) = menu.sub else {
+        return element!(Fragment).into_any();
+    };
+    let Some(children) = menu.sub_entries() else {
+        return element!(Fragment).into_any();
+    };
+    let (label_width, hint_width) =
+        content_widths(children, props.display.as_ref());
+    let rect = props.rect;
+    element!(
+        Positioned(
+            clear: true,
+            x: rect.x,
+            y: rect.y,
+            width: rect.width,
+            height: rect.height,
+        ) {
+            Border(
+                flex_direction: Direction::Vertical,
+                border_style: theme.border,
+            ) {
+                for (index, entry) in children.iter().enumerate() {
+                    Text(
+                        key: index,
+                        text: dropdown_row(
+                            entry,
+                            index == sub,
+                            label_width,
+                            hint_width,
+                            props.view,
+                            props.display.as_ref(),
                             theme,
                         ),
                     )
@@ -275,31 +383,42 @@ pub(super) fn MenuDropdown(
 
 /// Render one dropdown row: selection pointer, label padded to the common
 /// width, and the command's key hint right-aligned in its own column.
+/// Separator rows render as a rule across the box's inner width.
 ///
-/// `label` is the resolved [`item_label`] of `item`, so toggle rows show
-/// their state-dependent `show`/`hide` prefix.
+/// Labels are resolved through [`entry_label`], so toggle rows show their
+/// state-dependent `show`/`hide` prefix and submenu parents carry their
+/// flyout pointer.
 ///
 /// The hint is underlined on top of its dim bold style: the key code must
 /// also read on terminals without color, matching the underlined
 /// accelerators of [`menu_title`] and [`super::option_list::OptionList`].
 fn dropdown_row(
-    item: &MenuItemDef,
-    label: &str,
+    entry: &MenuEntry,
     current: bool,
     label_width: u16,
     hint_width: u16,
-    dir_active: bool,
+    view: Option<MenuView>,
+    display: Option<&DisplayFilters>,
     theme: CocomoTheme,
 ) -> Line<'static> {
+    let hint_columns = hint_columns(hint_width);
+    if let MenuEntry::Separator = entry {
+        // The rule spans the box's inner width (the outer width minus the
+        // two border columns).
+        let width = label_width + hint_columns + 3;
+        return Line::from("\u{2500}".repeat(width as usize))
+            .style(theme.border);
+    }
+    let label = entry_label(entry, display).unwrap_or_default();
     let label_pad = " ".repeat(
         label_width.saturating_sub(label.chars().count() as u16) as usize,
     );
-    // Directory-only items are dimmed on a text session (or the welcome
-    // screen); confirming one stays a no-op, mirroring the controller.
-    let label_style = if item.requires_dir && !dir_active {
-        theme.dim
-    } else {
+    // Entries unavailable in the active view (or on the welcome screen)
+    // are dimmed; confirming one stays a no-op, mirroring the controller.
+    let label_style = if entry.available(view) {
         Style::default()
+    } else {
+        theme.dim
     };
     let mut spans = vec![
         Span::raw(if current { "\u{25b8}" } else { " " }),
@@ -307,7 +426,7 @@ fn dropdown_row(
         Span::styled(format!("{label}{label_pad}"), label_style),
     ];
     if hint_width > 0 {
-        let hint = key_hint(item.cmd).unwrap_or_default();
+        let hint = entry.cmd().and_then(key_hint).unwrap_or_default();
         let hint_pad = " "
             .repeat(hint_width.saturating_sub(hint.chars().count() as u16)
                 as usize);
@@ -333,7 +452,11 @@ mod tests {
     use ratatui_kit::{ratatui::style::Color, test_util::render_frames};
 
     use super::*;
-    use crate::{menu::MENUS, ui::theme::cocomo_palette};
+    use crate::{
+        keys::Cmd,
+        menu::{MENUS, MenuItemDef, MenuViews},
+        ui::theme::cocomo_palette,
+    };
 
     /// The bar titles the App shell renders.
     fn titles() -> Vec<Line<'static>> {
@@ -405,15 +528,14 @@ mod tests {
     fn dropdown_rect_anchors_under_its_title() {
         let items = titles();
         for (index, def) in MENUS.iter().enumerate() {
-            let menu = MenuState::open(index).unwrap();
-            let rect = dropdown_rect(&items, menu, BAR_ORIGIN, None);
+            let rect = dropdown_rect(&items, def, index, BAR_ORIGIN, None);
             let title_x =
                 tabs_item_x(&items, index, DIVIDER_WIDTH).unwrap() + 1;
             assert_eq!(rect.x, title_x, "menu {}", def.title);
             assert_eq!(rect.y, 1, "menu {}", def.title);
-            assert_eq!(rect.height, def.items.len() as u16 + 2);
+            assert_eq!(rect.height, def.entries.len() as u16 + 2);
             assert!(rect.width > 0);
-            // Every list row maps back to the item it displays, while the
+            // Every list row maps back to the entry it displays, while the
             // border rows and the cells left of the box do not.
             assert_eq!(
                 dropdown_hit_item(
@@ -433,7 +555,7 @@ mod tests {
                         y: rect.y + rect.height - 2
                     }
                 ),
-                Some(def.items.len() - 1)
+                Some(def.entries.len() - 1)
             );
             assert_eq!(
                 dropdown_hit_item(
@@ -456,15 +578,6 @@ mod tests {
                 None
             );
         }
-        // An unknown menu has no rectangle at all.
-        let unknown = MenuState {
-            bar_index: MENUS.len(),
-            item: 0,
-        };
-        assert_eq!(
-            dropdown_rect(&items, unknown, BAR_ORIGIN, None),
-            Rect::ZERO
-        );
     }
 
     #[test]
@@ -473,14 +586,17 @@ mod tests {
         let menu = MenuState {
             bar_index: menu_index("Sessions"),
             item: 1,
+            sub: None,
         };
-        let rect = dropdown_rect(&items, menu, BAR_ORIGIN, None);
+        let def = menu.menu().unwrap();
+        let rect =
+            dropdown_rect(&items, def, menu.bar_index, BAR_ORIGIN, None);
         let buf = render_frames(
             element!(PaletteProvider(palette: cocomo_palette()) {
                 MenuDropdown(
                     menu: Some(menu),
                     rect: rect,
-                    dir_active: false,
+                    view: None,
                     display: None,
                 )
             }),
@@ -489,8 +605,8 @@ mod tests {
             1,
         );
         let cell = |x: u16, y: u16| buf[(rect.x + x, rect.y + y)].style();
-        // The first row is a directory-only item on a non-directory
-        // session: dimmed label, no pointer.
+        // The first row is a directory-only item on the welcome screen:
+        // dimmed label, no pointer.
         assert_eq!(buf[(rect.x + 3, rect.y + 1)].symbol(), "o");
         assert_eq!(cell(3, 1).fg, Some(cocomo_palette().fg_dim));
         assert_ne!(cell(1, 1).bg, Some(cocomo_palette().selection));
@@ -514,20 +630,20 @@ mod tests {
             .expect("Sessions menu");
         // The first item is keyboard-bound (`O`), so its hint must carry
         // the color-free underline cue like every other key code.
-        let item = def
-            .items
+        let entry = def
+            .entries
             .iter()
-            .find(|i| key_hint(i.cmd).is_some())
-            .expect("item with a key hint");
-        let hint = key_hint(item.cmd).unwrap();
+            .find(|e| e.cmd().and_then(key_hint).is_some())
+            .expect("entry with a key hint");
+        let hint = key_hint(entry.cmd().unwrap()).unwrap();
         let theme = CocomoTheme::default();
         let row = dropdown_row(
-            item,
-            item.label,
+            entry,
             false,
             20,
             hint.chars().count() as u16,
-            true,
+            None,
+            None,
             theme,
         );
         let hint_span =
@@ -538,6 +654,93 @@ mod tests {
             hint_span.style.add_modifier.contains(Modifier::UNDERLINED),
             "key hint not underlined: {row:?}"
         );
+    }
+
+    #[test]
+    fn dropdown_rows_render_separators_and_submenu_markers() {
+        let theme = CocomoTheme::default();
+        // A separator renders as a rule across the box's inner width
+        // (label column, hint column with its gap, plus the paddings).
+        let sep = dropdown_row(
+            &MenuEntry::Separator,
+            false,
+            10,
+            4,
+            None,
+            None,
+            theme,
+        );
+        assert_eq!(sep.spans.len(), 1);
+        assert_eq!(sep.spans[0].content.as_ref(), "─".repeat(19).as_str());
+        assert_eq!(sep.style, theme.border);
+        // A submenu parent shows its label with a right-pointing pointer.
+        static CHILDREN: &[MenuEntry] = &[MenuEntry::Item(MenuItemDef {
+            label: "child",
+            cmd: Cmd::Quit,
+            views: MenuViews::ALL,
+        })];
+        let parent = dropdown_row(
+            &MenuEntry::SubMenu {
+                label: "group",
+                children: CHILDREN,
+            },
+            false,
+            10,
+            0,
+            None,
+            None,
+            theme,
+        );
+        assert!(parent.spans[2].content.starts_with("group"), "{parent:?}");
+        assert!(parent.spans[2].content.contains('\u{25b8}'), "{parent:?}");
+    }
+
+    #[test]
+    fn dropdown_rows_dim_entries_of_other_views() {
+        let theme = CocomoTheme::default();
+        let entry = MenuEntry::Item(MenuItemDef {
+            label: "dir only",
+            cmd: Cmd::Quit,
+            views: MenuViews::DIR,
+        });
+        let row = |view| {
+            let row = dropdown_row(&entry, false, 12, 0, view, None, theme);
+            row.spans[2].style
+        };
+        // Dimmed on the welcome screen and on a text session, lit on a
+        // directory session.
+        assert_eq!(row(None), theme.dim);
+        assert_eq!(row(Some(MenuView::Text)), theme.dim);
+        assert_ne!(row(Some(MenuView::Dir)), theme.dim);
+    }
+
+    #[test]
+    fn flyout_rect_anchors_at_the_parent_row() {
+        let children = [
+            MenuEntry::Item(MenuItemDef {
+                label: "first child",
+                cmd: Cmd::Quit,
+                views: MenuViews::ALL,
+            }),
+            MenuEntry::Item(MenuItemDef {
+                label: "second",
+                cmd: Cmd::CloseTab,
+                views: MenuViews::ALL,
+            }),
+        ];
+        let dropdown = Rect {
+            x: 5,
+            y: 2,
+            width: 20,
+            height: 8,
+        };
+        let rect = flyout_rect(&children, 3, dropdown, None);
+        // The flyout shares the dropdown's right border column and aligns
+        // its top border with the parent row.
+        assert_eq!(rect.x, dropdown.x + dropdown.width - 1);
+        assert_eq!(rect.y, dropdown.y + 3);
+        assert_eq!(rect.height, children.len() as u16 + 2);
+        assert!(rect.width > 0);
     }
 
     fn menu_index(title: &str) -> usize {

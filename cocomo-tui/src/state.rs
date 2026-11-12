@@ -32,6 +32,8 @@ use cocomo_lib::{
 use ratatui_kit::{Atom, components::table::TableState};
 use regex::RegexBuilder;
 
+use crate::menu::MenuView;
+
 /// The current input mode of a session.
 ///
 /// Each text-entry mode owns its input buffers, so a buffer cannot leak
@@ -1361,9 +1363,10 @@ pub struct AppState {
     /// The open dropdown of the menu bar.
     ///
     /// `None` means no menu is open; `Some` selects the menu at
-    /// `bar_index` and the highlighted dropdown item. While a menu is open,
-    /// the App shell routes navigation keys to
-    /// [`crate::keys::KeyScope::Menu`] instead of the session scopes.
+    /// `bar_index`, the highlighted dropdown item and, when set, the open
+    /// submenu flyout below it. While a menu is open, the App shell routes
+    /// navigation keys to [`crate::keys::KeyScope::Menu`] instead of the
+    /// session scopes.
     pub menu: Option<crate::menu::MenuState>,
     /// Whether the bottom help bar is shown.
     ///
@@ -1490,6 +1493,12 @@ impl AppState {
     /// Return an immutable reference to the active session, if any.
     pub fn active(&self) -> Option<&SessionView> {
         self.sessions.get(self.active_tab)
+    }
+
+    /// The menu-bar view of the active session, `None` on the welcome
+    /// screen (where the full bar is shown).
+    pub fn menu_view(&self) -> Option<MenuView> {
+        self.active().map(|s| MenuView::from_content(&s.content))
     }
 
     /// Return a reference to the session with the given stable id.

@@ -29,8 +29,8 @@ use super::{
     filter_panel::FilterPanel,
     frame::{hint_line, tabs_hit_item},
     menu_bar::{
-        DIVIDER_WIDTH, MenuBar, MenuDropdown, dropdown_hit_item,
-        dropdown_rect, menu_title,
+        DIVIDER_WIDTH, MenuBar, MenuDropdown, MenuFlyout, dropdown_hit_item,
+        dropdown_rect, flyout_rect, menu_title,
     },
     report_modal::ReportModal,
     session_browser::SessionBrowser,
@@ -45,7 +45,7 @@ use super::{
 use crate::{
     controller,
     keys::{self, Cmd, KeyScope},
-    menu::MenuState,
+    menu::{self, MenuState},
     state::{APP_STATE, SessionContent},
 };
 
@@ -134,8 +134,8 @@ fn apply_menu_outcome(
 /// the key first.
 fn run_menu_command(cmd: Cmd, exit: &mut impl FnMut()) -> bool {
     match cmd {
-        Cmd::MenuPrev => controller::switch_menu(-1),
-        Cmd::MenuNext => controller::switch_menu(1),
+        Cmd::MenuPrev => controller::menu_prev(),
+        Cmd::MenuNext => controller::menu_next(),
         // `Alt+<accel>` and a click on the bar toggle, so the same title
         // closes the dropdown it just opened.
         Cmd::MenuOpen(index) => controller::toggle_menu(index),
@@ -153,12 +153,15 @@ fn run_menu_command(cmd: Cmd, exit: &mut impl FnMut()) -> bool {
 /// Handle a left click while a dropdown owns the menu input layer.
 ///
 /// A click on a bar title toggles its dropdown (a click on the open title
-/// closes it), a click on a list row confirms that row, and anything else
-/// dismisses the dropdown without running an item.
+/// closes it), a click on a dropdown or flyout row picks that row, and
+/// anything else dismisses the dropdown without running an item. `bar`
+/// maps visible bar positions (the active view may show a subset of the
+/// menus) onto their indices in [`menu::MENUS`].
 fn menu_mouse(
     pos: Position,
     titles: &[Line<'static>],
-    dropdown: &Option<(MenuState, Rect)>,
+    bar: &[usize],
+    dropdown: &Option<(MenuState, Rect, Option<Rect>)>,
     exit: &mut impl FnMut(),
 ) {
     if pos.y == BAR_ORIGIN.y {
@@ -166,20 +169,31 @@ fn menu_mouse(
             pos.x.saturating_sub(BAR_ORIGIN.x),
             titles,
             DIVIDER_WIDTH,
-        ) {
-            Some(index) => controller::toggle_menu(index),
+        )
+        .and_then(|item| bar.get(item))
+        {
+            Some(&index) => controller::toggle_menu(index),
             None => controller::close_menu(),
         }
         return;
     }
-    let Some((menu, rect)) = dropdown else {
+    let Some((menu, rect, flyout)) = dropdown else {
         controller::close_menu();
         return;
     };
-    // Rows the open menu does not have (below its last item, on the border)
-    // only close the dropdown.
-    let item = dropdown_hit_item(*rect, pos)
-        .filter(|item| menu.menu().is_some_and(|def| *item < def.items.len()));
+    // The flyout paints over the dropdown's right border, so its rows
+    // claim the click first.
+    if let Some(flyout) = flyout
+        && let Some(item) = dropdown_hit_item(*flyout, pos)
+    {
+        apply_menu_outcome(controller::pick_submenu_item(item), exit);
+        return;
+    }
+    // Rows the open menu does not have (below its last entry, on the
+    // border) only close the dropdown.
+    let item = dropdown_hit_item(*rect, pos).filter(|item| {
+        menu.menu().is_some_and(|def| *item < def.entries.len())
+    });
     match item {
         Some(item) => {
             apply_menu_outcome(controller::pick_menu_item(item), exit)
@@ -243,34 +257,53 @@ pub(crate) fn App(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         );
     }
 
-    // Titles with their accelerator letter underlined. The dropdown
-    // geometry and the click hit-test are derived from these very lines, so
-    // bar, dropdown and mouse mapping cannot drift apart.
-    let menu_titles: Vec<Line<'static>> =
-        crate::menu::MENUS.iter().map(menu_title).collect();
-
     // While a dropdown is open its input layer blocks every handler below
     // (keys and mouse), exactly like a modal blocks the shell. Read the
     // state the layer and its handler need before registering them.
-    let (open_menu, dir_active, display) = {
+    let (open_menu, menu_view, display) = {
         let app = app_state.read();
         (
             app.menu,
-            app.active().is_some_and(|s| s.content.is_dir()),
+            app.menu_view(),
             app.active()
                 .and_then(|s| s.dir())
                 .map(|d| d.display.clone()),
         )
     };
-    let dropdown = open_menu.map(|menu| {
-        (
-            menu,
-            dropdown_rect(&menu_titles, menu, BAR_ORIGIN, display.as_ref()),
-        )
+    // Titles with their accelerator letter underlined, one per menu the
+    // active view shows. The dropdown geometry and the click hit-test are
+    // derived from these very lines, so bar, dropdown and mouse mapping
+    // cannot drift apart.
+    let bar = menu::bar_indices(menu_view);
+    let menu_titles: Vec<Line<'static>> = bar
+        .iter()
+        .map(|&index| menu_title(&menu::MENUS[index]))
+        .collect();
+    let dropdown = open_menu.and_then(|menu| {
+        let def = menu.menu()?;
+        let bar_pos = bar.iter().position(|&i| i == menu.bar_index)?;
+        let rect = dropdown_rect(
+            &menu_titles,
+            def,
+            bar_pos,
+            BAR_ORIGIN,
+            display.as_ref(),
+        );
+        let flyout = menu
+            .sub
+            .is_some()
+            .then(|| {
+                menu.sub_entries().map(|children| {
+                    flyout_rect(children, menu.item, rect, display.as_ref())
+                })
+            })
+            .flatten();
+        Some((menu, rect, flyout))
     });
     let menu_layer = hooks.use_input_layer(open_menu.is_some(), true);
     {
         let titles = menu_titles.clone();
+        let bar = bar.clone();
         let mut menu_exit = hooks.use_exit();
         hooks.use_event_handler(
             EventScope::Layer(menu_layer),
@@ -318,6 +351,7 @@ pub(crate) fn App(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                                 y: mouse.row,
                             },
                             &titles,
+                            &bar,
                             &dropdown,
                             &mut menu_exit,
                         );
@@ -426,8 +460,12 @@ pub(crate) fn App(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     // Read current state for rendering the menu and tab bars.
     let app = app_state.read();
-    // Only the title of the open dropdown is highlighted.
-    let menu_selected = app.menu.map(|m| m.bar_index);
+    // Only the title of the open dropdown is highlighted; the highlight is
+    // addressed by visible-bar position, since the bar may be a subset of
+    // `menu::MENUS`.
+    let menu_selected = app
+        .menu
+        .and_then(|m| bar.iter().position(|&i| i == m.bar_index));
     let active_index = app.active_index();
     let active_view = match app.active().map(|s| &s.content) {
         Some(SessionContent::Dir(_)) => ActiveView::Dir,
@@ -456,7 +494,9 @@ pub(crate) fn App(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 menu_titles: menu_titles,
                 selected: menu_selected,
                 on_select: Handler::from(move |index| {
-                    controller::toggle_menu(index);
+                    if let Some(&bar_index) = bar.get(index) {
+                        controller::toggle_menu(bar_index);
+                    }
                 }),
             )
             TabBar(
@@ -535,14 +575,21 @@ pub(crate) fn App(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     controller::close_shortcuts();
                 },
             )
-            // Dropdown of the open menu. Last in the tree so the overlay
-            // paints over everything else, and positioned in absolute
-            // coordinates so it costs the main view no rows.
-            if let Some((menu, rect)) = dropdown {
+            // Dropdown of the open menu (and its submenu flyout). Last in
+            // the tree so the overlays paint over everything else, and
+            // positioned in absolute coordinates so they cost the main view
+            // no rows.
+            if let Some((menu, rect, flyout)) = dropdown {
                 MenuDropdown(
                     menu: Some(menu),
                     rect: rect,
-                    dir_active: dir_active,
+                    view: menu_view,
+                    display: display.clone(),
+                )
+                MenuFlyout(
+                    menu: Some(menu),
+                    rect: flyout.unwrap_or_default(),
+                    view: menu_view,
                     display: display.clone(),
                 )
             }
@@ -962,25 +1009,31 @@ mod menu_mouse_tests {
         MENUS.iter().map(menu_title).collect()
     }
 
+    /// The visible bar for the welcome screen (the full table).
+    fn bar() -> Vec<usize> {
+        menu::bar_indices(None)
+    }
+
     #[test]
     fn a_click_on_a_title_toggles_its_dropdown() {
         let titles = titles();
+        let bar = bar();
         let mut exits = 0;
         let mut exit = || exits += 1;
         APP_STATE.set(AppState::new());
         // Tabs pad each title by one cell, so "Compare" (index 1) spans
         // x=13..=21 and "Help" starts at x=54.
-        menu_mouse(Position { x: 14, y: 0 }, &titles, &None, &mut exit);
+        menu_mouse(Position { x: 14, y: 0 }, &titles, &bar, &None, &mut exit);
         assert_eq!(
             APP_STATE.state().read().menu.map(|m| m.bar_index),
             Some(1)
         );
         // A second click on the same title closes the dropdown...
-        menu_mouse(Position { x: 14, y: 0 }, &titles, &None, &mut exit);
+        menu_mouse(Position { x: 14, y: 0 }, &titles, &bar, &None, &mut exit);
         assert_eq!(APP_STATE.state().read().menu, None);
         // ...and so does a click on the rest of the bar.
-        menu_mouse(Position { x: 14, y: 0 }, &titles, &None, &mut exit);
-        menu_mouse(Position { x: 80, y: 0 }, &titles, &None, &mut exit);
+        menu_mouse(Position { x: 14, y: 0 }, &titles, &bar, &None, &mut exit);
+        menu_mouse(Position { x: 80, y: 0 }, &titles, &bar, &None, &mut exit);
         assert_eq!(APP_STATE.state().read().menu, None);
         assert_eq!(exits, 0);
     }
@@ -988,14 +1041,21 @@ mod menu_mouse_tests {
     #[test]
     fn a_click_on_a_row_confirms_it() {
         let titles = titles();
+        let bar = bar();
         let mut exits = 0;
         let mut exit = || exits += 1;
         APP_STATE.set(AppState::new());
-        // "Help" is the last menu and its single item toggles the help bar.
+        // "Help" is the last menu and its first item toggles the help bar.
         let help = MENUS.len() - 1;
         let menu = MenuState::open(help).unwrap();
-        let rect = dropdown_rect(&titles, menu, BAR_ORIGIN, None);
-        let dropdown = Some((menu, rect));
+        let rect = dropdown_rect(
+            &titles,
+            &MENUS[menu.bar_index],
+            menu.bar_index,
+            BAR_ORIGIN,
+            None,
+        );
+        let dropdown = Some((menu, rect, None));
         APP_STATE.state().write().menu = Some(menu);
         menu_mouse(
             Position {
@@ -1003,6 +1063,7 @@ mod menu_mouse_tests {
                 y: rect.y + 1,
             },
             &titles,
+            &bar,
             &dropdown,
             &mut exit,
         );
@@ -1015,11 +1076,17 @@ mod menu_mouse_tests {
         // The quit row of the Sessions menu hands the exit request to the
         // shell instead of running a command.
         let menu = MenuState::open(0).unwrap();
-        let rect = dropdown_rect(&titles, menu, BAR_ORIGIN, None);
-        let dropdown = Some((menu, rect));
+        let rect = dropdown_rect(
+            &titles,
+            &MENUS[menu.bar_index],
+            menu.bar_index,
+            BAR_ORIGIN,
+            None,
+        );
+        let dropdown = Some((menu, rect, None));
         APP_STATE.set(AppState::new());
         APP_STATE.state().write().menu = Some(menu);
-        // The quit row is the fourth item, i.e. the fifth content row of
+        // The quit row is the fourth entry, i.e. the fifth content row of
         // the box (below its top border).
         menu_mouse(
             Position {
@@ -1027,6 +1094,7 @@ mod menu_mouse_tests {
                 y: rect.y + 4,
             },
             &titles,
+            &bar,
             &dropdown,
             &mut exit,
         );
@@ -1037,12 +1105,19 @@ mod menu_mouse_tests {
     #[test]
     fn a_click_outside_the_rows_only_closes_the_dropdown() {
         let titles = titles();
+        let bar = bar();
         let mut exits = 0;
         let mut exit = || exits += 1;
         APP_STATE.set(AppState::new());
         let menu = MenuState::open(0).unwrap();
-        let rect = dropdown_rect(&titles, menu, BAR_ORIGIN, None);
-        let dropdown = Some((menu, rect));
+        let rect = dropdown_rect(
+            &titles,
+            &MENUS[menu.bar_index],
+            menu.bar_index,
+            BAR_ORIGIN,
+            None,
+        );
+        let dropdown = Some((menu, rect, None));
         APP_STATE.state().write().menu = Some(menu);
         // The top border row is not an item, and neither is the area right
         // of the box.
@@ -1056,7 +1131,7 @@ mod menu_mouse_tests {
                 y: rect.y + 1,
             },
         ] {
-            menu_mouse(pos, &titles, &dropdown, &mut exit);
+            menu_mouse(pos, &titles, &bar, &dropdown, &mut exit);
             assert_eq!(APP_STATE.state().read().menu, None);
             APP_STATE.state().write().menu = Some(menu);
         }
