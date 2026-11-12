@@ -54,9 +54,11 @@ pub enum SyncOperation {
     UpdateNewer,
     /// Copy newer files in both directions.
     UpdateBoth,
-    /// Copy left-only files to right. Does not delete anything.
+    /// Copy right-only and different files to left, does not delete
+    /// anything.
     CopyLeft,
-    /// Copy right-only files to left. Does not delete anything.
+    /// Copy left-only and different files to right, does not delete
+    /// anything.
     CopyRight,
     /// Copy only newer files.
     CopyNewer,
@@ -88,8 +90,8 @@ impl SyncOperation {
             SyncOperation::MirrorRight => "mirror right → left",
             SyncOperation::UpdateNewer => "update newer",
             SyncOperation::UpdateBoth => "update both",
-            SyncOperation::CopyLeft => "copy left → right",
-            SyncOperation::CopyRight => "copy right → left",
+            SyncOperation::CopyLeft => "copy right → left",
+            SyncOperation::CopyRight => "copy left → right",
             SyncOperation::CopyNewer => "copy newer",
             SyncOperation::DeleteOrphans => "delete orphans",
         }

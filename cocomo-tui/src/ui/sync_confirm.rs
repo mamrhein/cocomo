@@ -8,7 +8,7 @@
 // $Revision$
 
 //! Sync approval modal: the confirmation step of the sync commands (the
-//! Sync menu entries and `S`).
+//! File / Folder menu entries and `S`).
 //!
 //! Once the dry-run plan is ready, the controller puts the session into
 //! [`SessionMode::SyncConfirm`]; this component turns that mode into an

@@ -135,7 +135,7 @@ pub enum Cmd {
     OpenFilterPanel,
     /// Toggle the visibility of hidden (dot-prefixed) entries.
     ToggleHidden,
-    /// Show every status class and hidden entries (Filter menu "show
+    /// Show every status class and hidden entries (View menu "show
     /// all").
     ShowAllFilters,
     /// Toggle content comparison.
@@ -151,6 +151,12 @@ pub enum Cmd {
     /// Update both panels from each other (no deletions), after a
     /// confirmation dialog.
     SyncBoth,
+    /// Update the left panel from the right (no deletions), after a
+    /// confirmation dialog (menu-only; the File / Folder submenu).
+    SyncUpdateLeft,
+    /// Update the right panel from the left (no deletions), after a
+    /// confirmation dialog (menu-only; the File / Folder submenu).
+    SyncUpdateRight,
     /// Toggle the visibility of one entry-status class (dropdown item).
     ToggleStatusFilter(StatusFilter),
     /// Enter save-session mode.
@@ -194,7 +200,8 @@ pub enum Cmd {
     /// Close the transfer dialog without transferring.
     DialogAbort,
     /// Execute the given transfer choice on the current selection
-    /// immediately (Sync menu dropdown item), without opening the dialog.
+    /// immediately (File / Folder menu submenu item), without opening
+    /// the dialog.
     TransferExecute(TransferOp, TransferChoice),
     /// Enter search mode (`/`).
     StartSearch,
@@ -841,18 +848,18 @@ const KEYMAP: &[KeyBinding] = &[
         help: Some(("Esc s", "sessions menu")),
     },
     KeyBinding {
-        key: KeyCode::Char('c'),
+        key: KeyCode::Char('f'),
         modifiers: ALT,
         scope: KeyScope::Global,
         cmd: Cmd::MenuOpen(1),
-        help: Some(("Esc c", "compare menu")),
+        help: Some(("Esc f", "file menu")),
     },
     KeyBinding {
-        key: KeyCode::Char('y'),
+        key: KeyCode::Char('/'),
         modifiers: ALT,
         scope: KeyScope::Global,
         cmd: Cmd::MenuOpen(2),
-        help: Some(("Esc y", "sync menu")),
+        help: Some(("Esc /", "search menu")),
     },
     KeyBinding {
         key: KeyCode::Char('v'),
@@ -862,11 +869,11 @@ const KEYMAP: &[KeyBinding] = &[
         help: Some(("Esc v", "view menu")),
     },
     KeyBinding {
-        key: KeyCode::Char('f'),
+        key: KeyCode::Char('o'),
         modifiers: ALT,
         scope: KeyScope::Global,
         cmd: Cmd::MenuOpen(4),
-        help: Some(("Esc f", "filter menu")),
+        help: Some(("Esc o", "options menu")),
     },
     KeyBinding {
         key: KeyCode::Char('h'),
@@ -1132,7 +1139,11 @@ fn execute(cmd: Cmd, session: &mut SessionView) -> SessionAction {
                     .unwrap_or_default(),
             }
         }
-        Cmd::SyncLeftRight | Cmd::SyncRightLeft | Cmd::SyncBoth => {
+        Cmd::SyncLeftRight
+        | Cmd::SyncRightLeft
+        | Cmd::SyncBoth
+        | Cmd::SyncUpdateLeft
+        | Cmd::SyncUpdateRight => {
             // Remember the operation (the confirm modal and the execute
             // snapshot read it), then plan the sync with it (dry-run);
             // the controller opens the confirmation modal once the plan
@@ -1143,6 +1154,8 @@ fn execute(cmd: Cmd, session: &mut SessionView) -> SessionAction {
             let operation = match cmd {
                 Cmd::SyncLeftRight => SyncOperation::MirrorLeft,
                 Cmd::SyncRightLeft => SyncOperation::MirrorRight,
+                Cmd::SyncUpdateLeft => SyncOperation::CopyLeft,
+                Cmd::SyncUpdateRight => SyncOperation::CopyRight,
                 _ => SyncOperation::UpdateBoth,
             };
             dir.sync_operation = operation;
@@ -2121,6 +2134,8 @@ mod tests {
             (Cmd::SyncLeftRight, SyncOperation::MirrorLeft),
             (Cmd::SyncRightLeft, SyncOperation::MirrorRight),
             (Cmd::SyncBoth, SyncOperation::UpdateBoth),
+            (Cmd::SyncUpdateLeft, SyncOperation::CopyLeft),
+            (Cmd::SyncUpdateRight, SyncOperation::CopyRight),
         ] {
             let action = run_menu_command(&mut session, cmd);
             assert_eq!(
@@ -2900,9 +2915,10 @@ mod tests {
         for label in ["j/k", "g/G", "n/N", "Ctrl+W", "Tab", "q"] {
             assert!(text.contains(label), "missing `{label}` in `{text}`");
         }
-        // Dir-only labels must not appear in the text help bar. (Not
-        // `filter`: the global `Esc f` menu accel legitimately mentions
-        // the Filter menu in both views.)
+        // Dir-only labels must not appear in the text help bar. (The
+        // global `Esc f` accel now reads "file menu", so no menu label
+        // mentions the dir-only filter or hidden commands either.)
+        assert!(!text.contains("filter"));
         assert!(!text.contains("hidden"));
     }
 

@@ -993,7 +993,7 @@ mod dir_sync {
             ])
             .assert()
             .code(1)
-            .stdout(predicate::str::contains("copy right"));
+            .stdout(predicate::str::contains("copy left \u{2192} right"));
     }
 
     #[test]

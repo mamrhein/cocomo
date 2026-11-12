@@ -800,12 +800,12 @@ mod render_tests {
         // under the "Sessions" title, row 2 its first item.
         assert!(rows[0].contains("Sessions"), "{rows:?}");
         assert!(rows[1].contains('┌'), "{}", rows[1]);
-        assert!(rows[2].contains("open session browser"), "{}", rows[2]);
-        assert!(rows[2].contains('▸'), "{}", rows[2]);
+        assert!(rows[2].contains("Open session\u{2026}"), "{}", rows[2]);
+        assert!(rows[2].contains('\u{25b8}'), "{}", rows[2]);
         // With no open menu the overlay is gone and the view below it shows
         // through again.
         let closed = render(dir_session_state());
-        assert!(!closed.contains("open session browser"), "{closed}");
+        assert!(!closed.contains("Open session\u{2026}"), "{closed}");
         assert!(closed.contains("Loading comparison"), "{closed}");
     }
 
@@ -1021,8 +1021,8 @@ mod menu_mouse_tests {
         let mut exits = 0;
         let mut exit = || exits += 1;
         APP_STATE.set(AppState::new());
-        // Tabs pad each title by one cell, so "Compare" (index 1) spans
-        // x=13..=21 and "Help" starts at x=54.
+        // Tabs pad each title by one cell, so "File / Folder" (index 1)
+        // spans x=13..=27 and the bar ends (after "Help") at x=68.
         menu_mouse(Position { x: 14, y: 0 }, &titles, &bar, &None, &mut exit);
         assert_eq!(
             APP_STATE.state().read().menu.map(|m| m.bar_index),
@@ -1086,12 +1086,12 @@ mod menu_mouse_tests {
         let dropdown = Some((menu, rect, None));
         APP_STATE.set(AppState::new());
         APP_STATE.state().write().menu = Some(menu);
-        // The quit row is the fourth entry, i.e. the fifth content row of
+        // The quit row is the eighth entry, i.e. the ninth content row of
         // the box (below its top border).
         menu_mouse(
             Position {
                 x: rect.x + 2,
-                y: rect.y + 4,
+                y: rect.y + 8,
             },
             &titles,
             &bar,

@@ -180,13 +180,18 @@ const fn item(label: &'static str, cmd: Cmd, views: MenuViews) -> MenuEntry {
     MenuEntry::Item(MenuItemDef { label, cmd, views })
 }
 
-/// Every menu, in bar order: Sessions, Compare, Sync, View, Filter, Help.
+/// Every menu, in bar order: Sessions, File / Folder, Search, View,
+/// Options, Help.
 ///
-/// The Sync menu offers the three directional sync commands; each plans a
-/// dry-run and shows a confirmation dialog before anything changes on
-/// disk. The five per-entry commands then run a transfer on the current
-/// selection directly, with the same enablement rules as the accelerators
-/// of the copy/delete/move dialogs.
+/// The File / Folder menu groups the per-entry reconcile transfers
+/// (Copy, Move, Delete) and the whole-comparison sync commands (Update,
+/// Mirror) in submenus; the sync commands each plan a dry-run and show a
+/// confirmation dialog before anything changes on disk, while the
+/// transfers act on the current selection directly, with the same
+/// enablement rules as the accelerators of the copy/delete/move dialogs.
+/// Reconcile items are view-independent (a text session transfers its
+/// compared file pair the same way), the sync commands and the View and
+/// Options menus belong to the folder comparison view only.
 pub const MENUS: &[MenuDef] = &[
     MenuDef {
         title: "Sessions",
@@ -194,98 +199,145 @@ pub const MENUS: &[MenuDef] = &[
         views: MenuViews::ALL,
         entries: &[
             item(
-                "open session browser",
+                "Open session\u{2026}",
                 Cmd::OpenSessionBrowser,
-                MenuViews::DIR,
+                MenuViews::ALL,
             ),
-            item("save session", Cmd::StartSaveSession, MenuViews::DIR),
-            item("close tab", Cmd::CloseTab, MenuViews::ALL),
-            item("quit", Cmd::Quit, MenuViews::ALL),
+            item("Save session", Cmd::StartSaveSession, MenuViews::ALL),
+            MenuEntry::Separator,
+            item(
+                "Session settings\u{2026}",
+                Cmd::OpenSettings,
+                MenuViews::ALL,
+            ),
+            item("Report\u{2026}", Cmd::OpenReport, MenuViews::DIR),
+            MenuEntry::Separator,
+            item("Close tab", Cmd::CloseTab, MenuViews::ALL),
+            item("Quit", Cmd::Quit, MenuViews::ALL),
         ],
     },
     MenuDef {
-        title: "Compare",
-        accel: 'c',
+        title: "File / Folder",
+        accel: 'f',
         views: MenuViews::ALL,
         entries: &[
-            item("reload", Cmd::Reload, MenuViews::DIR),
-            item(
-                "compare content on/off",
-                Cmd::ToggleCompareContent,
-                MenuViews::DIR,
-            ),
-            item("open entry", Cmd::OpenEntry, MenuViews::DIR),
-            item("go up", Cmd::GoUp, MenuViews::DIR),
-            item("next difference", Cmd::NextDiff, MenuViews::ALL),
-            item("previous difference", Cmd::PrevDiff, MenuViews::ALL),
-        ],
-    },
-    MenuDef {
-        title: "Sync",
-        accel: 'y',
-        views: MenuViews::ALL,
-        entries: &[
-            item(
-                "sync left \u{2192} right",
-                Cmd::SyncLeftRight,
-                MenuViews::DIR,
-            ),
-            item(
-                "sync right \u{2192} left",
-                Cmd::SyncRightLeft,
-                MenuViews::DIR,
-            ),
-            item("sync both", Cmd::SyncBoth, MenuViews::DIR),
+            item("Open entry", Cmd::OpenEntry, MenuViews::DIR),
+            item("Go up", Cmd::GoUp, MenuViews::DIR),
+            MenuEntry::Separator,
             // Per-entry transfers; not dir-only, since a text session can
             // transfer its two files just like `c`/`d`/`v` do.
-            item(
-                "move left \u{2192} right",
-                Cmd::TransferExecute(TransferOp::Move, TransferChoice::Left),
-                MenuViews::ALL,
-            ),
-            item(
-                "move right \u{2192} left",
-                Cmd::TransferExecute(TransferOp::Move, TransferChoice::Right),
-                MenuViews::ALL,
-            ),
-            item(
-                "delete left",
-                Cmd::TransferExecute(TransferOp::Delete, TransferChoice::Left),
-                MenuViews::ALL,
-            ),
-            item(
-                "delete right",
-                Cmd::TransferExecute(
-                    TransferOp::Delete,
-                    TransferChoice::Right,
-                ),
-                MenuViews::ALL,
-            ),
-            item(
-                "delete both",
-                Cmd::TransferExecute(TransferOp::Delete, TransferChoice::Both),
-                MenuViews::ALL,
-            ),
-            item("cancel preview", Cmd::Cancel, MenuViews::DIR),
+            MenuEntry::SubMenu {
+                label: "Copy",
+                children: &[
+                    item(
+                        "Left to right",
+                        Cmd::TransferExecute(
+                            TransferOp::Copy,
+                            TransferChoice::Left,
+                        ),
+                        MenuViews::ALL,
+                    ),
+                    item(
+                        "Right to left",
+                        Cmd::TransferExecute(
+                            TransferOp::Copy,
+                            TransferChoice::Right,
+                        ),
+                        MenuViews::ALL,
+                    ),
+                ],
+            },
+            MenuEntry::SubMenu {
+                label: "Move",
+                children: &[
+                    item(
+                        "Left to right",
+                        Cmd::TransferExecute(
+                            TransferOp::Move,
+                            TransferChoice::Left,
+                        ),
+                        MenuViews::ALL,
+                    ),
+                    item(
+                        "Right to left",
+                        Cmd::TransferExecute(
+                            TransferOp::Move,
+                            TransferChoice::Right,
+                        ),
+                        MenuViews::ALL,
+                    ),
+                ],
+            },
+            MenuEntry::SubMenu {
+                label: "Delete",
+                children: &[
+                    item(
+                        "Left",
+                        Cmd::TransferExecute(
+                            TransferOp::Delete,
+                            TransferChoice::Left,
+                        ),
+                        MenuViews::ALL,
+                    ),
+                    item(
+                        "Right",
+                        Cmd::TransferExecute(
+                            TransferOp::Delete,
+                            TransferChoice::Right,
+                        ),
+                        MenuViews::ALL,
+                    ),
+                    item(
+                        "Both",
+                        Cmd::TransferExecute(
+                            TransferOp::Delete,
+                            TransferChoice::Both,
+                        ),
+                        MenuViews::ALL,
+                    ),
+                ],
+            },
+            MenuEntry::Separator,
+            // Whole-comparison sync commands; labeled by their
+            // destination side, matching the GUI's File menu.
+            MenuEntry::SubMenu {
+                label: "Update",
+                children: &[
+                    item("Left", Cmd::SyncUpdateLeft, MenuViews::DIR),
+                    item("Right", Cmd::SyncUpdateRight, MenuViews::DIR),
+                    item("Both", Cmd::SyncBoth, MenuViews::DIR),
+                ],
+            },
+            MenuEntry::SubMenu {
+                label: "Mirror",
+                children: &[
+                    item("Left", Cmd::SyncRightLeft, MenuViews::DIR),
+                    item("Right", Cmd::SyncLeftRight, MenuViews::DIR),
+                ],
+            },
+        ],
+    },
+    MenuDef {
+        title: "Search",
+        accel: '/',
+        views: MenuViews::ALL,
+        entries: &[
+            item("Find filename\u{2026}", Cmd::StartSearch, MenuViews::DIR),
+            item("Next difference", Cmd::NextDiff, MenuViews::ALL),
+            item("Previous difference", Cmd::PrevDiff, MenuViews::ALL),
         ],
     },
     MenuDef {
         title: "View",
         accel: 'v',
-        views: MenuViews::ALL,
+        views: MenuViews::DIR,
         entries: &[
-            item("expand directory", Cmd::ExpandDir, MenuViews::DIR),
-            item("collapse directory", Cmd::CollapseDir, MenuViews::DIR),
-            item("expand all", Cmd::ExpandAllDirs, MenuViews::DIR),
-            item("collapse all", Cmd::CollapseAllDirs, MenuViews::DIR),
-        ],
-    },
-    MenuDef {
-        title: "Filter",
-        accel: 'f',
-        views: MenuViews::ALL,
-        entries: &[
-            item("open filter panel", Cmd::OpenFilterPanel, MenuViews::DIR),
+            item("Expand directory", Cmd::ExpandDir, MenuViews::DIR),
+            item("Collapse directory", Cmd::CollapseDir, MenuViews::DIR),
+            item("Expand all", Cmd::ExpandAllDirs, MenuViews::DIR),
+            item("Collapse all", Cmd::CollapseAllDirs, MenuViews::DIR),
+            MenuEntry::Separator,
+            item("Filter panel\u{2026}", Cmd::OpenFilterPanel, MenuViews::DIR),
             item("hidden items", Cmd::ToggleHidden, MenuViews::DIR),
             item(
                 "equal items",
@@ -322,16 +374,27 @@ pub const MENUS: &[MenuDef] = &[
                 Cmd::ToggleStatusFilter(StatusFilter::RightOnly),
                 MenuViews::DIR,
             ),
-            item("show all", Cmd::ShowAllFilters, MenuViews::DIR),
+            MenuEntry::Separator,
+            item("Show all", Cmd::ShowAllFilters, MenuViews::DIR),
         ],
+    },
+    MenuDef {
+        title: "Options",
+        accel: 'o',
+        views: MenuViews::DIR,
+        entries: &[item(
+            "Compare content on/off",
+            Cmd::ToggleCompareContent,
+            MenuViews::DIR,
+        )],
     },
     MenuDef {
         title: "Help",
         accel: 'h',
         views: MenuViews::ALL,
         entries: &[
-            item("toggle help bar", Cmd::ToggleHelp, MenuViews::ALL),
-            item("keyboard shortcuts", Cmd::ToggleShortcuts, MenuViews::ALL),
+            item("Toggle help bar", Cmd::ToggleHelp, MenuViews::ALL),
+            item("Keyboard shortcuts", Cmd::ToggleShortcuts, MenuViews::ALL),
         ],
     },
 ];
@@ -358,11 +421,11 @@ fn bar_indices_in(menus: &[MenuDef], view: Option<MenuView>) -> Vec<usize> {
 /// The dropdown label of `item`, resolved against the active session's
 /// display filters.
 ///
-/// Visibility toggle items read `show …` while their group is filtered
-/// out and `hide …` while it is shown (a partial umbrella — one sub-bit
+/// Visibility toggle items read `Show …` while their group is filtered
+/// out and `Hide …` while it is shown (a partial umbrella — one sub-bit
 /// shown, its sibling hidden — counts as filtered out). Every other item
 /// renders its static label. Without a directory session (`display` is
-/// `None`) the toggles advertise `show …`, matching their dimmed
+/// `None`) the toggles advertise `Show …`, matching their dimmed
 /// no-op state.
 pub fn item_label(
     item: &MenuItemDef,
@@ -375,7 +438,7 @@ pub fn item_label(
         }
         _ => return item.label.to_string(),
     };
-    format!("{} {}", if shown { "hide" } else { "show" }, item.label)
+    format!("{} {}", if shown { "Hide" } else { "Show" }, item.label)
 }
 
 /// Return the menu with the given bar index, if it exists.
@@ -588,8 +651,7 @@ mod tests {
 
     /// Synthetic table exercising separators, submenus, and view masks.
     /// The navigation cores resolve against an injected table so the state
-    /// machine is tested independently from the (currently flat) real
-    /// [`MENUS`].
+    /// machine is tested independently from the real [`MENUS`] table.
     static TEST_MENUS: &[MenuDef] = &[
         MenuDef {
             title: "Alpha",
@@ -631,6 +693,23 @@ mod tests {
     /// Whether any top-level entry is the leaf `cmd`.
     fn lists(entries: &[MenuEntry], cmd: Cmd) -> bool {
         entries.iter().any(|entry| entry.cmd() == Some(cmd))
+    }
+
+    /// The children of the submenu parent with `label`, panicking when
+    /// `entries` do not list it.
+    fn submenu(
+        entries: &'static [MenuEntry],
+        label: &str,
+    ) -> &'static [MenuEntry] {
+        entries
+            .iter()
+            .find_map(|entry| match entry {
+                MenuEntry::SubMenu { label: l, children } if *l == label => {
+                    Some(*children)
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no submenu {label}"))
     }
 
     fn check_labels(entries: &[MenuEntry]) {
@@ -683,37 +762,148 @@ mod tests {
     }
 
     #[test]
-    fn sync_menu_lists_the_directional_commands() {
-        let sync = MENUS
+    fn sessions_menu_lists_the_lifecycle_commands() {
+        let sessions = MENUS
             .iter()
-            .find(|m| m.title == "Sync")
-            .expect("no Sync menu");
-        for cmd in [Cmd::SyncLeftRight, Cmd::SyncRightLeft, Cmd::SyncBoth] {
+            .find(|m| m.title == "Sessions")
+            .expect("no Sessions menu");
+        // Session tools are view-independent; only the report needs a
+        // folder session.
+        for cmd in [
+            Cmd::OpenSessionBrowser,
+            Cmd::StartSaveSession,
+            Cmd::OpenSettings,
+            Cmd::CloseTab,
+            Cmd::Quit,
+        ] {
             assert!(
-                lists(sync.entries, cmd),
-                "Sync menu misses the command {cmd:?}",
+                lists(sessions.entries, cmd),
+                "Sessions menu misses the {cmd:?} item",
+            );
+        }
+        let report = leaf(sessions.entries, Cmd::OpenReport);
+        assert!(report.available(Some(MenuView::Dir)));
+        assert!(!report.available(Some(MenuView::Text)));
+    }
+
+    #[test]
+    fn file_menu_lists_the_reconcile_submenus() {
+        let file = MENUS
+            .iter()
+            .find(|m| m.title == "File / Folder")
+            .expect("no File / Folder menu");
+        let transfers: [(&str, &[Cmd]); 3] = [
+            (
+                "Copy",
+                &[
+                    Cmd::TransferExecute(
+                        TransferOp::Copy,
+                        TransferChoice::Left,
+                    ),
+                    Cmd::TransferExecute(
+                        TransferOp::Copy,
+                        TransferChoice::Right,
+                    ),
+                ],
+            ),
+            (
+                "Move",
+                &[
+                    Cmd::TransferExecute(
+                        TransferOp::Move,
+                        TransferChoice::Left,
+                    ),
+                    Cmd::TransferExecute(
+                        TransferOp::Move,
+                        TransferChoice::Right,
+                    ),
+                ],
+            ),
+            (
+                "Delete",
+                &[
+                    Cmd::TransferExecute(
+                        TransferOp::Delete,
+                        TransferChoice::Left,
+                    ),
+                    Cmd::TransferExecute(
+                        TransferOp::Delete,
+                        TransferChoice::Right,
+                    ),
+                    Cmd::TransferExecute(
+                        TransferOp::Delete,
+                        TransferChoice::Both,
+                    ),
+                ],
+            ),
+        ];
+        for (parent, cmds) in transfers {
+            let children = submenu(file.entries, parent);
+            // Copy and Move address their source side ("Left to right",
+            // "Right to left"); Delete also offers "Both".
+            assert_eq!(children.len(), cmds.len(), "submenu {parent}");
+            for cmd in cmds {
+                assert!(
+                    lists(children, *cmd),
+                    "submenu {parent} misses the transfer {cmd:?}",
+                );
+            }
+            assert_eq!(
+                leaf(children, cmds[0]).label,
+                if parent == "Delete" {
+                    "Left"
+                } else {
+                    "Left to right"
+                },
             );
         }
     }
 
     #[test]
-    fn sync_menu_lists_the_per_entry_transfers() {
-        let sync = MENUS
+    fn file_menu_lists_the_sync_submenus() {
+        let file = MENUS
             .iter()
-            .find(|m| m.title == "Sync")
-            .expect("no Sync menu");
-        for cmd in [
-            Cmd::TransferExecute(TransferOp::Move, TransferChoice::Left),
-            Cmd::TransferExecute(TransferOp::Move, TransferChoice::Right),
-            Cmd::TransferExecute(TransferOp::Delete, TransferChoice::Left),
-            Cmd::TransferExecute(TransferOp::Delete, TransferChoice::Right),
-            Cmd::TransferExecute(TransferOp::Delete, TransferChoice::Both),
-        ] {
+            .find(|m| m.title == "File / Folder")
+            .expect("no File / Folder menu");
+        let update = submenu(file.entries, "Update");
+        for cmd in [Cmd::SyncUpdateLeft, Cmd::SyncUpdateRight, Cmd::SyncBoth] {
             assert!(
-                lists(sync.entries, cmd),
-                "Sync menu misses the per-entry transfer {cmd:?}",
+                lists(update, cmd),
+                "Update submenu misses the command {cmd:?}",
             );
         }
+        // Sync submenu items are labeled by their destination side
+        // (matching the GUI's File menu): Mirror "Left" mirrors the
+        // right panel onto the left.
+        let mirror = submenu(file.entries, "Mirror");
+        assert_eq!(leaf(mirror, Cmd::SyncRightLeft).label, "Left");
+        assert_eq!(leaf(mirror, Cmd::SyncLeftRight).label, "Right");
+    }
+
+    #[test]
+    fn search_menu_lists_find_and_difference_commands() {
+        let search = MENUS
+            .iter()
+            .find(|m| m.title == "Search")
+            .expect("no Search menu");
+        for cmd in [Cmd::StartSearch, Cmd::NextDiff, Cmd::PrevDiff] {
+            assert!(
+                lists(search.entries, cmd),
+                "Search menu misses the {cmd:?} item",
+            );
+        }
+    }
+
+    #[test]
+    fn options_menu_lists_compare_content() {
+        let options = MENUS
+            .iter()
+            .find(|m| m.title == "Options")
+            .expect("no Options menu");
+        assert!(
+            lists(options.entries, Cmd::ToggleCompareContent),
+            "Options menu misses the content toggle",
+        );
     }
 
     #[test]
@@ -736,11 +926,11 @@ mod tests {
     }
 
     #[test]
-    fn filter_menu_lists_every_visibility_command() {
-        let filter = MENUS
+    fn view_menu_lists_every_visibility_command() {
+        let view = MENUS
             .iter()
-            .find(|m| m.title == "Filter")
-            .expect("no Filter menu");
+            .find(|m| m.title == "View")
+            .expect("no View menu");
         for cmd in [
             Cmd::OpenFilterPanel,
             Cmd::ToggleHidden,
@@ -754,36 +944,36 @@ mod tests {
             Cmd::ShowAllFilters,
         ] {
             assert!(
-                lists(filter.entries, cmd),
-                "Filter menu misses the {cmd:?} item",
+                lists(view.entries, cmd),
+                "View menu misses the {cmd:?} item",
             );
         }
     }
 
     #[test]
-    fn filter_items_switch_between_show_and_hide() {
-        let filter = MENUS
+    fn view_items_switch_between_show_and_hide() {
+        let view = MENUS
             .iter()
-            .find(|m| m.title == "Filter")
-            .expect("no Filter menu");
-        let hidden = leaf(filter.entries, Cmd::ToggleHidden);
+            .find(|m| m.title == "View")
+            .expect("no View menu");
+        let hidden = leaf(view.entries, Cmd::ToggleHidden);
         let different = leaf(
-            filter.entries,
+            view.entries,
             Cmd::ToggleStatusFilter(StatusFilter::Different),
         );
 
-        // Shown groups offer "hide …", hidden ones "show …".
+        // Shown groups offer "Hide …", hidden ones "Show …".
         let all = DisplayFilters::all();
-        assert_eq!(item_label(&hidden, Some(&all)), "hide hidden items");
-        assert_eq!(item_label(&different, Some(&all)), "hide different items");
+        assert_eq!(item_label(&hidden, Some(&all)), "Hide hidden items");
+        assert_eq!(item_label(&different, Some(&all)), "Hide different items");
         let off = DisplayFilters {
             show_statuses: DirEntryStatus::all(),
             show_hidden: false,
             suppress_content_filters: false,
         };
-        assert_eq!(item_label(&hidden, Some(&off)), "show hidden items");
+        assert_eq!(item_label(&hidden, Some(&off)), "Show hidden items");
 
-        // A partial umbrella reads unchecked, so the item offers "show".
+        // A partial umbrella reads unchecked, so the item offers "Show".
         let partial = DisplayFilters {
             show_statuses: DirEntryStatus::all() - DirEntryStatus::RightNewer,
             show_hidden: true,
@@ -791,14 +981,14 @@ mod tests {
         };
         assert_eq!(
             item_label(&different, Some(&partial)),
-            "show different items"
+            "Show different items"
         );
 
         // Static items keep their label; without a session the toggles
-        // advertise "show".
-        let open = leaf(filter.entries, Cmd::OpenFilterPanel);
-        assert_eq!(item_label(&open, None), "open filter panel");
-        assert_eq!(item_label(&hidden, None), "show hidden items");
+        // advertise "Show".
+        let open = leaf(view.entries, Cmd::OpenFilterPanel);
+        assert_eq!(item_label(&open, None), "Filter panel\u{2026}");
+        assert_eq!(item_label(&hidden, None), "Show hidden items");
     }
 
     #[test]
@@ -844,24 +1034,25 @@ mod tests {
     fn item_navigation_wraps_at_both_ends() {
         let sessions =
             MENUS.iter().position(|m| m.title == "Sessions").unwrap();
-        let len = menu_at(sessions)
-            .unwrap()
-            .entries
-            .iter()
-            .filter(|e| e.selectable())
-            .count();
+        // The wrap counts selectable entries, while `item` addresses
+        // entry indices (the Sessions menu has separators), so the
+        // expectations look up the selectable entry indices.
+        let entries = &menu_at(sessions).unwrap().entries;
+        let selectable: Vec<usize> = (0..entries.len())
+            .filter(|&i| entries[i].selectable())
+            .collect();
         let mut menu = MenuState::open(sessions).unwrap();
         // One step up from the first item lands on the last one.
         menu.move_item(-1);
-        assert_eq!(menu.item, len - 1);
+        assert_eq!(menu.item, *selectable.last().unwrap());
         // And back down wraps to the first.
         menu.move_item(1);
-        assert_eq!(menu.item, 0);
+        assert_eq!(menu.item, selectable[0]);
         // Large deltas wrap modulo the selectable item count.
-        menu.move_item(len as isize);
-        assert_eq!(menu.item, 0);
-        menu.move_item(len as isize + 2);
-        assert_eq!(menu.item, 2 % len);
+        menu.move_item(selectable.len() as isize);
+        assert_eq!(menu.item, selectable[0]);
+        menu.move_item(selectable.len() as isize + 2);
+        assert_eq!(menu.item, selectable[2 % selectable.len()]);
     }
 
     #[test]
@@ -882,13 +1073,13 @@ mod tests {
     fn current_addresses_the_highlighted_item() {
         let menu = MenuState::open(1).unwrap();
         let MenuEntry::Item(first) = MENUS[1].entries[0] else {
-            panic!("first Compare entry is not a leaf");
+            panic!("first File / Folder entry is not a leaf");
         };
         assert_eq!(menu.current().copied(), Some(first));
         let mut menu = menu;
         menu.move_item(1);
         let MenuEntry::Item(second) = MENUS[1].entries[1] else {
-            panic!("second Compare entry is not a leaf");
+            panic!("second File / Folder entry is not a leaf");
         };
         assert_eq!(menu.current().copied(), Some(second));
     }
@@ -944,11 +1135,12 @@ mod tests {
         assert_eq!(bar_indices_in(TEST_MENUS, Some(MenuView::Text)), vec![0]);
         // The welcome screen shows the full bar.
         assert_eq!(bar_indices_in(TEST_MENUS, None), vec![0, 1]);
-        // The real table currently shows every menu in every view.
+        // The real table: View and Options are dir-only menus, so the
+        // text tab shows a reduced bar.
         let full: Vec<usize> = (0..MENUS.len()).collect();
-        for view in [None, Some(MenuView::Dir), Some(MenuView::Text)] {
-            assert_eq!(bar_indices(view), full);
-        }
+        assert_eq!(bar_indices(None), full);
+        assert_eq!(bar_indices(Some(MenuView::Dir)), full);
+        assert_eq!(bar_indices(Some(MenuView::Text)), vec![0, 1, 2, 5]);
     }
 
     #[test]

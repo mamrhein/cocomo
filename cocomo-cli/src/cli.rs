@@ -171,10 +171,10 @@ pub struct DirSyncArgs {
     /// Update newer files in both directions.
     #[arg(long, default_value_t = false)]
     pub(crate) update_both: bool,
-    /// Copy left-only files to right (no deletions).
+    /// Copy right-only and different files to left (no deletions).
     #[arg(long, default_value_t = false)]
     pub(crate) copy_left: bool,
-    /// Copy right-only files to left (no deletions).
+    /// Copy left-only and different files to right (no deletions).
     #[arg(long, default_value_t = false)]
     pub(crate) copy_right: bool,
     /// Copy only newer files.

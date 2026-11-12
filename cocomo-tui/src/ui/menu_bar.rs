@@ -186,8 +186,8 @@ pub(super) struct MenuBarProps {
     pub(super) on_select: Handler<'static, usize>,
 }
 
-/// Top menu bar with tab-like navigation items (Sessions, Compare, Sync,
-/// View, Filter, Help).
+/// Top menu bar with tab-like navigation items (Sessions, File / Folder,
+/// Search, View, Options, Help).
 ///
 /// Rendered borderless on a single row to keep the chrome compact; the
 /// title of the open dropdown is highlighted with the theme's title style.
@@ -487,25 +487,27 @@ mod tests {
                 .contains(Modifier::UNDERLINED)
         };
         // Tabs pad each title by one cell, so "Sessions" spans x=1..=8,
-        // the divider x=9..=13, and "Compare" starts at x=14.
+        // the divider x=10..=12, and "File / Folder" starts at x=14.
         assert_eq!(buf[(1, 0)].symbol(), "S");
         assert!(underlined(1));
         // The further `s` letters of "Sessions" are not the accelerator.
         assert!(!underlined(2));
         assert!(!underlined(3));
         assert!(!underlined(8));
-        // "Compare" marks its `c`, "Sync" its `y` (at x=26..=29).
-        assert_eq!(buf[(14, 0)].symbol(), "C");
+        // "File / Folder" marks its leading `F` (at x=14..=26).
+        assert_eq!(buf[(14, 0)].symbol(), "F");
         assert!(underlined(14));
         assert!(!underlined(15));
-        assert_eq!(buf[(26, 0)].symbol(), "S");
-        assert!(!underlined(26));
-        assert!(underlined(27));
+        // "Search" is addressed by `Alt+/`, which is not a letter of the
+        // title, so nothing in it is underlined (title spans x=32..=37).
+        assert_eq!(buf[(32, 0)].symbol(), "S");
+        assert!(!underlined(32));
+        assert!(!underlined(37));
     }
 
     #[test]
     fn selected_title_carries_the_highlight_style() {
-        // Index 2 of `MENUS` is "Sync", which starts at x=26.
+        // Index 2 of `MENUS` is "Search", which starts at x=32.
         let buf = render_frames(
             element!(PaletteProvider(palette: cocomo_palette()) {
                 MenuBar(
@@ -519,9 +521,9 @@ mod tests {
             1,
         );
         // The open title is highlighted, its neighbours are not.
-        assert_eq!(buf[(26, 0)].style().fg, Some(Color::Yellow));
+        assert_eq!(buf[(32, 0)].style().fg, Some(Color::Yellow));
         assert_ne!(buf[(1, 0)].style().fg, Some(Color::Yellow));
-        assert_ne!(buf[(35, 0)].style().fg, Some(Color::Yellow));
+        assert_ne!(buf[(43, 0)].style().fg, Some(Color::Yellow));
     }
 
     #[test]
@@ -605,15 +607,19 @@ mod tests {
             1,
         );
         let cell = |x: u16, y: u16| buf[(rect.x + x, rect.y + y)].style();
-        // The first row is a directory-only item on the welcome screen:
-        // dimmed label, no pointer.
-        assert_eq!(buf[(rect.x + 3, rect.y + 1)].symbol(), "o");
-        assert_eq!(cell(3, 1).fg, Some(cocomo_palette().fg_dim));
+        // The first row is available on the welcome screen, so it is lit
+        // and carries no pointer.
+        assert_eq!(buf[(rect.x + 3, rect.y + 1)].symbol(), "O");
+        assert_ne!(cell(3, 1).fg, Some(cocomo_palette().fg_dim));
         assert_ne!(cell(1, 1).bg, Some(cocomo_palette().selection));
         // The current row carries the pointer and the highlight style.
         assert_eq!(buf[(rect.x + 1, rect.y + 2)].symbol(), "\u{25b8}");
         assert_eq!(cell(3, 2).bg, Some(cocomo_palette().selection));
-        assert_eq!(buf[(rect.x + 3, rect.y + 2)].symbol(), "s");
+        assert_eq!(buf[(rect.x + 3, rect.y + 2)].symbol(), "S");
+        // The "Report…" row (fifth entry) is directory-only and dimmed on
+        // the welcome screen.
+        assert_eq!(buf[(rect.x + 3, rect.y + 5)].symbol(), "R");
+        assert_eq!(cell(3, 5).fg, Some(cocomo_palette().fg_dim));
         // The box is drawn closed on the right, i.e. it is wide enough for
         // its longest label.
         assert_eq!(

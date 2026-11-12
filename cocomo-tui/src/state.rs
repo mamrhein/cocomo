@@ -743,7 +743,8 @@ pub struct DirView {
     /// Compare file contents (vs. meta data only).
     pub compare_content: bool,
     /// Which entry statuses and hidden entries the tree displays (driven
-    /// by the filter panel, the Filter menu and the digit toggles).
+    /// by the filter panel, the View menu's filter group and the digit
+    /// toggles).
     pub display: DisplayFilters,
     /// The dry-run plan awaiting approval in the confirmation modal, or
     /// `None` while no sync is pending. Cleared once the plan has been

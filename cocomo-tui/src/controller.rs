@@ -987,8 +987,8 @@ pub(crate) fn confirm_sync() {
 /// plan.
 ///
 /// Bound to the modal's cancel action (`n`/`Esc`, or `Enter` while the
-/// list highlights Cancel). A sync command (`S` or the Sync menu) plans
-/// afresh from the current filesystem state.
+/// list highlights Cancel). A sync command (`S` or the File / Folder
+/// menu) plans afresh from the current filesystem state.
 pub(crate) fn reject_sync() {
     let state = APP_STATE.state();
     let mut app = state.write();
@@ -1834,9 +1834,23 @@ mod tests {
     #[test]
     fn confirm_menu_item_runs_the_dir_command_and_closes_the_dropdown() {
         APP_STATE.set(dir_app_state());
-        open_menu(menu_index("Filter"));
-        // The third Filter item toggles the equal group.
-        move_menu_item(2);
+        open_menu(menu_index("View"));
+        // The equal-group toggle sits behind the View menu's first
+        // separator, so move by the count of selectable items that
+        // precede it.
+        let view = menu::menu_at(menu_index("View")).unwrap();
+        let target = view
+            .entries
+            .iter()
+            .position(|e| {
+                e.cmd() == Some(Cmd::ToggleStatusFilter(StatusFilter::Equal))
+            })
+            .unwrap();
+        let steps = (0..=target)
+            .filter(|&i| view.entries[i].selectable())
+            .count()
+            - 1;
+        move_menu_item(steps as isize);
         assert_eq!(confirm_menu_item(), MenuOutcome::Handled);
         let state = APP_STATE.state();
         let app = state.read();
