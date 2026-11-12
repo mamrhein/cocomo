@@ -2241,6 +2241,27 @@ mod tests {
         assert_eq!(names, ["Sessions", "View", "Options", "Help"]);
     }
 
+    /// A merge tab gains the Merge menu directly after the (titled
+    /// "File") file menu; Edit and Search have no merge items and stay
+    /// hidden.
+    #[test]
+    fn merge_tab_inserts_the_merge_menu_after_the_file_menu() {
+        let menus = build_app_menus(
+            MenuState {
+                is_merge: true,
+                merge_can_take: true,
+                ..MenuState::empty()
+            },
+            &HashSet::new(),
+        );
+        let names: Vec<String> =
+            menus.iter().map(|m| m.name.to_string()).collect();
+        assert_eq!(
+            names,
+            ["Sessions", "File", "Merge", "View", "Options", "Help"]
+        );
+    }
+
     /// The "Compare files using" submenu carries the four file views,
     /// and hiding one command removes just that entry.
     #[test]

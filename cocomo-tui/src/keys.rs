@@ -2128,7 +2128,7 @@ mod tests {
     }
 
     #[test]
-    fn sync_menu_commands_plan_with_their_operation() {
+    fn sync_commands_plan_with_their_operation() {
         let mut session = dir_session();
         for (cmd, expected) in [
             (Cmd::SyncLeftRight, SyncOperation::MirrorLeft),
