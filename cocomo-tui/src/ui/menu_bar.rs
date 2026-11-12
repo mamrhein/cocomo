@@ -273,10 +273,14 @@ pub(super) fn MenuDropdown(
 ) -> impl Into<AnyElement<'static>> {
     let theme = hooks.use_component_theme::<CocomoTheme>();
     let Some(menu) = props.menu else {
-        return element!(Fragment).into_any();
+        // A childless `Fragment` has a transparent layout and falls back to
+        // the default `Fill(1)` height, which would steal the main view's
+        // rows in the App shell's vertical flex. A closed `Modal` is
+        // zero-sized instead (as in `FilterPanel`).
+        return element!(Modal(open: false)).into_any();
     };
     let Some(def) = menu.menu() else {
-        return element!(Fragment).into_any();
+        return element!(Modal(open: false)).into_any();
     };
     let (label_width, hint_width) =
         content_widths(def.entries, props.display.as_ref());
@@ -337,14 +341,17 @@ pub(super) fn MenuFlyout(
     hooks: Hooks,
 ) -> impl Into<AnyElement<'static>> {
     let theme = hooks.use_component_theme::<CocomoTheme>();
+    // Like `MenuDropdown`, a closed `Modal` stands in for "nothing to
+    // render": a childless `Fragment` would fall back to the default
+    // `Fill(1)` height and steal the main view's rows.
     let Some(menu) = props.menu else {
-        return element!(Fragment).into_any();
+        return element!(Modal(open: false)).into_any();
     };
     let Some(sub) = menu.sub else {
-        return element!(Fragment).into_any();
+        return element!(Modal(open: false)).into_any();
     };
     let Some(children) = menu.sub_entries() else {
-        return element!(Fragment).into_any();
+        return element!(Modal(open: false)).into_any();
     };
     let (label_width, hint_width) =
         content_widths(children, props.display.as_ref());

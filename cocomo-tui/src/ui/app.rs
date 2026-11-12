@@ -586,12 +586,16 @@ pub(crate) fn App(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     view: menu_view,
                     display: display.clone(),
                 )
-                MenuFlyout(
-                    menu: Some(menu),
-                    rect: flyout.unwrap_or_default(),
-                    view: menu_view,
-                    display: display.clone(),
-                )
+                // Only mounted while a submenu flyout is actually open, so
+                // a closed dropdown never adds a layout child below.
+                if let Some(flyout) = flyout {
+                    MenuFlyout(
+                        menu: Some(menu),
+                        rect: flyout,
+                        view: menu_view,
+                        display: display.clone(),
+                    )
+                }
             }
         }
     )
@@ -807,6 +811,27 @@ mod render_tests {
         let closed = render(dir_session_state());
         assert!(!closed.contains("Open session\u{2026}"), "{closed}");
         assert!(closed.contains("Loading comparison"), "{closed}");
+    }
+
+    #[test]
+    fn every_open_dropdown_keeps_the_table_panel_visible() {
+        // Regression: the closed submenu flyout used to render a childless
+        // `Fragment` next to the dropdown, whose default `Fill(1)` height
+        // collapsed the main view to a single row while any menu was open.
+        // Assert on the panel's bottom border and the status bar row: the
+        // top-centered empty message may legitimately sit under a
+        // dropdown, rows below it must not.
+        for bar_index in 0..menu::MENUS.len() {
+            let mut app = dir_session_state();
+            app.menu = MenuState::open(bar_index);
+            let text = render(app);
+            let title = menu::MENUS[bar_index].title;
+            assert!(
+                text.contains('└') && text.contains("No data"),
+                "table panel collapsed with the {title} dropdown \
+                 open:\n{text}",
+            );
+        }
     }
 
     /// Dir session whose single entry exists on both sides, so the transfer
