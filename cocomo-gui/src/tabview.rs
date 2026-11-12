@@ -706,8 +706,8 @@ impl WindowRoot {
                             .icon(IconName::PanelBottomClose)
                             .ghost()
                             .small()
-                            .tooltip("Collapse log pane")
-                            .accessibility_label("Collapse log pane")
+                            .tooltip("Hide log pane")
+                            .accessibility_label("Hide log pane")
                             .on_click(|_, _, cx| {
                                 cx.update_global::<LogPaneOpen, _>(
                                     |open, _| open.0 = !open.0,
