@@ -25,7 +25,10 @@
 //!
 //! The server host key is verified against the standard
 //! `~/.ssh/known_hosts` file. Unknown or changed keys are refused (fail
-//! closed), matching the default behaviour of `ssh`.
+//! closed), matching the default behaviour of `ssh`. Entries whose key blob
+//! cannot be parsed (e.g. OpenSSH post-quantum host keys such as
+//! `ssh-mldsa44-ed25519`, which `ssh-key` does not model yet) are skipped
+//! rather than failing the whole check, like OpenSSH does.
 //!
 //! # Authentication
 //!
@@ -35,6 +38,7 @@
 //! An empty username falls back to the local user, as with `ssh`.
 
 use std::{
+    borrow::Cow,
     collections::{HashMap, hash_map::DefaultHasher},
     ffi::OsStr,
     fmt,
@@ -52,13 +56,15 @@ use std::{
 };
 
 use async_trait::async_trait;
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use futures::Stream;
+use hmac::{Hmac, KeyInit, Mac};
 use russh::{
     client::{self as ssh_client, Handler as SshHandler},
     keys::{
-        PrivateKeyWithHashAlg, PublicKeyOrCertificate,
+        PrivateKeyWithHashAlg, PublicKey, PublicKeyOrCertificate,
         agent::client::AgentClient,
     },
 };
@@ -66,6 +72,7 @@ use russh_sftp::{
     client::{SftpSession, error::Error as SftpError, fs::File as SftpHandle},
     protocol::{FileAttributes, OpenFlags},
 };
+use sha1::Sha1;
 use tokio::io::{
     AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWrite, AsyncWriteExt, ReadBuf,
 };
@@ -192,13 +199,14 @@ impl HostKeyHandler {
     /// Verify `key` against the known hosts file.
     ///
     /// Fails closed: a host that is not recorded, or whose recorded key no
-    /// longer matches, is refused rather than accepted.
+    /// longer matches, is refused rather than accepted. Unparsable entries
+    /// (unknown key types, corrupt lines) are skipped.
     fn verify_key(
         &self,
         key: &PublicKeyOrCertificate,
     ) -> std::result::Result<bool, SshHandlerError> {
         let pub_key = key.public_key();
-        match russh::keys::check_known_hosts(&self.host, self.port, &pub_key) {
+        match check_known_hosts(&self.host, self.port, &pub_key) {
             Ok(true) => Ok(true),
             Ok(false) => Err(SshHandlerError(format!(
                 "host {}:{} is not in known_hosts; connect once with `ssh` \
@@ -224,6 +232,130 @@ impl SshHandler for HostKeyHandler {
         let result = self.verify_key(key);
         async move { result }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Lenient known_hosts verification
+// ---------------------------------------------------------------------------
+
+/// Verify `pub_key` against the user's `~/.ssh/known_hosts` file.
+///
+/// Drop-in replacement for `russh::keys::check_known_hosts` (up to 0.65.1)
+/// which tolerates entries whose key blob cannot be parsed: a line with an
+/// unknown key type (e.g. the OpenSSH 10.x post-quantum host key
+/// `ssh-mldsa44-ed25519`) or a corrupt blob is skipped instead of failing
+/// verification for every host in the file.
+fn check_known_hosts(
+    host: &str,
+    port: u16,
+    pub_key: &PublicKey,
+) -> std::result::Result<bool, SshHandlerError> {
+    match dirs::home_dir().map(|home| home.join(".ssh").join("known_hosts")) {
+        Some(path) => check_known_hosts_path(host, port, pub_key, &path),
+        None => Ok(false),
+    }
+}
+
+/// Verify `pub_key` against the known hosts file at `path`.
+///
+/// Like OpenSSH (and unlike russh 0.65.1): any matching entry accepts the
+/// key, so a stale entry no longer masks a current one, and a changed-key
+/// error is only reported when no entry matches.
+fn check_known_hosts_path(
+    host: &str,
+    port: u16,
+    pub_key: &PublicKey,
+    path: &Path,
+) -> std::result::Result<bool, SshHandlerError> {
+    let contents = match fs_err::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(err) => {
+            return Err(SshHandlerError(format!(
+                "cannot read {}: {err}",
+                path.display()
+            )));
+        }
+    };
+    // OpenSSH records the bare host for port 22 and `[host]:port` otherwise.
+    let host_port = if port == 22 {
+        Cow::Borrowed(host)
+    } else {
+        Cow::Owned(format!("[{host}]:{port}"))
+    };
+    let mut mismatch_line = None;
+    for (idx, line) in contents.lines().enumerate() {
+        let line_no = idx + 1;
+        let trimmed = line.trim_start();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let mut fields = trimmed.split_whitespace();
+        let (Some(hosts_field), Some(_key_type), Some(key_b64)) =
+            (fields.next(), fields.next(), fields.next())
+        else {
+            continue;
+        };
+        // `@cert-authority` and `@revoked` markers are not supported.
+        if hosts_field.starts_with('@') {
+            continue;
+        }
+        if !host_matches(hosts_field, &host_port) {
+            continue;
+        }
+        // Skip entries we cannot parse so that a single unsupported key
+        // type does not poison the whole file.
+        let Ok(recorded) = russh::keys::parse_public_key_base64(key_b64)
+        else {
+            continue;
+        };
+        if recorded.algorithm() != pub_key.algorithm() {
+            continue;
+        }
+        // Compare key material only; the comment is not part of the key.
+        if recorded.key_data() == pub_key.key_data() {
+            return Ok(true);
+        }
+        if mismatch_line.is_none() {
+            mismatch_line = Some(line_no);
+        }
+    }
+    match mismatch_line {
+        Some(line_no) => Err(SshHandlerError(format!(
+            "key changed, remove line {line_no} of {} to re-trust the server",
+            path.display()
+        ))),
+        None => Ok(false),
+    }
+}
+
+/// Check whether `host_port` matches a comma-separated known_hosts host
+/// pattern field, including hashed (`|1|salt|hash`) entries.
+fn host_matches(patterns: &str, host_port: &str) -> bool {
+    patterns.split(',').any(|pattern| {
+        pattern == host_port || matches_hashed_entry(pattern, host_port)
+    })
+}
+
+/// Check a `|1|<base64 salt>|<base64 HMAC-SHA1>` hashed hostname entry,
+/// as written by OpenSSH with `HashKnownHosts yes`.
+fn matches_hashed_entry(entry: &str, host_port: &str) -> bool {
+    let Some(rest) = entry.strip_prefix("|1|") else {
+        return false;
+    };
+    let Some((salt, hash)) = rest.split_once('|') else {
+        return false;
+    };
+    let (Ok(salt), Ok(hash)) = (STANDARD.decode(salt), STANDARD.decode(hash))
+    else {
+        return false;
+    };
+    let Ok(mac) = Hmac::<Sha1>::new_from_slice(&salt) else {
+        return false;
+    };
+    mac.chain_update(host_port.as_bytes())
+        .verify_slice(&hash)
+        .is_ok()
 }
 
 // ---------------------------------------------------------------------------
@@ -1874,5 +2006,189 @@ mod tests {
         temp_env::with_var("USERNAME", Some(""), || {
             assert_eq!(local_username(), None)
         });
+    }
+
+    /// A valid OpenSSH-ed25519 key blob (from the russh test suite).
+    const ED25519_KEY: &str =
+        "AAAAC3NzaC1lZDI1NTE5AAAAIJdD7y3aLq454yWBdwLWbieU1ebz9/cu7/QEXn9OIeZJ";
+
+    /// A different valid ed25519 key blob (from the russh test suite).
+    const ED25519_KEY_2: &str =
+        "AAAAC3NzaC1lZDI1NTE5AAAAIA6rWI3G2sz07DnfFlrouTcysQlj2P+jpNSOEWD9OJ3X";
+
+    /// A blob labelled with the OpenSSH 10.x post-quantum host key type
+    /// `ssh-mldsa44-ed25519`, which `ssh-key` cannot represent (its
+    /// algorithm parser rejects bare names without `@domain`).
+    fn unparsable_key_blob() -> String {
+        let label = b"ssh-mldsa44-ed25519";
+        let mut blob = Vec::new();
+        blob.extend_from_slice(&(label.len() as u32).to_be_bytes());
+        blob.extend_from_slice(label);
+        blob.extend_from_slice(&[0u8; 32]);
+        STANDARD.encode(blob)
+    }
+
+    fn write_known_hosts(contents: &str) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        fs_err::write(dir.path().join("known_hosts"), contents).unwrap();
+        dir
+    }
+
+    fn key(base64: &str) -> PublicKey {
+        russh::keys::parse_public_key_base64(base64).unwrap()
+    }
+
+    #[test]
+    fn known_hosts_lenient_accepts_valid_key_beside_unparsable() {
+        let dir = write_known_hosts(&format!(
+            "example.com ssh-mldsa44-ed25519 {}\nexample.com ssh-ed25519 \
+             {ED25519_KEY}\n",
+            unparsable_key_blob()
+        ));
+        let path = dir.path().join("known_hosts");
+        assert!(
+            check_known_hosts_path(
+                "example.com",
+                22,
+                &key(ED25519_KEY),
+                &path
+            )
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn known_hosts_lenient_unknown_host_when_only_unparsable() {
+        let dir = write_known_hosts(&format!(
+            "example.com ssh-mldsa44-ed25519 {}\n",
+            unparsable_key_blob()
+        ));
+        let path = dir.path().join("known_hosts");
+        // The unparsable entry is skipped, so the host counts as unknown
+        // rather than producing a parse error.
+        assert!(
+            !check_known_hosts_path(
+                "example.com",
+                22,
+                &key(ED25519_KEY),
+                &path
+            )
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn known_hosts_lenient_corrupt_line_does_not_break_other_hosts() {
+        let dir = write_known_hosts(&format!(
+            "other.com ssh-ed25519 not-base64!!\nexample.com ssh-ed25519 \
+             {ED25519_KEY}\n"
+        ));
+        let path = dir.path().join("known_hosts");
+        assert!(
+            check_known_hosts_path(
+                "example.com",
+                22,
+                &key(ED25519_KEY),
+                &path
+            )
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn known_hosts_lenient_stale_entry_does_not_mask_match() {
+        let dir = write_known_hosts(&format!(
+            "example.com ssh-ed25519 {ED25519_KEY_2}\nexample.com \
+             ssh-ed25519 {ED25519_KEY}\n"
+        ));
+        let path = dir.path().join("known_hosts");
+        assert!(
+            check_known_hosts_path(
+                "example.com",
+                22,
+                &key(ED25519_KEY),
+                &path
+            )
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn known_hosts_lenient_reports_changed_key_with_line() {
+        let dir = write_known_hosts(&format!(
+            "example.com ssh-ed25519 {ED25519_KEY_2}\n"
+        ));
+        let path = dir.path().join("known_hosts");
+        let err = check_known_hosts_path(
+            "example.com",
+            22,
+            &key(ED25519_KEY),
+            &path,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("key changed"));
+        assert!(err.to_string().contains("line 1"));
+    }
+
+    #[test]
+    fn known_hosts_lenient_matches_hashed_host() {
+        // Hashed entry for `example.com` (vector from the russh test suite).
+        let dir = write_known_hosts(
+            "|1|O33ESRMWPVkMYIwJ1Uw+n877jTo=|nuuC5vEqXlEZ/8BXQR7m619W6Ak= \
+             ssh-ed25519 \
+             AAAAC3NzaC1lZDI1NTE5AAAAILIG2T/\
+             B0l0gaqj3puu510tu9N1OkQ4znY3LYuEm5zCF\n",
+        );
+        let path = dir.path().join("known_hosts");
+        let hashed_key = russh::keys::parse_public_key_base64(
+            "AAAAC3NzaC1lZDI1NTE5AAAAILIG2T/\
+             B0l0gaqj3puu510tu9N1OkQ4znY3LYuEm5zCF",
+        )
+        .unwrap();
+        assert!(
+            check_known_hosts_path("example.com", 22, &hashed_key, &path)
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn known_hosts_lenient_scopes_entries_by_port() {
+        let dir = write_known_hosts(&format!(
+            "[example.com]:2222 ssh-ed25519 {ED25519_KEY}\n"
+        ));
+        let path = dir.path().join("known_hosts");
+        assert!(
+            check_known_hosts_path(
+                "example.com",
+                2222,
+                &key(ED25519_KEY),
+                &path
+            )
+            .unwrap()
+        );
+        assert!(
+            !check_known_hosts_path(
+                "example.com",
+                22,
+                &key(ED25519_KEY),
+                &path
+            )
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn known_hosts_lenient_missing_file_is_unknown_host() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("no-such-known_hosts");
+        assert!(
+            !check_known_hosts_path(
+                "example.com",
+                22,
+                &key(ED25519_KEY),
+                &path
+            )
+            .unwrap()
+        );
     }
 }
