@@ -854,6 +854,8 @@ impl Render for WindowRoot {
                     show_hidden: state.show_hidden(),
                     show_statuses: state.filters().show_statuses,
                     can_sync: state.has_comparison(),
+                    has_comparison: state.has_comparison(),
+                    can_merge: state.selected_merge_pair().is_some(),
                     can_compare_parent: false,
                     can_go_back: state.can_go_back(),
                     can_go_forward: state.can_go_forward(),
@@ -873,6 +875,7 @@ impl Render for WindowRoot {
                     let state = state.read(cx);
                     MenuState {
                         is_text: true,
+                        can_merge: true,
                         word_wrap: state.is_word_wrap(),
                         show_thumbnails: state.is_show_thumbnail(),
                         is_text_editing: state.is_editing(),

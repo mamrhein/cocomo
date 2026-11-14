@@ -2593,6 +2593,19 @@ impl AppState {
         Some(entry_endpoints(entry, &self.left, &self.right))
     }
 
+    /// The endpoints of the selected entry's two sides, if the entry is
+    /// a file on both sides: the pair a two-way text merge can seed
+    /// from. Orphans have no counterpart and directories are not
+    /// text files, so neither reaches a merge.
+    pub fn selected_merge_pair(&self) -> Option<(Endpoint, Endpoint)> {
+        let entry = self.selected_entry()?;
+        let files_on_both_sides =
+            entry.left.as_ref().is_some_and(|l| !l.is_dir)
+                && entry.right.as_ref().is_some_and(|r| !r.is_dir);
+        files_on_both_sides
+            .then(|| entry_endpoints(entry, &self.left, &self.right))
+    }
+
     /// Run a filesystem operation on the tokio runtime, then re-compare
     /// so the panes reflect the change. Failures land in the notice and
     /// the log, mirroring [`Self::run_transfer`].
@@ -4013,6 +4026,62 @@ mod tests {
                 state.selected_right_path().as_deref(),
                 Some("/right/delta.txt")
             );
+        });
+    }
+
+    /// A selection that is a file on both sides yields the endpoints a
+    /// two-way merge seeds from; orphans do not.
+    #[gpui::test]
+    fn selected_merge_pair_requires_a_file_on_both_sides(
+        cx: &mut TestAppContext,
+    ) {
+        let state = cx.new(|cx| {
+            let mut state = AppState::new(
+                Endpoint::local("/left"),
+                Endpoint::local("/right"),
+                "test".into(),
+                cx,
+            );
+            state.set_comparison_for_test(comparison(sample_entries()));
+            state
+        });
+
+        state.update(cx, |state, cx| {
+            // The name-sorted display starts on the identical file.
+            assert_eq!(state.selected_entry().unwrap().name, "Alpha.txt");
+            let (left, right) =
+                state.selected_merge_pair().expect("a file on both sides");
+            assert_eq!(left.path().to_string_lossy(), "/left/Alpha.txt");
+            assert_eq!(right.path().to_string_lossy(), "/right/Alpha.txt");
+
+            // An orphan has no counterpart to merge against.
+            state.select_row(2, cx);
+            assert_eq!(state.selected_entry().unwrap().name, "charlie.txt");
+            assert!(state.selected_merge_pair().is_none());
+        });
+    }
+
+    /// A directory pair is not a merge candidate.
+    #[gpui::test]
+    fn selected_merge_pair_rejects_directories(cx: &mut TestAppContext) {
+        let state = cx.new(|cx| {
+            let mut state = AppState::new(
+                Endpoint::local("/left"),
+                Endpoint::local("/right"),
+                "test".into(),
+                cx,
+            );
+            state.set_comparison_for_test(comparison(vec![entry(
+                "sub",
+                DirEntryStatus::LeftNewer,
+                Some(dir_info("sub")),
+                Some(dir_info("sub")),
+            )]));
+            state
+        });
+
+        state.update(cx, |state, _| {
+            assert!(state.selected_merge_pair().is_none());
         });
     }
 

@@ -176,7 +176,7 @@ pub struct MenuState {
     /// folder-only commands).
     pub is_folder: bool,
     /// Whether the active tab is a text compare (enables the text-only
-    /// commands: report, info, sections, wrap, thumbnails).
+    /// commands: sections, wrap, thumbnails).
     pub is_text: bool,
     /// Whether the active tab is a text merge (enables the merge
     /// commands: take, save output, ancestor pane).
@@ -203,8 +203,16 @@ pub struct MenuState {
     /// Whether any entry is selected (enables the folder commands that
     /// act on the selection: Copy/Move to folder, Open with ▸).
     pub has_selection: bool,
-    /// Whether a comparison is loaded (enables the Synchronize submenu).
+    /// Whether a comparison is loaded (enables the Synchronize submenu
+    /// and the folder tab's Report…).
     pub can_sync: bool,
+    /// Whether the active folder session displays a comparison
+    /// (enables Report…; before it lands there is nothing to report).
+    pub has_comparison: bool,
+    /// Whether a two-way merge tab can be seeded from the active tab:
+    /// a text compare (its file pair) or a folder tab with a selected
+    /// file that exists on both sides (enables Merge files…).
+    pub can_merge: bool,
     /// Whether the active text compare was opened from a folder session
     /// that is still open (enables Compare Parent Folders).
     pub can_compare_parent: bool,
@@ -271,6 +279,8 @@ impl MenuState {
             can_exchange: false,
             has_selection: false,
             can_sync: false,
+            has_comparison: false,
+            can_merge: false,
             can_compare_parent: false,
             can_go_back: false,
             can_go_forward: false,
@@ -461,21 +471,28 @@ fn build_app_menus(
             }),
         ]),
         items([
+            // Report and Info describe the active compare: the folder
+            // report needs a loaded comparison to have content, the
+            // folder info always has the pair paths to show.
             show(hidden, "session.report", || {
-                MenuItem::action("Report…", SessionReport)
-                    .disabled(!state.is_text)
+                MenuItem::action("Report…", SessionReport).disabled(
+                    !(state.is_text
+                        || (state.is_folder && state.has_comparison)),
+                )
             }),
             show(hidden, "session.info", || {
-                MenuItem::action("Info…", SessionInfo).disabled(!state.is_text)
+                MenuItem::action("Info…", SessionInfo)
+                    .disabled(!(state.is_text || state.is_folder))
             }),
         ]),
         items([
-            // Merging needs a text compare tab to seed left and right;
-            // the ancestor stays empty until three-file merges arrive from
-            // the Home card or a folder merge.
+            // Merging seeds left and right from the active text
+            // compare, or from the selected file pair of a folder tab;
+            // the ancestor stays empty until three-file merges arrive
+            // from the Home card.
             show(hidden, "session.merge", || {
                 MenuItem::action("Merge files…", MergeFiles)
-                    .disabled(!state.is_text)
+                    .disabled(!state.can_merge)
             }),
             // The parent link exists only for text tabs opened out of a
             // folder session that is still open.
@@ -1629,28 +1646,33 @@ pub fn register_menu_handlers(cx: &mut App) {
         }
     });
 
-    // Sessions menu — report and info describe the active text compare;
-    // the menu items are disabled on other tabs.
+    // Sessions menu — report and info describe the active compare:
+    // the text view's diff report and stats, or the folder session's
+    // cocomo-lib comparison report and summary dialog.
     cx.on_action(move |_action: &SessionReport, cx: &mut App| {
         let Some((window, mgr)) = active_window_and_manager(cx) else {
             return;
         };
-        let Some(session) = mgr.read(cx).active_text_session(cx) else {
-            return;
-        };
         crate::windows::defer_window_update(window, cx, move |window, cx| {
-            crate::text_diff::open_report_dialog(session, window, cx);
+            if let Some(session) = mgr.read(cx).active_text_session(cx) {
+                crate::text_diff::open_report_dialog(session, window, cx);
+            } else if let Some(state) = mgr.read(cx).active_folder_session(cx)
+            {
+                crate::chrome::open_folder_report_dialog(state, window, cx);
+            }
         });
     });
     cx.on_action(move |_action: &SessionInfo, cx: &mut App| {
         let Some((window, mgr)) = active_window_and_manager(cx) else {
             return;
         };
-        let Some(session) = mgr.read(cx).active_text_session(cx) else {
-            return;
-        };
         crate::windows::defer_window_update(window, cx, move |window, cx| {
-            crate::text_diff::open_info_dialog(session, window, cx);
+            if let Some(session) = mgr.read(cx).active_text_session(cx) {
+                crate::text_diff::open_info_dialog(session, window, cx);
+            } else if let Some(state) = mgr.read(cx).active_folder_session(cx)
+            {
+                crate::chrome::open_folder_info_dialog(state, window, cx);
+            }
         });
     });
 
@@ -1678,22 +1700,31 @@ pub fn register_menu_handlers(cx: &mut App) {
         session.update(cx, |s, cx| s.save_side(side, true, cx));
     });
 
-    // Sessions menu — merge the active text compare's pair in a new merge
-    // tab (two-way: no ancestor is known from a plain comparison).
+    // Sessions menu — merge the active pair in a new merge tab
+    // (two-way: no ancestor is known from a plain comparison). A text
+    // compare seeds the pair from its files; a folder tab from the
+    // selected entry when it is a file on both sides.
     cx.on_action(move |_action: &MergeFiles, cx: &mut App| {
         let Some(mgr) = active_manager(cx) else {
             return;
         };
-        let Some(session) = mgr.read(cx).active_text_session(cx) else {
-            return;
+        let pair = {
+            let mgr = mgr.read(cx);
+            mgr.active_text_session(cx)
+                .map(|session| {
+                    let session = session.read(cx);
+                    (session.left_endpoint(), session.right_endpoint())
+                })
+                .or_else(|| {
+                    mgr.active_folder_session(cx)
+                        .and_then(|state| state.read(cx).selected_merge_pair())
+                })
         };
-        let (left, right) = {
-            let session = session.read(cx);
-            (session.left_endpoint(), session.right_endpoint())
-        };
-        mgr.update(cx, |m, cx| {
-            m.add_text_merge_tab(left, right, None, cx);
-        });
+        if let Some((left, right)) = pair {
+            mgr.update(cx, |m, cx| {
+                m.add_text_merge_tab(left, right, None, cx);
+            });
+        }
     });
 
     // Session menu and toolbar Rules button — the session-rules dialog,
@@ -2709,5 +2740,131 @@ mod tests {
                 "the fallback must resolve and drive the folder session"
             );
         });
+    }
+
+    /// Aborts the auto-load and injects a two-entry comparison into the
+    /// active folder session, so the folder session commands have a
+    /// loaded result to act on without racing the async auto-compare.
+    fn inject_comparison(
+        cx: &mut gpui::TestAppContext,
+        manager: &Entity<GuiSessionManager>,
+    ) {
+        use cocomo_lib::{DirComparison, DirEntry, EntryInfo};
+        let file = |name: &str| EntryInfo {
+            name: name.to_string(),
+            path: name.to_string(),
+            size: 4,
+            modified: "2026-01-01T00:00:00+00:00".to_string(),
+            is_dir: false,
+            hash: None,
+        };
+        let comparison = DirComparison {
+            entries: vec![
+                DirEntry {
+                    name: "only-left.txt".into(),
+                    status: DirEntryStatus::LeftOrphan,
+                    left: Some(file("only-left.txt")),
+                    right: None,
+                    center: None,
+                    sub_entries: None,
+                    name_conflict: false,
+                },
+                DirEntry {
+                    name: "shared.txt".into(),
+                    status: DirEntryStatus::RightNewer,
+                    left: Some(file("shared.txt")),
+                    right: Some(file("shared.txt")),
+                    center: None,
+                    sub_entries: None,
+                    name_conflict: false,
+                },
+            ],
+            counts: Default::default(),
+            errors: Vec::new(),
+        };
+        let state = cx.update(|cx| {
+            manager
+                .read(cx)
+                .active_folder_session(cx)
+                .expect("folder tab must be active")
+        });
+        state.update(cx, |state, cx| {
+            // Drop the in-flight auto-compare; its late result would
+            // otherwise clobber the injected comparison.
+            state.stop(cx);
+            state.set_comparison_for_test(comparison);
+        });
+    }
+
+    /// Report… on a folder tab opens the comparison-report dialog
+    /// through the window fallback, not only on text tabs.
+    #[gpui::test]
+    fn report_opens_the_folder_report_dialog(cx: &mut gpui::TestAppContext) {
+        let (window, manager, _rt) =
+            setup_folder_window(cx, "cocomo-menus-folder-report");
+        inject_comparison(cx, &manager);
+        dispatch_menu_action(cx, window, SessionReport);
+        assert!(
+            dialog_is_open(cx, window),
+            "Report… must open the folder report dialog"
+        );
+    }
+
+    /// Info… on a folder tab opens the session-summary dialog even
+    /// before the comparison has landed: the pair paths exist either
+    /// way.
+    #[gpui::test]
+    fn info_opens_the_folder_summary_dialog(cx: &mut gpui::TestAppContext) {
+        let (window, _manager, _rt) =
+            setup_folder_window(cx, "cocomo-menus-folder-info");
+        dispatch_menu_action(cx, window, SessionInfo);
+        assert!(
+            dialog_is_open(cx, window),
+            "Info… must open the folder summary dialog"
+        );
+    }
+
+    /// Merge files… with a shared file selected in the folder tree
+    /// opens a two-way text merge tab over that file pair.
+    #[gpui::test]
+    fn merge_files_opens_a_merge_tab_for_the_folder_selection(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (window, manager, _rt) =
+            setup_folder_window(cx, "cocomo-menus-folder-merge");
+        inject_comparison(cx, &manager);
+        let state = cx.update(|cx| {
+            manager
+                .read(cx)
+                .active_folder_session(cx)
+                .expect("folder tab must be active")
+        });
+        state.update(cx, |state, cx| {
+            let index = (0..)
+                .find_map(|i| {
+                    state
+                        .entry_at(i)
+                        .filter(|entry| entry.name == "shared.txt")
+                        .map(|_| i)
+                })
+                .expect("the injected comparison must carry shared.txt");
+            state.select_row(index, cx);
+            assert!(
+                state.selected_merge_pair().is_some(),
+                "a file present on both sides must offer a merge pair"
+            );
+        });
+        dispatch_menu_action(cx, window, MergeFiles);
+        let session_type = cx.update(|cx| {
+            manager
+                .read(cx)
+                .active_session()
+                .map(|session| session.config.session_type)
+        });
+        assert_eq!(
+            session_type,
+            Some(cocomo_lib::SessionType::TextMerge),
+            "Merge files… must open a merge tab over the selection"
+        );
     }
 }
