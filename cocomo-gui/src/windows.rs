@@ -20,7 +20,7 @@
 
 use gpui::{
     AnyWindowHandle, App, AppContext as _, BorrowAppContext as _, Bounds,
-    Entity, Global, WindowId, WindowOptions, px, size,
+    Entity, Global, Window, WindowId, WindowOptions, px, size,
 };
 
 use crate::{
@@ -95,6 +95,30 @@ impl WindowRegistry {
     /// the first live window when no window is active (a menu dispatch
     /// from a detached panel, for instance).
     pub fn active_manager(cx: &App) -> Option<Entity<GuiSessionManager>> {
+        Self::active_entry(cx).map(|entry| entry.manager.clone())
+    }
+
+    /// The handle of the focused window, or the first live one.
+    pub fn active_handle(cx: &App) -> Option<AnyWindowHandle> {
+        Self::active_entry(cx).map(|entry| entry.handle)
+    }
+
+    /// The handle and manager of the focused window, or of the first live
+    /// window when no window is active.
+    ///
+    /// Menu handlers resolve this per dispatch so the window they update
+    /// and the manager they act through always belong to the same entry.
+    pub fn active_window_and_manager(
+        cx: &App,
+    ) -> Option<(AnyWindowHandle, Entity<GuiSessionManager>)> {
+        let entry = Self::active_entry(cx)?;
+        Some((entry.handle, entry.manager.clone()))
+    }
+
+    /// The entry of the focused window, or the first live one. The
+    /// fallback matters when a native dialog or another application holds
+    /// focus; without it a menu command would be silently dropped.
+    fn active_entry(cx: &App) -> Option<&WindowEntry> {
         let registry = cx.try_global::<Self>()?;
         if let Some(active) = cx.active_window()
             && let Some(entry) = registry
@@ -102,9 +126,9 @@ impl WindowRegistry {
                 .iter()
                 .find(|e| e.handle.window_id() == active.window_id())
         {
-            return Some(entry.manager.clone());
+            return Some(entry);
         }
-        registry.entries.first().map(|e| e.manager.clone())
+        registry.entries.first()
     }
 
     /// Whether any window holds a session with unsaved changes.
@@ -167,6 +191,42 @@ pub fn register_window(
 /// that window's tabs.
 pub fn active_manager(cx: &App) -> Option<Entity<GuiSessionManager>> {
     WindowRegistry::active_manager(cx)
+}
+
+/// The handle of the focused window, or the first live one.
+pub fn active_handle(cx: &App) -> Option<AnyWindowHandle> {
+    WindowRegistry::active_handle(cx)
+}
+
+/// The handle and manager of the focused window, or of the first live one.
+pub fn active_window_and_manager(
+    cx: &App,
+) -> Option<(AnyWindowHandle, Entity<GuiSessionManager>)> {
+    WindowRegistry::active_window_and_manager(cx)
+}
+
+/// Run `update` against `window` once the current update has unwound.
+///
+/// Menu and keystroke dispatch runs *inside* the target window's own
+/// update: the in-window menu bar (`gpui-component`'s `PopupMenu`)
+/// routes item clicks through `Window::dispatch_action`, whose deferred
+/// closure re-opens the window before the action reaches the global
+/// handlers. A handler that touched the window directly would re-enter
+/// it and fail with "window not found" — the dialog-opening commands
+/// used to vanish exactly this way. `App::defer` runs the closure at
+/// the end of the effect cycle, once the window is back in the app;
+/// handlers dispatched at the app level (the native macOS bar) are
+/// unaffected by the extra hop.
+pub fn defer_window_update(
+    window: AnyWindowHandle,
+    cx: &mut App,
+    update: impl FnOnce(&mut Window, &mut App) + 'static,
+) {
+    cx.defer(move |cx| {
+        // The window may have closed between dispatch and flush; there
+        // is then no surface left to update.
+        let _ = window.update(cx, |_, window, cx| update(window, cx));
+    });
 }
 
 /// Move the tab at `index` out of `manager` and into a new window.
@@ -360,4 +420,94 @@ pub fn quit_application(cx: &mut App) {
     workspace::clear_running_marker();
     close_all_windows(cx);
     cx.quit();
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui::{Context, IntoElement, Render, TestAppContext, Window, div};
+
+    use super::*;
+    use crate::session_manager::SavedSessionStore;
+
+    /// Minimal root so a headless window can be registered without the
+    /// full window chrome.
+    struct EmptyRoot;
+
+    impl Render for EmptyRoot {
+        fn render(
+            &mut self,
+            _window: &mut Window,
+            _cx: &mut Context<Self>,
+        ) -> impl IntoElement {
+            div()
+        }
+    }
+
+    /// Open a headless window and register it with its own manager.
+    fn open_test_window(
+        cx: &mut TestAppContext,
+    ) -> (AnyWindowHandle, Entity<GuiSessionManager>) {
+        let store = cx.new(|_| {
+            SavedSessionStore::new(std::path::PathBuf::from(
+                "/tmp/cocomo-window-tests",
+            ))
+        });
+        let manager = cx.new(|_| GuiSessionManager::new(store));
+        let handle = cx
+            .update(|cx| {
+                gpui::open_window(WindowOptions::default(), cx, |_, cx| {
+                    cx.new(|_| EmptyRoot)
+                })
+            })
+            .expect("failed to open the test window")
+            .0;
+        cx.update(|cx| register_window(handle, manager.clone(), cx));
+        (handle, manager)
+    }
+
+    #[gpui::test]
+    fn active_resolution_without_windows(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui::init(cx);
+            WindowRegistry::init_global(cx);
+        });
+        cx.update(|cx| {
+            assert_eq!(active_handle(cx), None);
+            assert!(active_window_and_manager(cx).is_none());
+            assert_eq!(active_manager(cx), None);
+        });
+    }
+
+    /// With a headless window the active-window lookup can be unset, so
+    /// resolution must fall back to the first registered entry; and the
+    /// returned handle and manager must come from the same entry.
+    #[gpui::test]
+    fn active_resolution_picks_one_registered_window(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui::init(cx);
+            WindowRegistry::init_global(cx);
+        });
+        let (first, first_manager) = open_test_window(cx);
+        let (second, second_manager) = open_test_window(cx);
+
+        cx.update(|cx| {
+            let handle =
+                active_handle(cx).expect("a registered window resolves");
+            assert!(handle == first || handle == second);
+            let (pair_handle, manager) =
+                active_window_and_manager(cx).expect("the pair resolves");
+            assert_eq!(pair_handle, handle);
+            // The manager must belong to the same entry as the handle.
+            assert!(manager == first_manager || manager == second_manager);
+            let entry_manager = cx
+                .global::<WindowRegistry>()
+                .entries
+                .iter()
+                .find(|e| e.handle == pair_handle)
+                .map(|e| e.manager.clone())
+                .expect("the handle is registered");
+            assert_eq!(entry_manager, manager);
+            assert_eq!(active_manager(cx), Some(manager));
+        });
+    }
 }

@@ -24,9 +24,9 @@ use cocomo_lib::{DirEntryStatus, Endpoint};
 #[cfg(not(target_os = "macos"))]
 use gpui::component::menu::AppMenuBar;
 use gpui::{
-    App, AppContext as _, AsyncApp, BorrowAppContext as _, ElementId, Entity,
-    Focusable as _, KeyBinding, Menu, MenuItem, PathPromptOptions,
-    SharedString, actions,
+    AnyWindowHandle, App, AppContext as _, AsyncApp, BorrowAppContext as _,
+    ElementId, Entity, Focusable as _, KeyBinding, Menu, MenuItem,
+    PathPromptOptions, SharedString, actions,
     component::{
         WindowExt as _,
         button::{Button, ButtonVariants as _},
@@ -109,7 +109,6 @@ actions!(
         ToggleLogPane,
         ToggleSingleRowToolbar,
         SessionSettings,
-        ClearSession,
         CompareParentFolders,
         CompareUsingText,
         CompareUsingTable,
@@ -436,12 +435,6 @@ fn build_app_menus(
             show(hidden, "session.settings", || {
                 MenuItem::action("Session settings…", SessionSettings)
                     .disabled(is_home)
-            }),
-            show(hidden, "session.clear", || {
-                // Merge tabs are seeded from a compare pair; clearing
-                // one would leave a merge with no sources to take.
-                MenuItem::action("Clear session", ClearSession)
-                    .disabled(!(state.is_folder || state.is_text))
             }),
         ]),
         items([
@@ -1263,6 +1256,14 @@ fn active_manager(cx: &App) -> Option<Entity<GuiSessionManager>> {
     crate::windows::active_manager(cx)
 }
 
+/// The window a menu command acts on and the manager that owns its tabs,
+/// resolved from the same registry entry.
+fn active_window_and_manager(
+    cx: &App,
+) -> Option<(AnyWindowHandle, Entity<GuiSessionManager>)> {
+    crate::windows::active_window_and_manager(cx)
+}
+
 /// Re-open the active view's file pair in another file compare view.
 ///
 /// The pair comes from the active file-pair tab, or from the selected
@@ -1368,6 +1369,9 @@ pub fn register_menu_handlers(cx: &mut App) {
         let Some(mgr) = active_manager(cx) else {
             return;
         };
+        // Capture the live view state before writing, so a folder tab's
+        // current endpoints, rules, and filters reach the file.
+        mgr.update(cx, |m, cx| m.sync_active_config(cx));
         let weak = mgr.downgrade();
         let name = mgr
             .read(cx)
@@ -1407,10 +1411,7 @@ pub fn register_menu_handlers(cx: &mut App) {
 
     // Sessions menu — save as: ask for a name, then persist under it.
     cx.on_action(move |_action: &SaveSessionAs, cx: &mut App| {
-        let Some(mgr) = active_manager(cx) else {
-            return;
-        };
-        let Some(window) = cx.active_window() else {
+        let Some((window, mgr)) = active_window_and_manager(cx) else {
             return;
         };
         let default_name = mgr
@@ -1418,7 +1419,7 @@ pub fn register_menu_handlers(cx: &mut App) {
             .active_config()
             .map(|c| c.name.clone())
             .unwrap_or_default();
-        let _ = window.update(cx, |_, window, cx| {
+        crate::windows::defer_window_update(window, cx, move |window, cx| {
             // Created before opening: the dialog builder re-runs on every
             // layer rebuild, so persistent entities must live outside it.
             let input = cx.new(|cx| {
@@ -1475,13 +1476,10 @@ pub fn register_menu_handlers(cx: &mut App) {
     // Session/File menu — close the active session, prompting first when
     // it has unsaved changes.
     cx.on_action(move |_action: &CloseSession, cx: &mut App| {
-        let Some(mgr) = active_manager(cx) else {
+        let Some((window, mgr)) = active_window_and_manager(cx) else {
             return;
         };
-        let Some(window) = cx.active_window() else {
-            return;
-        };
-        let _ = window.update(cx, |_, window, cx| {
+        crate::windows::defer_window_update(window, cx, move |window, cx| {
             mgr.update(cx, |m, cx| {
                 let index = m.active_index();
                 m.request_close_session(index, window, cx);
@@ -1492,13 +1490,10 @@ pub fn register_menu_handlers(cx: &mut App) {
     // File menu — close all sessions of the active window, prompting
     // once when any session has unsaved changes.
     cx.on_action(move |_action: &CloseAllSessions, cx: &mut App| {
-        let Some(mgr) = active_manager(cx) else {
+        let Some((window, mgr)) = active_window_and_manager(cx) else {
             return;
         };
-        let Some(window) = cx.active_window() else {
-            return;
-        };
-        let _ = window.update(cx, |_, window, cx| {
+        crate::windows::defer_window_update(window, cx, move |window, cx| {
             mgr.update(cx, |m, cx| m.request_close_all_sessions(window, cx));
         });
     });
@@ -1565,10 +1560,98 @@ pub fn register_menu_handlers(cx: &mut App) {
         crate::windows::refresh_all_windows(cx);
     });
 
-    // Sessions menu — reload is handled by the focused folder view; the
-    // global handler only records dispatches that reached no view.
+    // Sessions menu — reload the active session. The focused view
+    // handles the action itself when it has focus; this global is the
+    // fallback for dispatches that reach no view (a menu click while a
+    // dialog or the tab strip holds focus).
     cx.on_action(move |_action: &ReloadCompare, cx: &mut App| {
-        log::push(LogLevel::Info, "Reload comparison dispatched", cx);
+        let Some(mgr) = active_manager(cx) else {
+            return;
+        };
+        if let Some(state) = mgr.read(cx).active_folder_session(cx) {
+            state.update(cx, |s, cx| s.reload(cx));
+        } else if let Some(session) = mgr.read(cx).active_text_session(cx) {
+            // Same contract as the text view's handler: unsaved buffer
+            // edits survive a reload, so the re-diff runs on the buffers.
+            session.update(cx, |s, cx| {
+                if s.is_dirty() {
+                    s.recompare(cx);
+                } else {
+                    s.load(cx);
+                }
+            });
+        }
+    });
+
+    // Sessions menu — back and forward walk the folder session's
+    // navigation history; the menu item is disabled on other tabs.
+    cx.on_action(move |_action: &GoBack, cx: &mut App| {
+        let Some(mgr) = active_manager(cx) else {
+            return;
+        };
+        if let Some(state) = mgr.read(cx).active_folder_session(cx) {
+            state.update(cx, |s, cx| s.go_back(cx));
+        }
+    });
+    cx.on_action(move |_action: &GoForward, cx: &mut App| {
+        let Some(mgr) = active_manager(cx) else {
+            return;
+        };
+        if let Some(state) = mgr.read(cx).active_folder_session(cx) {
+            state.update(cx, |s, cx| s.go_forward(cx));
+        }
+    });
+
+    // Sessions menu — swap sides of the active compare. The text view
+    // re-seeds its path inputs from the session's swap counter on the
+    // next render, so the fallback stays consistent with the view.
+    cx.on_action(move |_action: &SwapSides, cx: &mut App| {
+        let Some(mgr) = active_manager(cx) else {
+            return;
+        };
+        if let Some(state) = mgr.read(cx).active_folder_session(cx) {
+            state.update(cx, |s, cx| s.swap_sides(cx));
+        } else if let Some(session) = mgr.read(cx).active_text_session(cx) {
+            session.update(cx, |s, cx| s.swap_sides(cx));
+        }
+    });
+
+    // Sessions menu — abort the in-flight comparison of the active
+    // folder or text session, keeping whatever is displayed.
+    cx.on_action(move |_action: &StopCompare, cx: &mut App| {
+        let Some(mgr) = active_manager(cx) else {
+            return;
+        };
+        if let Some(state) = mgr.read(cx).active_folder_session(cx) {
+            state.update(cx, |s, cx| s.stop(cx));
+        } else if let Some(session) = mgr.read(cx).active_text_session(cx) {
+            session.update(cx, |s, cx| s.stop(cx));
+        }
+    });
+
+    // Sessions menu — report and info describe the active text compare;
+    // the menu items are disabled on other tabs.
+    cx.on_action(move |_action: &SessionReport, cx: &mut App| {
+        let Some((window, mgr)) = active_window_and_manager(cx) else {
+            return;
+        };
+        let Some(session) = mgr.read(cx).active_text_session(cx) else {
+            return;
+        };
+        crate::windows::defer_window_update(window, cx, move |window, cx| {
+            crate::text_diff::open_report_dialog(session, window, cx);
+        });
+    });
+    cx.on_action(move |_action: &SessionInfo, cx: &mut App| {
+        let Some((window, mgr)) = active_window_and_manager(cx) else {
+            return;
+        };
+        let Some(session) = mgr.read(cx).active_text_session(cx) else {
+            return;
+        };
+        crate::windows::defer_window_update(window, cx, move |window, cx| {
+            crate::text_diff::open_info_dialog(session, window, cx);
+        });
     });
 
     // File menu — save the focused side's edited buffer.
@@ -1616,13 +1699,10 @@ pub fn register_menu_handlers(cx: &mut App) {
     // Session menu and toolbar Rules button — the session-rules dialog,
     // branched on the active tab type.
     cx.on_action(move |_action: &SessionSettings, cx: &mut App| {
-        let Some(mgr) = active_manager(cx) else {
+        let Some((window, mgr)) = active_window_and_manager(cx) else {
             return;
         };
-        let Some(window) = cx.active_window() else {
-            return;
-        };
-        let _ = window.update(cx, |_, window, cx| {
+        crate::windows::defer_window_update(window, cx, move |window, cx| {
             if let Some(session) = mgr.read(cx).active_text_session(cx) {
                 crate::text_diff::open_text_rules_dialog(session, window, cx);
             } else if let Some(state) = mgr.read(cx).active_folder_session(cx)
@@ -1630,20 +1710,6 @@ pub fn register_menu_handlers(cx: &mut App) {
                 crate::ui::open_folder_rules_dialog(state, window, cx);
             }
         });
-    });
-
-    // Sessions menu — clear the active folder or text session: drop the
-    // comparison and selection, keep the endpoints so the session can be
-    // reloaded.
-    cx.on_action(move |_action: &ClearSession, cx: &mut App| {
-        let Some(mgr) = active_manager(cx) else {
-            return;
-        };
-        if let Some(state) = mgr.read(cx).active_folder_session(cx) {
-            state.update(cx, |s, cx| s.clear_session(cx));
-        } else if let Some(session) = mgr.read(cx).active_text_session(cx) {
-            session.update(cx, |s, cx| s.clear_session(cx));
-        }
     });
 
     // Sessions menu — step from a text compare back to the folder session
@@ -1671,13 +1737,10 @@ pub fn register_menu_handlers(cx: &mut App) {
     // File menu — open a file into the focused pane of the active text
     // compare through a path prompt (spec: "Open File (pane-specific)").
     cx.on_action(move |_action: &OpenFile, cx: &mut App| {
-        let Some(mgr) = active_manager(cx) else {
+        let Some((window, mgr)) = active_window_and_manager(cx) else {
             return;
         };
         let Some(session) = mgr.read(cx).active_text_session(cx) else {
-            return;
-        };
-        let Some(window) = cx.active_window() else {
             return;
         };
         let side = session.read(cx).focus_side();
@@ -1689,7 +1752,7 @@ pub fn register_menu_handlers(cx: &mut App) {
             };
             endpoint.display().to_string()
         };
-        let _ = window.update(cx, |_, window, cx| {
+        crate::windows::defer_window_update(window, cx, move |window, cx| {
             let input = cx.new(|cx| {
                 InputState::new(window, cx)
                     .placeholder("File path")
@@ -1860,7 +1923,7 @@ pub fn register_menu_handlers(cx: &mut App) {
         let Some((endpoint, _)) = target(cx) else {
             return;
         };
-        let Some(window) = cx.active_window() else {
+        let Some(window) = crate::windows::active_handle(cx) else {
             return;
         };
         let path = endpoint.path().to_path_buf();
@@ -1934,40 +1997,40 @@ pub fn register_menu_handlers(cx: &mut App) {
 
     // Options menu — the application-options dialog.
     cx.on_action(move |_action: &Options, cx: &mut App| {
-        let Some(window) = cx.active_window() else {
+        let Some(window) = crate::windows::active_handle(cx) else {
             return;
         };
-        let _ = window.update(cx, |_, window, cx| {
+        crate::windows::defer_window_update(window, cx, move |window, cx| {
             crate::options::open_options_dialog(window, cx);
         });
     });
 
     // Options menu — the file-format registry dialog.
     cx.on_action(move |_action: &FileFormats, cx: &mut App| {
-        let Some(window) = cx.active_window() else {
+        let Some(window) = crate::windows::active_handle(cx) else {
             return;
         };
-        let _ = window.update(cx, |_, window, cx| {
+        crate::windows::defer_window_update(window, cx, move |window, cx| {
             crate::file_formats::open_file_formats_dialog(window, cx);
         });
     });
 
     // Options menu — the folder-sync presets dialog.
     cx.on_action(move |_action: &SyncPresets, cx: &mut App| {
-        let Some(window) = cx.active_window() else {
+        let Some(window) = crate::windows::active_handle(cx) else {
             return;
         };
-        let _ = window.update(cx, |_, window, cx| {
+        crate::windows::defer_window_update(window, cx, move |window, cx| {
             crate::sync_presets::open_sync_presets_dialog(window, cx);
         });
     });
 
     // Options menu — the profile management dialog.
     cx.on_action(move |_action: &Profiles, cx: &mut App| {
-        let Some(window) = cx.active_window() else {
+        let Some(window) = crate::windows::active_handle(cx) else {
             return;
         };
-        let _ = window.update(cx, |_, window, cx| {
+        crate::windows::defer_window_update(window, cx, move |window, cx| {
             crate::profiles::open_profiles_dialog(window, cx);
         });
     });
@@ -1990,10 +2053,10 @@ pub fn register_menu_handlers(cx: &mut App) {
     // Help menu — help contents: a static markdown guide. Version and
     // license live in the About dialog.
     cx.on_action(move |_action: &HelpContents, cx: &mut App| {
-        let Some(window) = cx.active_window() else {
+        let Some(window) = crate::windows::active_handle(cx) else {
             return;
         };
-        let _ = window.update(cx, |_, window, cx| {
+        crate::windows::defer_window_update(window, cx, move |window, cx| {
             window.open_dialog(cx, |dialog, _, _| {
                 dialog
                     .title("cocomo help")
@@ -2021,10 +2084,10 @@ pub fn register_menu_handlers(cx: &mut App) {
 
     // Help menu — about: a real modal naming the product and its version.
     cx.on_action(move |_action: &About, cx: &mut App| {
-        let Some(window) = cx.active_window() else {
+        let Some(window) = crate::windows::active_handle(cx) else {
             return;
         };
-        let _ = window.update(cx, |_, window, cx| {
+        crate::windows::defer_window_update(window, cx, move |window, cx| {
             window.open_dialog(cx, |dialog, _, _| {
                 dialog
                     .title("About cocomo")
@@ -2062,6 +2125,8 @@ fn save_session_as(
     name: String,
     cx: &mut App,
 ) {
+    // Persist the live view state under the new name, as plain save does.
+    mgr.update(cx, |m, cx| m.sync_active_config(cx));
     let weak = mgr.downgrade();
     let task = mgr.update(cx, |m, cx| m.save_as(name.clone(), cx));
     cx.spawn(move |cx: &mut AsyncApp| {
@@ -2097,11 +2162,13 @@ fn save_session_as(
 /// window, so a background-task failure is never silent.
 pub(crate) fn notify_error(message: String, cx: &mut App) {
     // The notification layer belongs to a window; without one there is
-    // nowhere to show the message, and the log already recorded it.
-    let Some(window) = cx.active_window() else {
+    // nowhere to show the message, and the log already recorded it. Use
+    // the registry fallback so a failure is still shown when no window
+    // reports itself active (a dialog, for instance, holds focus).
+    let Some(window) = crate::windows::active_handle(cx) else {
         return;
     };
-    let _ = window.update(cx, |_, window, cx| {
+    crate::windows::defer_window_update(window, cx, move |window, cx| {
         window.push_notification(Notification::error(message), cx);
     });
 }
@@ -2422,6 +2489,224 @@ mod tests {
             assert!(
                 !view.items.is_empty(),
                 "the View menu must carry items for the in-window bar"
+            );
+        });
+    }
+
+    // ------------------------------------------------------------------
+    // Global menu dispatch through the window-registry fallback
+    // ------------------------------------------------------------------
+
+    /// Minimal root view for the fallback window: renders nothing and
+    /// handles no actions, so every dispatch bubbles up to the
+    /// app-level menu handlers.
+    struct BareRoot;
+
+    impl gpui::Render for BareRoot {
+        fn render(
+            &mut self,
+            _window: &mut gpui::Window,
+            _cx: &mut gpui::Context<Self>,
+        ) -> impl gpui::IntoElement {
+            div()
+        }
+    }
+
+    /// Install the tokio runtime handle the folder-tab auto-load
+    /// needs. The runtime must stay alive for the test's duration, so
+    /// the caller keeps the returned value.
+    fn init_tokio_handle() -> tokio::runtime::Runtime {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _guard = rt.enter();
+        crate::runtime::set_handle();
+        rt
+    }
+
+    /// Install the globals the menu handlers need, register the
+    /// handlers, and open one window over a manager holding a folder
+    /// tab. In a headless test `cx.active_window()` is always `None`,
+    /// so every dispatch below takes the window-registry fallback —
+    /// exactly the path a menu click follows while a native dialog
+    /// holds focus, which used to drop the commands silently.
+    fn setup_folder_window(
+        cx: &mut gpui::TestAppContext,
+        tag: &str,
+    ) -> (
+        AnyWindowHandle,
+        Entity<GuiSessionManager>,
+        tokio::runtime::Runtime,
+    ) {
+        let rt = init_tokio_handle();
+        cx.update(|cx| {
+            gpui::init(cx);
+            cx.set_global(crate::options::AppOptions::default());
+            cx.set_global(crate::log::LogBuffer::default());
+            cx.set_global(LogPaneOpen(true));
+            crate::file_formats::FileFormatRegistry::init_global(cx);
+            crate::windows::WindowRegistry::init_global(cx);
+            register_menu_handlers(cx);
+        });
+        // Throwaway dirs for the pair; the folder tab auto-loads the
+        // pair, so the compare paths must exist.
+        let base = std::env::temp_dir().join(tag);
+        let left = base.join("left");
+        let right = base.join("right");
+        std::fs::create_dir_all(&left).unwrap();
+        std::fs::create_dir_all(&right).unwrap();
+        let store =
+            cx.new(|_| crate::session_manager::SavedSessionStore::new(base));
+        let manager = cx.new(|_| GuiSessionManager::new(store));
+        // The folder tab auto-compares across the tokio bridge, whose
+        // completion wake lands on a tokio worker thread. That mix of
+        // executors is inherently non-deterministic, so tell the test
+        // scheduler to tolerate it.
+        cx.executor().allow_parking();
+        manager.update(cx, |m, cx| {
+            m.add_folder_tab(
+                Endpoint::local(left),
+                Endpoint::local(right),
+                false,
+                cx,
+            );
+        });
+        let window = cx.update(|cx| {
+            gpui::open_window(gpui::WindowOptions::default(), cx, |_, cx| {
+                cx.new(|_| BareRoot)
+            })
+            .expect("failed to open the test window")
+            .0
+        });
+        cx.update(|cx| {
+            crate::windows::register_window(window, manager.clone(), cx);
+        });
+        (window, manager, rt)
+    }
+
+    /// Dispatch a menu action through the window, exactly as the
+    /// in-window menu bar does: a `PopupMenu` item click calls
+    /// `Window::dispatch_action`, whose deferred closure re-opens the
+    /// window before the action reaches the global handlers. Handlers
+    /// must survive that re-entrant context; regressing to an app-level
+    /// dispatch here would hide the live-app failure mode.
+    fn dispatch_menu_action<A: gpui::Action>(
+        cx: &mut gpui::TestAppContext,
+        window: AnyWindowHandle,
+        action: A,
+    ) {
+        use gpui::test::TestWindowExt as _;
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.dispatch_action(Box::new(action), cx);
+        })
+        .expect("failed to dispatch the menu action");
+        cx.run_until_parked();
+    }
+
+    /// Whether the test window holds an open, non-closing dialog.
+    fn dialog_is_open(
+        cx: &mut gpui::TestAppContext,
+        window: AnyWindowHandle,
+    ) -> bool {
+        cx.update_window(window, |_, window, cx| window.has_active_dialog(cx))
+            .unwrap_or(false)
+    }
+
+    /// The About command opens its dialog even when the dispatch
+    /// reaches no focused window at all.
+    #[gpui::test]
+    fn about_opens_its_dialog_without_a_focused_window(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (window, _manager, _rt) =
+            setup_folder_window(cx, "cocomo-menus-about");
+        dispatch_menu_action(cx, window, About);
+        assert!(
+            dialog_is_open(cx, window),
+            "About must open its dialog through the window fallback"
+        );
+    }
+
+    /// The save-as prompt resolves the fallback window and manager, so
+    /// the session-name dialog opens while focus is lost.
+    #[gpui::test]
+    fn save_session_as_opens_the_name_dialog(cx: &mut gpui::TestAppContext) {
+        let (window, _manager, _rt) =
+            setup_folder_window(cx, "cocomo-menus-save-as");
+        dispatch_menu_action(cx, window, SaveSessionAs);
+        assert!(
+            dialog_is_open(cx, window),
+            "Save session as… must open the name dialog"
+        );
+    }
+
+    /// The session-rules dialog branches on the active tab: a folder
+    /// tab gets the folder rules dialog.
+    #[gpui::test]
+    fn session_settings_opens_the_folder_rules_dialog(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (window, _manager, _rt) =
+            setup_folder_window(cx, "cocomo-menus-settings");
+        dispatch_menu_action(cx, window, SessionSettings);
+        assert!(
+            dialog_is_open(cx, window),
+            "Session settings… must open the folder rules dialog"
+        );
+    }
+
+    /// Swap sides exchanges the active folder session's endpoints even
+    /// though the dispatch reached a background window.
+    #[gpui::test]
+    fn swap_sides_swaps_the_active_folder_session(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (window, manager, _rt) =
+            setup_folder_window(cx, "cocomo-menus-swap");
+        let endpoints = |cx: &mut gpui::TestAppContext| {
+            cx.update(|cx| {
+                manager.read(cx).active_folder_session(cx).map(|state| {
+                    let config = state.read(cx).to_config("swap".into());
+                    (config.left.path, config.right.path)
+                })
+            })
+        };
+        let (left, right) = endpoints(cx).expect("folder tab must be active");
+        dispatch_menu_action(cx, window, SwapSides);
+        let (after_left, after_right) =
+            endpoints(cx).expect("folder tab must still be active");
+        assert_eq!(
+            after_left, right,
+            "the left side must hold the old right path"
+        );
+        assert_eq!(
+            after_right, left,
+            "the right side must hold the old left path"
+        );
+    }
+
+    /// Reload / recompare now drives the active session instead of
+    /// only logging. The compare I/O runs on tokio, so this is a smoke
+    /// test that the fallback resolves the session and dispatches the
+    /// reload without panicking — the previously dead end.
+    #[gpui::test]
+    fn reload_compare_reaches_the_active_session(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (window, manager, _rt) =
+            setup_folder_window(cx, "cocomo-menus-reload");
+        dispatch_menu_action(cx, window, ReloadCompare);
+        cx.update(|cx| {
+            assert!(
+                manager.read(cx).active_folder_session(cx).is_some_and(
+                    |state| {
+                        state.read(cx).is_loading()
+                            || state.read(cx).has_comparison()
+                    }
+                ),
+                "the fallback must resolve and drive the folder session"
             );
         });
     }

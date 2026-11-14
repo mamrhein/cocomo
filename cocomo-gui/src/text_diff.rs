@@ -1011,6 +1011,9 @@ pub struct TextDiffSession {
     /// Bumps whenever the row model changes, so the view can refresh
     /// editor decorations.
     model_rev: usize,
+    /// Counter bumped on every side swap, so the view can re-seed its
+    /// path inputs after a swap it did not trigger itself.
+    swap_rev: usize,
     /// The parent folder session this diff was opened from, if any.
     parent: Option<WeakEntity<AppState>>,
     /// The session manager, for opening follow-up tabs.
@@ -1081,6 +1084,7 @@ impl TextDiffSession {
             align_anchor: None,
             detail_mode: DetailMode::default(),
             model_rev: 0,
+            swap_rev: 0,
             parent,
             manager,
         }
@@ -1562,6 +1566,7 @@ impl TextDiffSession {
         std::mem::swap(&mut self.left_format, &mut self.right_format);
         self.rebuild_grammar();
         self.rebuild_model();
+        self.swap_rev += 1;
         cx.notify();
     }
 
@@ -1927,50 +1932,6 @@ impl TextDiffSession {
         })
     }
 
-    /// Clear the comparison: drop content, diff, selection, and
-    /// alignment state, keeping the endpoints and settings (Session ▸
-    /// Clear session).
-    ///
-    /// An in-flight load is aborted first so its result cannot
-    /// repopulate the cleared view; nothing auto-reloads because
-    /// `ensure_loaded` only runs at view creation.
-    pub fn clear_session(&mut self, cx: &mut Context<Self>) {
-        if self.loading {
-            self.load_revision += 1;
-            if let Some(token) = self.cancel_token.take() {
-                token.cancel();
-            }
-        }
-        self.loading = false;
-        self.left_raw = None;
-        self.right_raw = None;
-        self.left_lines = Arc::new(Vec::new());
-        self.right_lines = Arc::new(Vec::new());
-        self.left_meta = None;
-        self.right_meta = None;
-        self.diff = None;
-        self.rows = Arc::new(Vec::new());
-        self.sections = Arc::new(Vec::new());
-        self.display = Arc::new(Vec::new());
-        self.section_display = Arc::new(Vec::new());
-        self.row_section = Arc::new(Vec::new());
-        self.is_section_start = Arc::new(Vec::new());
-        self.collapsed.clear();
-        self.selected = None;
-        self.error = None;
-        self.load_ms = None;
-        self.align_overrides.clear();
-        self.align_anchor = None;
-        // Leave edit mode; the editors re-seed from the (now empty)
-        // model the next time editing is entered.
-        self.editing = false;
-        self.left_dirty = false;
-        self.right_dirty = false;
-        self.editors_stale = true;
-        self.model_rev += 1;
-        cx.notify();
-    }
-
     /// Clear the stale-editor flag and the dirty marks after the view
     /// has re-seeded both editors from the model.
     pub fn mark_editors_seeded(&mut self) {
@@ -2003,6 +1964,13 @@ impl TextDiffSession {
     /// The row-model revision, for refreshing editor decorations.
     pub fn model_rev(&self) -> usize {
         self.model_rev
+    }
+
+    /// How often the sides were swapped. The view compares this against
+    /// its own record to detect swaps that bypassed its action handler
+    /// (the global menu fallback, for instance).
+    pub fn swap_rev(&self) -> usize {
+        self.swap_rev
     }
 
     /// Whether the editors still need re-seeding from the last load.
@@ -2875,6 +2843,9 @@ pub struct TextDiffView {
     left_path_input: Option<Entity<InputState>>,
     /// Right file-bar path input, created on first render.
     right_path_input: Option<Entity<InputState>>,
+    /// The session's swap counter the path inputs were last re-seeded
+    /// for; a newer value means a swap happened outside the view.
+    applied_swap_rev: usize,
     /// Subscriptions for the path inputs' Enter commits.
     _path_subs: Vec<Subscription>,
     /// Re-render whenever the session notifies.
@@ -2951,12 +2922,14 @@ impl TextDiffView {
 
         let _state_sub = cx.observe(&state, |_, _, cx| cx.notify());
         state.update(cx, |session, cx| session.ensure_loaded(cx));
+        let applied_swap_rev = state.read(cx).swap_rev();
         Self {
             state,
             left_list,
             right_list,
             left_path_input: None,
             right_path_input: None,
+            applied_swap_rev,
             _path_subs: Vec::new(),
             _state_sub,
             thumbnail_drag: Rc::new(Cell::new(false)),
@@ -3449,49 +3422,7 @@ impl TextDiffView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let text = self.state.read(cx).report_text();
-        // Suggest the left file's directory as the save location.
-        let dir = std::path::PathBuf::from(self.state.read(cx).left_path())
-            .parent()
-            .map(|p| p.to_path_buf())
-            .unwrap_or_default();
-        let preview = text.clone();
-        window.open_dialog(cx, move |dialog, _, _| {
-            dialog
-                .title("Session report")
-                .child(
-                    div()
-                        .id(ElementId::Name("report-preview".into()))
-                        .max_h(px(384.))
-                        .overflow_y_scroll()
-                        .child(preview.clone()),
-                )
-                .footer(
-                    h_flex()
-                        .justify_end()
-                        .gap_2()
-                        .child(
-                            Button::new("report_cancel")
-                                .label("Cancel")
-                                .on_click(|_, window, cx| {
-                                    window.close_dialog(cx);
-                                }),
-                        )
-                        .child(
-                            Button::new("report_save")
-                                .label("Save to file…")
-                                .primary()
-                                .on_click({
-                                    let text = text.clone();
-                                    let dir = dir.clone();
-                                    move |_, window, cx| {
-                                        window.close_dialog(cx);
-                                        save_report(&text, &dir, cx);
-                                    }
-                                }),
-                        ),
-                )
-        });
+        open_report_dialog(self.state.clone(), window, cx);
     }
 
     fn handle_info(
@@ -3500,26 +3431,7 @@ impl TextDiffView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let stats = self.state.read(cx).info_stats();
-        let (left, right) = {
-            let session = self.state.read(cx);
-            (session.left_path(), session.right_path())
-        };
-        window.open_dialog(cx, move |dialog, _, _| {
-            dialog.title("Session info").child(
-                v_flex()
-                    .gap_1()
-                    .text_sm()
-                    .child(format!("Left:  {left}"))
-                    .child(format!("Right: {right}"))
-                    .child(format!("Left lines:  {}", stats.left_lines))
-                    .child(format!("Right lines: {}", stats.right_lines))
-                    .child(format!("Difference sections: {}", stats.sections))
-                    .child(format!("Inserted lines: {}", stats.insertions))
-                    .child(format!("Deleted lines: {}", stats.deletions))
-                    .child(format!("Changed lines: {}", stats.changes)),
-            )
-        });
+        open_info_dialog(self.state.clone(), window, cx);
     }
 }
 
@@ -4095,6 +4007,7 @@ impl Render for TextDiffView {
         let selected_row = session.selected_row().copied();
         let detail_mode = session.detail_mode();
         let model_rev = session.model_rev();
+        let swap_rev = session.swap_rev();
         let menu_flags = RowMenuFlags {
             anchor: session.align_anchor(),
             has_overrides: session.has_align_overrides(),
@@ -4119,6 +4032,15 @@ impl Render for TextDiffView {
             right_input.update(cx, |i, cx| {
                 i.set_value(right_path.clone(), window, cx);
             });
+        }
+
+        // A swap that did not run through this view's handler (the
+        // global menu fallback while the view lacks focus) bumped the
+        // session's swap counter; re-seed the path inputs exactly once
+        // so later user edits are never clobbered.
+        if swap_rev != self.applied_swap_rev {
+            self.applied_swap_rev = swap_rev;
+            self.sync_path_inputs(window, cx);
         }
 
         // Reset the lists only when the row count or wrap mode changed;
@@ -5583,6 +5505,91 @@ impl Render for TextRulesBody {
     }
 }
 
+/// Open the report dialog for a text compare session.
+///
+/// Free function so the global menu handler can open it without the
+/// view; the view's action handler delegates here as well.
+pub(crate) fn open_report_dialog(
+    session: Entity<TextDiffSession>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let text = session.read(cx).report_text();
+    // Suggest the left file's directory as the save location.
+    let dir = std::path::PathBuf::from(session.read(cx).left_path())
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_default();
+    let preview = text.clone();
+    window.open_dialog(cx, move |dialog, _, _| {
+        dialog
+            .title("Session report")
+            .child(
+                div()
+                    .id(ElementId::Name("report-preview".into()))
+                    .max_h(px(384.))
+                    .overflow_y_scroll()
+                    .child(preview.clone()),
+            )
+            .footer(
+                h_flex()
+                    .justify_end()
+                    .gap_2()
+                    .child(
+                        Button::new("report_cancel").label("Cancel").on_click(
+                            |_, window, cx| {
+                                window.close_dialog(cx);
+                            },
+                        ),
+                    )
+                    .child(
+                        Button::new("report_save")
+                            .label("Save to file…")
+                            .primary()
+                            .on_click({
+                                let text = text.clone();
+                                let dir = dir.clone();
+                                move |_, window, cx| {
+                                    window.close_dialog(cx);
+                                    save_report(&text, &dir, cx);
+                                }
+                            }),
+                    ),
+            )
+    });
+}
+
+/// Open the info dialog for a text compare session.
+///
+/// Free function so the global menu handler can open it without the
+/// view; the view's action handler delegates here as well.
+pub(crate) fn open_info_dialog(
+    session: Entity<TextDiffSession>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let stats = session.read(cx).info_stats();
+    let (left, right) = {
+        let session = session.read(cx);
+        (session.left_path(), session.right_path())
+    };
+    window.open_dialog(cx, move |dialog, _, _| {
+        dialog.title("Session info").child(
+            v_flex()
+                .gap_1()
+                .text_sm()
+                .child(format!("Left:  {left}"))
+                .child(format!("Right: {right}"))
+                .child(format!("Left lines:  {}", stats.left_lines))
+                .child(format!("Right lines: {}", stats.right_lines))
+                .child(format!("Difference sections: {}", stats.sections))
+                .child(format!("Inserted lines: {}", stats.insertions))
+                .child(format!("Deleted lines: {}", stats.deletions))
+                .child(format!("Changed lines: {}", stats.changes)),
+        )
+    });
+}
+
 /// Open the rules dialog for a text compare session.
 pub(crate) fn open_text_rules_dialog(
     session: Entity<TextDiffSession>,
@@ -6072,63 +6079,12 @@ mod tests {
     }
 
     #[gpui::test]
-    fn clear_session_drops_content_and_keeps_paths(cx: &mut TestAppContext) {
-        cx.update(|cx| cx.set_global(crate::log::LogBuffer::default()));
-        let session =
-            cx.new(|cx| TextDiffSession::for_test("a\nb\n", "a\nX\n", cx));
-        session.update(cx, |s, cx| {
-            assert!(s.can_save());
-            assert!(!s.display.is_empty());
-
-            s.clear_session(cx);
-
-            assert!(!s.can_save());
-            assert!(s.left_raw.is_none());
-            assert!(s.right_raw.is_none());
-            assert!(s.diff.is_none());
-            assert!(s.display.is_empty());
-            assert!(s.selected.is_none());
-            assert!(!s.is_editing());
-            assert!(s.editors_stale());
-            // The endpoints survive the clear, so Reload can refetch.
-            assert_eq!(s.left_path(), "/left.txt");
-            assert_eq!(s.right_path(), "/right.txt");
-        });
-    }
-
-    #[gpui::test]
-    fn clear_session_aborts_an_in_flight_load(cx: &mut TestAppContext) {
-        cx.update(|cx| cx.set_global(crate::log::LogBuffer::default()));
-        let session = cx.new(|cx| TextDiffSession::for_test("a\n", "b\n", cx));
-        session.update(cx, |s, cx| {
-            // Simulate an in-flight load without spawning the real task.
-            s.loading = true;
-            s.load_revision = 3;
-            let token = CancellationToken::new();
-            s.cancel_token = Some(token.clone());
-
-            s.clear_session(cx);
-
-            assert!(!s.is_loading());
-            // The bumped revision drops the in-flight result on arrival.
-            assert_eq!(s.load_revision, 4);
-            assert!(s.cancel_token.is_none());
-            assert!(token.is_cancelled());
-        });
-    }
-
-    #[gpui::test]
     fn side_text_returns_the_loaded_text(cx: &mut TestAppContext) {
         let session =
             cx.new(|cx| TextDiffSession::for_test("a\nb\n", "a\nX\n", cx));
         cx.update(|cx| {
             assert_eq!(session.read(cx).side_text(Side::Left, cx), "a\nb\n");
             assert_eq!(session.read(cx).side_text(Side::Right, cx), "a\nX\n");
-        });
-        // After a clear there is no text to compare against.
-        session.update(cx, |s, cx| s.clear_session(cx));
-        cx.update(|cx| {
-            assert_eq!(session.read(cx).side_text(Side::Left, cx), "");
         });
     }
 

@@ -44,8 +44,8 @@ use crate::{
     folder_table::FolderTableDelegate,
     menus::{
         CollapseAll, CollapseDir, CopyPathLeft, CopyPathRight, ExpandAll,
-        ExpandDir, ReloadCompare, SaveSession, SelectAllEntries,
-        ShowAllFilters, StopCompare, ToggleShowDifferent, ToggleShowHidden,
+        ExpandDir, ReloadCompare, SelectAllEntries, ShowAllFilters,
+        StopCompare, ToggleShowDifferent, ToggleShowHidden,
         ToggleShowLeftNewer, ToggleShowLeftOnly, ToggleShowOrphans,
         ToggleShowRightNewer, ToggleShowRightOnly, ToggleShowSame,
     },
@@ -650,21 +650,6 @@ impl FolderCompareView {
     ) {
         self.state.update(cx, |state, cx| {
             state.stop(cx);
-        });
-    }
-
-    /// Handle the SaveSession action dispatched from menus or toolbar.
-    fn handle_save_session(
-        &mut self,
-        _: &SaveSession,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let name = self.state.read(cx).title().to_string();
-        let config = self.state.read(cx).to_config(name.clone());
-
-        self.session_manager.update(cx, |mgr, cx| {
-            mgr.update_active_config(config, cx);
         });
     }
 
@@ -1650,21 +1635,6 @@ impl FolderCompareView {
     ) {
         self.state.update(cx, |state, cx| state.collapse_all(cx));
     }
-
-    // -----------------------------------------------------------------------
-    // Session callbacks (used by TabBar)
-    // -----------------------------------------------------------------------
-
-    /// Save the current session.
-    #[allow(dead_code)]
-    fn save_session(&mut self, cx: &mut Context<Self>) {
-        let name = self.state.read(cx).title().to_string();
-        let config = self.state.read(cx).to_config(name.clone());
-
-        self.session_manager.update(cx, |mgr, cx| {
-            mgr.update_active_config(config, cx);
-        });
-    }
 }
 
 impl Render for FolderCompareView {
@@ -1757,7 +1727,6 @@ impl Render for FolderCompareView {
             // Menu-dispatched actions that need view context.
             .on_action(cx.listener(Self::handle_reload_compare))
             .on_action(cx.listener(Self::handle_stop_compare))
-            .on_action(cx.listener(Self::handle_save_session))
             // File/dir diff actions.
             .on_action(cx.listener(Self::handle_open_file_diff))
             .on_action(cx.listener(Self::handle_open_dir_diff))

@@ -1657,17 +1657,20 @@ impl GuiSessionManager {
         }
     }
 
-    /// Update the active session's config (paths, name, etc.).
-    pub fn update_active_config(
-        &mut self,
-        config: SessionConfig,
-        cx: &mut Context<Self>,
-    ) {
-        if let Some(session) = self.open_sessions.get_mut(self.active_index) {
-            session.config = config;
-            session.dirty = true;
-            cx.notify();
-        }
+    /// Refresh the active session's config from its live view state so
+    /// a save captures the current endpoints, rules, and filters. Folder
+    /// tabs carry their state in the view; other tab kinds keep their
+    /// config authoritative and are left untouched.
+    pub fn sync_active_config(&mut self, cx: &mut App) {
+        let Some(session) = self.open_sessions.get_mut(self.active_index)
+        else {
+            return;
+        };
+        let Some(state) = session.tab_entity.folder_state(cx) else {
+            return;
+        };
+        let name = session.config.name.clone();
+        session.config = state.read(cx).to_config(name);
     }
 
     /// Record an ancestor on the active merge session's config so a

@@ -1994,41 +1994,6 @@ impl AppState {
         self.comparison.is_some()
     }
 
-    /// Clear the session: drop the comparison, selection, and navigation
-    /// state, keeping the endpoints, settings, and title (Session ▸ Clear
-    /// session).
-    ///
-    /// An in-flight comparison is aborted first so its result cannot
-    /// repopulate the cleared view. The session stays open and can be
-    /// reloaded; nothing auto-reloads because `trigger_auto_load` only
-    /// runs at view creation.
-    pub fn clear_session(&mut self, cx: &mut Context<Self>) {
-        if self.loading {
-            self.load_revision += 1;
-            if let Some(token) = self.cancel_token.take() {
-                token.cancel();
-            }
-        }
-        self.loading = false;
-        self.busy_label = None;
-        self.comparison = None;
-        self.tree_rows.clear();
-        self.expanded.clear();
-        self.selected_index = 0;
-        self.selected_paths.clear();
-        self.notice = None;
-        self.error = None;
-        // The current pair becomes the new session root: the breadcrumb
-        // and history restart from where the user is standing.
-        self.root_left = self.left.clone();
-        self.root_right = self.right.clone();
-        self.nav_steps.clear();
-        self.history = initial_history(&self.left, &self.right);
-        self.history_pos = 0;
-        log::push(LogLevel::Info, "Session cleared", cx);
-        cx.notify();
-    }
-
     /// Select a row by display-order index, dropping any multi-selection.
     pub fn select_row(&mut self, index: usize, cx: &mut Context<Self>) {
         if index < self.tree_rows.len() {
@@ -5514,44 +5479,6 @@ mod tests {
             assert_eq!(summary.same, 2);
             assert_eq!(summary.different, 1);
             assert_eq!(summary.orphans, 1);
-        });
-    }
-
-    #[gpui::test]
-    fn clear_session_drops_results_and_navigation(cx: &mut TestAppContext) {
-        init_log_globals(cx);
-        let state = cx.new(|cx| {
-            let mut state = AppState::new(
-                Endpoint::local("/left"),
-                Endpoint::local("/right"),
-                "test".into(),
-                cx,
-            );
-            state.set_comparison_for_test(comparison(sample_entries()));
-            state
-        });
-
-        state.update(cx, |state, cx| {
-            state.select_row(1, cx);
-            state.set_notice("earlier result".into(), cx);
-            assert!(state.has_comparison());
-            assert!(state.selected_entry().is_some());
-
-            state.clear_session(cx);
-
-            assert!(!state.has_comparison());
-            assert!(state.tree_rows.is_empty());
-            assert!(state.selected_entry().is_none());
-            assert!(state.notice().is_none());
-            assert!(state.error.is_none());
-            assert!(!state.loading);
-            // Navigation restarts from the current pair.
-            assert!(!state.can_go_back());
-            assert!(!state.can_go_forward());
-            // The endpoints and the title survive the clear.
-            assert_eq!(state.left.path(), std::path::Path::new("/left"));
-            assert_eq!(state.right.path(), std::path::Path::new("/right"));
-            assert_eq!(&state.title, "test");
         });
     }
 }
