@@ -973,9 +973,7 @@ mod render_tests {
     #[test]
     fn session_browser_lists_the_saved_sessions() {
         let mut app = dir_session_state();
-        app.active_mut().unwrap().ui.mode = SessionMode::SessionBrowser {
-            saved_sessions: vec!["alpha".into(), "beta".into()],
-        };
+        app.session_browser = Some(vec!["alpha".into(), "beta".into()]);
         let screen = render(app);
         assert!(screen.contains("alpha"), "{screen}");
         assert!(screen.contains("beta"), "{screen}");
@@ -986,10 +984,9 @@ mod render_tests {
 
     #[test]
     fn session_browser_placeholders_while_the_list_is_empty() {
-        let mut app = dir_session_state();
-        app.active_mut().unwrap().ui.mode = SessionMode::SessionBrowser {
-            saved_sessions: Vec::new(),
-        };
+        // The browser is app-level: it renders without any session, too.
+        let mut app = AppState::new();
+        app.session_browser = Some(Vec::new());
         let screen = render(app);
         assert!(screen.contains("No saved sessions yet."), "{screen}");
         assert!(!screen.contains('\u{25b8}'), "{screen}");

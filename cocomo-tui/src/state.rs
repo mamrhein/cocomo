@@ -48,9 +48,6 @@ pub enum SessionMode {
     FilterPanel { draft: Box<FilterDraft> },
     /// The user is typing a session name to save.
     SaveSession { name: String },
-    /// The session browser modal (`O`) is open. `saved_sessions` is
-    /// filled asynchronously by the `ListSessions` action.
-    SessionBrowser { saved_sessions: Vec<String> },
     /// The settings modal (`,`) is open.
     Settings,
     /// The report modal (`R`) is open, holding its draft in a box.
@@ -281,8 +278,8 @@ impl SessionMode {
     ///
     /// While editing, printable keys belong to the input component's layer;
     /// the shell and session handlers must not claim them (e.g. `q` must
-    /// not quit). The modal panels (`FilterPanel`, `SessionBrowser`,
-    /// `Settings`, `Report`) are not text-entry modes: like
+    /// not quit). The modal panels (`FilterPanel`, `Settings`, `Report`)
+    /// are not text-entry modes: like
     /// [`SessionMode::Transfer`] they own an exclusive input layer that
     /// keeps the shell and the table from seeing keys.
     pub fn is_editing(&self) -> bool {
@@ -662,8 +659,9 @@ pub enum SessionAction {
     ExecuteSync,
     /// Save the current session config to a file.
     SaveSession { name: String },
-    /// List saved session files for loading.
-    ListSessions,
+    /// Open the app-level session browser and list saved session files
+    /// for loading.
+    OpenSessionBrowser,
     /// Load a session config from a file.
     LoadSession { path: PathBuf },
     /// Execute the transfers the dialog confirmed on the selected entry,
@@ -1457,6 +1455,13 @@ pub struct AppState {
     /// navigation keys to [`crate::keys::KeyScope::Menu`] instead of the
     /// session scopes.
     pub menu: Option<crate::menu::MenuState>,
+    /// The open session browser modal.
+    ///
+    /// `None` means the browser is closed; `Some` holds the saved-session
+    /// names the browser lists, empty until the listing task fills them.
+    /// The browser lives at app level (not in a session mode) so it works
+    /// on the welcome screen, where no session could carry it.
+    pub session_browser: Option<Vec<String>>,
     /// Whether the bottom help bar is shown.
     ///
     /// Hidden by default so the main view area gets the row; toggled with
@@ -1510,6 +1515,7 @@ impl AppState {
             sessions: Vec::new(),
             active_tab: 0,
             menu: None,
+            session_browser: None,
             show_help: false,
             show_shortcuts: false,
             error_message: None,

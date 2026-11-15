@@ -1053,9 +1053,10 @@ pub fn help_lines(scopes: &[KeyScope], width: u16) -> Vec<Line<'static>> {
 /// While the transfer dialog is open its scope owns the keys, which keeps
 /// the dialog accelerators in the same table as every other binding even
 /// though the dialog renders in its own input layer. The modal panels
-/// (`FilterPanel`, `SessionBrowser`, `Settings`, `Report`) route to
-/// dedicated handlers because their key ownership depends on which panel
-/// section currently has focus.
+/// (`FilterPanel`, `Settings`, `Report`) route to dedicated handlers
+/// because their key ownership depends on which panel section currently
+/// has focus. The session browser is not a session mode; its keys are
+/// dispatched at app level by `controller::dispatch_browser_key`.
 pub fn handle_session_key(
     session: &mut SessionView,
     key: KeyEvent,
@@ -1063,9 +1064,6 @@ pub fn handle_session_key(
     match session.ui.mode {
         SessionMode::FilterPanel { .. } => {
             return handle_filter_panel_key(session, key);
-        }
-        SessionMode::SessionBrowser { .. } => {
-            return handle_browser_key(session, key);
         }
         SessionMode::Settings => return handle_settings_key(session, key),
         SessionMode::Report { .. } => return handle_report_key(session, key),
@@ -1201,11 +1199,10 @@ fn execute(cmd: Cmd, session: &mut SessionView) -> SessionAction {
             SessionAction::None
         }
         Cmd::OpenSessionBrowser => {
-            // Open the browser and list saved sessions for it.
-            session.ui.mode = SessionMode::SessionBrowser {
-                saved_sessions: Vec::new(),
-            };
-            SessionAction::ListSessions
+            // The browser lives at app level, so opening it leaves the
+            // session untouched; the controller opens it and lists the
+            // saved sessions.
+            SessionAction::OpenSessionBrowser
         }
         Cmd::OpenSettings => {
             session.ui.mode = SessionMode::Settings;
@@ -1314,21 +1311,16 @@ fn execute(cmd: Cmd, session: &mut SessionView) -> SessionAction {
             session.ui.mode = SessionMode::Normal;
             SessionAction::None
         }
-        Cmd::SessionNew => {
-            // The browser hands over to the save-name prompt.
-            session.ui.mode = SessionMode::SaveSession {
-                name: String::new(),
-            };
-            SessionAction::None
-        }
         // These depend on which panel draft is open and are executed by
         // the panel handlers, never through this match.
         Cmd::PanelFocusNext | Cmd::PanelApply | Cmd::PanelToggle => {
             SessionAction::None
         }
         // Global and menu commands are dispatched by the App shell, never
-        // here.
+        // here. `SessionNew` is owned by the app-level session browser
+        // (`controller::dispatch_browser_key`).
         Cmd::CloseTab
+        | Cmd::SessionNew
         | Cmd::SwitchTab
         | Cmd::MenuOpen(_)
         | Cmd::MenuPrev
@@ -1601,22 +1593,6 @@ fn handle_filter_panel_key(
         return Some(SessionAction::None);
     }
     None
-}
-
-/// Handle a key for the open session browser modal.
-///
-/// The browser owns `Esc` (close) and `n` (create new); `j`/`k`/`Enter`
-/// pass through to its `OptionList` child, which loads the highlighted
-/// session.
-fn handle_browser_key(
-    session: &mut SessionView,
-    key: KeyEvent,
-) -> Option<SessionAction> {
-    if !matches!(session.ui.mode, SessionMode::SessionBrowser { .. }) {
-        return None;
-    }
-    let cmd = lookup(KeyScope::SessionBrowser, key)?;
-    Some(execute(cmd, session))
 }
 
 /// Handle a key for the open settings modal.
@@ -2145,13 +2121,11 @@ mod tests {
         assert!(!session.dir().unwrap().shows_equal());
         assert_eq!(session.ui.table_state.selected(), Some(0));
 
-        // `Sessions` opens the browser and asks for the saved list.
+        // `Sessions` opens the app-level browser and asks for the saved
+        // list; the session itself stays in normal mode.
         let action = run_menu_command(&mut session, Cmd::OpenSessionBrowser);
-        assert!(matches!(action, SessionAction::ListSessions));
-        assert!(matches!(
-            session.ui.mode,
-            SessionMode::SessionBrowser { .. }
-        ));
+        assert!(matches!(action, SessionAction::OpenSessionBrowser));
+        assert_eq!(session.ui.mode, SessionMode::Normal);
     }
 
     #[test]
@@ -2415,7 +2389,7 @@ mod tests {
     }
 
     #[test]
-    fn save_mode_and_browser_carry_their_own_state() {
+    fn save_mode_carries_its_own_state() {
         let mut session = dir_session();
         session.ui.name_filter = Some(NamePattern::new("keep me").unwrap());
 
@@ -2437,26 +2411,13 @@ mod tests {
         assert!(press(&mut session, KeyCode::Char('q')).is_some());
         assert_eq!(session.ui.mode, SessionMode::Normal);
 
-        // The browser opens empty and asks the controller to fill the
-        // saved-session list.
+        // The browser is app-level: `O` only asks the controller to open
+        // it, so the session mode is untouched.
         assert_eq!(
             press(&mut session, KeyCode::Char('O')),
-            Some(SessionAction::ListSessions)
+            Some(SessionAction::OpenSessionBrowser)
         );
-        assert!(matches!(
-            &session.ui.mode,
-            SessionMode::SessionBrowser { saved_sessions }
-                if saved_sessions.is_empty()
-        ));
-        // `n` hands over to the save-name prompt.
-        assert_eq!(
-            press(&mut session, KeyCode::Char('n')),
-            Some(SessionAction::None)
-        );
-        assert!(matches!(
-            &session.ui.mode,
-            SessionMode::SaveSession { name } if name.is_empty()
-        ));
+        assert_eq!(session.ui.mode, SessionMode::Normal);
     }
 
     #[test]
@@ -2478,14 +2439,8 @@ mod tests {
 
         assert_eq!(
             press(&mut session, KeyCode::Char('O')),
-            Some(SessionAction::ListSessions)
+            Some(SessionAction::OpenSessionBrowser)
         );
-        assert!(matches!(
-            &session.ui.mode,
-            SessionMode::SessionBrowser { saved_sessions }
-                if saved_sessions.is_empty()
-        ));
-        assert!(press(&mut session, KeyCode::Esc).is_some());
         assert_eq!(session.ui.mode, SessionMode::Normal);
 
         assert_eq!(

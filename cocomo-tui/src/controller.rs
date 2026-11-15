@@ -741,12 +741,21 @@ pub(crate) fn process_session_action(action: SessionAction) {
                 "Saving session",
             );
         }
-        SessionAction::ListSessions => {
-            // Listing saved sessions needs no comparison of any kind, so
-            // any session (text or folder) can carry the browser mode.
-            let Some(id) = active_session_id() else {
-                return;
-            };
+        SessionAction::OpenSessionBrowser => {
+            // The browser lives at app level and needs no comparison of
+            // any kind, so it opens without an active session. Under one
+            // write lock, drop any open session modal so the browser never
+            // coexists with another session modal.
+            {
+                let state = APP_STATE.state();
+                let mut app = state.write();
+                if let Some(session) = app.active_mut()
+                    && !matches!(session.ui.mode, SessionMode::Normal)
+                {
+                    session.ui.mode = SessionMode::Normal;
+                }
+                app.session_browser = Some(Vec::new());
+            }
             spawn_task(
                 |_| Some(()),
                 |_| async move {
@@ -761,14 +770,11 @@ pub(crate) fn process_session_action(action: SessionAction) {
                         })
                         .collect::<Vec<_>>())
                 },
-                move |app, names| {
-                    // Only apply the listing while the session is still
-                    // browsing; the list lives in the mode.
-                    if let Some(s) = app.session_mut(id)
-                        && let SessionMode::SessionBrowser { saved_sessions } =
-                            &mut s.ui.mode
-                    {
-                        *saved_sessions = names;
+                |app, names| {
+                    // Only apply the listing while the browser is still
+                    // open; the list lives in the app-level state.
+                    if let Some(list) = &mut app.session_browser {
+                        *list = names;
                     }
                 },
                 "Failed to list saved sessions",
@@ -980,11 +986,38 @@ pub(crate) fn dispatch_filter_panel_key(key: KeyEvent) -> bool {
 }
 
 /// Handle a key press for the open session browser modal.
+///
+/// The browser is app-level, so it works without an active session. Like
+/// [`dispatch_key`], it claims only the keys its scope owns: `Esc` closes
+/// it, and `n` hands over to the save-name prompt — which needs a session
+/// to carry the prompt, so `n` is a no-op on the welcome screen.
 pub(crate) fn dispatch_browser_key(key: KeyEvent) -> bool {
-    dispatch_key(
-        |s| matches!(s.ui.mode, SessionMode::SessionBrowser { .. }),
-        key,
-    )
+    let state = APP_STATE.state();
+    let mut app = state.write();
+    if app.session_browser.is_none() {
+        return false;
+    }
+    let Some(cmd) = keys::lookup(keys::KeyScope::SessionBrowser, key) else {
+        return false;
+    };
+    match cmd {
+        Cmd::PanelClose => {
+            app.session_browser = None;
+            true
+        }
+        Cmd::SessionNew => {
+            let Some(session) = app.active_mut() else {
+                return false;
+            };
+            // The browser hands over to the save-name prompt.
+            session.ui.mode = SessionMode::SaveSession {
+                name: String::new(),
+            };
+            app.session_browser = None;
+            true
+        }
+        _ => false,
+    }
 }
 
 /// Handle a key press for the open settings modal.
@@ -1111,13 +1144,10 @@ pub(crate) fn load_saved_session(name: String) {
     let path = {
         let state = APP_STATE.state();
         let mut app = state.write();
-        let Some(session) = app.active_mut() else {
-            return;
-        };
-        if !matches!(session.ui.mode, SessionMode::SessionBrowser { .. }) {
+        if app.session_browser.is_none() {
             return;
         }
-        session.ui.mode = SessionMode::Normal;
+        app.session_browser = None;
         default_session_dir().join(format!("{name}.toml"))
     };
     process_session_action(SessionAction::LoadSession { path });
@@ -1339,6 +1369,10 @@ pub(crate) fn scroll_active(delta: isize) {
 pub(crate) fn close_active_tab() -> bool {
     let state = APP_STATE.state();
     let mut app = state.write();
+    if app.sessions.is_empty() {
+        // Nothing to close (the welcome screen): a no-op, never a quit.
+        return false;
+    }
     app.close_active();
     app.sessions.is_empty()
 }
@@ -1531,10 +1565,17 @@ pub(crate) fn confirm_menu_item() -> MenuOutcome {
                 if !item.available(view) {
                     return MenuOutcome::Handled;
                 }
-                let Some(session) = app.active_mut() else {
-                    return MenuOutcome::Handled;
-                };
-                keys::run_menu_command(session, cmd)
+                if cmd == Cmd::OpenSessionBrowser {
+                    // App-level command: the browser works without an
+                    // active session, so it runs on the welcome screen
+                    // too.
+                    SessionAction::OpenSessionBrowser
+                } else {
+                    let Some(session) = app.active_mut() else {
+                        return MenuOutcome::Handled;
+                    };
+                    keys::run_menu_command(session, cmd)
+                }
             }
         }
     };
@@ -1639,6 +1680,8 @@ pub(crate) fn cancel_quit() {
 
 #[cfg(test)]
 mod tests {
+    use ratatui_kit::crossterm::event::{KeyCode, KeyModifiers};
+
     use super::*;
 
     #[tokio::test]
@@ -2140,6 +2183,110 @@ mod tests {
         });
         assert_eq!(confirm_menu_item(), MenuOutcome::CloseTab);
         assert_eq!(APP_STATE.state().read().menu, None);
+    }
+
+    #[tokio::test]
+    async fn confirm_menu_item_opens_the_browser_without_a_session() {
+        APP_STATE.set(AppState::new());
+        open_menu(menu_index("Sessions"));
+        // "Open session…" is the first Sessions item, so the fresh
+        // highlight already sits on it.
+        assert_eq!(confirm_menu_item(), MenuOutcome::Handled);
+        let state = APP_STATE.state();
+        let app = state.read();
+        assert_eq!(app.menu, None);
+        // The browser opened at app level, still empty while the listing
+        // task is in flight.
+        assert_eq!(app.session_browser, Some(Vec::new()));
+    }
+
+    #[test]
+    fn confirm_menu_item_skips_report_without_a_session() {
+        APP_STATE.set(AppState::new());
+        open_menu(menu_index("Sessions"));
+        let sessions = menu::menu_at(menu_index("Sessions")).unwrap();
+        let report = sessions
+            .entries
+            .iter()
+            .position(|e| e.cmd() == Some(Cmd::OpenReport))
+            .unwrap();
+        let steps = (0..=report)
+            .filter(|&i| sessions.entries[i].selectable())
+            .count()
+            - 1;
+        move_menu_item(steps as isize);
+        // Report… is dir-only: on the welcome screen it stays dimmed and
+        // confirming it changes nothing.
+        assert_eq!(confirm_menu_item(), MenuOutcome::Handled);
+        let state = APP_STATE.state();
+        let app = state.read();
+        assert_eq!(app.menu, None);
+        assert_eq!(app.session_browser, None);
+    }
+
+    /// A press with no modifiers, for the browser's own key scope.
+    fn browser_key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn dispatch_browser_key_closes_on_esc_without_a_session() {
+        let mut app = AppState::new();
+        app.session_browser = Some(Vec::new());
+        APP_STATE.set(app);
+        // `Esc` closes the browser even on the welcome screen.
+        assert!(dispatch_browser_key(browser_key(KeyCode::Esc)));
+        assert_eq!(APP_STATE.state().read().session_browser, None);
+        // With the browser closed, no key is claimed.
+        assert!(!dispatch_browser_key(browser_key(KeyCode::Esc)));
+    }
+
+    #[test]
+    fn dispatch_browser_key_new_needs_a_session() {
+        let mut app = AppState::new();
+        app.session_browser = Some(Vec::new());
+        APP_STATE.set(app);
+        // On the welcome screen no session could carry the save-name
+        // prompt, so `n` is inert and the browser stays open.
+        assert!(!dispatch_browser_key(browser_key(KeyCode::Char('n'))));
+        assert!(APP_STATE.state().read().session_browser.is_some());
+
+        let mut app = dir_app_state();
+        app.session_browser = Some(vec!["saved".into()]);
+        APP_STATE.set(app);
+        // With a session, `n` hands over to the save-name prompt and
+        // closes the browser.
+        assert!(dispatch_browser_key(browser_key(KeyCode::Char('n'))));
+        let state = APP_STATE.state();
+        let app = state.read();
+        assert_eq!(app.session_browser, None);
+        assert!(matches!(
+            &app.active().unwrap().ui.mode,
+            SessionMode::SaveSession { name } if name.is_empty()
+        ));
+    }
+
+    #[test]
+    fn close_active_tab_is_inert_without_a_session() {
+        APP_STATE.set(AppState::new());
+        // The welcome screen has nothing to close; the shell must not
+        // interpret the no-op as "the last tab closed" and quit.
+        assert!(!close_active_tab());
+        assert!(APP_STATE.state().read().sessions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn load_saved_session_closes_the_browser() {
+        let mut app = AppState::new();
+        app.session_browser = Some(vec!["gone".into()]);
+        APP_STATE.set(app);
+        // The name has no backing file, so the spawned load task fails on
+        // its own; the browser still closes synchronously.
+        load_saved_session("phase4-missing-session".into());
+        assert_eq!(APP_STATE.state().read().session_browser, None);
+        // With the browser closed, a stray select is inert.
+        load_saved_session("phase4-missing-session".into());
+        assert_eq!(APP_STATE.state().read().session_browser, None);
     }
 
     #[test]
