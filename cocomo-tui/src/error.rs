@@ -61,6 +61,11 @@ pub(crate) enum TuiError {
         /// The `fs_err` context ("failed to … `path`") plus the OS reason.
         message: String,
     },
+
+    /// A saved session uses a type the TUI cannot open (merge, table, hex
+    /// and image compares are GUI-only).
+    #[error("unsupported session type: {0}")]
+    UnsupportedSessionType(cocomo_lib::SessionType),
 }
 
 impl TuiError {

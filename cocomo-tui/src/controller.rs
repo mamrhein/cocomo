@@ -31,8 +31,8 @@ use std::{
 use cocomo_lib::{
     CompareConfig, ContentCache, DirComparison, DirEntryStatus, Endpoint,
     FsError, FsPair, Grammar, NodeFileSystem, NullPrompter, Prompter,
-    Provider, SessionConfig, SyncOperation, SyncResult, SyncRules,
-    TextCompareSettings, compare_texts, default_session_dir,
+    Provider, SessionConfig, SessionType as LibSessionType, SyncOperation,
+    SyncResult, SyncRules, compare_texts, default_session_dir,
     execute_transfers, list_saved_sessions, report::generate_report,
 };
 use ratatui_kit::crossterm::event::KeyEvent;
@@ -44,7 +44,8 @@ use crate::{
     session_store::session_to_config,
     state::{
         APP_STATE, AppState, NamePattern, SessionAction, SessionContent,
-        SessionMode, SessionView, SettingItem, StatusFilter, TransferChoice,
+        SessionMode, SessionView, SettingItem, StatusFilter, TextRules,
+        TextSource, TransferChoice,
     },
 };
 
@@ -111,14 +112,6 @@ fn detect_grammar(path: &Path) -> Grammar {
     }
 }
 
-/// Build the text compare settings using a detected grammar.
-fn build_text_settings(grammar: &Grammar) -> TextCompareSettings {
-    TextCompareSettings {
-        grammar: Some(grammar.clone()),
-        ..TextCompareSettings::default()
-    }
-}
-
 /// Read a text file for comparison through its endpoint's provider.
 ///
 /// A missing file yields empty content: one side of a comparison can
@@ -133,10 +126,14 @@ async fn read_text_file(fs: &Provider, path: &Path) -> Result<String> {
     }
 }
 
-/// Run a text comparison and create a new [`SessionView`].
-async fn run_text_comparison(
+/// Open a text comparison session with the given rule toggles.
+///
+/// The file contents are retained on the session so the settings modal can
+/// re-run the comparison synchronously when a rule toggle changes.
+async fn open_text_session(
     left: Endpoint,
     right: Endpoint,
+    rules: TextRules,
 ) -> Result<SessionView> {
     // Detect grammar from the left file (fall back to right if the left
     // file is known to be missing; a remote left side is assumed present
@@ -153,12 +150,28 @@ async fn run_text_comparison(
 
     // Run the text comparison; the session derives the merged row model
     // from the diff.
-    let settings = build_text_settings(&grammar);
+    let settings = rules.compare_settings(&grammar);
     let text_diff = compare_texts(&left_content, &right_content, &settings);
 
     Ok(SessionView::new_text_compare(
-        left, right, text_diff, grammar,
+        left,
+        right,
+        text_diff,
+        grammar,
+        TextSource {
+            left: left_content,
+            right: right_content,
+            rules,
+        },
     ))
+}
+
+/// Run a default text comparison and create a new [`SessionView`].
+async fn run_text_comparison(
+    left: Endpoint,
+    right: Endpoint,
+) -> Result<SessionView> {
+    open_text_session(left, right, TextRules::default()).await
 }
 
 /// Plan a sync operation (dry-run) for the given endpoints.
@@ -248,7 +261,12 @@ fn resolve_endpoint_ref(
     Ok(Endpoint::from_ref(provider, path, prompter)?)
 }
 
-/// Create a directory comparison session from a saved config.
+/// Create a session from a saved config.
+///
+/// Text-compare configs open as text sessions with their saved rule
+/// toggles; dir-compare configs restore their comparison, display filters
+/// and name filter. Any other session type is GUI-only and reported as
+/// unsupported instead of silently opening the wrong kind of session.
 async fn create_session_from_config(
     config: &SessionConfig,
 ) -> Result<SessionView> {
@@ -268,6 +286,25 @@ async fn create_session_from_config(
         &prompter,
     )?;
 
+    match config.session_type {
+        LibSessionType::TextCompare => {
+            let rules = TextRules::from_settings(&config.settings);
+            open_text_session(left, right, rules).await
+        }
+        LibSessionType::DirCompare => {
+            open_dir_session(config, left, right).await
+        }
+        other => Err(TuiError::UnsupportedSessionType(other)),
+    }
+}
+
+/// Create a directory comparison session (with restored filters) from a
+/// saved config whose endpoints are already resolved.
+async fn open_dir_session(
+    config: &SessionConfig,
+    left: Endpoint,
+    right: Endpoint,
+) -> Result<SessionView> {
     let compare_files = config.settings.compare_files;
 
     // Run the comparison; propagate failures so the caller can report them
@@ -685,11 +722,11 @@ pub(crate) fn process_session_action(action: SessionAction) {
             );
         }
         SessionAction::SaveSession { name } => {
-            let Some(id) = active_dir_session_id() else {
+            let Some(id) = active_session_id() else {
                 return;
             };
             spawn_task(
-                move |app| app.session(id).and_then(session_to_config),
+                move |app| app.session(id).map(session_to_config),
                 move |config| async move {
                     let session_dir = default_session_dir();
                     fs_err::tokio::create_dir_all(&session_dir)
@@ -705,7 +742,9 @@ pub(crate) fn process_session_action(action: SessionAction) {
             );
         }
         SessionAction::ListSessions => {
-            let Some(id) = active_dir_session_id() else {
+            // Listing saved sessions needs no comparison of any kind, so
+            // any session (text or folder) can carry the browser mode.
+            let Some(id) = active_session_id() else {
                 return;
             };
             spawn_task(
@@ -1087,20 +1126,51 @@ pub(crate) fn load_saved_session(name: String) {
 /// Toggle or cycle the settings modal entry `item`.
 ///
 /// Dispatched by the settings modal's `Select` on `Enter`; the modal stays
-/// open so several settings can be changed in a row.
+/// open so several settings can be changed in a row. The modal only shows
+/// the entries that apply to the active session kind, so a dir-only item
+/// on a text session (or vice versa) is a no-op by construction.
 pub(crate) fn toggle_setting(item: SettingItem) {
     if let Some(session) = APP_STATE.state().write().active_mut()
         && matches!(session.ui.mode, SessionMode::Settings)
-        && let Some(dir) = session.dir_mut()
     {
         match item {
             SettingItem::CompareContent => {
-                dir.compare_content = !dir.compare_content;
+                if let Some(dir) = session.dir_mut() {
+                    dir.compare_content = !dir.compare_content;
+                }
             }
             SettingItem::HideSame => {
-                dir.display.show_statuses =
-                    StatusFilter::Equal.toggle(dir.display.show_statuses);
-                session.ui.table_state.select(Some(0));
+                if let Some(dir) = session.dir_mut() {
+                    dir.display.show_statuses =
+                        StatusFilter::Equal.toggle(dir.display.show_statuses);
+                    session.ui.table_state.select(Some(0));
+                }
+            }
+            SettingItem::IgnoreWhitespace
+            | SettingItem::SkipBlankLines
+            | SettingItem::SkipComments => {
+                if let Some(text) = session.text_mut() {
+                    match item {
+                        SettingItem::IgnoreWhitespace => {
+                            text.source.rules.ignore_whitespace =
+                                !text.source.rules.ignore_whitespace;
+                        }
+                        SettingItem::SkipBlankLines => {
+                            text.source.rules.skip_blank_lines =
+                                !text.source.rules.skip_blank_lines;
+                        }
+                        _ => {
+                            text.source.rules.skip_comments =
+                                !text.source.rules.skip_comments;
+                        }
+                    }
+                    // Re-run the comparison from the retained contents so
+                    // the diff reflects the rule immediately.
+                    text.recompare_with_rules();
+                    // The row model may have shrunk; reset the cursor so it
+                    // (and any stale drag anchor) cannot point past the end.
+                    session.set_cursor(Some(0));
+                }
             }
         }
     }
@@ -1934,6 +2004,7 @@ mod tests {
             Endpoint::local("/right/b.txt"),
             cocomo_lib::TextDiff::default(),
             Grammar::plain_text(),
+            TextSource::default(),
         ));
         APP_STATE.set(app);
         open_menu(menu_index("View"));
@@ -1943,6 +2014,102 @@ mod tests {
         let app = state.read();
         assert_eq!(app.menu, None);
         assert!(app.active().unwrap().ui.mode == SessionMode::Normal);
+    }
+
+    fn text_config(left: &Path, right: &Path) -> SessionConfig {
+        SessionConfig {
+            name: "text".to_string(),
+            session_type: LibSessionType::TextCompare,
+            left: cocomo_lib::ProviderRef {
+                provider: "local".to_string(),
+                path: left.to_path_buf(),
+            },
+            right: cocomo_lib::ProviderRef {
+                provider: "local".to_string(),
+                path: right.to_path_buf(),
+            },
+            center: None,
+            settings: cocomo_lib::SessionSettings {
+                ignore_whitespace: true,
+                ..Default::default()
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn create_session_from_config_opens_text_compare_with_rules() {
+        let dir = tempfile::tempdir().unwrap();
+        let left = dir.path().join("a.txt");
+        let right = dir.path().join("b.txt");
+        fs_err::write(&left, "alpha\n  beta\n").unwrap();
+        fs_err::write(&right, "alpha\nbeta\n").unwrap();
+
+        let session = create_session_from_config(&text_config(&left, &right))
+            .await
+            .unwrap();
+        assert!(session.content.is_text());
+        let text = session.text().unwrap();
+        // The saved rule is restored and was applied to the diff: the two
+        // files differ only in whitespace, so there are no differences.
+        assert!(text.source.rules.ignore_whitespace);
+        assert!(text.text_diff.as_ref().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn create_session_from_config_rejects_unsupported_types() {
+        let mut config = text_config(Path::new("/a"), Path::new("/b"));
+        config.session_type = LibSessionType::DirMerge;
+        let result = create_session_from_config(&config).await;
+        match result {
+            Ok(_) => panic!("an unsupported type must not open a session"),
+            Err(err) => assert!(matches!(
+                err,
+                TuiError::UnsupportedSessionType(LibSessionType::DirMerge)
+            )),
+        }
+    }
+
+    #[test]
+    fn toggle_setting_flips_text_rules_and_recompares() {
+        let mut app = AppState::new();
+        app.add_session(SessionView::new_text_compare(
+            Endpoint::local("/left/a.txt"),
+            Endpoint::local("/right/b.txt"),
+            compare_texts(
+                "alpha\n  beta\n",
+                "alpha\nbeta\n",
+                &TextRules::default().compare_settings(&Grammar::plain_text()),
+            ),
+            Grammar::plain_text(),
+            TextSource {
+                left: "alpha\n  beta\n".to_string(),
+                right: "alpha\nbeta\n".to_string(),
+                rules: TextRules::default(),
+            },
+        ));
+        let session = app.active_mut().unwrap();
+        session.ui.mode = SessionMode::Settings;
+        assert!(
+            !session
+                .text()
+                .unwrap()
+                .text_diff
+                .as_ref()
+                .unwrap()
+                .is_empty()
+        );
+        APP_STATE.set(app);
+
+        toggle_setting(SettingItem::IgnoreWhitespace);
+
+        let state = APP_STATE.state();
+        let app = state.read();
+        let session = app.active().unwrap();
+        let text = session.text().unwrap();
+        assert!(text.source.rules.ignore_whitespace);
+        // The diff was re-run from the retained contents: with whitespace
+        // ignored the two files are equal and no differences remain.
+        assert!(text.text_diff.as_ref().unwrap().is_empty());
     }
 
     #[test]

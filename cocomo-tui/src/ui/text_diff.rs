@@ -31,7 +31,7 @@ use super::{
 use crate::{
     controller::{
         dispatch_text_key, scroll_active, select_row, set_active_mode,
-        set_mode_buffer, submit_command, submit_search,
+        set_mode_buffer, submit_command, submit_save_name, submit_search,
     },
     diff_model::current_diff_position,
     keys::{self, KeyScope},
@@ -181,7 +181,9 @@ pub(super) fn TextCompareView(
     // an item. While a text-entry mode is active, mode-specific hints take
     // over (the same convention as the dir view).
     let help_bar_lines: Vec<Line<'static>> =
-        if matches!(mode, SessionMode::Search { .. }) {
+        if matches!(mode, SessionMode::SaveSession { .. }) {
+            vec![Line::from("s=activate  Enter=save  Esc=cancel")]
+        } else if matches!(mode, SessionMode::Search { .. }) {
             vec![Line::from("/=activate  Enter=jump  Esc=cancel")]
         } else if matches!(mode, SessionMode::Command { .. }) {
             vec![Line::from(":=activate  Enter=run  Esc=cancel")]
@@ -237,7 +239,24 @@ pub(super) fn TextCompareView(
             // Status bar or input component depending on mode. Text entry
             // uses SearchInput, which owns its exclusive input layer; the
             // activate key matches the key that entered the mode.
-            if let SessionMode::Search { query } = &mode {
+            if let SessionMode::SaveSession { name } = &mode {
+                SearchInput(
+                    value: name.clone(),
+                    placeholder: "Session name...".to_string(),
+                    is_editing: true,
+                    activate_key: KeyCode::Char('s'),
+                    on_change: Handler::from(move |val: String| {
+                        set_mode_buffer(val);
+                    }),
+                    on_submit: Handler::from(move |val: String| -> bool {
+                        submit_save_name(val)
+                    }),
+                    clear_on_escape: true,
+                    on_clear: Handler::from(move |_: ()| {
+                        set_active_mode(SessionMode::Normal);
+                    }),
+                )
+            } else if let SessionMode::Search { query } = &mode {
                 SearchInput(
                     value: query.clone(),
                     placeholder: "Search lines...".to_string(),

@@ -595,6 +595,27 @@ const KEYMAP: &[KeyBinding] = &[
         cmd: Cmd::StartCommand,
         help: Some((":", "command")),
     },
+    KeyBinding {
+        key: KeyCode::Char('s'),
+        modifiers: NONE,
+        scope: KeyScope::TextNormal,
+        cmd: Cmd::StartSaveSession,
+        help: Some(("s", "save")),
+    },
+    KeyBinding {
+        key: KeyCode::Char('O'),
+        modifiers: NONE,
+        scope: KeyScope::TextNormal,
+        cmd: Cmd::OpenSessionBrowser,
+        help: Some(("O", "sessions")),
+    },
+    KeyBinding {
+        key: KeyCode::Char(','),
+        modifiers: NONE,
+        scope: KeyScope::TextNormal,
+        cmd: Cmd::OpenSettings,
+        help: Some((",", "settings")),
+    },
     // -- Transfer dialog (its own input layer; the `OptionList` inside
     //    owns j/k/Enter, so only the accelerators are listed here). --
     KeyBinding {
@@ -1809,6 +1830,7 @@ mod tests {
     use ratatui_kit::crossterm::event::KeyEvent;
 
     use super::*;
+    use crate::state::{TextRules, TextSource};
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, NONE)
@@ -1824,6 +1846,11 @@ mod tests {
             Endpoint::local(PathBuf::from("/right")),
             diff,
             Grammar::plain_text(),
+            TextSource {
+                left: left.to_string(),
+                right: right.to_string(),
+                rules: TextRules::default(),
+            },
         )
     }
 
@@ -2430,6 +2457,42 @@ mod tests {
             &session.ui.mode,
             SessionMode::SaveSession { name } if name.is_empty()
         ));
+    }
+
+    #[test]
+    fn text_tabs_bind_save_sessions_and_settings() {
+        let mut session = text_session();
+
+        // The same session tools that the dir view offers are available on
+        // a text tab in normal mode.
+        assert_eq!(
+            press(&mut session, KeyCode::Char('s')),
+            Some(SessionAction::None)
+        );
+        assert!(matches!(
+            &session.ui.mode,
+            SessionMode::SaveSession { name } if name.is_empty()
+        ));
+        assert!(press(&mut session, KeyCode::Esc).is_some());
+        assert_eq!(session.ui.mode, SessionMode::Normal);
+
+        assert_eq!(
+            press(&mut session, KeyCode::Char('O')),
+            Some(SessionAction::ListSessions)
+        );
+        assert!(matches!(
+            &session.ui.mode,
+            SessionMode::SessionBrowser { saved_sessions }
+                if saved_sessions.is_empty()
+        ));
+        assert!(press(&mut session, KeyCode::Esc).is_some());
+        assert_eq!(session.ui.mode, SessionMode::Normal);
+
+        assert_eq!(
+            press(&mut session, KeyCode::Char(',')),
+            Some(SessionAction::None)
+        );
+        assert_eq!(session.ui.mode, SessionMode::Settings);
     }
 
     #[test]

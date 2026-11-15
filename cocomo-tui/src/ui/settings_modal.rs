@@ -9,12 +9,14 @@
 
 //! Settings modal: the `,` entry point for the per-session toggles.
 //!
-//! The modal lists the two session settings (content comparison and
-//! hiding identical entries) with their current values in the hint column
-//! of an [`OptionList`]; `Enter` toggles the highlighted entry and keeps
-//! the modal open, so several settings can be changed in a row, and `Esc`
-//! closes it. The entries mirror the `C` and `F` bindings — the modal is a
-//! discoverable front for the same state, not a second source of truth.
+//! The modal lists the settings of the active session kind with their
+//! current values in the hint column of an [`OptionList`]: folder sessions
+//! get content comparison and hiding identical entries, text sessions get
+//! the three text rule toggles. `Enter` toggles the highlighted entry and
+//! keeps the modal open, so several settings can be changed in a row, and
+//! `Esc` closes it. The dir entries mirror the `C` and `F` bindings — the
+//! modal is a discoverable front for the same state, not a second source
+//! of truth.
 //!
 //! Like `TransferDialog` the component lives in the App shell and reads
 //! the active session. Its handler owns only `Esc`; `j`/`k`/`Enter` are
@@ -50,23 +52,44 @@ pub(super) fn SettingsModal(
     let theme = hooks.use_component_theme::<CocomoTheme>();
 
     // Build the rows from the active session's current settings, so the
-    // hints always reflect the effective state. The row count is fixed, so
-    // rebuilding them per frame leaves the list's cursor where it is.
+    // hints always reflect the effective state. Only the entries that
+    // apply to the session kind are listed, so no toggle is a silent
+    // no-op; the list cursor stays on the same row across rebuilds.
     let rows: Option<Vec<OptionItem<SettingItem>>> = app_handle
         .read()
         .active()
         .filter(|s| matches!(s.ui.mode, SessionMode::Settings))
         .map(|s| {
-            let dir = s.dir();
-            vec![
-                OptionItem::new(
-                    SettingItem::CompareContent,
-                    "Compare content",
-                )
-                .hint(on_off(dir.is_some_and(|d| d.compare_content))),
-                OptionItem::new(SettingItem::HideSame, "Hide identical")
-                    .hint(on_off(dir.is_some_and(|d| !d.shows_equal()))),
-            ]
+            if let Some(dir) = s.dir() {
+                vec![
+                    OptionItem::new(
+                        SettingItem::CompareContent,
+                        "Compare content",
+                    )
+                    .hint(on_off(dir.compare_content)),
+                    OptionItem::new(SettingItem::HideSame, "Hide identical")
+                        .hint(on_off(!dir.shows_equal())),
+                ]
+            } else {
+                let rules = s.text().map(|t| t.source.rules);
+                vec![
+                    OptionItem::new(
+                        SettingItem::IgnoreWhitespace,
+                        "Ignore whitespace",
+                    )
+                    .hint(on_off(rules.is_some_and(|r| r.ignore_whitespace))),
+                    OptionItem::new(
+                        SettingItem::SkipBlankLines,
+                        "Skip blank lines",
+                    )
+                    .hint(on_off(rules.is_some_and(|r| r.skip_blank_lines))),
+                    OptionItem::new(
+                        SettingItem::SkipComments,
+                        "Skip comments",
+                    )
+                    .hint(on_off(rules.is_some_and(|r| r.skip_comments))),
+                ]
+            }
         });
     let open = rows.is_some();
 
@@ -102,10 +125,12 @@ pub(super) fn SettingsModal(
     element!(
         Modal(
             open: true,
-            // Reuse this component's layer; see `FilterPanel`.
+            // Reuse this component's layer; see `FilterPanel`. The height
+            // follows the entry count (2 rows for dir, 3 for text) plus
+            // the border, padding and titles.
             layer: Some(layer),
             width: Constraint::Length(48),
-            height: Constraint::Length(9),
+            height: Constraint::Length(items.len() as u16 + 7),
         ) {
             Border(
                 flex_direction: Direction::Vertical,

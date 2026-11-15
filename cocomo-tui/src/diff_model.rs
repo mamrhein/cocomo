@@ -74,6 +74,7 @@ mod tests {
     use cocomo_lib::{Endpoint, Grammar, TextCompareSettings, compare_texts};
 
     use super::*;
+    use crate::state::{TextRules, TextSource};
 
     /// Text session with 12 merged rows: line 3 differs, lines 4 and 5
     /// were added on the right, line 7 (left) differs against line 9
@@ -87,6 +88,11 @@ mod tests {
             Endpoint::local(PathBuf::from("/right")),
             diff,
             Grammar::plain_text(),
+            TextSource {
+                left: left.to_string(),
+                right: right.to_string(),
+                rules: TextRules::default(),
+            },
         )
     }
 

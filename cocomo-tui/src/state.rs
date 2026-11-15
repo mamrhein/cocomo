@@ -25,7 +25,8 @@ use std::{
 
 use cocomo_lib::{
     DirComparison, DirEntry, DirEntryStatus, Endpoint, Grammar, MergedDiffRow,
-    SyncOperation, SyncResult, TextDiff, TransferAction, TransferItem,
+    SessionSettings, SyncOperation, SyncResult, TextCompareSettings, TextDiff,
+    TransferAction, TransferItem, WhitespaceMode, compare_texts,
     filter::DisplayFilters,
     report::{ReportConfig, ReportFormat},
 };
@@ -600,12 +601,27 @@ impl FilterRow {
 }
 
 /// A toggleable entry of the settings modal (`,`).
+///
+/// The modal only offers the items that apply to the active session kind:
+/// [`SettingItem::CompareContent`] and [`SettingItem::HideSame`] are
+/// folder-session items, the text-rule items are text-session items, so no
+/// control in the modal is ever a no-op.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SettingItem {
-    /// Toggle content comparison (mirrors `C`).
+    /// Toggle content comparison (mirrors `C`, folder sessions).
     CompareContent,
-    /// Toggle hiding identical entries (mirrors `F`).
+    /// Toggle hiding identical entries (mirrors `F`, folder sessions).
     HideSame,
+    /// Ignore whitespace differences in the diff (mirrors
+    /// `SessionSettings::ignore_whitespace`, text sessions).
+    IgnoreWhitespace,
+    /// Skip blank lines in the diff (mirrors
+    /// `SessionSettings::skip_blank_lines`, text sessions).
+    SkipBlankLines,
+    /// Skip comment lines in the diff (mirrors
+    /// `SessionSettings::skip_comments`, text sessions; only meaningful
+    /// with a grammar that classifies comments).
+    SkipComments,
 }
 
 /// A [`ReportConfig`] with field-wise equality.
@@ -794,6 +810,62 @@ pub struct DirRow<'a> {
     pub tree_prefix: String,
 }
 
+/// The comparison rules a text session applies to its content.
+///
+/// Mirrors the text-related [`SessionSettings`] fields so a saved text
+/// session round-trips its rules through the shared session-file format.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TextRules {
+    /// Ignore whitespace differences.
+    pub ignore_whitespace: bool,
+    /// Skip blank lines.
+    pub skip_blank_lines: bool,
+    /// Skip comment lines; requires a grammar that classifies comments.
+    pub skip_comments: bool,
+}
+
+impl TextRules {
+    /// The rules stored in a saved session config.
+    pub fn from_settings(settings: &SessionSettings) -> Self {
+        Self {
+            ignore_whitespace: settings.ignore_whitespace,
+            skip_blank_lines: settings.skip_blank_lines,
+            skip_comments: settings.skip_comments,
+        }
+    }
+
+    /// The `cocomo-lib` comparison settings these rules produce for
+    /// `grammar`.
+    pub fn compare_settings(&self, grammar: &Grammar) -> TextCompareSettings {
+        TextCompareSettings {
+            grammar: Some(grammar.clone()),
+            whitespace_mode: if self.ignore_whitespace {
+                WhitespaceMode::Insensitive
+            } else {
+                WhitespaceMode::Sensitive
+            },
+            ignore_blank_lines: self.skip_blank_lines,
+            ignore_comments: self.skip_comments,
+            ..TextCompareSettings::new()
+        }
+    }
+}
+
+/// The file contents a text diff was computed from, plus the rules that
+/// produced it.
+///
+/// Retained on the session so a rule toggle in the settings modal can
+/// re-run the diff synchronously instead of re-reading the files.
+#[derive(Clone, Debug, Default)]
+pub struct TextSource {
+    /// Full content of the left file.
+    pub left: String,
+    /// Full content of the right file.
+    pub right: String,
+    /// The rules the current diff was computed with.
+    pub rules: TextRules,
+}
+
 /// Text diff state: the diff result plus the derived display model.
 pub struct TextDiffView {
     /// Text diff result, or `None` while loading.
@@ -807,6 +879,9 @@ pub struct TextDiffView {
     pub merged_rows: Vec<MergedDiffRow>,
     /// Grammar used for syntax classification.
     pub grammar: Grammar,
+    /// The compared contents and the rules the current diff was computed
+    /// with (see [`TextSource`]).
+    pub source: TextSource,
 }
 
 impl TextDiffView {
@@ -817,6 +892,15 @@ impl TextDiffView {
             .as_ref()
             .map_or_else(Vec::new, TextDiff::merged_rows);
         self.text_diff = text_diff;
+    }
+
+    /// Re-run the diff from the retained [`Self::source`] contents with
+    /// the current rules, keeping [`Self::merged_rows`] in sync.
+    pub fn recompare_with_rules(&mut self) {
+        let settings = self.source.rules.compare_settings(&self.grammar);
+        let diff =
+            compare_texts(&self.source.left, &self.source.right, &settings);
+        self.set_text_diff(Some(diff));
     }
 }
 
@@ -881,11 +965,14 @@ impl SessionView {
     ///
     /// The merged row model is derived from the diff at construction, so
     /// the session always carries the exact rows its view renders.
+    /// `source` must be the content `text_diff` was computed from, with
+    /// the rules that produced it, so rule toggles can re-run the diff.
     pub fn new_text_compare(
         left: Endpoint,
         right: Endpoint,
         text_diff: TextDiff,
         grammar: Grammar,
+        source: TextSource,
     ) -> Self {
         let merged_rows = text_diff.merged_rows();
         Self {
@@ -894,6 +981,7 @@ impl SessionView {
                 text_diff: Some(text_diff),
                 merged_rows,
                 grammar,
+                source,
             }),
             ui: UiState::default(),
         }
@@ -1713,6 +1801,7 @@ mod tests {
             Endpoint::local("/right"),
             TextDiff::default(),
             Grammar::plain_text(),
+            TextSource::default(),
         );
         assert!(text.text().is_some());
         assert!(text.dir().is_none());
@@ -2133,6 +2222,11 @@ mod tests {
             Endpoint::local("/right"),
             diff,
             Grammar::plain_text(),
+            TextSource {
+                left: "fn one()\nfn two()\n".into(),
+                right: "fn one()\nlet THREE = 3;\n".into(),
+                rules: TextRules::default(),
+            },
         );
 
         // A match only on the right side is found, and only on the left.
@@ -2593,6 +2687,7 @@ mod tests {
             Endpoint::local("/right/a.txt"),
             TextDiff::default(),
             Grammar::plain_text(),
+            TextSource::default(),
         );
         let target = text.transfer_target().unwrap();
         assert_eq!(target.name, "a.txt");
@@ -2606,6 +2701,7 @@ mod tests {
             Endpoint::local("/right/b.txt"),
             TextDiff::default(),
             Grammar::plain_text(),
+            TextSource::default(),
         );
         let target = mismatched.transfer_target().unwrap();
         assert!(!target.has_left && !target.has_right);
