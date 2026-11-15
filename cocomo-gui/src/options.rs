@@ -105,6 +105,38 @@ const THEME_PREFERENCES: [ThemePreference; 3] = [
     ThemePreference::Dark,
 ];
 
+/// What a window does once its last tab has closed.
+///
+/// A window is never left showing the closed tab's view under an empty tab
+/// bar; the preference decides which of the two honest outcomes it takes
+/// instead (see [`crate::session_manager::GuiSessionManager`]).
+#[derive(
+    Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum LastTabAction {
+    /// Keep the window open and show the Home launcher.
+    #[default]
+    ShowHome,
+    /// Close the window. Since the app quits when its last window closes,
+    /// this ends the run when the window was the only one.
+    CloseWindow,
+}
+
+impl LastTabAction {
+    /// Display label for the Options dialog.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::ShowHome => "Show Home",
+            Self::CloseWindow => "Close the window",
+        }
+    }
+}
+
+/// The last-tab actions in display order.
+const LAST_TAB_ACTIONS: [LastTabAction; 2] =
+    [LastTabAction::ShowHome, LastTabAction::CloseWindow];
+
 /// The persisted application preferences.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct AppOptions {
@@ -118,6 +150,9 @@ pub struct AppOptions {
     /// horizontal row instead of stacking them.
     #[serde(default)]
     pub single_row_toolbar: bool,
+    /// What happens when the last tab of a window closes.
+    #[serde(default)]
+    pub last_tab_action: LastTabAction,
     /// Which light/dark mode to use.
     #[serde(default)]
     pub theme: ThemePreference,
@@ -140,6 +175,7 @@ impl Default for AppOptions {
             restore_workspace_on_launch: true,
             auto_save_sessions: true,
             single_row_toolbar: false,
+            last_tab_action: LastTabAction::default(),
             theme: ThemePreference::default(),
             colors: ColorOverrides::default(),
             commands: HashMap::new(),
@@ -396,12 +432,40 @@ fn render_general_page(draft: &Entity<OptionsDraft>, cx: &App) -> AnyElement {
             }))
     };
 
+    let last_tab_action = draft.read(cx).working.last_tab_action;
+    let last_tab_row = {
+        let draft_action = draft.clone();
+        h_flex()
+            .items_center()
+            .gap_2()
+            .child(Label::new("When the last tab closes:").text_sm())
+            .children(LAST_TAB_ACTIONS.iter().enumerate().map(
+                |(i, action)| {
+                    let action = *action;
+                    let draft_btn = draft_action.clone();
+                    Button::new(("options_last_tab_action", i))
+                        .label(action.label())
+                        .ghost()
+                        .small()
+                        .selected(action == last_tab_action)
+                        .accessibility_label(action.label())
+                        .on_click(move |_, _, cx| {
+                            draft_btn.update(cx, |d, cx| {
+                                d.working.last_tab_action = action;
+                                cx.notify();
+                            });
+                        })
+                },
+            ))
+    };
+
     v_flex()
         .gap_3()
         .child(restore_switch)
         .child(auto_save_switch)
         .child(single_row_switch)
         .child(theme_row)
+        .child(last_tab_row)
         .child(
             div()
                 .text_xs()
@@ -723,6 +787,10 @@ mod tests {
         let options = AppOptions::default();
         assert!(options.restore_workspace_on_launch);
         assert!(options.auto_save_sessions);
+        // A window must never end up with an empty tab bar over a stale
+        // view, so a preference is always in effect; Home is the gentle
+        // default.
+        assert_eq!(options.last_tab_action, LastTabAction::ShowHome);
         assert!(options.command_visible("session.save"));
         assert_eq!(options.command_binding("session.save"), None);
     }
@@ -753,6 +821,7 @@ mod tests {
             },
         );
         options.theme = ThemePreference::Dark;
+        options.last_tab_action = LastTabAction::CloseWindow;
         let text = serde_json::to_string(&options).unwrap();
         let back: AppOptions = serde_json::from_str(&text).unwrap();
         assert_eq!(back.colors.important.as_deref(), Some("#ff0000"));
@@ -761,6 +830,7 @@ mod tests {
             Some("cmd-s".to_string().as_str())
         );
         assert_eq!(back.theme, ThemePreference::Dark);
+        assert_eq!(back.last_tab_action, LastTabAction::CloseWindow);
     }
 
     #[test]
@@ -770,5 +840,6 @@ mod tests {
         assert!(back.restore_workspace_on_launch);
         assert!(back.auto_save_sessions);
         assert_eq!(back.theme, ThemePreference::System);
+        assert_eq!(back.last_tab_action, LastTabAction::ShowHome);
     }
 }

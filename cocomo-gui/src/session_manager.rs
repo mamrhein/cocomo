@@ -47,6 +47,7 @@ use crate::{
     credentials::{DialogPrompter, RemoteOpen, resolve_remote},
     file_formats::FileViewKind,
     log::{self, LogLevel},
+    options::{AppOptions, LastTabAction},
     tabview::TabEntity,
     workspace::WindowWorkspace,
 };
@@ -705,6 +706,15 @@ impl GuiSessionManager {
     /// Return the active session index.
     pub fn active_index(&self) -> usize {
         self.active_index
+    }
+
+    /// Return the stable id of the active tab, or `None` when no tab is open.
+    ///
+    /// The window root diffs this against its previous render, so replacing
+    /// the active tab re-syncs the content even when the index stays the
+    /// same — which is exactly what closing the last tab does.
+    pub fn active_tab_id(&self) -> Option<usize> {
+        self.open_sessions.get(self.active_index).map(|s| s.tab_id)
     }
 
     /// Return the number of open sessions.
@@ -1505,6 +1515,33 @@ impl GuiSessionManager {
         );
         self.adjust_active_index(index);
         cx.notify();
+        self.after_last_tab_closed(cx);
+    }
+
+    /// Apply the last-tab preference to this window.
+    ///
+    /// Every close path ends here once its tab list has gone empty, so a
+    /// window never sits with an empty tab bar above the view of the tab it
+    /// just closed: either Home takes over as the launcher, or the window
+    /// closes (which ends the run when it was the last one).
+    fn after_last_tab_closed(&mut self, cx: &mut Context<Self>) {
+        if !self.open_sessions.is_empty() {
+            return;
+        }
+        // The options global is installed before any window exists; falling
+        // back to the default keeps a bare manager usable in tests.
+        let action = cx
+            .try_global::<AppOptions>()
+            .map_or_else(LastTabAction::default, |options| {
+                options.last_tab_action
+            });
+        match action {
+            LastTabAction::ShowHome => self.open_home(cx),
+            LastTabAction::CloseWindow => {
+                let manager_id = cx.entity_id();
+                crate::windows::close_window_for(manager_id, cx);
+            }
+        }
     }
 
     /// Close the session at `index`, prompting first when it has unsaved
@@ -1567,6 +1604,7 @@ impl GuiSessionManager {
             cx,
         );
         cx.notify();
+        self.after_last_tab_closed(cx);
     }
 
     /// Close all sessions of this window, prompting once when any of
@@ -2226,9 +2264,12 @@ mod tests {
     }
 
     #[gpui::test]
-    fn close_all_sessions_empties_the_manager(cx: &mut TestAppContext) {
+    fn close_all_sessions_leaves_only_home(cx: &mut TestAppContext) {
         let _rt = init_tokio_handle();
-        cx.update(|cx| cx.set_global(crate::log::LogBuffer::default()));
+        cx.update(|cx| {
+            cx.set_global(crate::log::LogBuffer::default());
+            cx.set_global(AppOptions::default());
+        });
         let mgr = manager_in(cx, "cocomo-test-close-all");
         mgr.update(cx, |m, cx| {
             m.open_session_config(config_named("a"), cx).unwrap();
@@ -2239,9 +2280,67 @@ mod tests {
 
             m.close_all_sessions(cx);
 
-            assert!(m.is_empty());
+            // The sessions are gone, and the window falls back to Home
+            // rather than to an empty tab bar.
+            assert_eq!(m.len(), 1);
             assert_eq!(m.active_index(), 0);
+            assert_eq!(
+                m.active_config().unwrap().session_type,
+                SessionType::Home
+            );
             assert!(!m.has_dirty());
+        });
+    }
+
+    /// Closing the last tab must not leave the window on an empty tab list:
+    /// the default preference hands it to Home.
+    #[gpui::test]
+    fn closing_the_last_tab_shows_home(cx: &mut TestAppContext) {
+        let _rt = init_tokio_handle();
+        cx.update(|cx| {
+            cx.set_global(crate::log::LogBuffer::default());
+            cx.set_global(AppOptions::default());
+        });
+        let mgr = manager_in(cx, "cocomo-test-last-tab-home");
+        let closed_tab = mgr.update(cx, |m, cx| {
+            m.open_session_config(config_named("a"), cx).unwrap();
+            m.active_tab_id().expect("one open tab")
+        });
+        mgr.update(cx, |m, cx| m.close_session(0, cx));
+        mgr.read_with(cx, |m, _| {
+            assert_eq!(m.len(), 1);
+            assert_eq!(
+                m.active_config().unwrap().session_type,
+                SessionType::Home
+            );
+            // The index is 0 again, exactly as it was for the closed tab, so
+            // only the tab id tells the window root that the content
+            // changed. Without this, the closed tab's view stays on screen.
+            let home_tab = m.active_tab_id().expect("the home tab is active");
+            assert_ne!(home_tab, closed_tab);
+        });
+    }
+
+    /// The alternative preference closes the window instead. No window is
+    /// registered in this test app, so the close resolves to nothing and the
+    /// manager is left with no tabs — what matters here is that no Home tab
+    /// is inserted behind the user's back.
+    #[gpui::test]
+    fn closing_the_last_tab_can_close_the_window(cx: &mut TestAppContext) {
+        let _rt = init_tokio_handle();
+        cx.update(|cx| {
+            cx.set_global(crate::log::LogBuffer::default());
+            cx.set_global(AppOptions {
+                last_tab_action: LastTabAction::CloseWindow,
+                ..AppOptions::default()
+            });
+        });
+        let mgr = manager_in(cx, "cocomo-test-last-tab-close");
+        mgr.update(cx, |m, cx| {
+            m.open_session_config(config_named("a"), cx).unwrap();
+            m.close_session(0, cx);
+            assert!(m.is_empty());
+            assert_eq!(m.active_tab_id(), None);
         });
     }
 

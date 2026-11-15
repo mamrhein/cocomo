@@ -20,7 +20,7 @@
 
 use gpui::{
     AnyWindowHandle, App, AppContext as _, BorrowAppContext as _, Bounds,
-    Entity, Global, Window, WindowId, WindowOptions, px, size,
+    Entity, EntityId, Global, Window, WindowId, WindowOptions, px, size,
 };
 
 use crate::{
@@ -266,6 +266,34 @@ pub fn refresh_all_windows(cx: &mut App) {
     for handle in handles {
         let _ = handle.update(cx, |_, window, _| window.refresh());
     }
+}
+
+/// Close the window that owns the tabs of `manager_id`.
+///
+/// This is the "close the window" outcome of the last-tab preference: with
+/// [`gpui::QuitMode::LastWindowClosed`] it ends the run when the window was
+/// the last one, and leaves the other windows alone when it was not.
+///
+/// The request arrives from inside that window's own update (a tab's close
+/// button, a menu dispatch), so removing the window there would re-enter it.
+/// The removal is deferred to the end of the effect cycle, the same way
+/// [`defer_window_update`] defers its touch.
+pub fn close_window_for(manager_id: EntityId, cx: &mut App) {
+    let Some(handle) =
+        cx.try_global::<WindowRegistry>().and_then(|registry| {
+            registry
+                .entries
+                .iter()
+                .find(|entry| entry.manager.entity_id() == manager_id)
+                .map(|entry| entry.handle)
+        })
+    else {
+        return;
+    };
+    cx.defer(move |cx| {
+        // The window may already be gone; there is then nothing left to close.
+        let _ = handle.update(cx, |_, window, _| window.remove_window());
+    });
 }
 
 /// Close every live window.

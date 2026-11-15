@@ -582,8 +582,10 @@ pub struct WindowRoot {
     session_manager: Entity<GuiSessionManager>,
     /// Navigation stack managing tab content visibility.
     nav_stack_state: Entity<NavStackState>,
-    /// Last known active tab index, for diffing against the session manager.
-    last_active_index: usize,
+    /// Stable id of the active tab, for diffing against the session
+    /// manager. An id rather than an index, because closing the last tab
+    /// hands index 0 to whatever comes next.
+    last_active_tab: Option<usize>,
     /// Last menu snapshot pushed to the menu bar, so the bar is rebuilt
     /// only when it actually changes.
     last_menu_state: Option<MenuState>,
@@ -660,7 +662,7 @@ impl WindowRoot {
         Self {
             session_manager,
             nav_stack_state: cx.new(|_| NavStackState::new()),
-            last_active_index: 0,
+            last_active_tab: None,
             last_menu_state: None,
             #[cfg(not(target_os = "macos"))]
             app_menu_bar,
@@ -757,10 +759,13 @@ impl Render for WindowRoot {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let mgr = self.session_manager.read(cx);
-        let active_index = mgr.active_index();
-        let tabs = mgr.tab_entities();
-        let active_tab = tabs.get(active_index).cloned();
+        let (active_tab_id, active_tab) = {
+            let mgr = self.session_manager.read(cx);
+            (
+                mgr.active_tab_id(),
+                mgr.tab_entities().get(mgr.active_index()).cloned(),
+            )
+        };
 
         // Sync the NavStackState with the active tab. When the active tab
         // changes or the stack is empty, clear and push the new view,
@@ -770,26 +775,37 @@ impl Render for WindowRoot {
         // effect of `render`.
         // NavMotion::Immediate switches views without animation, which is
         // appropriate for tab switching.
-        let mut sync_title: Option<SharedString> = None;
-        if (active_index != self.last_active_index
-            || self.nav_stack_state.read(cx).is_empty())
-            && let Some(tab) = active_tab.as_ref()
+        // The active tab is identified by its tab id rather than its index:
+        // closing the last tab leaves index 0 in place for whatever comes
+        // next (Home, or nothing while the window closes), and an index
+        // comparison would keep showing the closed tab's view.
+        if active_tab_id != self.last_active_tab
+            || (active_tab.is_some()
+                && self.nav_stack_state.read(cx).is_empty())
         {
-            let view = tab.any_view();
-            let focus = tab.focus_handle(cx);
-            let title = tab.window_title(cx);
-            self.nav_stack_state.update(cx, |state, cx| {
-                state.clear(cx);
-                state.push(view, NavMotion::Immediate, cx);
-            });
-            self.last_active_index = active_index;
-            focus.focus(window, cx);
-            sync_title = Some(title);
-        }
-        // The session-manager read borrow ends here, so the window title
-        // can be set (it needs `&mut Window`).
-        if let Some(title) = sync_title {
-            window.set_window_title(&title);
+            match active_tab.as_ref() {
+                Some(tab) => {
+                    let view = tab.any_view();
+                    let focus = tab.focus_handle(cx);
+                    let title = tab.window_title(cx);
+                    self.nav_stack_state.update(cx, |state, cx| {
+                        state.clear(cx);
+                        state.push(view, NavMotion::Immediate, cx);
+                    });
+                    focus.focus(window, cx);
+                    window.set_window_title(&title);
+                }
+                None => {
+                    // No tab is open: the last one closed and, per the
+                    // last-tab preference, the window is on its way out.
+                    // Dropping the closed tab's view keeps it from lingering
+                    // under an empty tab bar.
+                    self.nav_stack_state
+                        .update(cx, |state, cx| state.clear(cx));
+                    window.set_window_title("Cocomo");
+                }
+            }
+            self.last_active_tab = active_tab_id;
         }
 
         // Keep the native menu bar in sync with the active tab: folder-only
