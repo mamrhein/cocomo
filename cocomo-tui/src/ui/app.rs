@@ -33,6 +33,7 @@ use super::{
         dropdown_rect, flyout_rect, menu_title,
     },
     report_modal::ReportModal,
+    save_overwrite::SaveOverwriteModal,
     session_browser::SessionBrowser,
     settings_modal::SettingsModal,
     sync_confirm::SyncConfirmModal,
@@ -555,6 +556,9 @@ pub(crate) fn App(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             // Sync execution approval, driven by the active session's
             // sync-confirm mode.
             SyncConfirmModal()
+            // Save-overwrite prompt, driven by the active session's
+            // save-overwrite mode (a save whose name clashed).
+            SaveOverwriteModal()
             // Filter panel, session browser, settings, and report modal,
             // each driven by the active session's mode (at most one is
             // open at a time).

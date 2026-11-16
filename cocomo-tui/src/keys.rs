@@ -18,6 +18,7 @@
 //! transfer dialog, [`KeyScope::FilterPanel`], [`KeyScope::SessionBrowser`],
 //! [`KeyScope::Settings`] and [`KeyScope::Report`] to the modal panels,
 //! [`KeyScope::SyncConfirm`] to the sync approval modal,
+//! [`KeyScope::SaveOverwrite`] to the save-overwrite prompt,
 //! and [`KeyScope::Editing`] is the root-layer fallback while a text-entry
 //! mode is active.
 //!
@@ -95,6 +96,11 @@ pub enum KeyScope {
     /// and `Esc` reject it; `j`/`k`/`Enter` are owned by its `OptionList`
     /// child and deliberately not listed.
     SyncConfirm,
+    /// The save-overwrite prompt is open. `y` replaces the saved session,
+    /// `n` and `Esc` take the name back to the input instead; `j`/`k`/
+    /// `Enter` are owned by its `OptionList` child and deliberately not
+    /// listed.
+    SaveOverwrite,
     /// The report modal is open. `Enter` generates from every section but
     /// the format list (where the `Select` child owns it) and is handled
     /// dynamically, so it is deliberately not listed.
@@ -177,6 +183,11 @@ pub enum Cmd {
     Cancel,
     /// Execute the planned sync from the approval modal (`y`).
     SyncExecute,
+    /// Replace the already saved session (save-overwrite prompt, `y`).
+    SaveOverwriteConfirm,
+    /// Take the clashed name back to the save-name input (save-overwrite
+    /// prompt, `n`/`Esc`).
+    SaveOverwriteChangeName,
     /// Jump to the next difference group.
     NextDiff,
     /// Jump to the previous difference group.
@@ -743,6 +754,41 @@ const KEYMAP: &[KeyBinding] = &[
         cmd: Cmd::PanelClose,
         help: None,
     },
+    KeyBinding {
+        key: KeyCode::Char('y'),
+        modifiers: NONE,
+        scope: KeyScope::SaveOverwrite,
+        cmd: Cmd::SaveOverwriteConfirm,
+        help: None,
+    },
+    KeyBinding {
+        key: KeyCode::Char('Y'),
+        modifiers: NONE,
+        scope: KeyScope::SaveOverwrite,
+        cmd: Cmd::SaveOverwriteConfirm,
+        help: None,
+    },
+    KeyBinding {
+        key: KeyCode::Char('n'),
+        modifiers: NONE,
+        scope: KeyScope::SaveOverwrite,
+        cmd: Cmd::SaveOverwriteChangeName,
+        help: None,
+    },
+    KeyBinding {
+        key: KeyCode::Char('N'),
+        modifiers: NONE,
+        scope: KeyScope::SaveOverwrite,
+        cmd: Cmd::SaveOverwriteChangeName,
+        help: None,
+    },
+    KeyBinding {
+        key: KeyCode::Esc,
+        modifiers: NONE,
+        scope: KeyScope::SaveOverwrite,
+        cmd: Cmd::SaveOverwriteChangeName,
+        help: None,
+    },
     // -- Report modal. --
     KeyBinding {
         key: KeyCode::Esc,
@@ -1070,6 +1116,9 @@ pub fn handle_session_key(
         SessionMode::SyncConfirm => {
             return handle_sync_confirm_key(session, key);
         }
+        SessionMode::SaveOverwrite { .. } => {
+            return handle_save_overwrite_key(session, key);
+        }
         _ => {}
     }
     let scope = if session.ui.mode.is_editing() {
@@ -1245,6 +1294,30 @@ fn execute(cmd: Cmd, session: &mut SessionView) -> SessionAction {
             // executor.
             session.ui.mode = SessionMode::Normal;
             SessionAction::ExecuteSync
+        }
+        Cmd::SaveOverwriteConfirm => {
+            // Approving the prompt closes it and re-runs the save with the
+            // name-clash check disabled, replacing the saved session.
+            let SessionMode::SaveOverwrite { name } = &session.ui.mode else {
+                return SessionAction::None;
+            };
+            let name = name.clone();
+            session.ui.mode = SessionMode::Normal;
+            SessionAction::SaveSession {
+                name,
+                overwrite: true,
+            }
+        }
+        Cmd::SaveOverwriteChangeName => {
+            // Changing the name reopens the focused name input with the
+            // clashed name still in the buffer, caret at the end.
+            let SessionMode::SaveOverwrite { name } = &session.ui.mode else {
+                return SessionAction::None;
+            };
+            let name = name.clone();
+            let cursor = name.chars().count();
+            session.ui.mode = SessionMode::SaveSession { name, cursor };
+            SessionAction::None
         }
         Cmd::NextDiff => {
             jump_diff(session, 1);
@@ -1632,6 +1705,22 @@ fn handle_sync_confirm_key(
             dir.pending_sync = None;
         }
     }
+    Some(execute(cmd, session))
+}
+
+/// Handle a key for the open save-overwrite prompt.
+///
+/// The prompt owns `y` (replace the saved session) and `n`/`Esc` (take
+/// the name back to the input); `j`/`k`/`Enter` pass through to its
+/// `OptionList` child, which confirms the highlighted option.
+fn handle_save_overwrite_key(
+    session: &mut SessionView,
+    key: KeyEvent,
+) -> Option<SessionAction> {
+    if !matches!(session.ui.mode, SessionMode::SaveOverwrite { .. }) {
+        return None;
+    }
+    let cmd = lookup(KeyScope::SaveOverwrite, key)?;
     Some(execute(cmd, session))
 }
 
@@ -2935,6 +3024,56 @@ mod tests {
         session.ui.mode = SessionMode::SyncConfirm;
         assert_eq!(press(&mut session, KeyCode::Char('j')), None);
         assert_eq!(session.ui.table_state.selected(), Some(0));
+    }
+
+    #[test]
+    fn save_overwrite_scope_routes_both_decisions() {
+        // While the overwrite prompt is open it claims `y`/`Y` (replace
+        // the saved session, re-saving with the clash check disabled) and
+        // `n`/`N`/`Esc` (take the name back to the input); `j` stays
+        // unbound so the `OptionList` child in the same input layer
+        // navigates.
+        let mut session = dir_session();
+        for code in [KeyCode::Char('y'), KeyCode::Char('Y')] {
+            session.ui.mode = SessionMode::SaveOverwrite {
+                name: "left vs right".into(),
+            };
+            assert_eq!(
+                press(&mut session, code),
+                Some(SessionAction::SaveSession {
+                    name: "left vs right".into(),
+                    overwrite: true,
+                }),
+                "{:?}",
+                code,
+            );
+            assert_eq!(session.ui.mode, SessionMode::Normal, "{:?}", code);
+        }
+        for code in [KeyCode::Char('n'), KeyCode::Char('N'), KeyCode::Esc] {
+            session.ui.mode = SessionMode::SaveOverwrite {
+                name: "left vs right".into(),
+            };
+            assert_eq!(
+                press(&mut session, code),
+                Some(SessionAction::None),
+                "{:?}",
+                code
+            );
+            // The clashed name is back in the focused prompt's buffer.
+            assert!(
+                matches!(&session.ui.mode,
+                    SessionMode::SaveSession { name, cursor }
+                        if name == "left vs right" && *cursor == 13),
+                "{:?} -> {:?}",
+                code,
+                session.ui.mode,
+            );
+        }
+        session.ui.mode = SessionMode::SaveOverwrite {
+            name: "left vs right".into(),
+        };
+        assert_eq!(press(&mut session, KeyCode::Char('j')), None);
+        assert!(matches!(session.ui.mode, SessionMode::SaveOverwrite { .. }));
     }
 
     #[test]

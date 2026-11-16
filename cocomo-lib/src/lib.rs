@@ -137,7 +137,7 @@ pub use secrets::{NullPrompter, Prompter, Secrets, TtyPrompter};
 pub use session::{
     ColorOverrides, ProviderRef, Session, SessionConfig, SessionManager,
     SessionSettings, SessionType, default_session_dir, list_saved_sessions,
-    list_saved_sessions_in,
+    list_saved_sessions_in, session_file_exists, session_file_exists_in,
 };
 pub use sftp::{SftpConfig, SftpDirId, SftpFileId, SftpFs, SftpNodeId};
 pub use snapshot::{

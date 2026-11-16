@@ -34,6 +34,7 @@ use cocomo_lib::{
     Provider, SessionConfig, SessionType as LibSessionType, SyncOperation,
     SyncResult, SyncRules, compare_texts, default_session_dir,
     execute_transfers, list_saved_sessions, report::generate_report,
+    session_file_exists_in,
 };
 use ratatui_kit::crossterm::event::{KeyCode, KeyEvent};
 
@@ -740,7 +741,7 @@ pub(crate) fn process_session_action(action: SessionAction) {
                 "Syncing",
             );
         }
-        SessionAction::SaveSession { name } => {
+        SessionAction::SaveSession { name, overwrite } => {
             let Some(id) = active_session_id() else {
                 return;
             };
@@ -751,11 +752,19 @@ pub(crate) fn process_session_action(action: SessionAction) {
                     fs_err::tokio::create_dir_all(&session_dir)
                         .await
                         .map_err(|e| TuiError::io(&session_dir, e))?;
+                    // Without the user's approval from the overwrite
+                    // prompt, an existing file is never replaced; the clash
+                    // is reported back so the prompt can open.
+                    if !overwrite
+                        && session_file_exists_in(&session_dir, &name).await?
+                    {
+                        return Ok(SaveOutcome::Conflict { name });
+                    }
                     let path = session_dir.join(format!("{name}.toml"));
                     config.save_to_file(&path).await?;
-                    Ok(())
+                    Ok(SaveOutcome::Saved)
                 },
-                |_app, ()| {},
+                move |app, outcome| apply_save_outcome(app, id, outcome),
                 "Failed to save session",
                 "Saving session",
             );
@@ -939,6 +948,29 @@ pub(crate) fn process_session_action(action: SessionAction) {
     }
 }
 
+/// Outcome of a save task: the file was written, or the name clashed with
+/// an already saved session (`name` is the requested file name).
+enum SaveOutcome {
+    Saved,
+    Conflict { name: String },
+}
+
+/// Apply the result of a save task to the session that requested it.
+///
+/// A name clash opens the overwrite prompt — but only over `Normal`, so a
+/// mode the user entered while the task was running is never replaced
+/// (mirroring the sync-plan guard).
+fn apply_save_outcome(app: &mut AppState, id: usize, outcome: SaveOutcome) {
+    let SaveOutcome::Conflict { name } = outcome else {
+        return;
+    };
+    if let Some(s) = app.session_mut(id)
+        && matches!(s.ui.mode, SessionMode::Normal)
+    {
+        s.ui.mode = SessionMode::SaveOverwrite { name };
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Synchronous mutations
 // ---------------------------------------------------------------------------
@@ -1058,6 +1090,14 @@ pub(crate) fn dispatch_sync_confirm_key(key: KeyEvent) -> bool {
     dispatch_key(|s| matches!(s.ui.mode, SessionMode::SyncConfirm), key)
 }
 
+/// Handle a key press for the open save-overwrite prompt.
+pub(crate) fn dispatch_save_overwrite_key(key: KeyEvent) -> bool {
+    dispatch_key(
+        |s| matches!(s.ui.mode, SessionMode::SaveOverwrite { .. }),
+        key,
+    )
+}
+
 /// Approve the planned sync: close the confirmation modal and execute.
 ///
 /// Bound to the modal's confirm action (`y`/`Enter`). Execution re-derives
@@ -1094,6 +1134,47 @@ pub(crate) fn reject_sync() {
         if let Some(dir) = session.dir_mut() {
             dir.pending_sync = None;
         }
+    }
+}
+
+/// Approve the save-overwrite prompt: close it and re-run the save with
+/// the name-clash check disabled, replacing the saved session file.
+///
+/// Dispatched by the prompt's `Overwrite` option (`y`/`Enter`).
+pub(crate) fn confirm_overwrite() {
+    let action = {
+        let state = APP_STATE.state();
+        let mut app = state.write();
+        let Some(session) = app.active_mut().filter(|s| {
+            matches!(s.ui.mode, SessionMode::SaveOverwrite { .. })
+        }) else {
+            return;
+        };
+        let name = match &session.ui.mode {
+            SessionMode::SaveOverwrite { name } => name.clone(),
+            _ => return,
+        };
+        session.ui.mode = SessionMode::Normal;
+        SessionAction::SaveSession {
+            name,
+            overwrite: true,
+        }
+    };
+    process_session_action(action);
+}
+
+/// Leave the save-overwrite prompt back into the focused name input,
+/// keeping the clashed name ready to edit.
+///
+/// Dispatched by the prompt's `Change name` option (`n`/`Esc`).
+pub(crate) fn change_save_name() {
+    if let Some(session) = APP_STATE.state().write().active_mut() {
+        let name = match &session.ui.mode {
+            SessionMode::SaveOverwrite { name } => name.clone(),
+            _ => return,
+        };
+        let cursor = name.chars().count();
+        session.ui.mode = SessionMode::SaveSession { name, cursor };
     }
 }
 
@@ -1162,7 +1243,10 @@ pub(crate) fn submit_save_name(name: String) -> bool {
         session.ui.mode = SessionMode::Normal;
         name
     };
-    process_session_action(SessionAction::SaveSession { name });
+    process_session_action(SessionAction::SaveSession {
+        name,
+        overwrite: false,
+    });
     true
 }
 
@@ -2391,6 +2475,93 @@ mod tests {
         ));
         // With the prompt closed, keys fall through to lower layers.
         assert!(!dispatch_save_key(save_key(KeyCode::Char('x'))));
+    }
+
+    #[test]
+    fn save_conflict_opens_the_overwrite_prompt() {
+        let mut app = dir_app_state();
+        let id = app.active().unwrap().core.id;
+        apply_save_outcome(
+            &mut app,
+            id,
+            SaveOutcome::Conflict {
+                name: "demo".into(),
+            },
+        );
+        assert!(
+            matches!(&app.active().unwrap().ui.mode,
+                SessionMode::SaveOverwrite { name } if name == "demo"),
+            "a clash must open the prompt",
+        );
+        // A successful save of another task never closes the prompt.
+        apply_save_outcome(&mut app, id, SaveOutcome::Saved);
+        assert!(matches!(
+            app.active().unwrap().ui.mode,
+            SessionMode::SaveOverwrite { .. }
+        ));
+        // A successful save leaves `Normal` untouched.
+        let mut fresh = dir_app_state();
+        let fresh_id = fresh.active().unwrap().core.id;
+        apply_save_outcome(&mut fresh, fresh_id, SaveOutcome::Saved);
+        assert!(matches!(
+            fresh.active().unwrap().ui.mode,
+            SessionMode::Normal
+        ));
+    }
+
+    #[test]
+    fn save_conflict_does_not_stomp_another_mode() {
+        // A mode the user entered while the save task was running must
+        // survive the clash (mirroring the sync-plan guard).
+        let mut app = dir_app_state();
+        let id = app.active().unwrap().core.id;
+        app.active_mut().unwrap().ui.mode = SessionMode::Settings;
+        apply_save_outcome(
+            &mut app,
+            id,
+            SaveOutcome::Conflict {
+                name: "demo".into(),
+            },
+        );
+        assert!(matches!(
+            app.active().unwrap().ui.mode,
+            SessionMode::Settings
+        ));
+    }
+
+    #[test]
+    fn change_save_name_returns_to_the_focused_input() {
+        let mut app = dir_app_state();
+        app.active_mut().unwrap().ui.mode = SessionMode::SaveOverwrite {
+            name: "left vs right".into(),
+        };
+        APP_STATE.set(app);
+        change_save_name();
+        let state = APP_STATE.state();
+        let app = state.read();
+        // The clashed name is back in the editable buffer, caret at the
+        // end, ready for a distinguishing suffix.
+        assert!(
+            matches!(&app.active().unwrap().ui.mode,
+                SessionMode::SaveSession { name, cursor }
+                    if name == "left vs right" && *cursor == 13),
+            "got {:?}",
+            app.active().unwrap().ui.mode,
+        );
+    }
+
+    #[test]
+    fn overwrite_prompt_guards_are_inert_without_the_mode() {
+        // `confirm_overwrite` must not dispatch a save when no prompt is
+        // open (a stray dispatch here would also panic spawning its
+        // task), and the overwrite key dispatcher must not claim keys.
+        APP_STATE.set(dir_app_state());
+        confirm_overwrite();
+        assert!(!dispatch_save_overwrite_key(save_key(KeyCode::Char('y'))));
+        assert!(matches!(
+            APP_STATE.state().read().active().unwrap().ui.mode,
+            SessionMode::Normal
+        ));
     }
 
     #[test]

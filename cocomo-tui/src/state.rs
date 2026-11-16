@@ -71,6 +71,11 @@ pub enum SessionMode {
     /// [`SessionMode::Transfer`], the modal's exclusive input layer owns
     /// every key while it is open, so this is not a text-entry mode either.
     SyncConfirm,
+    /// A save name clashed with an already saved session; the overwrite
+    /// prompt awaits the decision, carrying the clashed `name`. Like
+    /// [`SessionMode::SyncConfirm`], the modal's exclusive input layer owns
+    /// every key while it is open, so this is not a text-entry mode either.
+    SaveOverwrite { name: String },
 }
 
 /// Which transfer the [`SessionMode::Transfer`] dialog offers.
@@ -667,7 +672,11 @@ pub enum SessionAction {
     /// approved.
     ExecuteSync,
     /// Save the current session config to a file.
-    SaveSession { name: String },
+    ///
+    /// With `overwrite` set to `false` the controller checks for a name
+    /// clash first and opens the overwrite prompt instead of silently
+    /// replacing the saved session.
+    SaveSession { name: String, overwrite: bool },
     /// Open the app-level session browser and list saved session files
     /// for loading.
     OpenSessionBrowser,
@@ -1837,6 +1846,16 @@ mod tests {
         // input layer, not through a text-entry mode guard, so `is_editing`
         // must stay `false` (mirroring `Transfer`).
         assert!(!SessionMode::SyncConfirm.is_editing());
+    }
+
+    #[test]
+    fn save_overwrite_is_not_an_editing_mode() {
+        // The overwrite prompt owns the keys through its own exclusive
+        // input layer; the name buffer it carries is fixed, not editable
+        // (changing the name returns to `SaveSession`).
+        assert!(
+            !SessionMode::SaveOverwrite { name: "demo".into() }.is_editing()
+        );
     }
 
     #[test]

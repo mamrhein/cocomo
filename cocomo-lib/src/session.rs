@@ -340,6 +340,27 @@ pub async fn list_saved_sessions_in(dir: &Path) -> Result<Vec<PathBuf>> {
     Ok(sessions)
 }
 
+/// Report whether the named session file (`.toml`) exists in the default
+/// session directory.
+pub async fn session_file_exists(name: &str) -> Result<bool> {
+    session_file_exists_in(&default_session_dir(), name).await
+}
+
+/// Report whether the named session file (`{name}.toml`) exists in `dir`.
+///
+/// A missing file — or a directory that does not exist yet — simply means
+/// "not saved"; any other I/O failure is returned with path context.
+pub async fn session_file_exists_in(dir: &Path, name: &str) -> Result<bool> {
+    let path = dir.join(format!("{name}.toml"));
+    match fs_err::tokio::try_exists(&path).await {
+        Ok(exists) => Ok(exists),
+        // `try_exists` reports NotFound when a parent directory is
+        // missing, which likewise means "not saved".
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(crate::error::wrap(e, FsOperation::Open, path)),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Runtime session
 // ---------------------------------------------------------------------------
@@ -983,5 +1004,28 @@ mod tests {
             .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
             .collect();
         assert_eq!(names, vec!["alpha.toml", "beta.toml"]);
+    }
+
+    #[tokio::test]
+    async fn session_file_exists_in_finds_saved_sessions() {
+        let dir = tempfile::tempdir().unwrap();
+        fs_err::tokio::write(dir.path().join("demo.toml"), "")
+            .await
+            .unwrap();
+        // A non-session file with the same stem does not count.
+        fs_err::tokio::write(dir.path().join("other.txt"), "")
+            .await
+            .unwrap();
+
+        assert!(session_file_exists_in(dir.path(), "demo").await.unwrap());
+        assert!(!session_file_exists_in(dir.path(), "other").await.unwrap());
+        assert!(!session_file_exists_in(dir.path(), "missing").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn session_file_exists_in_missing_dir_is_false() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("does-not-exist");
+        assert!(!session_file_exists_in(&missing, "demo").await.unwrap());
     }
 }
