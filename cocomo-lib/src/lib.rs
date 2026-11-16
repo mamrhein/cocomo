@@ -157,8 +157,8 @@ pub use text::{
 // on `tokio-util` directly.
 pub use tokio_util::sync::CancellationToken;
 pub use transfer::{
-    FsPair, TransferAction, TransferItem, TransferResult, execute_transfers,
-    plan_transfers,
+    FsPair, TransferAction, TransferFailure, TransferItem, TransferResult,
+    execute_transfers, plan_transfers,
 };
 pub use url::{Url, UrlError};
 pub use webdav::{

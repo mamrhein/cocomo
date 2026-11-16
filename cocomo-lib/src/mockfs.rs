@@ -144,7 +144,10 @@ static NEXT_FS_ID: AtomicU64 = AtomicU64::new(1);
 ///     MockFs::new("mock")
 ///         .with_dir("/root")
 ///         .with_file("/root/a.txt", "alpha")
-///         .with_error("/root/locked", FsError::PermissionDenied { .. }),
+///         .with_error(
+///             "/root/locked",
+///             FsError::permission_denied(FsOperation::Read, "/root/locked"),
+///         ),
 /// );
 /// ```
 #[derive(Debug)]
@@ -457,9 +460,7 @@ impl MockFs {
     /// addressed it.
     fn remove_subtree(&self, path: &Path) -> Result<()> {
         if self.node_at(path).is_none() {
-            return Err(FsError::NotFound {
-                path: path.to_path_buf(),
-            });
+            return Err(FsError::not_found(path.to_path_buf()));
         }
         let doomed = self.subtree(path);
         {
@@ -479,9 +480,7 @@ impl MockFs {
     /// [`MockFs::fixup_cache_after_move`]).
     fn move_subtree(&self, src: &Path, dst: &Path) -> Result<()> {
         if self.node_at(src).is_none() {
-            return Err(FsError::NotFound {
-                path: src.to_path_buf(),
-            });
+            return Err(FsError::not_found(src.to_path_buf()));
         }
         if self.is_occupied(dst) {
             return Err(FsError::InvalidArgument {
@@ -520,9 +519,7 @@ impl MockFs {
     /// produce for the new path.
     fn copy_subtree(&self, src: &Path, dst: &Path) -> Result<NodeId<u64>> {
         if self.node_at(src).is_none() {
-            return Err(FsError::NotFound {
-                path: src.to_path_buf(),
-            });
+            return Err(FsError::not_found(src.to_path_buf()));
         }
         if self.is_occupied(dst) {
             return Err(FsError::InvalidArgument {
@@ -577,9 +574,7 @@ impl MockFs {
                 self.upsert_node(node)
             }
             None => {
-                return Err(FsError::NotFound {
-                    path: dst.to_path_buf(),
-                });
+                return Err(FsError::not_found(dst.to_path_buf()));
             }
         };
         Ok(NodeId::new(id))
@@ -656,9 +651,7 @@ impl MockFs {
                 meta.is_symlink = true;
                 Ok(meta)
             }
-            None => Err(FsError::NotFound {
-                path: path.to_path_buf(),
-            }),
+            None => Err(FsError::not_found(path.to_path_buf())),
         }
     }
 
@@ -683,9 +676,7 @@ impl MockFs {
                 expected: "directory",
                 actual: "symlink",
             }),
-            None => Err(FsError::NotFound {
-                path: path.to_path_buf(),
-            }),
+            None => Err(FsError::not_found(path.to_path_buf())),
         }
     }
 
@@ -702,9 +693,7 @@ impl MockFs {
                 Some(MockNode::File(buf)) => {
                     Ok(Box::new(MockFile::new(buf.lock().as_slice())))
                 }
-                _ => Err(FsError::NotFound {
-                    path: path.to_path_buf(),
-                }),
+                _ => Err(FsError::not_found(path.to_path_buf())),
             },
             // Writing through a handle appends to the file's shared
             // buffer, so a later `read` on the same path observes what was
@@ -713,9 +702,7 @@ impl MockFs {
                 Some(MockNode::File(buf)) => {
                     Ok(Box::new(MockWritableFile::new(Arc::clone(&buf))))
                 }
-                _ => Err(FsError::NotFound {
-                    path: path.to_path_buf(),
-                }),
+                _ => Err(FsError::not_found(path.to_path_buf())),
             },
         }
     }
@@ -729,9 +716,7 @@ impl MockFs {
             return Err(err);
         }
         let Some(data) = self.content(path) else {
-            return Err(FsError::NotFound {
-                path: path.to_path_buf(),
-            });
+            return Err(FsError::not_found(path.to_path_buf()));
         };
         let Some(r) = range else {
             return Ok(data);
@@ -770,9 +755,7 @@ impl MockFs {
             return Ok(stream);
         }
         let Some(buf) = self.content(path) else {
-            return Err(FsError::NotFound {
-                path: path.to_path_buf(),
-            });
+            return Err(FsError::not_found(path.to_path_buf()));
         };
         let mut data = buf;
         // Chunk the content like a real provider so that streaming consumers
@@ -800,9 +783,7 @@ impl MockFs {
             return Err(err);
         }
         if self.node_at(path).is_none() {
-            return Err(FsError::NotFound {
-                path: path.to_path_buf(),
-            });
+            return Err(FsError::not_found(path.to_path_buf()));
         }
         if self.has_children(path) {
             return Err(FsError::InvalidArgument {
@@ -878,9 +859,7 @@ impl NodeFileSystem for MockFs {
             return match node {
                 Some(n) if n.is_deleted() => Err(FsError::StaleNode),
                 Some(_) => Ok(NodeId::new(id)),
-                None => Err(FsError::NotFound {
-                    path: path.to_path_buf(),
-                }),
+                None => Err(FsError::not_found(path.to_path_buf())),
             };
         }
         let name = path.file_name().map(OsStr::to_owned).unwrap_or_default();
@@ -906,9 +885,7 @@ impl NodeFileSystem for MockFs {
             )
             .with_parent(parent_id),
             None => {
-                return Err(FsError::NotFound {
-                    path: path.to_path_buf(),
-                });
+                return Err(FsError::not_found(path.to_path_buf()));
             }
         };
         let id = self.cache_node(node);
@@ -937,9 +914,10 @@ impl NodeFileSystem for MockFs {
         match nodes.get(id.get()).cloned() {
             Some(node) if node.is_deleted() => Err(FsError::StaleNode),
             Some(node) => Ok(node),
-            None => Err(FsError::NotFound {
-                path: PathBuf::from("(unknown node)"),
-            }),
+            None => Err(FsError::not_found_with_message(
+                PathBuf::from("(unknown node)"),
+                "node is not in the cache",
+            )),
         }
     }
 
@@ -955,9 +933,10 @@ impl NodeFileSystem for MockFs {
     ) -> Result<()> {
         let mut nodes = self.nodes.write();
         let Some(arc) = nodes.get_mut(id.get()) else {
-            return Err(FsError::NotFound {
-                path: PathBuf::from("(unknown node)"),
-            });
+            return Err(FsError::not_found_with_message(
+                PathBuf::from("(unknown node)"),
+                "node is not in the cache",
+            ));
         };
         // Like the real providers, the mock caches hashes in memory only;
         // the cached hash dies with the node.
@@ -1219,7 +1198,7 @@ impl WritableFileSystem for MockFs {
         let node = self.get_node(id)?;
         let old_path = node.path().to_path_buf();
         let Some(parent) = old_path.parent() else {
-            return Err(FsError::NotFound { path: old_path });
+            return Err(FsError::not_found(old_path));
         };
         let new_path = parent.join(new_name);
         if new_path == old_path {
@@ -1461,10 +1440,7 @@ mod tests {
 
     #[tokio::test]
     async fn injected_error_surfaces_on_all_operations() {
-        let err = FsError::PermissionDenied {
-            operation: FsOperation::Read,
-            path: "/secret".into(),
-        };
+        let err = FsError::permission_denied(FsOperation::Read, "/secret");
         let fs = MockFs::new("mock")
             .with_file("/secret", "x")
             .with_error("/secret", err);
@@ -1605,10 +1581,7 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_path_honours_injected_errors() {
-        let err = FsError::PermissionDenied {
-            operation: FsOperation::Resolve,
-            path: "/secret".into(),
-        };
+        let err = FsError::permission_denied(FsOperation::Resolve, "/secret");
         let fs = MockFs::new("mock")
             .with_file("/secret", "x")
             .with_error("/secret", err);
@@ -1716,10 +1689,7 @@ mod tests {
         );
         let locked = locked.with_error(
             "/locked.txt",
-            FsError::PermissionDenied {
-                operation: FsOperation::Write,
-                path: "/locked.txt".into(),
-            },
+            FsError::permission_denied(FsOperation::Write, "/locked.txt"),
         );
         assert!(matches!(
             locked.write_node(locked_id, Bytes::from_static(b"x")).await,

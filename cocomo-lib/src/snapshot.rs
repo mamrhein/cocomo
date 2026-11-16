@@ -726,10 +726,10 @@ mod tests {
             .with_dir("/root/sub")
             .with_error(
                 "/root/sub",
-                FsError::PermissionDenied {
-                    operation: FsOperation::ReadDir,
-                    path: PathBuf::from("/root/sub"),
-                },
+                FsError::permission_denied(
+                    FsOperation::ReadDir,
+                    PathBuf::from("/root/sub"),
+                ),
             );
 
         let result = capture_snapshot_node(

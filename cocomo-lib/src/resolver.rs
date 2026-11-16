@@ -247,6 +247,12 @@ impl Endpoint {
         &self.fs
     }
 
+    /// The URL addressing this side. Display-ready: local URLs render as
+    /// bare paths, remote URLs as `scheme://host/path`.
+    pub fn url(&self) -> &Url {
+        &self.url
+    }
+
     /// A shared handle to the servicing provider.
     pub fn fs_arc(&self) -> Arc<Provider> {
         self.fs.clone()

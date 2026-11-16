@@ -8,8 +8,8 @@
 // $Revision$
 
 use cocomo_lib::{
-    error::FsError, profile::ProfileError, provider::ProviderError,
-    resolver::ResolverError, url::UrlError,
+    TransferFailure, error::FsError, profile::ProfileError,
+    provider::ProviderError, resolver::ResolverError, url::UrlError,
 };
 
 // ---------------------------------------------------------------------------
@@ -40,6 +40,11 @@ pub enum CliError {
     /// this variant is returned.
     #[error("operation incomplete due to filesystem errors")]
     FsErrors(Vec<FsError>),
+    /// Per-item failures collected while executing a sync. Each failure
+    /// names the attempted action and the entry path; they are printed to
+    /// stderr before this variant is returned.
+    #[error("operation incomplete due to transfer errors")]
+    TransferErrors(Vec<TransferFailure>),
 }
 
 /// Map a shared [`ResolverError`] onto the corresponding [`CliError`]

@@ -70,7 +70,7 @@ async fn dir_compare_missing_root_returns_fs_error() {
             .await;
 
     match result {
-        Err(CliError::Fs(FsError::NotFound { path })) => {
+        Err(CliError::Fs(FsError::NotFound { path, .. })) => {
             assert_eq!(path, PathBuf::from("/left"));
         }
         other => panic!("expected Fs(NotFound), got {other:?}"),
@@ -87,10 +87,10 @@ async fn dir_compare_surfaces_mid_walk_file_error() {
         .with_file("/left/blocked.txt", "secret")
         .with_error(
             "/left/blocked.txt",
-            FsError::PermissionDenied {
-                operation: FsOperation::Read,
-                path: PathBuf::from("/left/blocked.txt"),
-            },
+            FsError::permission_denied(
+                FsOperation::Read,
+                PathBuf::from("/left/blocked.txt"),
+            ),
         )
         .with_dir("/right");
 
@@ -116,10 +116,10 @@ async fn dir_compare_surfaces_mid_walk_subdir_error() {
         .with_dir("/left/sub")
         .with_error(
             "/left/sub",
-            FsError::PermissionDenied {
-                operation: FsOperation::ReadDir,
-                path: PathBuf::from("/left/sub"),
-            },
+            FsError::permission_denied(
+                FsOperation::ReadDir,
+                PathBuf::from("/left/sub"),
+            ),
         )
         .with_dir("/right");
 
@@ -183,10 +183,10 @@ async fn dir_sync_surfaces_mid_walk_error() {
         .with_file("/left/blocked.txt", "secret")
         .with_error(
             "/left/blocked.txt",
-            FsError::PermissionDenied {
-                operation: FsOperation::Read,
-                path: PathBuf::from("/left/blocked.txt"),
-            },
+            FsError::permission_denied(
+                FsOperation::Read,
+                PathBuf::from("/left/blocked.txt"),
+            ),
         )
         .with_dir("/right");
 
@@ -216,7 +216,7 @@ async fn dir_sync_missing_root_returns_fs_error() {
     .await;
 
     match result {
-        Err(CliError::Fs(FsError::NotFound { path })) => {
+        Err(CliError::Fs(FsError::NotFound { path, .. })) => {
             assert_eq!(path, PathBuf::from("/left"));
         }
         other => panic!("expected Fs(NotFound), got {other:?}"),
@@ -233,10 +233,10 @@ async fn dir_sync_non_dry_run_aborts_on_mid_walk_error() {
         .with_dir("/left/blocked")
         .with_error(
             "/left/blocked",
-            FsError::PermissionDenied {
-                operation: FsOperation::ReadDir,
-                path: PathBuf::from("/left/blocked"),
-            },
+            FsError::permission_denied(
+                FsOperation::ReadDir,
+                PathBuf::from("/left/blocked"),
+            ),
         )
         .with_dir("/right");
 
@@ -263,10 +263,11 @@ async fn dir_sync_failed_transfer_returns_fs_errors() {
         .with_dir("/right")
         .with_error(
             "/right/a.txt",
-            FsError::PermissionDenied {
-                operation: FsOperation::Write,
-                path: PathBuf::from("/right/a.txt"),
-            },
+            FsError::permission_denied_with_message(
+                FsOperation::Write,
+                PathBuf::from("/right/a.txt"),
+                "Permission denied (os error 13)",
+            ),
         );
 
     let result =
@@ -274,11 +275,23 @@ async fn dir_sync_failed_transfer_returns_fs_errors() {
             .await;
 
     match result {
-        Err(CliError::FsErrors(errors)) => {
-            assert_eq!(errors.len(), 1);
-            assert!(matches!(errors[0], FsError::PermissionDenied { .. }));
+        Err(CliError::TransferErrors(failures)) => {
+            assert_eq!(failures.len(), 1);
+            assert!(matches!(
+                failures[0].error,
+                FsError::PermissionDenied { .. }
+            ));
+            // The failure names the attempted action and the entry path,
+            // and the rendered text carries the original OS message.
+            let text = failures[0].to_string();
+            assert!(text.contains("copy left \u{2192} right"), "{text}");
+            assert!(text.contains("`a.txt`"), "{text}");
+            assert!(
+                text.contains("Permission denied (os error 13)"),
+                "{text}"
+            );
         }
-        other => panic!("expected FsErrors, got {other:?}"),
+        other => panic!("expected TransferErrors, got {other:?}"),
     }
 }
 
@@ -315,7 +328,7 @@ async fn text_compare_missing_file_returns_fs_error() {
     .await;
 
     match result {
-        Err(CliError::Fs(FsError::NotFound { path })) => {
+        Err(CliError::Fs(FsError::NotFound { path, .. })) => {
             assert_eq!(path, PathBuf::from("/left.txt"));
         }
         other => panic!("expected Fs(NotFound), got {other:?}"),
@@ -328,10 +341,10 @@ async fn text_compare_injected_read_error_returns_fs_error() {
         .with_file("/left.txt", "secret")
         .with_error(
             "/left.txt",
-            FsError::PermissionDenied {
-                operation: FsOperation::Read,
-                path: PathBuf::from("/left.txt"),
-            },
+            FsError::permission_denied(
+                FsOperation::Read,
+                PathBuf::from("/left.txt"),
+            ),
         )
         .with_file("/right.txt", "public");
 
@@ -379,7 +392,7 @@ async fn snapshot_capture_missing_root_returns_fs_error() {
         run_with_mock(mock, &["cocomo", "snapshot", "capture", "/data"]).await;
 
     match result {
-        Err(CliError::Fs(FsError::NotFound { path })) => {
+        Err(CliError::Fs(FsError::NotFound { path, .. })) => {
             assert_eq!(path, PathBuf::from("/data"));
         }
         other => panic!("expected Fs(NotFound), got {other:?}"),
@@ -427,10 +440,10 @@ async fn snapshot_capture_mid_walk_error_writes_no_file() {
         .with_dir("/data/sub")
         .with_error(
             "/data/sub",
-            FsError::PermissionDenied {
-                operation: FsOperation::ReadDir,
-                path: PathBuf::from("/data/sub"),
-            },
+            FsError::permission_denied(
+                FsOperation::ReadDir,
+                PathBuf::from("/data/sub"),
+            ),
         );
 
     let result = run_with_mock(

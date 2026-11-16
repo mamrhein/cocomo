@@ -725,7 +725,7 @@ impl NodeFileSystem for LocalFs {
             return match node {
                 Some(n) if n.is_deleted() => Err(FsError::StaleNode),
                 Some(_) => Ok(NodeId::new(id)),
-                None => Err(FsError::NotFound { path: abs }),
+                None => Err(FsError::not_found(abs)),
             };
         }
 
@@ -777,9 +777,10 @@ impl NodeFileSystem for LocalFs {
             Some(node) => Ok(node),
             None => {
                 drop(nodes);
-                Err(FsError::NotFound {
-                    path: PathBuf::from("(unknown node)"),
-                })
+                Err(FsError::not_found_with_message(
+                    PathBuf::from("(unknown node)"),
+                    "node is not in the cache",
+                ))
             }
         }
     }
@@ -796,9 +797,10 @@ impl NodeFileSystem for LocalFs {
     ) -> Result<()> {
         let mut nodes = self.nodes.write();
         let Some(arc) = nodes.get_mut(id.get()) else {
-            return Err(FsError::NotFound {
-                path: PathBuf::from("(unknown node)"),
-            });
+            return Err(FsError::not_found_with_message(
+                PathBuf::from("(unknown node)"),
+                "node is not in the cache",
+            ));
         };
         // Arc::make_mut clones the inner value if the arc is shared,
         // ensuring exclusive access to update the cached hash.

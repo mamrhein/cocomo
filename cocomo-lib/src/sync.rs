@@ -1533,10 +1533,10 @@ mod tests {
             .with_dir("/left/blocked")
             .with_error(
                 "/left/blocked",
-                FsError::PermissionDenied {
-                    operation: FsOperation::ReadDir,
-                    path: PathBuf::from("/left/blocked"),
-                },
+                FsError::permission_denied(
+                    FsOperation::ReadDir,
+                    PathBuf::from("/left/blocked"),
+                ),
             );
         let right_fs = MockFs::new("mock-right").with_dir("/right");
 
@@ -1581,10 +1581,10 @@ mod tests {
             .with_dir("/left/blocked")
             .with_error(
                 "/left/blocked",
-                FsError::PermissionDenied {
-                    operation: FsOperation::ReadDir,
-                    path: PathBuf::from("/left/blocked"),
-                },
+                FsError::permission_denied(
+                    FsOperation::ReadDir,
+                    PathBuf::from("/left/blocked"),
+                ),
             );
         let right_fs = MockFs::new("mock-right").with_dir("/right");
 

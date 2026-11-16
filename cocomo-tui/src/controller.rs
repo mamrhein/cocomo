@@ -347,6 +347,13 @@ fn report_error(msg: impl Into<String>) {
     APP_STATE.state().write().error_message = Some(msg.into());
 }
 
+/// Label naming both session endpoints, e.g. `[left: /a | right: ftp://h/b]`.
+/// Sync failure messages carry it so the user sees which sides — and
+/// therefore which nodes of which providers — the failure happened between.
+pub(crate) fn endpoints_label(left: &Endpoint, right: &Endpoint) -> String {
+    format!("[left: {} | right: {}]", left.url(), right.url())
+}
+
 /// Return the stable id of the active directory-comparison session, if any.
 ///
 /// Spawned tasks capture this at spawn time so their results are written
@@ -641,6 +648,12 @@ pub(crate) fn process_session_action(action: SessionAction) {
                         snapshot.compare_content,
                     )
                     .await
+                    .map_err(|e| {
+                        e.with_context(endpoints_label(
+                            &snapshot.left,
+                            &snapshot.right,
+                        ))
+                    })
                 },
                 move |app, result| {
                     if let Some(s) = app.session_mut(id) {
@@ -673,15 +686,20 @@ pub(crate) fn process_session_action(action: SessionAction) {
                     app.session(id).and_then(SessionSnapshot::from_session)
                 },
                 move |snapshot| async move {
+                    let endpoints =
+                        endpoints_label(&snapshot.left, &snapshot.right);
                     let result = execute_sync_session(
                         &snapshot.left,
                         &snapshot.right,
                         snapshot.sync_operation,
                         snapshot.compare_content,
                     )
-                    .await?;
+                    .await
+                    .map_err(|e| e.with_context(endpoints.clone()))?;
                     // Non-fatal per-item failures are collected by the
-                    // executor; surface them before re-comparing.
+                    // executor; surface them before re-comparing. Each
+                    // failure already names the attempted action and the
+                    // entry path; the endpoint label adds the sides.
                     if let Some(transfer) = &result.transfer
                         && transfer.failed > 0
                     {
@@ -691,12 +709,12 @@ pub(crate) fn process_session_action(action: SessionAction) {
                             .map(|e| e.to_string())
                             .collect();
                         report_error(format!(
-                            "Sync partially failed: {}",
+                            "Sync partially failed {endpoints}: {}",
                             details.join("; ")
                         ));
                     }
                     for error in &result.errors {
-                        report_error(format!("Sync: {error}"));
+                        report_error(format!("Sync {endpoints}: {error}"));
                     }
                     // Re-run the comparison so the table reflects the
                     // sync.
@@ -705,7 +723,8 @@ pub(crate) fn process_session_action(action: SessionAction) {
                         &snapshot.right,
                         snapshot.compare_content,
                     )
-                    .await?;
+                    .await
+                    .map_err(|e| e.with_context(endpoints))?;
                     Ok(comparison)
                 },
                 move |app, comparison| {

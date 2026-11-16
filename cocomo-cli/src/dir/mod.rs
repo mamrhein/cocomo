@@ -276,7 +276,7 @@ pub(crate) async fn dir_sync<R: EndpointResolver>(
             for err in &transfer.errors {
                 eprintln!("error: {err}");
             }
-            return Err(CliError::FsErrors(transfer.errors.clone()));
+            return Err(CliError::TransferErrors(transfer.errors.clone()));
         }
     }
 

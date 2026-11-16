@@ -596,10 +596,10 @@ mod tests {
             .with_dir("/data/sub")
             .with_error(
                 "/data/sub",
-                FsError::PermissionDenied {
-                    operation: FsOperation::ReadDir,
-                    path: PathBuf::from("/data/sub"),
-                },
+                FsError::permission_denied(
+                    FsOperation::ReadDir,
+                    PathBuf::from("/data/sub"),
+                ),
             );
 
         let result = scan_directory_node(

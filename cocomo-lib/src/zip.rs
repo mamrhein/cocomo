@@ -160,9 +160,9 @@ fn to_utc(dt: ZipDateTime) -> Option<DateTime<Utc>> {
 /// Convert a [`ZipError`] into an [`FsError`] with operation context.
 fn zip_error(err: ZipError, operation: FsOperation, path: &Path) -> FsError {
     match err {
-        ZipError::FileNotFound => FsError::NotFound {
-            path: path.to_path_buf(),
-        },
+        ZipError::FileNotFound => {
+            FsError::not_found_with_message(path, "entry not found in archive")
+        }
         ZipError::Io(io_err) => wrap(io_err, operation, path.to_path_buf()),
         other => FsError::Io {
             operation,
@@ -570,12 +570,15 @@ impl NodeFileSystem for ZipFs {
             return match node {
                 Some(n) if n.is_deleted() => Err(FsError::StaleNode),
                 Some(_) => Ok(NodeId::new(id)),
-                None => Err(FsError::NotFound { path: npath }),
+                None => Err(FsError::not_found(npath)),
             };
         }
 
-        let info = self.tree.get(&key).ok_or(FsError::NotFound {
-            path: npath.clone(),
+        let info = self.tree.get(&key).ok_or_else(|| {
+            FsError::not_found_with_message(
+                &npath,
+                "entry not found in archive",
+            )
         })?;
         let parent_id = self.resolve_parent_id(&npath);
         let node = Self::build_node(&key, info, parent_id);
@@ -607,9 +610,10 @@ impl NodeFileSystem for ZipFs {
             Some(node) => Ok(node),
             None => {
                 drop(nodes);
-                Err(FsError::NotFound {
-                    path: PathBuf::from("(unknown node)"),
-                })
+                Err(FsError::not_found_with_message(
+                    PathBuf::from("(unknown node)"),
+                    "node is not in the cache",
+                ))
             }
         }
     }
@@ -627,9 +631,10 @@ impl NodeFileSystem for ZipFs {
         // Metadata-only cache update, allowed on a read-only provider.
         let mut nodes = self.nodes.write();
         let Some(arc) = nodes.get_mut(id.get()) else {
-            return Err(FsError::NotFound {
-                path: PathBuf::from("(unknown node)"),
-            });
+            return Err(FsError::not_found_with_message(
+                PathBuf::from("(unknown node)"),
+                "node is not in the cache",
+            ));
         };
         Arc::make_mut(arc).set_cached_hash(hash);
         Ok(())

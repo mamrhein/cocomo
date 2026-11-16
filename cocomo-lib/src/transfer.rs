@@ -25,9 +25,9 @@
 //! entire batch. A nested entry transfers to the same relative path on the
 //! target side; missing target-side directories are created on demand.
 
-use std::path::Path;
 #[allow(unused_imports)]
 use std::sync::Arc;
+use std::{fmt, path::Path};
 
 use bytes::BytesMut;
 use futures::future::BoxFuture;
@@ -131,6 +131,33 @@ impl TransferItem {
 // Transfer result
 // ---------------------------------------------------------------------------
 
+/// A single failed transfer, carrying the item context the executor knows:
+/// the [`TransferAction`] that was attempted and the entry's path relative
+/// to the side roots. The rendered text names the action and path in front
+/// of the underlying [`FsError`], so a batch failure message says *what*
+/// failed *where* instead of a bare filesystem error.
+#[derive(Clone, Debug)]
+pub struct TransferFailure {
+    /// The action that was attempted.
+    pub action: TransferAction,
+    /// The entry path (relative to the side roots) the action failed on.
+    pub path: String,
+    /// The underlying filesystem error.
+    pub error: FsError,
+}
+
+impl fmt::Display for TransferFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} `{}`: {}", self.action.label(), self.path, self.error)
+    }
+}
+
+impl std::error::Error for TransferFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.error)
+    }
+}
+
 /// Result of executing a batch of transfers.
 #[derive(Clone, Debug, Default)]
 pub struct TransferResult {
@@ -138,8 +165,9 @@ pub struct TransferResult {
     pub succeeded: usize,
     /// Number of operations that failed.
     pub failed: usize,
-    /// Errors encountered during the transfer.
-    pub errors: Vec<FsError>,
+    /// Per-item failures encountered during the transfer, each carrying
+    /// the failed action and path.
+    pub errors: Vec<TransferFailure>,
 }
 
 impl TransferResult {
@@ -309,7 +337,11 @@ where
             Ok(()) => result.succeeded += 1,
             Err(e) => {
                 result.failed += 1;
-                result.errors.push(e);
+                result.errors.push(TransferFailure {
+                    action: item.action,
+                    path: item_rel(item).to_owned(),
+                    error: e,
+                });
             }
         }
     }
@@ -864,7 +896,11 @@ mod tests {
         let mut result = TransferResult {
             succeeded: 2,
             failed: 1,
-            errors: vec![FsError::StaleNode],
+            errors: vec![TransferFailure {
+                action: TransferAction::CopyRight,
+                path: "gone.txt".into(),
+                error: FsError::StaleNode,
+            }],
         };
         let other = TransferResult {
             succeeded: 3,
@@ -1625,10 +1661,10 @@ mod tests {
             .with_file("/src/tree/blocked.txt", "bravo")
             .with_error(
                 "/src/tree/blocked.txt",
-                FsError::PermissionDenied {
-                    operation: FsOperation::Read,
-                    path: "/src/tree/blocked.txt".into(),
-                },
+                FsError::permission_denied(
+                    FsOperation::Read,
+                    "/src/tree/blocked.txt",
+                ),
             )
             .with_file("/src/tree/ok.txt", "alpha");
         let dst = MockFs::new("dst").with_dir("/dst");
@@ -1662,10 +1698,10 @@ mod tests {
         // the delete can run.
         let dst = MockFs::new("dst").with_dir("/dst").with_error(
             "/dst/moved.txt",
-            FsError::PermissionDenied {
-                operation: FsOperation::CreateFile,
-                path: "/dst/moved.txt".into(),
-            },
+            FsError::permission_denied(
+                FsOperation::CreateFile,
+                "/dst/moved.txt",
+            ),
         );
 
         let items = vec![TransferItem::new(

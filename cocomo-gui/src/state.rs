@@ -2433,6 +2433,14 @@ impl AppState {
         })
     }
 
+    /// Label naming both session endpoints, e.g.
+    /// `[left: /a | right: ftp://h/b]`. Failure messages carry it so the
+    /// user sees which sides — and therefore which nodes of which
+    /// providers — a failure happened between.
+    fn endpoints_label(&self) -> String {
+        format!("[left: {} | right: {}]", self.left.url(), self.right.url())
+    }
+
     /// Execute a previously planned transfer on the selected entry, then
     /// re-compare so the table reflects the transfer.
     pub fn run_transfer(
@@ -2498,6 +2506,9 @@ impl AppState {
         // the `FsPair` addresses outlive the await.
         let left = self.left.clone();
         let right = self.right.clone();
+        // Endpoint label for failure messages: names the sides (and their
+        // providers) a transfer error happened between.
+        let endpoints = self.endpoints_label();
         let join_handle = crate::runtime::spawn_on_tokio(async move {
             let pair = if left.same_provider(&right) {
                 FsPair::Shared(left.fs())
@@ -2540,8 +2551,9 @@ impl AppState {
                                     message.into()
                                 }
                                 Err(e) => {
-                                    let message =
-                                        format!("Transfer failed: {e}");
+                                    let message = format!(
+                                        "Transfer failed {endpoints}: {e}"
+                                    );
                                     log::push(
                                         LogLevel::Error,
                                         message.clone(),
@@ -2870,6 +2882,8 @@ impl AppState {
 
         let left = self.left.clone();
         let right = self.right.clone();
+        // Endpoint label for failure messages (see `run_transfer_items`).
+        let endpoints = self.endpoints_label();
         let join_handle = crate::runtime::spawn_on_tokio(async move {
             let pair = if left.same_provider(&right) {
                 FsPair::Shared(left.fs())
@@ -2911,8 +2925,10 @@ impl AppState {
                                 message.into()
                             }
                             Err(e) => {
-                                let message =
-                                    format!("{} failed: {e}", kind.label());
+                                let message = format!(
+                                    "{} failed {endpoints}: {e}",
+                                    kind.label()
+                                );
                                 log::push(
                                     LogLevel::Error,
                                     message.clone(),

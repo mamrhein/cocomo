@@ -878,9 +878,7 @@ impl NodeFileSystem for FtpFs {
             return match node {
                 Some(n) if n.is_deleted() => Err(FsError::StaleNode),
                 Some(_) => Ok(NodeId::new(id)),
-                None => Err(FsError::NotFound {
-                    path: path.to_path_buf(),
-                }),
+                None => Err(FsError::not_found(path)),
             };
         }
 
@@ -918,9 +916,10 @@ impl NodeFileSystem for FtpFs {
             Some(node) => Ok(node),
             None => {
                 drop(nodes);
-                Err(FsError::NotFound {
-                    path: PathBuf::from("(unknown node)"),
-                })
+                Err(FsError::not_found_with_message(
+                    PathBuf::from("(unknown node)"),
+                    "node is not in the cache",
+                ))
             }
         }
     }
@@ -937,9 +936,10 @@ impl NodeFileSystem for FtpFs {
     ) -> Result<()> {
         let mut nodes = self.nodes.write();
         let Some(arc) = nodes.get_mut(id.get()) else {
-            return Err(FsError::NotFound {
-                path: PathBuf::from("(unknown node)"),
-            });
+            return Err(FsError::not_found_with_message(
+                PathBuf::from("(unknown node)"),
+                "node is not in the cache",
+            ));
         };
         Arc::make_mut(arc).set_cached_hash(hash);
         Ok(())

@@ -66,6 +66,17 @@ pub(crate) enum TuiError {
     /// and image compares are GUI-only).
     #[error("unsupported session type: {0}")]
     UnsupportedSessionType(cocomo_lib::SessionType),
+
+    /// A failure annotated with the endpoint pair it occurred between, so
+    /// the rendered message names both sides; relative paths alone are
+    /// ambiguous when the sides live on different providers.
+    #[error("{source} {context}")]
+    Context {
+        /// Preformatted endpoint label, e.g. `[left: /a | right: ftp://h/b]`.
+        context: String,
+        #[source]
+        source: Box<Self>,
+    },
 }
 
 impl TuiError {
@@ -79,6 +90,15 @@ impl TuiError {
             _ => Self::Io {
                 message: err.to_string(),
             },
+        }
+    }
+
+    /// Annotate this failure with a preformatted endpoint label (see
+    /// [`crate::controller::endpoints_label`]).
+    pub(crate) fn with_context(self, context: impl Into<String>) -> Self {
+        Self::Context {
+            context: context.into(),
+            source: Box::new(self),
         }
     }
 }
@@ -127,9 +147,20 @@ mod tests {
     fn converts_lib_fs_error() {
         let fs_err = FsError::NotFound {
             path: PathBuf::from("/gone"),
+            message: String::new(),
         };
         let err: TuiError = fs_err.into();
         assert!(matches!(err, TuiError::Lib(_)));
         assert_eq!(err.to_string(), "not found: /gone");
+    }
+
+    #[test]
+    fn context_appends_endpoint_label() {
+        let err = TuiError::Lib(FsError::not_found("/gone"))
+            .with_context("[left: /a | right: ftp://h/b]");
+        assert_eq!(
+            err.to_string(),
+            "not found: /gone [left: /a | right: ftp://h/b]"
+        );
     }
 }
