@@ -32,7 +32,9 @@ use std::{fmt, path::Path};
 use bytes::BytesMut;
 use futures::future::BoxFuture;
 
-use crate::{DirComparison, DirEntryStatus, FsError, FsOperation};
+use crate::{
+    DirComparison, DirEntryStatus, FsError, FsOperation, node::NodeKind,
+};
 
 // ---------------------------------------------------------------------------
 // Transfer actions
@@ -545,20 +547,35 @@ where
     if is_dir {
         // Copy directory.
         src_fs.copy_node(src_node_id, dst_dir_id).await?;
+    } else if let NodeKind::Symlink { target } = src_node.kind() {
+        // A symlink transfers as a link: recreate it on the destination
+        // side with its raw target verbatim. Streaming through the link
+        // would either duplicate the target's content or (for a dangling
+        // or directory target) fail with a confusing error.
+        dst_fs
+            .create_symlink(dst_dir_id, src_node.name(), target.path())
+            .await?;
     } else {
         // Copy file: create destination file, then stream content.
         let dst_name = src_node.name();
         let new_file_id = dst_fs.create_file(dst_dir_id, dst_name).await?;
 
-        // Stream content from source to destination.
-        stream_file_content(
+        // Stream content from source to destination. On a source read
+        // failure, remove the freshly created (still empty) destination
+        // file again so the failure does not leave a zero-byte entry
+        // behind.
+        if let Err(e) = stream_file_content(
             src_fs,
             crate::FileId::new(*src_node_id.get()),
             src_node.path(),
             dst_fs,
             new_file_id,
         )
-        .await?;
+        .await
+        {
+            let _ = dst_fs.remove_node(new_file_id.as_node_id()).await;
+            return Err(e);
+        }
     }
 
     Ok(())
@@ -608,9 +625,11 @@ where
 /// `copy_node` executes *within* the provider it is called on, so the
 /// destination entry is created on the destination side and the source
 /// content is streamed (files) or mirrored recursively (directories)
-/// across the boundary. Symlinks and other special entries are skipped:
-/// their targets are provider-local and would dangle on the destination
-/// side.
+/// across the boundary. A symlink addressed directly by `rel` is copied
+/// as a link: its raw target is recreated verbatim on the destination
+/// side. Symlinks *nested* inside a transferred directory are skipped by
+/// [`mirror_directory_tree`]: their targets are provider-local and would
+/// dangle on the destination side.
 async fn copy_entry_cross<S, D>(
     src_fs: &S,
     src_root: &Path,
@@ -636,17 +655,30 @@ where
         let new_dir_id =
             dst_fs.create_dir_node(dst_dir_id, src_node.name()).await?;
         mirror_directory_tree(src_fs, src_node_id, dst_fs, new_dir_id).await?;
+    } else if let NodeKind::Symlink { target } = src_node.kind() {
+        // Transfer the symlink as a link (see `copy_entry`). Creating a
+        // destination file first would leave it empty when reading a
+        // dangling or directory link target fails.
+        dst_fs
+            .create_symlink(dst_dir_id, src_node.name(), target.path())
+            .await?;
     } else {
         let new_file_id =
             dst_fs.create_file(dst_dir_id, src_node.name()).await?;
-        stream_file_content(
+        if let Err(e) = stream_file_content(
             src_fs,
             crate::FileId::new(*src_node_id.get()),
             src_node.path(),
             dst_fs,
             new_file_id,
         )
-        .await?;
+        .await
+        {
+            // Do not leave the still-empty destination file behind when
+            // the source read fails.
+            let _ = dst_fs.remove_node(new_file_id.as_node_id()).await;
+            return Err(e);
+        }
     }
 
     Ok(())
@@ -1651,6 +1683,112 @@ mod tests {
             "expected a stream error: {:?}",
             result.errors
         );
+    }
+
+    #[tokio::test]
+    async fn execute_separate_pair_copy_stream_error_leaves_no_empty_file() {
+        // The destination file is created before the source is read; a
+        // failing source read must remove it again instead of leaving a
+        // zero-byte entry behind.
+        let src = MockFs::new("src")
+            .with_dir("/src")
+            .with_file("/src/broken.txt", "payload")
+            .with_stream_error(
+                "/src/broken.txt",
+                FsError::Io {
+                    operation: FsOperation::Read,
+                    path: "/src/broken.txt".into(),
+                    message: "injected read failure".to_owned(),
+                },
+            );
+        let dst = MockFs::new("dst").with_dir("/dst");
+
+        let items = vec![TransferItem::new(
+            TransferAction::CopyRight,
+            "broken.txt".to_string(),
+            false,
+            "broken.txt".to_string(),
+        )];
+
+        let result = execute_transfers(
+            &items,
+            Path::new("/src"),
+            Path::new("/dst"),
+            FsPair::Separate(&src, &dst),
+        )
+        .await;
+
+        assert_eq!(result.failed, 1);
+        assert!(
+            dst.read_path(Path::new("/dst/broken.txt"), None)
+                .await
+                .is_err(),
+            "a failed copy must not leave an empty destination file"
+        );
+    }
+
+    /// A symlink transfers as a link (not as the target's content, and not
+    /// as an empty file): the raw target is recreated verbatim on the
+    /// destination side.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn execute_separate_pair_copy_symlink_transfers_link() {
+        let (left, right) = make_test_dirs();
+        let left_fs = LocalFs::new("left");
+        let right_fs = LocalFs::new("right");
+
+        // A relative link to a sibling and a dangling link alike transfer
+        // as links; streaming the target's content (or failing on a
+        // dangling link) would be wrong for a cross-filesystem copy.
+        std::os::unix::fs::symlink("same.txt", left.join("link")).unwrap();
+        std::os::unix::fs::symlink("nowhere.txt", left.join("dangling"))
+            .unwrap();
+
+        let items = vec![
+            TransferItem::new(
+                TransferAction::CopyRight,
+                "link".to_string(),
+                false,
+                "link".to_string(),
+            ),
+            TransferItem::new(
+                TransferAction::CopyRight,
+                "dangling".to_string(),
+                false,
+                "dangling".to_string(),
+            ),
+        ];
+
+        let result = execute_transfers(
+            &items,
+            &left,
+            &right,
+            FsPair::Separate(&left_fs, &right_fs),
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "symlink copy should succeed: {:?}",
+            result.errors
+        );
+        assert!(
+            fs_err::symlink_metadata(right.join("link"))
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "destination should be a symlink"
+        );
+        assert_eq!(
+            fs_err::read_link(right.join("link")).unwrap(),
+            PathBuf::from("same.txt")
+        );
+        assert_eq!(
+            fs_err::read_link(right.join("dangling")).unwrap(),
+            PathBuf::from("nowhere.txt")
+        );
+
+        fs_err::remove_dir_all(left.parent().unwrap()).ok();
     }
 
     #[tokio::test]

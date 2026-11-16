@@ -1177,6 +1177,40 @@ impl WritableFileSystem for LocalFs {
                     fs_err::remove_dir_all(&src_path).map_err(|e| {
                         wrap(e, FsOperation::Move, src_path.clone())
                     })?;
+                } else if fs_err::symlink_metadata(&src_path)
+                    .map(|m| m.file_type().is_symlink())
+                    .unwrap_or(false)
+                {
+                    // Recreate the link at the destination; following it
+                    // with `fs_err::copy` would duplicate the target's
+                    // content or fail (dangling or directory target),
+                    // leaving an empty file behind.
+                    let target =
+                        fs_err::read_link(&src_path).map_err(|e| {
+                            wrap(e, FsOperation::ReadLink, src_path.clone())
+                        })?;
+                    #[cfg(unix)]
+                    tokio::fs::symlink(&target, &dst_path).await.map_err(
+                        |e| wrap(e, FsOperation::Symlink, dst_path.clone()),
+                    )?;
+                    #[cfg(windows)]
+                    if target.is_dir() {
+                        tokio::fs::symlink_dir(&target, &dst_path)
+                            .await
+                            .map_err(|e| {
+                                wrap(e, FsOperation::Symlink, dst_path.clone())
+                            })?;
+                    } else {
+                        tokio::fs::symlink_file(&target, &dst_path)
+                            .await
+                            .map_err(|e| {
+                                wrap(e, FsOperation::Symlink, dst_path.clone())
+                            })?;
+                    }
+                    // Remove the link itself, not its target.
+                    fs_err::remove_file(&src_path).map_err(|e| {
+                        wrap(e, FsOperation::Remove, src_path.clone())
+                    })?;
                 } else {
                     fs_err::copy(&src_path, &dst_path).map_err(|e| {
                         wrap(e, FsOperation::Copy, src_path.clone())
