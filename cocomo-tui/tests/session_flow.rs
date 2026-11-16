@@ -18,12 +18,15 @@
 use std::sync::Arc;
 
 use cocomo_lib::{
-    DirComparison, DirEntry, DirEntryStatus, Endpoint, EntryInfo,
-    SyncOperation, SyncResult,
+    DirComparison, DirEntry, DirEntryStatus, Endpoint, EntryInfo, Grammar,
+    SyncOperation, SyncResult, TextCompareSettings, compare_texts,
 };
 use cocomo_tui::{
     keys::{Cmd, KeyScope, handle_session_key, lookup, run_menu_command},
-    state::{AppState, NamePattern, SessionAction, SessionMode, SessionView},
+    state::{
+        AppState, NamePattern, SessionAction, SessionMode, SessionView,
+        TextRules, TextSource,
+    },
 };
 use ratatui_kit::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -142,6 +145,24 @@ fn tree_session() -> SessionView {
     session
 }
 
+/// Text session with a one-line diff, for the text-scope keybindings.
+fn text_session() -> SessionView {
+    let left = "a\nb\nc\n";
+    let right = "a\nB\nc\n";
+    let diff = compare_texts(left, right, &TextCompareSettings::new());
+    SessionView::new_text_compare(
+        Endpoint::local("/base/left"),
+        Endpoint::local("/base/right"),
+        diff,
+        Grammar::plain_text(),
+        TextSource {
+            left: left.to_string(),
+            right: right.to_string(),
+            rules: TextRules::default(),
+        },
+    )
+}
+
 #[test]
 fn enter_on_directory_entry_requests_open_dir() {
     let mut session = dir_session();
@@ -212,6 +233,27 @@ fn session_keys_report_their_controller_actions() {
         press(&mut session, KeyCode::Backspace),
         Some(SessionAction::GoUp)
     );
+}
+
+#[test]
+fn save_key_presets_the_tab_title_as_session_name() {
+    // Regression for issue #2 (defect 2): pressing `s` on a session entered
+    // the save-name prompt with an empty buffer in both the dir and the
+    // text normal scope, instead of proposing the tab title as the preset
+    // name.
+    for mut session in [dir_session(), text_session()] {
+        let title = session.tab_title().to_owned();
+        assert_eq!(
+            press(&mut session, KeyCode::Char('s')),
+            Some(SessionAction::None)
+        );
+        assert!(
+            matches!(&session.ui.mode,
+                SessionMode::SaveSession { name } if *name == title),
+            "expected the preset name {title:?}, got {:?}",
+            session.ui.mode,
+        );
+    }
 }
 
 #[test]

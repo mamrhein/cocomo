@@ -2421,6 +2421,26 @@ mod tests {
     }
 
     #[test]
+    fn save_mode_presets_the_name_from_the_tab_title() {
+        // Regression for issue #2 (defect 2): `s` entered SaveSession with
+        // an empty name buffer in both the dir and the text normal scope,
+        // instead of proposing the session's tab title as the preset.
+        for mut session in [dir_session(), text_session()] {
+            let title = session.tab_title().to_owned();
+            assert_eq!(
+                press(&mut session, KeyCode::Char('s')),
+                Some(SessionAction::None)
+            );
+            assert!(
+                matches!(&session.ui.mode,
+                    SessionMode::SaveSession { name } if *name == title),
+                "expected the preset name {title:?}, got {:?}",
+                session.ui.mode,
+            );
+        }
+    }
+
+    #[test]
     fn text_tabs_bind_save_sessions_and_settings() {
         let mut session = text_session();
 
