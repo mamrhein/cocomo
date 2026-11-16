@@ -1171,7 +1171,12 @@ impl SftpFs {
                 let src_entry = src.join(name);
                 let dst_entry = dst.join(name);
 
-                if meta.is_dir {
+                if meta.is_symlink {
+                    // Recreate nested links as links; following them would
+                    // copy the target's content or fail on a dangling link.
+                    let target = self.read_link(&src_entry).await?;
+                    self.symlink(&target, &dst_entry).await?;
+                } else if meta.is_dir {
                     self.copy_dir_all(&src_entry, &dst_entry).await?;
                 } else {
                     self.copy(&src_entry, &dst_entry).await?;
@@ -1550,9 +1555,12 @@ impl WritableFileSystem for SftpFs {
         let src_path = src_node.path();
         let dst_path = dst_node.path().join(src_node.name());
 
-        // For directories, recurse. For files, read + write.
+        // For directories, recurse. For symlinks, recreate the link with
+        // its raw target so the copy stays a link. For files, read + write.
         if src_node.kind().is_directory() {
             self.copy_dir_all(src_path, &dst_path).await?;
+        } else if let NodeKind::Symlink { target } = src_node.kind() {
+            self.symlink(target.path(), &dst_path).await?;
         } else {
             self.copy(src_path, &dst_path).await?;
         }

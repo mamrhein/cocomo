@@ -982,24 +982,8 @@ impl WritableFileSystem for LocalFs {
         let link_path = parent_node.path().join(name);
 
         // Create the symlink on disk.
-        #[cfg(unix)]
-        {
-            tokio::fs::symlink(target, &link_path).await.map_err(|e| {
-                wrap(e, FsOperation::CreateSymlink, link_path.clone())
-            })?;
-        }
-        #[cfg(windows)]
-        {
-            if target.is_dir() {
-                tokio::fs::symlink_dir(target, &link_path).await.map_err(
-                    |e| wrap(e, FsOperation::CreateSymlink, link_path.clone()),
-                )?;
-            } else {
-                tokio::fs::symlink_file(target, &link_path).await.map_err(
-                    |e| wrap(e, FsOperation::CreateSymlink, link_path.clone()),
-                )?;
-            }
-        }
+        create_symlink_at(target, &link_path, FsOperation::CreateSymlink)
+            .await?;
 
         // Stat and cache.
         let meta = fs_err::symlink_metadata(&link_path)
@@ -1140,8 +1124,16 @@ impl WritableFileSystem for LocalFs {
         let src_path = src_node.path();
         let dst_path = dst_node.path().join(src_node.name());
 
-        // Copy on filesystem.
-        if src_path.is_dir() {
+        // Copy on filesystem. `symlink_metadata` does not follow links, so
+        // a symlink is recreated as a link instead of being dereferenced
+        // (following it would duplicate the target's content or fail for a
+        // dangling or directory target).
+        let meta = fs_err::symlink_metadata(src_path).map_err(|e| {
+            wrap(e, FsOperation::Resolve, src_path.to_path_buf())
+        })?;
+        if meta.file_type().is_symlink() {
+            copy_symlink(src_path, &dst_path).await?;
+        } else if meta.is_dir() {
             // For directories, use recursive copy.
             copy_dir_all(src_path, &dst_path).await?;
         } else {
@@ -1171,45 +1163,27 @@ impl WritableFileSystem for LocalFs {
         let moved = match fs_err::tokio::rename(&src_path, &dst_path).await {
             Ok(()) => true,
             Err(rename_err) => {
-                // Cross-filesystem fallback.
-                if src_path.is_dir() {
-                    copy_dir_all(&src_path, &dst_path).await?;
-                    fs_err::remove_dir_all(&src_path).map_err(|e| {
-                        wrap(e, FsOperation::Move, src_path.clone())
+                // Cross-filesystem fallback. `symlink_metadata` does not
+                // follow links, so a symlink (even one pointing at a
+                // directory) is moved as a link rather than dereferenced.
+                let meta =
+                    fs_err::symlink_metadata(&src_path).map_err(|e| {
+                        wrap(e, FsOperation::Resolve, src_path.clone())
                     })?;
-                } else if fs_err::symlink_metadata(&src_path)
-                    .map(|m| m.file_type().is_symlink())
-                    .unwrap_or(false)
-                {
+                if meta.file_type().is_symlink() {
                     // Recreate the link at the destination; following it
                     // with `fs_err::copy` would duplicate the target's
                     // content or fail (dangling or directory target),
                     // leaving an empty file behind.
-                    let target =
-                        fs_err::read_link(&src_path).map_err(|e| {
-                            wrap(e, FsOperation::ReadLink, src_path.clone())
-                        })?;
-                    #[cfg(unix)]
-                    tokio::fs::symlink(&target, &dst_path).await.map_err(
-                        |e| wrap(e, FsOperation::Symlink, dst_path.clone()),
-                    )?;
-                    #[cfg(windows)]
-                    if target.is_dir() {
-                        tokio::fs::symlink_dir(&target, &dst_path)
-                            .await
-                            .map_err(|e| {
-                                wrap(e, FsOperation::Symlink, dst_path.clone())
-                            })?;
-                    } else {
-                        tokio::fs::symlink_file(&target, &dst_path)
-                            .await
-                            .map_err(|e| {
-                                wrap(e, FsOperation::Symlink, dst_path.clone())
-                            })?;
-                    }
+                    copy_symlink(&src_path, &dst_path).await?;
                     // Remove the link itself, not its target.
                     fs_err::remove_file(&src_path).map_err(|e| {
                         wrap(e, FsOperation::Remove, src_path.clone())
+                    })?;
+                } else if meta.is_dir() {
+                    copy_dir_all(&src_path, &dst_path).await?;
+                    fs_err::remove_dir_all(&src_path).map_err(|e| {
+                        wrap(e, FsOperation::Move, src_path.clone())
                     })?;
                 } else {
                     fs_err::copy(&src_path, &dst_path).map_err(|e| {
@@ -1263,39 +1237,7 @@ async fn copy_dir_all(src: &Path, dst: &Path) -> Result<()> {
             })?;
 
             if meta.file_type().is_symlink() {
-                let target = fs_err::read_link(&src_entry).map_err(|e| {
-                    wrap(e, FsOperation::ReadLink, src_entry.clone())
-                })?;
-                #[cfg(unix)]
-                {
-                    tokio::fs::symlink(&target, &dst_entry).await.map_err(
-                        |e| wrap(e, FsOperation::Symlink, dst_entry.clone()),
-                    )?;
-                }
-                #[cfg(windows)]
-                {
-                    if target.is_dir() {
-                        tokio::fs::symlink_dir(&target, &dst_entry)
-                            .await
-                            .map_err(|e| {
-                                wrap(
-                                    e,
-                                    FsOperation::Symlink,
-                                    dst_entry.clone(),
-                                )
-                            })?;
-                    } else {
-                        tokio::fs::symlink_file(&target, &dst_entry)
-                            .await
-                            .map_err(|e| {
-                                wrap(
-                                    e,
-                                    FsOperation::Symlink,
-                                    dst_entry.clone(),
-                                )
-                            })?;
-                    }
-                }
+                copy_symlink(&src_entry, &dst_entry).await?;
             } else if meta.is_dir() {
                 copy_dir_all(&src_entry, &dst_entry).await?;
             } else {
@@ -1308,6 +1250,40 @@ async fn copy_dir_all(src: &Path, dst: &Path) -> Result<()> {
         Ok(())
     })
     .await
+}
+
+/// Create a symlink at `link` pointing at `target`, verbatim.
+///
+/// On Windows the link flavor is picked from what the target currently is;
+/// a missing target is treated as a file link.
+async fn create_symlink_at(
+    target: &Path,
+    link: &Path,
+    op: FsOperation,
+) -> Result<()> {
+    #[cfg(unix)]
+    let created = tokio::fs::symlink(target, link).await;
+    #[cfg(windows)]
+    let created = if target.is_dir() {
+        tokio::fs::symlink_dir(target, link).await
+    } else {
+        tokio::fs::symlink_file(target, link).await
+    };
+    #[cfg(not(any(unix, windows)))]
+    let created: std::io::Result<()> = Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "symlinks are not supported on this platform",
+    ));
+    created.map_err(|e| wrap(e, op, link.to_path_buf()))
+}
+
+/// Recreate the symlink stored at `src` at `dst`, keeping its raw target
+/// byte for byte (relative targets stay relative and resolve against the
+/// destination directory).
+async fn copy_symlink(src: &Path, dst: &Path) -> Result<()> {
+    let target = fs_err::read_link(src)
+        .map_err(|e| wrap(e, FsOperation::ReadLink, src.to_path_buf()))?;
+    create_symlink_at(&target, dst, FsOperation::Symlink).await
 }
 
 #[cfg(test)]
@@ -1859,6 +1835,89 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(content, Bytes::from("copy me"));
+
+        fs_err::remove_dir_all(&base).ok();
+    }
+
+    /// `copy_node` preserves symlinks: the destination is a link carrying
+    /// the same raw target, for a dangling link alike.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn node_copy_symlink_is_copied_as_link() {
+        let base = temp_dir().join("node_copy_sym");
+        let dst_dir_path = base.join("dst");
+        let _ = fs_err::remove_dir_all(&base);
+        fs_err::create_dir_all(&dst_dir_path).unwrap();
+        fs_err::write(base.join("target.txt"), "payload").unwrap();
+        std::os::unix::fs::symlink("target.txt", base.join("link")).unwrap();
+        std::os::unix::fs::symlink("nowhere.txt", base.join("dangling"))
+            .unwrap();
+
+        let fs = LocalFs::new("node_test");
+        let dst_nodeid = fs.resolve_path(&dst_dir_path).await.unwrap();
+        let dst_dirid = DirId::<u64>::new(*dst_nodeid.get());
+
+        for (name, want) in
+            [("link", "target.txt"), ("dangling", "nowhere.txt")]
+        {
+            let src = fs.resolve_path(&base.join(name)).await.unwrap();
+            let new_id = fs.copy_node(src, dst_dirid).await.unwrap();
+            let new_node = fs.get_node(new_id).unwrap();
+            assert!(
+                new_node.kind().is_symlink(),
+                "{name} copied as {new_node}"
+            );
+            let copied = dst_dir_path.join(name);
+            assert_eq!(
+                fs_err::read_link(&copied).unwrap(),
+                PathBuf::from(want)
+            );
+        }
+        // The source links were not dereferenced or removed.
+        assert!(
+            fs_err::symlink_metadata(base.join("link"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+
+        fs_err::remove_dir_all(&base).ok();
+    }
+
+    /// A symlink pointing at a directory is copied as a link, not expanded
+    /// into a copy of the target's content.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn node_copy_dir_symlink_is_copied_as_link() {
+        let base = temp_dir().join("node_copy_dirsym");
+        let dst_dir_path = base.join("dst");
+        let _ = fs_err::remove_dir_all(&base);
+        fs_err::create_dir_all(base.join("realdir")).unwrap();
+        fs_err::create_dir_all(&dst_dir_path).unwrap();
+        fs_err::write(base.join("realdir/inner.txt"), "inner").unwrap();
+        std::os::unix::fs::symlink("realdir", base.join("dirlink")).unwrap();
+
+        let fs = LocalFs::new("node_test");
+        let src = fs.resolve_path(&base.join("dirlink")).await.unwrap();
+        let dst_nodeid = fs.resolve_path(&dst_dir_path).await.unwrap();
+        let dst_dirid = DirId::<u64>::new(*dst_nodeid.get());
+
+        let new_id = fs.copy_node(src, dst_dirid).await.unwrap();
+        assert!(fs.get_node(new_id).unwrap().kind().is_symlink());
+        let copied = dst_dir_path.join("dirlink");
+        assert!(
+            fs_err::symlink_metadata(&copied)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the directory link should stay a link"
+        );
+        assert_eq!(
+            fs_err::read_link(&copied).unwrap(),
+            PathBuf::from("realdir")
+        );
+        // The target directory's content was not duplicated into the copy.
+        assert!(!dst_dir_path.join("realdir").exists());
 
         fs_err::remove_dir_all(&base).ok();
     }
