@@ -35,7 +35,7 @@ use cocomo_lib::{
     SyncResult, SyncRules, compare_texts, default_session_dir,
     execute_transfers, list_saved_sessions, report::generate_report,
 };
-use ratatui_kit::crossterm::event::KeyEvent;
+use ratatui_kit::crossterm::event::{KeyCode, KeyEvent};
 
 use crate::{
     error::{Result, TuiError},
@@ -1028,9 +1028,13 @@ pub(crate) fn dispatch_browser_key(key: KeyEvent) -> bool {
             let Some(session) = app.active_mut() else {
                 return false;
             };
-            // The browser hands over to the save-name prompt.
+            // The browser hands over to the save-name prompt, with the name
+            // pre-filled from the tab title (same preset as
+            // `Cmd::StartSaveSession`).
+            let title = session.tab_title().to_owned();
             session.ui.mode = SessionMode::SaveSession {
-                name: String::new(),
+                name: title.clone(),
+                cursor: title.chars().count(),
             };
             app.session_browser = None;
             true
@@ -1120,9 +1124,16 @@ fn dispatch_key(
 pub(crate) fn set_mode_buffer(value: String) {
     if let Some(session) = APP_STATE.state().write().active_mut() {
         match &mut session.ui.mode {
-            SessionMode::SaveSession { name: buf }
-            | SessionMode::Search { query: buf }
-            | SessionMode::Command { input: buf } => *buf = value,
+            SessionMode::SaveSession { name, cursor } => {
+                // The whole buffer is replaced, so the caret lands at the
+                // end of the new text.
+                *cursor = value.chars().count();
+                *name = value;
+            }
+            SessionMode::Search { query: buf }
+            | SessionMode::Command { input: buf } => {
+                *buf = value;
+            }
             _ => {}
         }
     }
@@ -1131,8 +1142,8 @@ pub(crate) fn set_mode_buffer(value: String) {
 /// Submit the typed name for saving the active session.
 ///
 /// An empty name falls back to the session's tab title. Returns `true`
-/// when the save was dispatched (so the input component may close its
-/// editing layer), `false` when the session was not in save mode.
+/// when the save was dispatched, `false` when the session was not in
+/// save mode.
 pub(crate) fn submit_save_name(name: String) -> bool {
     let name = {
         let state = APP_STATE.state();
@@ -1153,6 +1164,47 @@ pub(crate) fn submit_save_name(name: String) -> bool {
     };
     process_session_action(SessionAction::SaveSession { name });
     true
+}
+
+/// Route a key to the save-session name prompt.
+///
+/// [`SaveInput`](crate::ui) calls this from its layer handler while the
+/// prompt is active, so the prompt owns the keys from its first frame
+/// (the `Editing` keymap scope stays as a fallback for other shells).
+/// Returns `true` when the prompt consumed the key; `false` lets the key
+/// fall through to lower layers.
+pub(crate) fn dispatch_save_key(key: KeyEvent) -> bool {
+    let submit = {
+        let state = APP_STATE.state();
+        let mut app = state.write();
+        let Some(session) = app
+            .active_mut()
+            .filter(|s| matches!(s.ui.mode, SessionMode::SaveSession { .. }))
+        else {
+            return false;
+        };
+        match key.code {
+            KeyCode::Esc => {
+                session.ui.mode = SessionMode::Normal;
+                None
+            }
+            KeyCode::Enter => {
+                let SessionMode::SaveSession { name, .. } = &session.ui.mode
+                else {
+                    return false;
+                };
+                Some(name.clone())
+            }
+            _ if keys::edit_save_name(session, key) => None,
+            _ => return false,
+        }
+    };
+    // `submit_save_name` takes the state lock itself, so run it after the
+    // guard above is dropped.
+    match submit {
+        Some(name) => submit_save_name(name),
+        None => true,
+    }
 }
 
 /// Load the saved session `name` from the session directory and close the
@@ -1618,8 +1670,12 @@ pub(crate) fn paste_into_mode(text: &str) -> bool {
         return false;
     };
     match &mut session.ui.mode {
-        SessionMode::SaveSession { name }
-        | SessionMode::Search { query: name }
+        SessionMode::SaveSession { name, cursor } => {
+            *cursor = value.chars().count();
+            *name = value;
+            true
+        }
+        SessionMode::Search { query: name }
         | SessionMode::Command { input: name } => {
             *name = value;
             true
@@ -2281,8 +2337,60 @@ mod tests {
         assert_eq!(app.session_browser, None);
         assert!(matches!(
             &app.active().unwrap().ui.mode,
-            SessionMode::SaveSession { name } if name.is_empty()
+            SessionMode::SaveSession { name, cursor }
+                if name == "left vs right" && *cursor == 13
         ));
+    }
+
+    /// A press with no modifiers, for the save-name prompt's layer.
+    fn save_key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn dispatch_save_key_edits_the_preset_buffer() {
+        let mut app = dir_app_state();
+        let title = app.active().unwrap().tab_title().to_owned();
+        app.active_mut().unwrap().ui.mode = SessionMode::SaveSession {
+            name: title.clone(),
+            cursor: title.chars().count(),
+        };
+        APP_STATE.set(app);
+        // The prompt owns editing keys from its very first frame; no
+        // activation re-press is needed (the issue #2 focus fix).
+        assert!(dispatch_save_key(save_key(KeyCode::Char('2'))));
+        assert!(dispatch_save_key(save_key(KeyCode::Backspace)));
+        assert!(dispatch_save_key(save_key(KeyCode::Left)));
+        // Non-editing keys are not claimed; they fall through.
+        assert!(!dispatch_save_key(save_key(KeyCode::PageUp)));
+        let state = APP_STATE.state();
+        let app = state.read();
+        let SessionMode::SaveSession { name, cursor } =
+            &app.active().unwrap().ui.mode
+        else {
+            panic!("a non-editing key must not close the prompt");
+        };
+        // The typed char was inserted, then deleted again; `Left` moved
+        // the caret inside the pre-filled title.
+        assert_eq!(name, &title);
+        assert_eq!(*cursor, title.chars().count() - 1);
+    }
+
+    #[test]
+    fn dispatch_save_key_esc_cancels_the_prompt() {
+        let mut app = dir_app_state();
+        app.active_mut().unwrap().ui.mode = SessionMode::SaveSession {
+            name: "left vs right".into(),
+            cursor: 13,
+        };
+        APP_STATE.set(app);
+        assert!(dispatch_save_key(save_key(KeyCode::Esc)));
+        assert!(matches!(
+            APP_STATE.state().read().active().unwrap().ui.mode,
+            SessionMode::Normal
+        ));
+        // With the prompt closed, keys fall through to lower layers.
+        assert!(!dispatch_save_key(save_key(KeyCode::Char('x'))));
     }
 
     #[test]

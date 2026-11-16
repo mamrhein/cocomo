@@ -24,14 +24,14 @@ use super::{
         COMMAND_PLACEHOLDER, HelpBar, StatusBar, busy_indicator, use_busy_tick,
     },
     rows::{CellRow, cell_row_renderer, dir_rows},
+    save_input::SaveInput,
     session_table::SessionTable,
     theme::CocomoTheme,
 };
 use crate::{
     controller::{
         dispatch_dir_key, extend_selection, scroll_active, select_row,
-        set_active_mode, set_mode_buffer, submit_command, submit_save_name,
-        submit_search,
+        set_active_mode, set_mode_buffer, submit_command, submit_search,
     },
     keys::{self, KeyScope},
     state::{APP_STATE, SessionMode, StatusFilter},
@@ -190,7 +190,7 @@ pub(super) fn DirCompareView(
 
     let help_bar_lines: Vec<Line<'static>> =
         if matches!(mode, SessionMode::SaveSession { .. }) {
-            vec![Line::from("s=activate  Enter=save  Esc=cancel")]
+            vec![Line::from("Enter=save  Esc=cancel")]
         } else if matches!(mode, SessionMode::Search { .. }) {
             vec![Line::from("/=activate  Enter=jump  Esc=cancel")]
         } else if matches!(mode, SessionMode::Command { .. }) {
@@ -252,26 +252,12 @@ pub(super) fn DirCompareView(
                     scroll_active(delta);
                 }),
             )
-            // Status bar or input component depending on mode. All text
-            // entry uses SearchInput, which owns its exclusive input layer;
-            // the activate key matches the key that entered the mode.
-            if let SessionMode::SaveSession { name } = &mode {
-                SearchInput(
-                    value: name.clone(),
-                    placeholder: "Session name...".to_string(),
-                    is_editing: true,
-                    activate_key: KeyCode::Char('s'),
-                    on_change: Handler::from(move |val: String| {
-                        set_mode_buffer(val);
-                    }),
-                    on_submit: Handler::from(move |val: String| -> bool {
-                        submit_save_name(val)
-                    }),
-                    clear_on_escape: true,
-                    on_clear: Handler::from(move |_: ()| {
-                        set_active_mode(SessionMode::Normal);
-                    }),
-                )
+            // Status bar or input component depending on mode. Search and
+            // command entry use SearchInput, which owns its exclusive input
+            // layer; the activate key matches the key that entered the mode.
+            // The save prompt is a dedicated focused component (issue #2).
+            if let SessionMode::SaveSession { .. } = &mode {
+                SaveInput()
             } else if let SessionMode::Search { query } = &mode {
                 SearchInput(
                     value: query.clone(),

@@ -59,6 +59,7 @@ mod menu_bar;
 mod option_list;
 mod report_modal;
 mod rows;
+mod save_input;
 mod session_browser;
 mod session_table;
 mod settings_modal;

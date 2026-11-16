@@ -46,8 +46,13 @@ pub enum SessionMode {
     /// The filter panel modal (`f`) is open, holding its draft in a box
     /// so the enum stays small.
     FilterPanel { draft: Box<FilterDraft> },
-    /// The user is typing a session name to save.
-    SaveSession { name: String },
+    /// The user is typing a session name to save, with the cursor
+    /// position (character index) within `name`.
+    ///
+    /// The buffer is preset with the session's tab title when the mode
+    /// opens; the prompt (`ui::save_input`) owns an exclusive input layer
+    /// from its first frame, so the first keystroke lands in the buffer.
+    SaveSession { name: String, cursor: usize },
     /// The settings modal (`,`) is open.
     Settings,
     /// The report modal (`R`) is open, holding its draft in a box.
@@ -278,10 +283,14 @@ impl SessionMode {
     ///
     /// While editing, printable keys belong to the input component's layer;
     /// the shell and session handlers must not claim them (e.g. `q` must
-    /// not quit). The modal panels (`FilterPanel`, `Settings`, `Report`)
-    /// are not text-entry modes: like
-    /// [`SessionMode::Transfer`] they own an exclusive input layer that
-    /// keeps the shell and the table from seeing keys.
+    /// not quit). `SaveSession` owns its exclusive layer from its first
+    /// frame (see `ui::save_input`), so its keys arrive through
+    /// `controller::dispatch_save_key` and the `Editing` keymap
+    /// scope is only a fallback guard; `Search` and `Command` raise their
+    /// layer from their `SearchInput` once editing is activated. The modal
+    /// panels (`FilterPanel`, `Settings`, `Report`) are not text-entry
+    /// modes: like [`SessionMode::Transfer`] they own an exclusive input
+    /// layer that keeps the shell and the table from seeing keys.
     pub fn is_editing(&self) -> bool {
         matches!(
             self,

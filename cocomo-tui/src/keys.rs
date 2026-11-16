@@ -1192,10 +1192,12 @@ fn execute(cmd: Cmd, session: &mut SessionView) -> SessionAction {
             SessionAction::None
         }
         Cmd::StartSaveSession => {
-            // Enter input mode; the name buffer lives in the mode itself.
-            session.ui.mode = SessionMode::SaveSession {
-                name: String::new(),
-            };
+            // Enter input mode; the name buffer lives in the mode itself,
+            // preset with the tab title so the user can accept or edit it
+            // (issue #2).
+            let name = session.tab_title().to_string();
+            let cursor = name.chars().count();
+            session.ui.mode = SessionMode::SaveSession { name, cursor };
             SessionAction::None
         }
         Cmd::OpenSessionBrowser => {
@@ -1790,6 +1792,22 @@ fn edit_text(value: &mut String, cursor: &mut usize, key: KeyEvent) -> bool {
     *value = input.value().to_string();
     *cursor = input.cursor();
     true
+}
+
+/// Forward an editing key to the active session's save-name buffer.
+///
+/// The save prompt's exclusive input layer dispatches every non-command
+/// key here, so the prompt is editable from its first frame (the focus
+/// fix for issue #2). Returns `true` when the key edited the buffer.
+pub(crate) fn edit_save_name(
+    session: &mut SessionView,
+    key: KeyEvent,
+) -> bool {
+    let SessionMode::SaveSession { name, cursor } = &mut session.ui.mode
+    else {
+        return false;
+    };
+    edit_text(name, cursor, key)
 }
 
 #[cfg(test)]
@@ -2393,14 +2411,16 @@ mod tests {
         let mut session = dir_session();
         session.ui.name_filter = Some(NamePattern::new("keep me").unwrap());
 
-        // Save mode owns its name buffer; the name filter is untouched.
+        // Save mode owns its name buffer, preset with the tab title; the
+        // name filter is untouched.
         assert_eq!(
             press(&mut session, KeyCode::Char('s')),
             Some(SessionAction::None)
         );
-        assert!(matches!(
-            &session.ui.mode,
-            SessionMode::SaveSession { name } if name.is_empty()
+        assert!(matches!(&session.ui.mode,
+            SessionMode::SaveSession { name, cursor }
+                if name == "left vs right"
+                    && *cursor == "left vs right".chars().count()
         ));
         assert_eq!(
             session.ui.name_filter.as_ref().unwrap().pattern,
@@ -2433,7 +2453,7 @@ mod tests {
             );
             assert!(
                 matches!(&session.ui.mode,
-                    SessionMode::SaveSession { name } if *name == title),
+                    SessionMode::SaveSession { name, .. } if *name == title),
                 "expected the preset name {title:?}, got {:?}",
                 session.ui.mode,
             );
@@ -2445,14 +2465,16 @@ mod tests {
         let mut session = text_session();
 
         // The same session tools that the dir view offers are available on
-        // a text tab in normal mode.
+        // a text tab in normal mode; the save prompt opens with the tab
+        // title preset.
         assert_eq!(
             press(&mut session, KeyCode::Char('s')),
             Some(SessionAction::None)
         );
         assert!(matches!(
             &session.ui.mode,
-            SessionMode::SaveSession { name } if name.is_empty()
+            SessionMode::SaveSession { name, .. }
+                if name == "left vs right"
         ));
         assert!(press(&mut session, KeyCode::Esc).is_some());
         assert_eq!(session.ui.mode, SessionMode::Normal);

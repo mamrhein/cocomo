@@ -249,7 +249,7 @@ fn save_key_presets_the_tab_title_as_session_name() {
         );
         assert!(
             matches!(&session.ui.mode,
-                SessionMode::SaveSession { name } if *name == title),
+                SessionMode::SaveSession { name, .. } if *name == title),
             "expected the preset name {title:?}, got {:?}",
             session.ui.mode,
         );
