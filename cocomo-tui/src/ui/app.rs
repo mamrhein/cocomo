@@ -222,6 +222,9 @@ pub(crate) fn App(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // Timestamp of the last bare `Esc`, for the `Esc <accel>` menu
     // fallback (see `esc_prefix`).
     let mut esc_at = hooks.use_state(|| Option::<Instant>::None);
+    // The error dialog grows with its message, so its box is derived from
+    // the terminal width; subscribing here re-renders the dialog on resize.
+    let (cols, _rows) = hooks.use_terminal_size();
 
     // The framework's automatic `Ctrl+C` exit would end the session
     // without warning, so it is disabled in favour of a double-press
@@ -476,6 +479,10 @@ pub(crate) fn App(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // Extract error message for the AlertModal (cloned to avoid holding the
     // read guard across element! rendering).
     let error_message = app.error_message.clone();
+    // `AlertModal` is a fixed-size box, so the app sizes it to the wrapped
+    // message (see `error_dialog_size`).
+    let (error_width, error_height) =
+        error_dialog_size(error_message.as_ref(), cols);
     let show_shortcuts = app.show_shortcuts;
     let quit_armed = app.quit_armed;
 
@@ -515,6 +522,8 @@ pub(crate) fn App(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             }
             AlertModal(
                 open: error_message.is_some(),
+                width: Constraint::Length(error_width),
+                height: Constraint::Length(error_height),
                 title: Line::from(" Error "),
                 message: error_message.unwrap_or_default(),
                 close_hint: Line::from("Enter / Esc").centered(),
@@ -601,6 +610,48 @@ pub(crate) fn App(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     )
 }
 
+/// Border (2 rows) plus vertical padding (2 rows) of the `AlertModal` frame.
+const ALERT_FRAME_ROWS: u16 = 4;
+/// Border (2 columns) plus horizontal padding (2 columns) of the
+/// `AlertModal` frame.
+const ALERT_FRAME_COLS: u16 = 4;
+
+/// Dialog box that shows the whole error message.
+///
+/// The framework's `AlertModal` never measures its content (default height
+/// fits only two body rows), so the app derives the box from the message:
+/// 60 % of the terminal width (at least 50 columns when available), tall
+/// enough for the wrapped message.
+///
+/// The height is deliberately not clamped to the terminal: `Modal` splits
+/// its box against the full screen, so ratatui's layout solver already caps
+/// an over-tall dialog at the screen edge, and leaving the row count
+/// terminal-independent keeps offscreen rendering deterministic.
+fn error_dialog_size(message: Option<&String>, cols: u16) -> (u16, u16) {
+    // `use_terminal_size` reports `0` where the size is unavailable
+    // (offscreen tests, a closed stdout); assume a modest terminal then.
+    let cols = if cols == 0 { 80 } else { cols };
+    // Keep a 2-column margin around the frame so it never touches the edges.
+    let max_width = cols.saturating_sub(ALERT_FRAME_COLS + 2).max(24);
+    let width = ((cols as u32 * 6 / 10) as u16).max(50).min(max_width);
+    let body_width =
+        usize::from(width.saturating_sub(ALERT_FRAME_COLS)).max(20);
+    // Greedy word wrap with the same shape as the modal's paragraph wrap
+    // (`break_words` splits over-long tokens such as joined error lists).
+    // The extra body row absorbs small wrap differences between `textwrap`
+    // and ratatui's paragraph wrapper.
+    let body = message.map(String::as_str).unwrap_or_default();
+    let body_rows = textwrap::wrap(
+        body,
+        textwrap::Options::new(body_width).break_words(true),
+    )
+    .len()
+    .saturating_add(1)
+    .max(2) as u16;
+    let height = body_rows.saturating_add(ALERT_FRAME_ROWS).max(6);
+    (width, height)
+}
+
 #[cfg(test)]
 mod esc_prefix_tests {
     use super::*;
@@ -677,6 +728,48 @@ mod esc_prefix_tests {
             ),
             EscPrefix::None
         );
+    }
+}
+
+#[cfg(test)]
+mod error_dialog_size_tests {
+    use super::*;
+
+    #[test]
+    fn short_messages_keep_the_compact_box() {
+        let (width, height) =
+            error_dialog_size(Some(&"bad thing".into()), 100);
+        assert_eq!(width, 60);
+        assert_eq!(height, 6);
+    }
+
+    #[test]
+    fn long_messages_grow_the_dialog() {
+        // 168 chars split into exactly three body rows of 56 columns; the
+        // box adds one slack row plus the frame.
+        let message = Some("x".repeat(56 * 3));
+        let (width, height) = error_dialog_size(message.as_ref(), 100);
+        assert_eq!(width, 60);
+        assert_eq!(height, 3 + 1 + ALERT_FRAME_ROWS);
+    }
+
+    #[test]
+    fn huge_messages_keep_their_full_height() {
+        // The helper does not clamp to the screen; the modal's layout
+        // solver caps the drawn box at the screen edge instead. This keeps
+        // the computed height independent of the ambient terminal.
+        let message = Some("x".repeat(56 * 40));
+        let (_, height) = error_dialog_size(message.as_ref(), 100);
+        assert_eq!(height, 40 + 1 + ALERT_FRAME_ROWS);
+    }
+
+    #[test]
+    fn unknown_terminal_size_falls_back_to_a_modest_box() {
+        // Offscreen rendering has no terminal size; the helper must still
+        // return a usable box instead of collapsing to zero.
+        let (width, height) = error_dialog_size(None, 0);
+        assert_eq!(width, 50);
+        assert_eq!(height, 6);
     }
 }
 
@@ -769,6 +862,24 @@ mod render_tests {
         assert!(
             !calm.contains("Press Ctrl+C again to quit"),
             "quit prompt rendered while disarmed:\n{calm}"
+        );
+    }
+
+    #[test]
+    fn error_modal_shows_the_whole_long_message() {
+        // Regression: the error `AlertModal` used the framework default of
+        // a fixed six-row box, so a long message was clipped after its two
+        // body rows. The dialog now grows with the wrapped message, so its
+        // tail stays visible.
+        let mut app = dir_session_state();
+        app.error_message = Some(format!(
+            "Transfer failed: {}code 4711",
+            "could not copy file_0123456789 ".repeat(5)
+        ));
+        let text = render(app);
+        assert!(
+            text.contains("Error") && text.contains("code 4711"),
+            "the tail of the long error message is clipped:\n{text}"
         );
     }
 
