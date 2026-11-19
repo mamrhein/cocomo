@@ -105,7 +105,7 @@ pub use format::{
     FileFormat, FormatRegistry, FormatSettings, FormatType, LineEnding,
     TableParser, TextEncoding,
 };
-pub use fs::{NodeFileSystem, OpenMode, WritableFileSystem};
+pub use fs::{CopyOptions, NodeFileSystem, OpenMode, WritableFileSystem};
 pub use ftp::{FtpConfig, FtpDirId, FtpFileId, FtpFs, FtpNodeId};
 pub use grammar::{Grammar, GrammarRule, Importance};
 pub use hash::{

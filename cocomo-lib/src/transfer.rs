@@ -545,8 +545,15 @@ where
     let src_node = src_fs.get_node(src_node_id)?;
 
     if is_dir {
-        // Copy directory.
-        src_fs.copy_node(src_node_id, dst_dir_id).await?;
+        // Copy directory. Options are threaded in with the transfer-level
+        // plumbing; the default mirrors the long-standing behavior.
+        src_fs
+            .copy_node(
+                src_node_id,
+                dst_dir_id,
+                &crate::fs::CopyOptions::default(),
+            )
+            .await?;
     } else if let NodeKind::Symlink { target } = src_node.kind() {
         // A symlink transfers as a link: recreate it on the destination
         // side with its raw target verbatim. Streaming through the link

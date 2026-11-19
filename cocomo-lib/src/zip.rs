@@ -63,7 +63,7 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use crate::{
     error::{FsError, FsOperation, Result, wrap},
     file::FsFile,
-    fs::{NodeFileSystem, OpenMode, WritableFileSystem},
+    fs::{CopyOptions, NodeFileSystem, OpenMode, WritableFileSystem},
     identity::{DirId, FileId, FileSystemId, NodeId},
     meta::Metadata,
     node::{Node, NodeKind, UserPermissions},
@@ -821,6 +821,7 @@ impl WritableFileSystem for ZipFs {
         &self,
         src: NodeId<Self::Nid>,
         _dst: DirId<Self::Nid>,
+        _options: &CopyOptions,
     ) -> Result<NodeId<Self::Nid>> {
         let path = self.node_path_of(src)?;
         Err(self.read_only_error(FsOperation::Copy, &path))

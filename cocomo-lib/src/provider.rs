@@ -42,7 +42,7 @@ use thiserror::Error;
 use crate::{
     error::{FsError, Result},
     file::FsFile,
-    fs::{NodeFileSystem, OpenMode, WritableFileSystem},
+    fs::{CopyOptions, NodeFileSystem, OpenMode, WritableFileSystem},
     ftp::{FtpConfig, FtpFs},
     identity::{DirId, FileId, FileSystemId, NodeId},
     local::LocalFs,
@@ -1009,14 +1009,15 @@ impl WritableFileSystem for Provider {
         &self,
         src: NodeId<Self::Nid>,
         dst: DirId<Self::Nid>,
+        options: &CopyOptions,
     ) -> Result<NodeId<Self::Nid>> {
         match self {
-            Self::Local(p) => p.copy_node(src, dst).await,
-            Self::Ftp(p) => p.copy_node(src, dst).await,
-            Self::Sftp(p) => p.copy_node(src, dst).await,
-            Self::S3(p) => p.copy_node(src, dst).await,
-            Self::WebDav(p) => p.copy_node(src, dst).await,
-            Self::Zip(p) => p.copy_node(src, dst).await,
+            Self::Local(p) => p.copy_node(src, dst, options).await,
+            Self::Ftp(p) => p.copy_node(src, dst, options).await,
+            Self::Sftp(p) => p.copy_node(src, dst, options).await,
+            Self::S3(p) => p.copy_node(src, dst, options).await,
+            Self::WebDav(p) => p.copy_node(src, dst, options).await,
+            Self::Zip(p) => p.copy_node(src, dst, options).await,
         }
     }
 

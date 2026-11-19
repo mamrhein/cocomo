@@ -80,7 +80,7 @@ use tokio::io::{
 use crate::{
     error::{FsError, FsOperation, Result},
     file::FsFile,
-    fs::{NodeFileSystem, OpenMode, WritableFileSystem},
+    fs::{CopyOptions, NodeFileSystem, OpenMode, WritableFileSystem},
     identity::{DirId, FileId, FileSystemId, NodeId},
     meta::Metadata,
     node::{Node, NodeKind, SymlinkTarget},
@@ -1549,6 +1549,10 @@ impl WritableFileSystem for SftpFs {
         &self,
         src: NodeId<Self::Nid>,
         dst: DirId<Self::Nid>,
+        // Symlinks are always recreated as links; modes and timestamps are
+        // not exposed by the SFTP attribute model we use, so the
+        // corresponding options are no-ops here.
+        _options: &CopyOptions,
     ) -> Result<NodeId<Self::Nid>> {
         let src_node = self.get_node(src)?;
         let dst_node = self.get_node(dst.as_node_id())?;

@@ -59,7 +59,8 @@ use crate::{
     error::{FsError, FsOperation, Result},
     file::FsFile,
     fs::{
-        DirEntryMeta, DirStream, NodeFileSystem, OpenMode, WritableFileSystem,
+        CopyOptions, DirEntryMeta, DirStream, NodeFileSystem, OpenMode,
+        WritableFileSystem,
     },
     identity::{DirId, FileId, FileSystemId, NodeId},
     meta::Metadata,
@@ -1213,6 +1214,9 @@ impl WritableFileSystem for MockFs {
         &self,
         src: NodeId<Self::Nid>,
         dst: DirId<Self::Nid>,
+        // The in-memory model has no modes or timestamps to preserve; it
+        // always recreates symlinks as links, matching the default.
+        _options: &CopyOptions,
     ) -> Result<NodeId<Self::Nid>> {
         let src_node = self.get_node(src)?;
         let dst_node = self.get_node(dst.as_node_id())?;
@@ -1863,7 +1867,10 @@ mod tests {
         let dst = fs.resolve_path(Path::new("/root/dst")).await.unwrap();
         // A cross-directory copy leaves the source intact and yields a
         // node for the copied root.
-        let copied = fs.copy_node(src, DirId::new(*dst.get())).await.unwrap();
+        let copied = fs
+            .copy_node(src, DirId::new(*dst.get()), &CopyOptions::default())
+            .await
+            .unwrap();
         assert!(fs.get_node(copied).unwrap().kind().is_directory());
         let b = fs.resolve_path(Path::new("/root/src/b.txt")).await.unwrap();
         // A rename within a directory re-keys the cache.

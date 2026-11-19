@@ -60,6 +60,7 @@ tokio-util = { version = "0.7", features = ["codec"] }
 toml = "1"
 uuid = { version = "1", features = ["serde", "v4"] }
 zip = { version = "9", default-features = false, features = ["deflate"] }
+filetime = "0.2.30"
 
 [dev-dependencies]
 temp-env = "0.3"
@@ -71,3 +72,6 @@ default = ["keychain", "prompt"]
 keychain = []
 # Interactive one-time credential prompts on a TTY via `rpassword`.
 prompt = ["dep:rpassword"]
+
+[target."cfg(unix)".dependencies]
+xattr = "1.7.0"

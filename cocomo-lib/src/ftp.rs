@@ -51,7 +51,7 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use crate::{
     error::{FsError, FsOperation, Result},
     file::FsFile,
-    fs::{NodeFileSystem, OpenMode, WritableFileSystem},
+    fs::{CopyOptions, NodeFileSystem, OpenMode, WritableFileSystem},
     identity::{DirId, FileId, FileSystemId, NodeId},
     meta::Metadata,
     node::{Node, NodeKind},
@@ -1200,6 +1200,9 @@ impl WritableFileSystem for FtpFs {
         &self,
         src: NodeId<Self::Nid>,
         dst: DirId<Self::Nid>,
+        // The FTP protocol has no links, modes, or server-side timestamps
+        // to preserve, so every option is a no-op here.
+        _options: &CopyOptions,
     ) -> Result<NodeId<Self::Nid>> {
         let src_node = self.get_node(src)?;
         let dst_node = self.get_node(dst.as_node_id())?;

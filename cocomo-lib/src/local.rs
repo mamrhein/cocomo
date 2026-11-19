@@ -22,12 +22,13 @@ use std::{
         atomic::{AtomicU64, Ordering},
     },
     task::{Context, Poll},
-    time::SystemTime,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use async_trait::async_trait;
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
+use filetime::FileTime;
 use futures::{Stream, StreamExt, TryStreamExt, stream};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio_util::codec::Decoder;
@@ -36,7 +37,8 @@ use crate::{
     error::{FsError, FsOperation, Result, wrap},
     file::FsFile,
     fs::{
-        DirEntryMeta, DirStream, NodeFileSystem, OpenMode, WritableFileSystem,
+        CopyOptions, DirEntryMeta, DirStream, NodeFileSystem, OpenMode,
+        WritableFileSystem,
     },
     identity::{DirId, FileId, FileSystemId, NodeId},
     meta::Metadata,
@@ -1118,6 +1120,7 @@ impl WritableFileSystem for LocalFs {
         &self,
         src: NodeId<Self::Nid>,
         dst: DirId<Self::Nid>,
+        options: &CopyOptions,
     ) -> Result<NodeId<Self::Nid>> {
         let src_node = self.get_node(src)?;
         let dst_node = self.get_node(dst.as_node_id())?;
@@ -1125,24 +1128,21 @@ impl WritableFileSystem for LocalFs {
         let dst_path = dst_node.path().join(src_node.name());
 
         // Copy on filesystem. `symlink_metadata` does not follow links, so
-        // a symlink is recreated as a link instead of being dereferenced
-        // (following it would duplicate the target's content or fail for a
-        // dangling or directory target).
+        // `copy_node_at` can honor `preserve_links`: a symlink is recreated
+        // as a link instead of being dereferenced (following it would
+        // duplicate the target's content or fail for a dangling or
+        // directory target).
         let meta = fs_err::symlink_metadata(src_path).map_err(|e| {
             wrap(e, FsOperation::Resolve, src_path.to_path_buf())
         })?;
-        if meta.file_type().is_symlink() {
-            copy_symlink(src_path, &dst_path).await?;
-        } else if meta.is_dir() {
-            // For directories, use recursive copy.
-            copy_dir_all(src_path, &dst_path).await?;
-        } else {
-            fs_err::tokio::copy(src_path, &dst_path)
-                .await
-                .map_err(|e| {
-                    wrap(e, FsOperation::Copy, src_path.to_path_buf())
-                })?;
-        }
+        copy_node_at(
+            src_path,
+            &dst_path,
+            &meta,
+            options,
+            &mut HardLinks::default(),
+        )
+        .await?;
 
         // Resolve the new path into the cache.
         self.resolve_path(&dst_path).await
@@ -1181,7 +1181,14 @@ impl WritableFileSystem for LocalFs {
                         wrap(e, FsOperation::Remove, src_path.clone())
                     })?;
                 } else if meta.is_dir() {
-                    copy_dir_all(&src_path, &dst_path).await?;
+                    copy_dir_all(
+                        &src_path,
+                        &dst_path,
+                        &meta,
+                        &CopyOptions::default(),
+                        &mut HardLinks::default(),
+                    )
+                    .await?;
                     fs_err::remove_dir_all(&src_path).map_err(|e| {
                         wrap(e, FsOperation::Move, src_path.clone())
                     })?;
@@ -1214,8 +1221,132 @@ impl WritableFileSystem for LocalFs {
     }
 }
 
-/// Recursively copy a directory.
-async fn copy_dir_all(src: &Path, dst: &Path) -> Result<()> {
+/// Hard links seen during one recursive copy, keyed by `(device, inode)`.
+///
+/// A source file with more than one link is copied in full the first time
+/// it is met; later occurrences become hard links to that first copy, so
+/// the link relation between source files survives in the destination
+/// (like `cp -d`). Only meaningful on Unix; inert elsewhere.
+#[derive(Default)]
+struct HardLinks {
+    #[cfg(unix)]
+    first_dst: HashMap<(u64, u64), PathBuf>,
+}
+
+impl HardLinks {
+    /// Destination path of an earlier copy of the same `(dev, ino)` if
+    /// `meta` describes a multiply-linked regular file already seen in
+    /// this run.
+    #[cfg(unix)]
+    fn linked_dst(&self, meta: &fs::Metadata) -> Option<PathBuf> {
+        use std::os::unix::fs::MetadataExt;
+        if meta.file_type().is_file() && meta.nlink() > 1 {
+            self.first_dst.get(&(meta.dev(), meta.ino())).cloned()
+        } else {
+            None
+        }
+    }
+
+    /// Remember `dst` as the first copy of a multiply-linked source file.
+    #[cfg(unix)]
+    fn record(&mut self, meta: &fs::Metadata, dst: &Path) {
+        use std::os::unix::fs::MetadataExt;
+        if meta.file_type().is_file() && meta.nlink() > 1 {
+            self.first_dst
+                .insert((meta.dev(), meta.ino()), dst.to_path_buf());
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn linked_dst(&self, _meta: &fs::Metadata) -> Option<PathBuf> {
+        None
+    }
+
+    #[cfg(not(unix))]
+    fn record(&mut self, _meta: &fs::Metadata, _dst: &Path) {}
+}
+
+/// Copy the node at `src` — whose metadata `meta` was captured without
+/// following links — to `dst`, honoring `options`.
+async fn copy_node_at(
+    src: &Path,
+    dst: &Path,
+    meta: &fs::Metadata,
+    options: &CopyOptions,
+    hard_links: &mut HardLinks,
+) -> Result<()> {
+    if meta.file_type().is_symlink() {
+        if options.preserve_links {
+            copy_symlink(src, dst).await?;
+            if options.preserve_timestamps {
+                preserve_timestamps(dst, meta);
+            }
+        } else {
+            // Dereference: copy the linked file or tree instead of the
+            // link itself. `canonicalize` resolves every link, so the
+            // target is never a symlink and cannot recurse here again.
+            let target = fs_err::canonicalize(src).map_err(|e| {
+                wrap(e, FsOperation::Resolve, src.to_path_buf())
+            })?;
+            let target_meta = target
+                .metadata()
+                .map_err(|e| wrap(e, FsOperation::Resolve, target.clone()))?;
+            if target_meta.is_dir() {
+                copy_dir_all(&target, dst, &target_meta, options, hard_links)
+                    .await?;
+            } else {
+                copy_file(&target, dst, &target_meta, options, hard_links)
+                    .await?;
+            }
+        }
+    } else if meta.is_dir() {
+        copy_dir_all(src, dst, meta, options, hard_links).await?;
+    } else {
+        copy_file(src, dst, meta, options, hard_links).await?;
+    }
+    Ok(())
+}
+
+/// Copy the regular file `src` to `dst`, honoring `options`.
+async fn copy_file(
+    src: &Path,
+    dst: &Path,
+    meta: &fs::Metadata,
+    options: &CopyOptions,
+    hard_links: &mut HardLinks,
+) -> Result<()> {
+    if options.preserve_links {
+        if let Some(existing) = hard_links.linked_dst(meta) {
+            // Second occurrence of a multi-linked source file: mirror the
+            // link instead of copying the content again.
+            std::fs::hard_link(&existing, dst)
+                .map_err(|e| wrap(e, FsOperation::Copy, dst.to_path_buf()))?;
+            return Ok(());
+        }
+    }
+    fs_err::tokio::copy(src, dst)
+        .await
+        .map_err(|e| wrap(e, FsOperation::Copy, src.to_path_buf()))?;
+    hard_links.record(meta, dst);
+    // Timestamps before mode: restoring the creation time needs a writable
+    // handle, and `chmod` never disturbs the times we just set.
+    if options.preserve_timestamps {
+        preserve_timestamps(dst, meta);
+    }
+    if options.preserve_mode {
+        preserve_mode(src, dst, meta);
+    }
+    Ok(())
+}
+
+/// Recursively copy a directory, honoring `options`.
+async fn copy_dir_all(
+    src: &Path,
+    dst: &Path,
+    meta: &fs::Metadata,
+    options: &CopyOptions,
+    hard_links: &mut HardLinks,
+) -> Result<()> {
     // Use boxed future to handle recursive async call.
     Box::pin(async move {
         fs_err::tokio::create_dir_all(dst)
@@ -1232,24 +1363,108 @@ async fn copy_dir_all(src: &Path, dst: &Path) -> Result<()> {
             let src_entry = entry.path();
             let dst_entry = dst.join(entry.file_name());
 
-            let meta = fs_err::symlink_metadata(&src_entry).map_err(|e| {
-                wrap(e, FsOperation::Resolve, src_entry.clone())
-            })?;
+            let entry_meta =
+                fs_err::symlink_metadata(&src_entry).map_err(|e| {
+                    wrap(e, FsOperation::Resolve, src_entry.clone())
+                })?;
 
-            if meta.file_type().is_symlink() {
-                copy_symlink(&src_entry, &dst_entry).await?;
-            } else if meta.is_dir() {
-                copy_dir_all(&src_entry, &dst_entry).await?;
-            } else {
-                fs_err::tokio::copy(&src_entry, &dst_entry).await.map_err(
-                    |e| wrap(e, FsOperation::Copy, src_entry.to_path_buf()),
-                )?;
-            }
+            copy_node_at(
+                &src_entry,
+                &dst_entry,
+                &entry_meta,
+                options,
+                hard_links,
+            )
+            .await?;
+        }
+
+        // Directory attributes go last: writing the entries above bumped
+        // the directory's own mtime, and a restrictive source mode applied
+        // first would block the child copies.
+        if options.preserve_timestamps {
+            preserve_timestamps(dst, meta);
+        }
+        if options.preserve_mode {
+            preserve_mode(src, dst, meta);
         }
 
         Ok(())
     })
     .await
+}
+
+/// Best-effort copy of `src`'s access attributes to `dst`.
+///
+/// Failures are skipped, never fatal: mode bits the kernel rejects and
+/// ACLs or extended attributes the filesystem or platform does not
+/// support must not fail the copy.
+fn preserve_mode(src: &Path, dst: &Path, meta: &fs::Metadata) {
+    let _ = fs_err::set_permissions(dst, meta.permissions());
+    #[cfg(unix)]
+    copy_xattrs(src, dst);
+}
+
+/// Copy user extended attributes and POSIX ACLs from `src` to `dst`.
+///
+/// ACLs ride along as their `system.posix_acl_*` xattrs (Linux); the
+/// remaining `system.*` entries are not settable through the xattr
+/// interface and `security.*` needs privileges, so both are skipped.
+#[cfg(unix)]
+fn copy_xattrs(src: &Path, dst: &Path) {
+    const ACL_XATTRS: [&str; 2] =
+        ["system.posix_acl_access", "system.posix_acl_default"];
+    let Ok(names) = xattr::list(src) else { return };
+    for name in names {
+        let name_str = name.to_string_lossy();
+        let copyable = name_str.starts_with("user.")
+            || ACL_XATTRS.contains(&name_str.as_ref());
+        if !copyable {
+            continue;
+        }
+        if let Ok(Some(value)) = xattr::get(src, &name) {
+            let _ = xattr::set(dst, &name, &value);
+        }
+    }
+}
+
+/// Best-effort restore of the timestamps `meta` describes onto `dst`.
+///
+/// `meta` must describe `dst`'s source itself (from `symlink_metadata`)
+/// so a symlink is timed via `lutimes` instead of touching its target.
+/// Timestamps the source does not expose (or the platform cannot set) are
+/// skipped; note that the *creation* time has no portable setter and is
+/// therefore not restored.
+fn preserve_timestamps(dst: &Path, meta: &fs::Metadata) {
+    fn to_file_time(t: SystemTime) -> Option<FileTime> {
+        let d = t.duration_since(UNIX_EPOCH).ok()?;
+        Some(FileTime::from_unix_time(
+            d.as_secs() as i64,
+            d.subsec_nanos(),
+        ))
+    }
+
+    let atime = meta.accessed().ok().and_then(to_file_time);
+    let mtime = meta.modified().ok().and_then(to_file_time);
+    let set = match (atime, mtime) {
+        (Some(a), Some(m)) => {
+            if meta.is_symlink() {
+                filetime::set_symlink_file_times(dst, a, m)
+            } else {
+                filetime::set_file_times(dst, a, m)
+            }
+        }
+        // A filesystem that hides one timestamp must still not block
+        // restoring the other; the single-time setters leave the unknown
+        // value untouched. Symlinks only expose both times together.
+        (Some(a), None) if !meta.is_symlink() => {
+            filetime::set_file_atime(dst, a)
+        }
+        (None, Some(m)) if !meta.is_symlink() => {
+            filetime::set_file_mtime(dst, m)
+        }
+        _ => Ok(()),
+    };
+    let _ = set;
 }
 
 /// Create a symlink at `link` pointing at `target`, verbatim.
@@ -1824,7 +2039,10 @@ mod tests {
         let dst_nodeid = fs.resolve_path(&base).await.unwrap();
         let dst_dirid = DirId::<u64>::new(*dst_nodeid.get());
 
-        let new_id = fs.copy_node(src_nodeid, dst_dirid).await.unwrap();
+        let new_id = fs
+            .copy_node(src_nodeid, dst_dirid, &CopyOptions::default())
+            .await
+            .unwrap();
         assert!(src_file_path.exists());
         // The copy gets the same name in the destination directory.
         let new_node = fs.get_node(new_id).unwrap();
@@ -1861,7 +2079,10 @@ mod tests {
             [("link", "target.txt"), ("dangling", "nowhere.txt")]
         {
             let src = fs.resolve_path(&base.join(name)).await.unwrap();
-            let new_id = fs.copy_node(src, dst_dirid).await.unwrap();
+            let new_id = fs
+                .copy_node(src, dst_dirid, &CopyOptions::default())
+                .await
+                .unwrap();
             let new_node = fs.get_node(new_id).unwrap();
             assert!(
                 new_node.kind().is_symlink(),
@@ -1902,7 +2123,10 @@ mod tests {
         let dst_nodeid = fs.resolve_path(&dst_dir_path).await.unwrap();
         let dst_dirid = DirId::<u64>::new(*dst_nodeid.get());
 
-        let new_id = fs.copy_node(src, dst_dirid).await.unwrap();
+        let new_id = fs
+            .copy_node(src, dst_dirid, &CopyOptions::default())
+            .await
+            .unwrap();
         assert!(fs.get_node(new_id).unwrap().kind().is_symlink());
         let copied = dst_dir_path.join("dirlink");
         assert!(
@@ -1918,6 +2142,213 @@ mod tests {
         );
         // The target directory's content was not duplicated into the copy.
         assert!(!dst_dir_path.join("realdir").exists());
+
+        fs_err::remove_dir_all(&base).ok();
+    }
+
+    /// With the default options, hard-linked source files stay linked
+    /// inside the copy: both destination entries share one inode.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn node_copy_preserves_hard_links() {
+        use std::os::unix::fs::MetadataExt;
+
+        let base = temp_dir().join("node_copy_hardlink");
+        let src_dir_path = base.join("src");
+        let dst_dir_path = base.join("dst");
+        let _ = fs_err::remove_dir_all(&base);
+        fs_err::create_dir_all(&src_dir_path).unwrap();
+        fs_err::create_dir_all(&dst_dir_path).unwrap();
+        let a = src_dir_path.join("a.txt");
+        fs_err::write(&a, "linked content").unwrap();
+        std::fs::hard_link(&a, src_dir_path.join("b.txt")).unwrap();
+
+        let fs = LocalFs::new("node_test");
+        let src = fs.resolve_path(&src_dir_path).await.unwrap();
+        let dst_nodeid = fs.resolve_path(&dst_dir_path).await.unwrap();
+        let dst_dirid = DirId::<u64>::new(*dst_nodeid.get());
+        fs.copy_node(src, dst_dirid, &CopyOptions::default())
+            .await
+            .unwrap();
+
+        let ca =
+            fs_err::symlink_metadata(dst_dir_path.join("src/a.txt")).unwrap();
+        let cb =
+            fs_err::symlink_metadata(dst_dir_path.join("src/b.txt")).unwrap();
+        assert_eq!(ca.ino(), cb.ino(), "hard-linked sources stay linked");
+        assert_eq!(ca.nlink(), 2, "only the two copies share the inode");
+        assert_eq!(
+            fs_err::read_to_string(dst_dir_path.join("src/a.txt")).unwrap(),
+            "linked content"
+        );
+
+        fs_err::remove_dir_all(&base).ok();
+    }
+
+    /// With `preserve_links` off a symlink is dereferenced: the copy is a
+    /// regular file carrying the target's content.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn node_copy_dereferences_symlink_when_unpreserved() {
+        let base = temp_dir().join("node_copy_deref");
+        let dst_dir_path = base.join("dst");
+        let _ = fs_err::remove_dir_all(&base);
+        fs_err::create_dir_all(&dst_dir_path).unwrap();
+        fs_err::write(base.join("target.txt"), "payload").unwrap();
+        std::os::unix::fs::symlink("target.txt", base.join("link")).unwrap();
+
+        let fs = LocalFs::new("node_test");
+        let src = fs.resolve_path(&base.join("link")).await.unwrap();
+        let dst_nodeid = fs.resolve_path(&dst_dir_path).await.unwrap();
+        let dst_dirid = DirId::<u64>::new(*dst_nodeid.get());
+        fs.copy_node(
+            src,
+            dst_dirid,
+            &CopyOptions {
+                preserve_links: false,
+                ..CopyOptions::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let copied = dst_dir_path.join("link");
+        let meta = fs_err::symlink_metadata(&copied).unwrap();
+        assert!(meta.is_file(), "the copy dereferences the link");
+        assert_eq!(fs_err::read_to_string(&copied).unwrap(), "payload");
+
+        fs_err::remove_dir_all(&base).ok();
+    }
+
+    /// Copying with the default options restores mtime and atime; turning
+    /// `preserve_timestamps` off leaves the destination freshly timed.
+    #[tokio::test]
+    async fn node_copy_preserves_timestamps() {
+        use std::time::Duration;
+
+        let old = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000_000);
+        let base = temp_dir().join("node_copy_times");
+        let src_dir_path = base.join("src");
+        let dst_dir_path = base.join("dst");
+        let _ = fs_err::remove_dir_all(&base);
+        fs_err::create_dir_all(src_dir_path.join("sub")).unwrap();
+        fs_err::create_dir_all(&dst_dir_path).unwrap();
+        let src_file = src_dir_path.join("timed.txt");
+        fs_err::write(&src_file, "time me").unwrap();
+        filetime::set_file_times(
+            &src_file,
+            FileTime::from_unix_time(1_000_000_000, 0),
+            FileTime::from_unix_time(1_000_000_000, 0),
+        )
+        .unwrap();
+
+        let fs = LocalFs::new("node_test");
+        let src = fs.resolve_path(&src_dir_path).await.unwrap();
+        let dst_nodeid = fs.resolve_path(&dst_dir_path).await.unwrap();
+        let dst_dirid = DirId::<u64>::new(*dst_nodeid.get());
+        fs.copy_node(src, dst_dirid, &CopyOptions::default())
+            .await
+            .unwrap();
+
+        let copied = dst_dir_path.join("src/timed.txt");
+        let meta = fs_err::metadata(&copied).unwrap();
+        assert_eq!(meta.modified().unwrap(), old);
+        assert_eq!(meta.accessed().unwrap(), old);
+
+        // Without the option the destination keeps its fresh times.
+        let dst2 = dst_dir_path.join("off");
+        fs_err::create_dir_all(&dst2).unwrap();
+        let dst2_id = fs.resolve_path(&dst2).await.unwrap();
+        fs.copy_node(
+            src,
+            DirId::<u64>::new(*dst2_id.get()),
+            &CopyOptions {
+                preserve_timestamps: false,
+                ..CopyOptions::default()
+            },
+        )
+        .await
+        .unwrap();
+        let meta = fs_err::metadata(dst2.join("src/timed.txt")).unwrap();
+        assert!(
+            meta.modified().unwrap() > old,
+            "disabling the option must not restore the old time"
+        );
+
+        fs_err::remove_dir_all(&base).ok();
+    }
+
+    /// `preserve_mode` copies directory mode bits and user extended
+    /// attributes that a plain content copy does not carry over.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn node_copy_preserves_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let base = temp_dir().join("node_copy_mode");
+        let src_dir_path = base.join("src");
+        let dst_dir_path = base.join("dst");
+        let _ = fs_err::remove_dir_all(&base);
+        fs_err::create_dir_all(&src_dir_path).unwrap();
+        fs_err::create_dir_all(&dst_dir_path).unwrap();
+        let src_file = src_dir_path.join("f.txt");
+        fs_err::write(&src_file, "m").unwrap();
+        fs_err::set_permissions(
+            &src_dir_path,
+            fs::Permissions::from_mode(0o750),
+        )
+        .unwrap();
+        // A tmpfs without user xattr support makes the setter fail; the
+        // mode half of the test still runs, the xattr half is skipped.
+        let no_xattrs =
+            xattr::set(&src_file, "user.cocomo", b"tagged").is_err();
+
+        let fs = LocalFs::new("node_test");
+        let src = fs.resolve_path(&src_dir_path).await.unwrap();
+        let dst_nodeid = fs.resolve_path(&dst_dir_path).await.unwrap();
+        let dst_dirid = DirId::<u64>::new(*dst_nodeid.get());
+        fs.copy_node(
+            src,
+            dst_dirid,
+            &CopyOptions {
+                preserve_mode: true,
+                ..CopyOptions::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let copied_dir = dst_dir_path.join("src");
+        assert_eq!(
+            fs_err::metadata(&copied_dir).unwrap().permissions().mode()
+                & 0o777,
+            0o750,
+            "the source directory mode is carried over"
+        );
+        if !no_xattrs {
+            assert_eq!(
+                xattr::get(copied_dir.join("f.txt"), "user.cocomo").unwrap(),
+                Some(b"tagged".to_vec())
+            );
+        }
+
+        // Without the option the user xattr is not carried over.
+        let dst2 = dst_dir_path.join("off");
+        fs_err::create_dir_all(&dst2).unwrap();
+        let dst2_id = fs.resolve_path(&dst2).await.unwrap();
+        fs.copy_node(
+            src,
+            DirId::<u64>::new(*dst2_id.get()),
+            &CopyOptions::default(),
+        )
+        .await
+        .unwrap();
+        if !no_xattrs {
+            assert_eq!(
+                xattr::get(dst2.join("src/f.txt"), "user.cocomo").unwrap(),
+                None
+            );
+        }
 
         fs_err::remove_dir_all(&base).ok();
     }

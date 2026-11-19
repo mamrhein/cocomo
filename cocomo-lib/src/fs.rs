@@ -31,6 +31,7 @@ use std::{
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::Stream;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     error::{FsError, Result},
@@ -53,6 +54,42 @@ pub enum OpenMode {
     Write,
     /// Open for appending. Creates the file if it does not exist.
     Append,
+}
+
+/// Options for copy operations, modeled after the POSIX `cp` command.
+///
+/// Options that a backend cannot support (e.g. links or modes on object
+/// stores without such concepts) are ignored; support is never an error.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct CopyOptions {
+    /// Copy symbolic links as symbolic links rather than copying the files
+    /// they point to, and preserve hard links between source files in the
+    /// copies (like `cp -d`).
+    #[serde(default = "default_true")]
+    pub preserve_links: bool,
+    /// Preserve attributes relevant to access permissions: file mode bits
+    /// and, best-effort, ACLs and extended attributes. Copying them is
+    /// never an error: anything that cannot be copied is skipped.
+    #[serde(default)]
+    pub preserve_mode: bool,
+    /// Preserve all available timestamps (creation, last access, last
+    /// modification).
+    #[serde(default = "default_true")]
+    pub preserve_timestamps: bool,
+}
+
+impl Default for CopyOptions {
+    fn default() -> Self {
+        Self {
+            preserve_links: true,
+            preserve_mode: false,
+            preserve_timestamps: true,
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// A single directory entry returned by a backend's path-based `read_dir`
@@ -257,10 +294,15 @@ pub trait WritableFileSystem: NodeFileSystem {
     ) -> Result<()>;
 
     /// Copy a node into a different directory within the same filesystem.
+    ///
+    /// `options` selects the POSIX `cp`-like preservation behavior; see
+    /// [`CopyOptions`]. Backends without the corresponding concepts ignore
+    /// the inapplicable options.
     async fn copy_node(
         &self,
         src: NodeId<Self::Nid>,
         dst: DirId<Self::Nid>,
+        options: &CopyOptions,
     ) -> Result<NodeId<Self::Nid>>;
 
     /// Move a node into a different directory within the same filesystem.

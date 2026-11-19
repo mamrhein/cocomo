@@ -39,7 +39,7 @@ use futures::Stream;
 use crate::{
     error::{FsError, Result},
     file::FsFile,
-    fs::{NodeFileSystem, OpenMode, WritableFileSystem},
+    fs::{CopyOptions, NodeFileSystem, OpenMode, WritableFileSystem},
     identity::{DirId, FileId, FileSystemId, NodeId},
     meta::Metadata,
     node::Node,
@@ -294,6 +294,7 @@ impl WritableFileSystem for S3Fs {
         &self,
         _src: NodeId<Self::Nid>,
         _dst: DirId<Self::Nid>,
+        _options: &CopyOptions,
     ) -> Result<NodeId<Self::Nid>> {
         unimplemented!(
             "S3Fs::copy_node — implement with aws-sdk-s3 CopyObject"
