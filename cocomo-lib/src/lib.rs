@@ -122,8 +122,8 @@ pub use node::{Node, NodeKind, SymlinkTarget, UserPermissions};
 pub use patch::{PatchError, PatchResult, apply_patch, generate_unified_diff};
 pub use profile::{
     EncryptedSecrets, Profile, ProfileError, ProfileStore, ProviderType,
-    default_config_path, default_master_key, default_store_path,
-    derive_master_key,
+    copy_defaults, default_config_path, default_master_key,
+    default_store_path, derive_master_key, set_copy_defaults,
 };
 pub use provider::{Credentials, Provider, ProviderError, ProviderRegistry};
 pub use resolver::{
@@ -137,7 +137,8 @@ pub use secrets::{NullPrompter, Prompter, Secrets, TtyPrompter};
 pub use session::{
     ColorOverrides, ProviderRef, Session, SessionConfig, SessionManager,
     SessionSettings, SessionType, default_session_dir, list_saved_sessions,
-    list_saved_sessions_in, session_file_exists, session_file_exists_in,
+    list_saved_sessions_in, resolve_copy_options, session_file_exists,
+    session_file_exists_in,
 };
 pub use sftp::{SftpConfig, SftpDirId, SftpFileId, SftpFs, SftpNodeId};
 pub use snapshot::{

@@ -29,10 +29,10 @@ use std::{
 };
 
 use cocomo_lib::{
-    CompareConfig, ContentCache, DirComparison, DirEntryStatus, Endpoint,
-    FsError, FsPair, Grammar, NodeFileSystem, NullPrompter, Prompter,
-    Provider, SessionConfig, SessionType as LibSessionType, SyncOperation,
-    SyncResult, SyncRules, compare_texts, default_session_dir,
+    CompareConfig, ContentCache, CopyOptions, DirComparison, DirEntryStatus,
+    Endpoint, FsError, FsPair, Grammar, NodeFileSystem, NullPrompter,
+    Prompter, Provider, SessionConfig, SessionType as LibSessionType,
+    SyncOperation, SyncResult, SyncRules, compare_texts, default_session_dir,
     execute_transfers, list_saved_sessions, report::generate_report,
     session_file_exists_in,
 };
@@ -190,6 +190,7 @@ async fn plan_sync_session(
         operation,
         dry_run: true,
         compare_content,
+        copy_options: CopyOptions::default(),
     };
 
     if left.same_provider(right) {
@@ -227,6 +228,7 @@ async fn execute_sync_session(
         operation,
         dry_run: false,
         compare_content,
+        copy_options: CopyOptions::default(),
     };
 
     if left.same_provider(right) {
@@ -842,6 +844,7 @@ pub(crate) fn process_session_action(action: SessionAction) {
                         &snapshot.left_root,
                         &snapshot.right_root,
                         pair,
+                        &CopyOptions::default(),
                     )
                     .await;
                     // Non-fatal per-item failures are collected by the

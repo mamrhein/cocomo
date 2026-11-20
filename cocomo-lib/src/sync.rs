@@ -25,7 +25,7 @@
 use std::{fmt, path::Path};
 
 use crate::{
-    CompareConfig, DirComparison, DirEntryStatus,
+    CompareConfig, CopyOptions, DirComparison, DirEntryStatus,
     compare::{compare_directories_node, compare_directories_pair_node},
     transfer::{
         FsPair, TransferAction, TransferItem, TransferResult,
@@ -111,6 +111,11 @@ pub struct SyncRules {
     pub dry_run: bool,
     /// Compare file contents. If `false`, uses size/mtime only.
     pub compare_content: bool,
+    /// POSIX `cp`-like preservation behavior for executed copies.
+    ///
+    /// Only consulted when transfers are executed; planning ignores it.
+    /// See [`CopyOptions`].
+    pub copy_options: CopyOptions,
 }
 
 // ---------------------------------------------------------------------------
@@ -298,8 +303,14 @@ where
     }
 
     // Execute the planned transfers.
-    let transfer_result =
-        execute_transfers(&result.planned, left_path, right_path, pair).await;
+    let transfer_result = execute_transfers(
+        &result.planned,
+        left_path,
+        right_path,
+        pair,
+        &rules.copy_options,
+    )
+    .await;
 
     result.transfer = Some(transfer_result);
     Ok(result)
@@ -1477,6 +1488,7 @@ mod tests {
             operation: SyncOperation::MirrorLeft,
             dry_run: false,
             compare_content: true,
+            ..Default::default()
         };
 
         let result = sync_directories_pair(
@@ -1544,6 +1556,7 @@ mod tests {
             operation: SyncOperation::MirrorLeft,
             dry_run: false,
             compare_content: true,
+            ..Default::default()
         };
 
         let result = sync_directories_pair(
@@ -1592,6 +1605,7 @@ mod tests {
             operation: SyncOperation::MirrorLeft,
             dry_run: true,
             compare_content: true,
+            ..Default::default()
         };
 
         let result = sync_directories_pair(
@@ -1605,5 +1619,71 @@ mod tests {
 
         assert_eq!(result.errors.len(), 1);
         assert!(matches!(result.errors[0], FsError::PermissionDenied { .. }));
+    }
+
+    /// A sync-executed copy honors the rules' `copy_options`: with
+    /// `preserve_mode` the file mode inside the planned directory
+    /// carries over, and the default `preserve_timestamps` restores the
+    /// source mtime.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn sync_copy_honors_copy_options() {
+        use std::{
+            fs,
+            os::unix::fs::PermissionsExt,
+            time::{Duration, UNIX_EPOCH},
+        };
+
+        let base = env::temp_dir()
+            .join(format!("cocomo_sync_opts_{}", process::id()));
+        let _ = fs_err::remove_dir_all(&base);
+        let left = base.join("left");
+        let right = base.join("right");
+        fs_err::create_dir_all(left.join("sub")).unwrap();
+        fs_err::create_dir_all(&right).unwrap();
+
+        let src_file = left.join("sub/f.txt");
+        fs_err::write(&src_file, "content").unwrap();
+        fs::set_permissions(&src_file, fs::Permissions::from_mode(0o640))
+            .unwrap();
+        let old = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        fs::File::open(&src_file)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(old))
+            .unwrap();
+
+        let fs = LocalFs::new("sync-opts");
+        let rules = SyncRules {
+            operation: SyncOperation::CopyRight,
+            dry_run: false,
+            copy_options: CopyOptions {
+                preserve_mode: true,
+                ..CopyOptions::default()
+            },
+            ..Default::default()
+        };
+
+        let result =
+            sync_directories(&fs, &left, &right, &rules).await.unwrap();
+        let transfer = result.transfer.expect("sync must execute");
+        assert!(
+            transfer.is_ok(),
+            "sync should succeed: {:?}",
+            transfer.errors
+        );
+
+        let dst_meta = fs_err::metadata(right.join("sub/f.txt")).unwrap();
+        assert_eq!(
+            dst_meta.permissions().mode() & 0o777,
+            0o640,
+            "the rules' preserve_mode carries the file mode over"
+        );
+        assert_eq!(
+            dst_meta.modified().unwrap(),
+            old,
+            "the rules' default timestamp preservation carries the mtime over"
+        );
+
+        fs_err::remove_dir_all(&base).ok();
     }
 }

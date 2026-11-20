@@ -19,6 +19,7 @@ mod summary;
 mod test_helpers;
 
 use cocomo_lib::{
+    CopyOptions,
     compare::{
         CompareConfig, compare_directories_node, compare_directories_pair_node,
     },
@@ -197,6 +198,7 @@ pub(crate) async fn dir_sync<R: EndpointResolver>(
         operation,
         dry_run: args.dry_run,
         compare_content: args.compare_files,
+        copy_options: CopyOptions::default(),
     };
 
     let result = match pair {

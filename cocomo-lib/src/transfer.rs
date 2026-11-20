@@ -33,7 +33,8 @@ use bytes::BytesMut;
 use futures::future::BoxFuture;
 
 use crate::{
-    DirComparison, DirEntryStatus, FsError, FsOperation, node::NodeKind,
+    CopyOptions, DirComparison, DirEntryStatus, FsError, FsOperation,
+    node::NodeKind,
 };
 
 // ---------------------------------------------------------------------------
@@ -321,11 +322,14 @@ impl<'a, N> FsPair<'a, N, N> {
 ///   content into a freshly created destination entry (directories are
 ///   mirrored recursively) and cross-boundary moves run as copy + delete;
 ///   single-side operations run against the provider addressing their side.
+/// * `options` - POSIX `cp`-like preservation behavior for executed copies;
+///   see [`CopyOptions`].
 pub async fn execute_transfers<L, R>(
     items: &[TransferItem],
     left_path: &Path,
     right_path: &Path,
     pair: FsPair<'_, L, R>,
+    options: &CopyOptions,
 ) -> TransferResult
 where
     L: crate::fs::WritableFileSystem<Nid = u64>,
@@ -334,7 +338,10 @@ where
     let mut result = TransferResult::default();
 
     for item in items {
-        match execute_single_transfer(item, left_path, right_path, pair).await
+        match execute_single_transfer(
+            item, left_path, right_path, pair, options,
+        )
+        .await
         {
             Ok(()) => result.succeeded += 1,
             Err(e) => {
@@ -362,6 +369,7 @@ async fn execute_single_transfer<L, R>(
     left_path: &Path,
     right_path: &Path,
     pair: FsPair<'_, L, R>,
+    options: &CopyOptions,
 ) -> Result<(), FsError>
 where
     L: crate::fs::WritableFileSystem<Nid = u64>,
@@ -375,13 +383,29 @@ where
         FsPair::Shared(fs) => match item.action {
             TransferAction::CopyLeft => {
                 // Copy from right to left.
-                copy_entry(fs, right_path, rel, item.is_dir, fs, left_path)
-                    .await
+                copy_entry(
+                    fs,
+                    right_path,
+                    rel,
+                    item.is_dir,
+                    fs,
+                    left_path,
+                    options,
+                )
+                .await
             }
             TransferAction::CopyRight => {
                 // Copy from left to right.
-                copy_entry(fs, left_path, rel, item.is_dir, fs, right_path)
-                    .await
+                copy_entry(
+                    fs,
+                    left_path,
+                    rel,
+                    item.is_dir,
+                    fs,
+                    right_path,
+                    options,
+                )
+                .await
             }
             TransferAction::DeleteLeft => {
                 delete_entry(fs, left_path, rel, item.is_dir).await
@@ -414,6 +438,7 @@ where
                     item.is_dir,
                     left_fs,
                     left_path,
+                    options,
                 )
                 .await
             }
@@ -426,6 +451,7 @@ where
                     item.is_dir,
                     right_fs,
                     right_path,
+                    options,
                 )
                 .await
             }
@@ -533,6 +559,7 @@ async fn copy_entry<N>(
     is_dir: bool,
     dst_fs: &N,
     dst_root: &Path,
+    options: &CopyOptions,
 ) -> Result<(), FsError>
 where
     N: crate::fs::WritableFileSystem<Nid = u64>,
@@ -545,20 +572,18 @@ where
     let src_node = src_fs.get_node(src_node_id)?;
 
     if is_dir {
-        // Copy directory. Options are threaded in with the transfer-level
-        // plumbing; the default mirrors the long-standing behavior.
-        src_fs
-            .copy_node(
-                src_node_id,
-                dst_dir_id,
-                &crate::fs::CopyOptions::default(),
-            )
-            .await?;
+        // Copy directory; `copy_node` honors the preservation options for
+        // the whole tree.
+        src_fs.copy_node(src_node_id, dst_dir_id, options).await?;
     } else if let NodeKind::Symlink { target } = src_node.kind() {
         // A symlink transfers as a link: recreate it on the destination
         // side with its raw target verbatim. Streaming through the link
         // would either duplicate the target's content or (for a dangling
         // or directory target) fail with a confusing error.
+        //
+        // The streamed-file and symlink paths ignore `options`: single
+        // files stream into a freshly created entry, and the provider API
+        // has no metadata setter to apply modes or timestamps afterwards.
         dst_fs
             .create_symlink(dst_dir_id, src_node.name(), target.path())
             .await?;
@@ -644,6 +669,7 @@ async fn copy_entry_cross<S, D>(
     is_dir: bool,
     dst_fs: &D,
     dst_root: &Path,
+    options: &CopyOptions,
 ) -> Result<(), FsError>
 where
     S: crate::fs::WritableFileSystem<Nid = u64>,
@@ -661,7 +687,14 @@ where
         // mirror its contents into it.
         let new_dir_id =
             dst_fs.create_dir_node(dst_dir_id, src_node.name()).await?;
-        mirror_directory_tree(src_fs, src_node_id, dst_fs, new_dir_id).await?;
+        mirror_directory_tree(
+            src_fs,
+            src_node_id,
+            dst_fs,
+            new_dir_id,
+            options,
+        )
+        .await?;
     } else if let NodeKind::Symlink { target } = src_node.kind() {
         // Transfer the symlink as a link (see `copy_entry`). Creating a
         // destination file first would leave it empty when reading a
@@ -693,11 +726,18 @@ where
 
 /// Mirror the contents of a source directory into an already created
 /// destination directory on another provider instance.
+///
+/// `options` is threaded through for symmetry with [`copy_entry`]; none of
+/// the preservation options apply across a provider boundary: content is
+/// streamed into freshly created destination entries, and the destination
+/// provider API has no metadata setter to apply modes or timestamps
+/// afterwards.
 fn mirror_directory_tree<'a, S, D>(
     src_fs: &'a S,
     src_dir_id: crate::NodeId<u64>,
     dst_fs: &'a D,
     dst_dir_id: crate::DirId<u64>,
+    _options: &'a CopyOptions,
 ) -> BoxFuture<'a, Result<(), FsError>>
 where
     S: crate::fs::WritableFileSystem<Nid = u64>,
@@ -719,8 +759,10 @@ where
             if child.kind().is_directory() {
                 let new_dir_id =
                     dst_fs.create_dir_node(dst_dir_id, child.name()).await?;
-                mirror_directory_tree(src_fs, child_id, dst_fs, new_dir_id)
-                    .await?;
+                mirror_directory_tree(
+                    src_fs, child_id, dst_fs, new_dir_id, _options,
+                )
+                .await?;
             } else if child.kind().is_file() {
                 let new_file_id =
                     dst_fs.create_file(dst_dir_id, child.name()).await?;
@@ -759,7 +801,19 @@ where
     S: crate::fs::WritableFileSystem<Nid = u64>,
     D: crate::fs::WritableFileSystem<Nid = u64>,
 {
-    copy_entry_cross(src_fs, src_root, rel, is_dir, dst_fs, dst_root).await?;
+    // Moves are not `cp` operations, so the copy options do not apply to
+    // their intermediate copy; the default mirrors the long-standing
+    // move behavior.
+    copy_entry_cross(
+        src_fs,
+        src_root,
+        rel,
+        is_dir,
+        dst_fs,
+        dst_root,
+        &CopyOptions::default(),
+    )
+    .await?;
     delete_entry(src_fs, src_root, rel, is_dir).await
 }
 
@@ -1166,9 +1220,14 @@ mod tests {
             "left_only.txt".to_string(),
         )];
 
-        let result =
-            execute_transfers(&items, &left, &right, FsPair::shared(&fs))
-                .await;
+        let result = execute_transfers(
+            &items,
+            &left,
+            &right,
+            FsPair::shared(&fs),
+            &CopyOptions::default(),
+        )
+        .await;
 
         assert!(
             result.is_ok(),
@@ -1202,9 +1261,14 @@ mod tests {
             "def/ghi/b.txt".to_string(),
         )];
 
-        let result =
-            execute_transfers(&items, &left, &right, FsPair::shared(&fs))
-                .await;
+        let result = execute_transfers(
+            &items,
+            &left,
+            &right,
+            FsPair::shared(&fs),
+            &CopyOptions::default(),
+        )
+        .await;
         assert!(
             result.is_ok(),
             "transfer should succeed: {:?}",
@@ -1240,9 +1304,14 @@ mod tests {
             "def/ghi/b.txt".to_string(),
         )];
 
-        let result =
-            execute_transfers(&items, &left, &right, FsPair::shared(&fs))
-                .await;
+        let result = execute_transfers(
+            &items,
+            &left,
+            &right,
+            FsPair::shared(&fs),
+            &CopyOptions::default(),
+        )
+        .await;
         assert!(
             result.is_ok(),
             "transfer should succeed: {:?}",
@@ -1278,9 +1347,14 @@ mod tests {
             "def/ghi".to_string(),
         )];
 
-        let result =
-            execute_transfers(&items, &left, &right, FsPair::shared(&fs))
-                .await;
+        let result = execute_transfers(
+            &items,
+            &left,
+            &right,
+            FsPair::shared(&fs),
+            &CopyOptions::default(),
+        )
+        .await;
         assert!(
             result.is_ok(),
             "transfer should succeed: {:?}",
@@ -1311,9 +1385,14 @@ mod tests {
             "big.bin".to_string(),
         )];
 
-        let result =
-            execute_transfers(&items, &left, &right, FsPair::shared(&fs))
-                .await;
+        let result = execute_transfers(
+            &items,
+            &left,
+            &right,
+            FsPair::shared(&fs),
+            &CopyOptions::default(),
+        )
+        .await;
 
         assert!(
             result.is_ok(),
@@ -1347,9 +1426,14 @@ mod tests {
             "left_only.txt".to_string(),
         )];
 
-        let result =
-            execute_transfers(&items, &left, &right, FsPair::shared(&fs))
-                .await;
+        let result = execute_transfers(
+            &items,
+            &left,
+            &right,
+            FsPair::shared(&fs),
+            &CopyOptions::default(),
+        )
+        .await;
 
         assert!(
             result.is_ok(),
@@ -1379,8 +1463,14 @@ mod tests {
             "def/ghi/b.txt".to_string(),
         )];
 
-        let result =
-            execute_transfers(&items, &left, &left, FsPair::shared(&fs)).await;
+        let result = execute_transfers(
+            &items,
+            &left,
+            &left,
+            FsPair::shared(&fs),
+            &CopyOptions::default(),
+        )
+        .await;
         assert!(result.is_ok(), "delete should succeed: {:?}", result.errors);
         assert!(!left.join("def/ghi/b.txt").exists());
 
@@ -1400,9 +1490,14 @@ mod tests {
             "subdir".to_string(),
         )];
 
-        let result =
-            execute_transfers(&items, &left, &right, FsPair::shared(&fs))
-                .await;
+        let result = execute_transfers(
+            &items,
+            &left,
+            &right,
+            FsPair::shared(&fs),
+            &CopyOptions::default(),
+        )
+        .await;
 
         assert!(
             result.is_ok(),
@@ -1431,8 +1526,14 @@ mod tests {
             "nonexistent.txt".to_string(),
         )];
 
-        let result =
-            execute_transfers(&items, &base, &base, FsPair::shared(&fs)).await;
+        let result = execute_transfers(
+            &items,
+            &base,
+            &base,
+            FsPair::shared(&fs),
+            &CopyOptions::default(),
+        )
+        .await;
 
         assert!(!result.is_ok());
         assert_eq!(result.failed, 1);
@@ -1465,9 +1566,14 @@ mod tests {
         assert_eq!(items[0].name, "right_only.txt");
 
         // Execute.
-        let result =
-            execute_transfers(&items, &left, &right, FsPair::shared(&fs))
-                .await;
+        let result = execute_transfers(
+            &items,
+            &left,
+            &right,
+            FsPair::shared(&fs),
+            &CopyOptions::default(),
+        )
+        .await;
         assert!(
             result.is_ok(),
             "transfer should succeed: {:?}",
@@ -1501,6 +1607,7 @@ mod tests {
             &left,
             &right,
             FsPair::Separate(&left_fs, &right_fs),
+            &CopyOptions::default(),
         )
         .await;
 
@@ -1539,6 +1646,7 @@ mod tests {
             &left,
             &right,
             FsPair::Separate(&left_fs, &right_fs),
+            &CopyOptions::default(),
         )
         .await;
 
@@ -1570,6 +1678,7 @@ mod tests {
             Path::new("/src"),
             Path::new("/dst"),
             FsPair::Separate(&src, &dst),
+            &CopyOptions::default(),
         )
         .await;
 
@@ -1604,6 +1713,7 @@ mod tests {
             Path::new("/src"),
             Path::new("/dst"),
             FsPair::Separate(&src, &dst),
+            &CopyOptions::default(),
         )
         .await;
 
@@ -1634,6 +1744,7 @@ mod tests {
             Path::new("/src"),
             Path::new("/dst"),
             FsPair::Separate(&src, &dst),
+            &CopyOptions::default(),
         )
         .await;
 
@@ -1678,6 +1789,7 @@ mod tests {
             Path::new("/src"),
             Path::new("/dst"),
             FsPair::Separate(&src, &dst),
+            &CopyOptions::default(),
         )
         .await;
 
@@ -1722,6 +1834,7 @@ mod tests {
             Path::new("/src"),
             Path::new("/dst"),
             FsPair::Separate(&src, &dst),
+            &CopyOptions::default(),
         )
         .await;
 
@@ -1771,6 +1884,7 @@ mod tests {
             &left,
             &right,
             FsPair::Separate(&left_fs, &right_fs),
+            &CopyOptions::default(),
         )
         .await;
 
@@ -1826,6 +1940,7 @@ mod tests {
             Path::new("/src"),
             Path::new("/dst"),
             FsPair::Separate(&src, &dst),
+            &CopyOptions::default(),
         )
         .await;
 
@@ -1861,6 +1976,7 @@ mod tests {
             Path::new("/src"),
             Path::new("/dst"),
             FsPair::Separate(&src, &dst),
+            &CopyOptions::default(),
         )
         .await;
 
@@ -1896,6 +2012,7 @@ mod tests {
             Path::new("/src"),
             &dst_root,
             FsPair::Separate(&src, &dst_fs),
+            &CopyOptions::default(),
         )
         .await;
 
@@ -1907,6 +2024,112 @@ mod tests {
         assert_eq!(
             fs_err::read_to_string(dst_root.join("hetero.txt")).unwrap(),
             "cross backend"
+        );
+
+        fs_err::remove_dir_all(&base).ok();
+    }
+
+    /// Copying a directory with `preserve_mode` carries the mode bits
+    /// into the mirrored tree, and the default `preserve_timestamps`
+    /// restores the source mtime; turning `preserve_timestamps` off
+    /// leaves the destination freshly timed.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn execute_copy_dir_honors_copy_options() {
+        use std::{
+            os::unix::fs::PermissionsExt,
+            time::{Duration, UNIX_EPOCH},
+        };
+
+        let base = env::temp_dir()
+            .join(format!("cocomo_xfer_opts_{}", process::id()));
+        let _ = fs_err::remove_dir_all(&base);
+
+        // One left-only directory with one unusual-mode file: the copy
+        // goes through `copy_node`, so the options apply to the tree.
+        let left = base.join("left");
+        let right = base.join("right");
+        fs_err::create_dir_all(left.join("sub")).unwrap();
+        fs_err::create_dir_all(&right).unwrap();
+
+        let src_file = left.join("sub/f.txt");
+        fs_err::write(&src_file, "content").unwrap();
+        std::fs::set_permissions(
+            &src_file,
+            std::fs::Permissions::from_mode(0o640),
+        )
+        .unwrap();
+        let old = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        std::fs::File::open(&src_file)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(old))
+            .unwrap();
+
+        let fs = LocalFs::new("xfer-opts");
+        let items = vec![TransferItem::new(
+            TransferAction::CopyRight,
+            "sub".to_string(),
+            true,
+            "sub".to_string(),
+        )];
+
+        let result = execute_transfers(
+            &items,
+            &left,
+            &right,
+            FsPair::shared(&fs),
+            &CopyOptions {
+                preserve_mode: true,
+                ..CopyOptions::default()
+            },
+        )
+        .await;
+        assert!(
+            result.is_ok(),
+            "transfer should succeed: {:?}",
+            result.errors
+        );
+
+        let dst_meta = fs_err::metadata(right.join("sub/f.txt")).unwrap();
+        assert_eq!(
+            dst_meta.permissions().mode() & 0o777,
+            0o640,
+            "the source file mode is carried over"
+        );
+        assert_eq!(
+            dst_meta.modified().unwrap(),
+            old,
+            "the default timestamp preservation carries the mtime over"
+        );
+
+        // Without timestamp preservation the copy is stamped with the
+        // time of the transfer instead of the source's old time.
+        let right2 = base.join("right2");
+        fs_err::create_dir_all(&right2).unwrap();
+        let result = execute_transfers(
+            &items,
+            &left,
+            &right2,
+            FsPair::shared(&fs),
+            &CopyOptions {
+                preserve_timestamps: false,
+                ..CopyOptions::default()
+            },
+        )
+        .await;
+        assert!(
+            result.is_ok(),
+            "transfer should succeed: {:?}",
+            result.errors
+        );
+        assert_ne!(
+            fs_err::metadata(right2.join("sub/f.txt"))
+                .unwrap()
+                .modified()
+                .unwrap(),
+            old,
+            "the destination is freshly timed when timestamps are not \
+             preserved"
         );
 
         fs_err::remove_dir_all(&base).ok();

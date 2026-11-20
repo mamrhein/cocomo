@@ -46,7 +46,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::Sha256;
 use thiserror::Error;
 
-use crate::provider::Provider;
+use crate::{fs::CopyOptions, provider::Provider};
 
 type HmacSha256 = SimpleHmac<Sha256>;
 
@@ -722,8 +722,60 @@ struct ConfigFile {
     /// The key is stored as plaintext hex protected only by owner-only
     /// file permissions; keeping it in the OS keychain instead would
     /// require a second secret to encrypt it, which solves nothing.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     master_key: Option<String>,
+    /// The `[copy]` section: global `cp`-like copy options shared by the
+    /// TUI and the GUI. `None` when the section is absent, i.e. the
+    /// built-in [`CopyOptions::default`] apply.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    copy: Option<CopyFile>,
+}
+
+/// Serialized form of the `[copy]` section in `config.toml`.
+///
+/// Every field is optional so a partially written section keeps working:
+/// entries the file omits fall back to the built-in defaults when the
+/// section is resolved into [`CopyOptions`].
+#[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+struct CopyFile {
+    /// Copy symbolic links as symbolic links and preserve hard links.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    preserve_links: Option<bool>,
+    /// Preserve mode bits, ACLs, and extended attributes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    preserve_mode: Option<bool>,
+    /// Preserve all available timestamps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    preserve_timestamps: Option<bool>,
+}
+
+impl CopyFile {
+    /// Resolve the section into complete copy options: entries the file
+    /// omits fall back to [`CopyOptions::default`].
+    fn to_options(&self) -> CopyOptions {
+        let defaults = CopyOptions::default();
+        CopyOptions {
+            preserve_links: self
+                .preserve_links
+                .unwrap_or(defaults.preserve_links),
+            preserve_mode: self
+                .preserve_mode
+                .unwrap_or(defaults.preserve_mode),
+            preserve_timestamps: self
+                .preserve_timestamps
+                .unwrap_or(defaults.preserve_timestamps),
+        }
+    }
+
+    /// Render complete copy options as an explicit section: every entry is
+    /// written, so the file fully documents the current defaults.
+    fn from_options(options: &CopyOptions) -> Self {
+        Self {
+            preserve_links: Some(options.preserve_links),
+            preserve_mode: Some(options.preserve_mode),
+            preserve_timestamps: Some(options.preserve_timestamps),
+        }
+    }
 }
 
 /// Resolve the master key for the default profile store.
@@ -750,17 +802,12 @@ fn read_master_key(config_path: &Path) -> ProfileResult<Vec<u8>> {
         return Ok(bytes);
     }
 
-    if config_path.exists() {
-        let content =
-            fs_err::read_to_string(config_path).map_err(ProfileError::Io)?;
-        let config: ConfigFile = toml::from_str(&content)
-            .map_err(|e| ProfileError::Toml(e.to_string()))?;
-        if let Some(hex_key) = config.master_key
-            && let Ok(bytes) = hex::decode(&hex_key)
-            && bytes.len() >= 32
-        {
-            return Ok(bytes);
-        }
+    let config = read_config(config_path)?;
+    if let Some(hex_key) = config.master_key
+        && let Ok(bytes) = hex::decode(&hex_key)
+        && bytes.len() >= 32
+    {
+        return Ok(bytes);
     }
 
     let mut key = vec![0u8; 32];
@@ -773,16 +820,29 @@ fn read_master_key(config_path: &Path) -> ProfileResult<Vec<u8>> {
     Ok(key)
 }
 
-/// Persist a freshly generated master key to `config.toml`.
-fn write_master_key(config_path: &Path, key: &[u8]) -> ProfileResult<()> {
+/// Parse `config.toml`, treating a missing file as an empty config.
+///
+/// A file that exists but does not parse is an error: writers merge into
+/// the parsed config, so silently dropping its entries is not an option.
+fn read_config(config_path: &Path) -> ProfileResult<ConfigFile> {
+    if !config_path.exists() {
+        return Ok(ConfigFile::default());
+    }
+    let content =
+        fs_err::read_to_string(config_path).map_err(ProfileError::Io)?;
+    toml::from_str(&content).map_err(|e| ProfileError::Toml(e.to_string()))
+}
+
+/// Persist `config` to `config.toml`, preserving all other entries.
+///
+/// The file may hold the master key, so it is written with owner-only
+/// permissions.
+fn write_config(config_path: &Path, config: &ConfigFile) -> ProfileResult<()> {
     if let Some(parent) = config_path.parent() {
         fs_err::create_dir_all(parent).map_err(ProfileError::Io)?;
     }
 
-    let config = ConfigFile {
-        master_key: Some(hex::encode(key)),
-    };
-    let content = toml::to_string_pretty(&config)
+    let content = toml::to_string_pretty(config)
         .map_err(|e| ProfileError::Toml(e.to_string()))?;
     fs_err::write(config_path, content).map_err(ProfileError::Io)?;
 
@@ -790,6 +850,53 @@ fn write_master_key(config_path: &Path, key: &[u8]) -> ProfileResult<()> {
     set_owner_only_permissions(config_path).map_err(ProfileError::Io)?;
 
     Ok(())
+}
+
+/// Persist a freshly generated master key to `config.toml`.
+///
+/// Entries the file already holds (e.g. the `[copy]` section) are
+/// preserved.
+fn write_master_key(config_path: &Path, key: &[u8]) -> ProfileResult<()> {
+    let mut config = read_config(config_path)?;
+    config.master_key = Some(hex::encode(key));
+    write_config(config_path, &config)
+}
+
+/// Read the global copy defaults from `config.toml`.
+///
+/// The `[copy]` section is the cross-app home of the copy options, shared
+/// by the TUI and the GUI. A missing file or section yields
+/// [`CopyOptions::default`]; a partially written section resolves its
+/// absent entries to the built-in defaults.
+pub fn copy_defaults() -> ProfileResult<CopyOptions> {
+    read_copy_defaults(&default_config_path())
+}
+
+/// Path-taking variant of [`copy_defaults`] for tests.
+fn read_copy_defaults(config_path: &Path) -> ProfileResult<CopyOptions> {
+    let config = read_config(config_path)?;
+    Ok(match config.copy {
+        Some(copy) => copy.to_options(),
+        None => CopyOptions::default(),
+    })
+}
+
+/// Persist the global copy defaults to `config.toml`.
+///
+/// Writes an explicit `[copy]` section with all three options, preserving
+/// the other entries of the file (notably the master key).
+pub fn set_copy_defaults(options: &CopyOptions) -> ProfileResult<()> {
+    write_copy_defaults(&default_config_path(), options)
+}
+
+/// Path-taking variant of [`set_copy_defaults`] for tests.
+fn write_copy_defaults(
+    config_path: &Path,
+    options: &CopyOptions,
+) -> ProfileResult<()> {
+    let mut config = read_config(config_path)?;
+    config.copy = Some(CopyFile::from_options(options));
+    write_config(config_path, &config)
 }
 
 // ---------------------------------------------------------------------------
@@ -1302,6 +1409,97 @@ mod tests {
             let content = fs_err::read_to_string(&path).unwrap();
             assert!(content.contains("master_key"));
         });
+    }
+
+    #[test]
+    fn copy_defaults_absent_file_is_default() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        assert_eq!(read_copy_defaults(&path).unwrap(), CopyOptions::default());
+
+        // A config without a `[copy]` section behaves the same.
+        fs_err::write(&path, "master_key = \"00\"").unwrap();
+        assert_eq!(read_copy_defaults(&path).unwrap(), CopyOptions::default());
+    }
+
+    #[test]
+    fn copy_defaults_partial_section_fills_defaults() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+
+        fs_err::write(&path, "[copy]\npreserve_mode = true\n").unwrap();
+        let options = read_copy_defaults(&path).unwrap();
+        assert!(options.preserve_links, "absent entry uses the built-in");
+        assert!(options.preserve_mode, "explicit entry is honored");
+        assert!(
+            options.preserve_timestamps,
+            "absent entry uses the built-in"
+        );
+
+        fs_err::write(&path, "[copy]\npreserve_timestamps = false\n").unwrap();
+        let options = read_copy_defaults(&path).unwrap();
+        assert!(options.preserve_links);
+        assert!(!options.preserve_mode);
+        assert!(!options.preserve_timestamps);
+    }
+
+    #[test]
+    fn set_copy_defaults_round_trip() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let options = CopyOptions {
+            preserve_links: false,
+            preserve_mode: true,
+            preserve_timestamps: false,
+        };
+
+        write_copy_defaults(&path, &options).unwrap();
+        assert_eq!(read_copy_defaults(&path).unwrap(), options);
+        let content = fs_err::read_to_string(&path).unwrap();
+        assert!(content.contains("[copy]"));
+        assert!(content.contains("preserve_links = false"));
+        assert!(content.contains("preserve_mode = true"));
+        assert!(content.contains("preserve_timestamps = false"));
+    }
+
+    #[test]
+    fn set_copy_defaults_preserves_master_key() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let key = hex::encode([0x42u8; 32]);
+        fs_err::write(&path, format!("master_key = \"{key}\"")).unwrap();
+
+        let options = CopyOptions {
+            preserve_mode: true,
+            ..CopyOptions::default()
+        };
+        write_copy_defaults(&path, &options).unwrap();
+
+        let content = fs_err::read_to_string(&path).unwrap();
+        assert!(
+            content.contains(&key),
+            "the master key must survive: {content}"
+        );
+        assert_eq!(read_copy_defaults(&path).unwrap(), options);
+    }
+
+    #[test]
+    fn write_master_key_preserves_copy_section() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        fs_err::write(&path, "[copy]\npreserve_mode = true\n").unwrap();
+
+        write_master_key(&path, &[0xAB; 32]).unwrap();
+
+        assert_eq!(
+            read_copy_defaults(&path).unwrap(),
+            CopyOptions {
+                preserve_mode: true,
+                ..CopyOptions::default()
+            }
+        );
+        let content = fs_err::read_to_string(&path).unwrap();
+        assert!(content.contains("master_key"));
     }
 
     #[test]

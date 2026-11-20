@@ -22,9 +22,9 @@ use std::{
 };
 
 use cocomo_lib::{
-    CancellationToken, CompareConfig, ContentCache, DirComparison, DirEntry,
-    DirEntryStatus, Endpoint, FsPair, ProviderRef, SessionConfig,
-    SessionSettings, SessionType, TransferAction, TransferItem,
+    CancellationToken, CompareConfig, ContentCache, CopyOptions,
+    DirComparison, DirEntry, DirEntryStatus, Endpoint, FsPair, ProviderRef,
+    SessionConfig, SessionSettings, SessionType, TransferAction, TransferItem,
     compare_content_pair_node, compare_directories_node,
     compare_directories_pair_node, execute_transfers,
     filter::{
@@ -2515,9 +2515,14 @@ impl AppState {
             } else {
                 FsPair::Separate(left.fs(), right.fs())
             };
-            let result =
-                execute_transfers(&items, left.path(), right.path(), pair)
-                    .await;
+            let result = execute_transfers(
+                &items,
+                left.path(),
+                right.path(),
+                pair,
+                &CopyOptions::default(),
+            )
+            .await;
             if result.is_ok() {
                 Ok(())
             } else {
@@ -2890,9 +2895,14 @@ impl AppState {
             } else {
                 FsPair::Separate(left.fs(), right.fs())
             };
-            let result =
-                execute_transfers(&items, left.path(), right.path(), pair)
-                    .await;
+            let result = execute_transfers(
+                &items,
+                left.path(),
+                right.path(),
+                pair,
+                &CopyOptions::default(),
+            )
+            .await;
             if result.is_ok() {
                 Ok(result.succeeded)
             } else {

@@ -39,7 +39,7 @@ use uuid::Uuid;
 use crate::{
     Result,
     error::{FsError, FsOperation},
-    fs::NodeFileSystem,
+    fs::{CopyOptions, NodeFileSystem},
     identity::NodeId,
     text::{TextCompareSettings, WhitespaceMode},
 };
@@ -189,6 +189,19 @@ pub struct SessionSettings {
     /// Optional row color overrides for the comparison views.
     #[serde(default)]
     pub color_overrides: ColorOverrides,
+    /// Copy symbolic links as symbolic links and preserve hard links in
+    /// transfers (`cp -d`). `None` inherits the global default; see
+    /// [`resolve_copy_options`].
+    #[serde(default)]
+    pub copy_preserve_links: Option<bool>,
+    /// Preserve mode bits, ACLs, and extended attributes in transfers.
+    /// `None` inherits the global default.
+    #[serde(default)]
+    pub copy_preserve_mode: Option<bool>,
+    /// Preserve all available timestamps in transfers. `None` inherits the
+    /// global default.
+    #[serde(default)]
+    pub copy_preserve_timestamps: Option<bool>,
 }
 
 impl Default for SessionSettings {
@@ -205,6 +218,9 @@ impl Default for SessionSettings {
             show_statuses: default_all_statuses(),
             ignored: Vec::new(),
             color_overrides: ColorOverrides::default(),
+            copy_preserve_links: None,
+            copy_preserve_mode: None,
+            copy_preserve_timestamps: None,
         }
     }
 }
@@ -234,6 +250,27 @@ pub struct ColorOverrides {
 
 fn default_true() -> bool {
     true
+}
+
+/// Resolve the effective copy options for a session.
+///
+/// Explicit per-session settings win; entries left at `None` inherit the
+/// `global` defaults (typically from [`crate::copy_defaults`]).
+pub fn resolve_copy_options(
+    settings: &SessionSettings,
+    global: &CopyOptions,
+) -> CopyOptions {
+    CopyOptions {
+        preserve_links: settings
+            .copy_preserve_links
+            .unwrap_or(global.preserve_links),
+        preserve_mode: settings
+            .copy_preserve_mode
+            .unwrap_or(global.preserve_mode),
+        preserve_timestamps: settings
+            .copy_preserve_timestamps
+            .unwrap_or(global.preserve_timestamps),
+    }
 }
 
 /// The show-all default of [`SessionSettings::show_statuses`]: every
@@ -796,6 +833,90 @@ mod tests {
         assert!(toml_str.contains("ignore_whitespace = true"));
         assert!(toml_str.contains("left_newer"));
         assert!(toml_str.contains("right_newer"));
+    }
+
+    #[test]
+    fn copy_options_absent_in_toml_stay_none() {
+        // Session files written before the copy options carry none of
+        // the three keys; they must load as `None` (inherit the global
+        // defaults), not as explicit booleans.
+        let toml_str = "name = \"Legacy\"\ntype = \
+                        \"DirCompare\"\n[left]\nprovider = \"local\"\npath = \
+                        \"/x\"\n[right]\nprovider = \"local\"\npath = \
+                        \"/y\"\n";
+        let loaded = SessionConfig::from_toml(toml_str).unwrap();
+        assert_eq!(loaded.settings.copy_preserve_links, None);
+        assert_eq!(loaded.settings.copy_preserve_mode, None);
+        assert_eq!(loaded.settings.copy_preserve_timestamps, None);
+    }
+
+    #[test]
+    fn copy_options_round_trip_through_toml() {
+        let config = SessionConfig {
+            name: "CopyOpts".to_string(),
+            session_type: SessionType::DirCompare,
+            left: ProviderRef {
+                provider: "local".to_string(),
+                path: PathBuf::from("/x"),
+            },
+            right: ProviderRef {
+                provider: "local".to_string(),
+                path: PathBuf::from("/y"),
+            },
+            center: None,
+            settings: SessionSettings {
+                copy_preserve_links: Some(false),
+                copy_preserve_mode: Some(true),
+                copy_preserve_timestamps: Some(false),
+                ..SessionSettings::default()
+            },
+        };
+
+        let toml_str = config.to_toml().unwrap();
+        assert!(toml_str.contains("copy_preserve_links = false"));
+        assert!(toml_str.contains("copy_preserve_mode = true"));
+        assert!(toml_str.contains("copy_preserve_timestamps = false"));
+        let loaded = SessionConfig::from_toml(&toml_str).unwrap();
+        assert_eq!(config, loaded);
+    }
+
+    #[test]
+    fn resolve_copy_options_overrides_win_and_none_inherits() {
+        let global = CopyOptions {
+            preserve_links: false,
+            preserve_mode: true,
+            preserve_timestamps: false,
+        };
+
+        // No overrides: everything inherits the global defaults.
+        let settings = SessionSettings::default();
+        assert_eq!(resolve_copy_options(&settings, &global), global);
+
+        // Explicit per-session values win over the global defaults.
+        let settings = SessionSettings {
+            copy_preserve_links: Some(true),
+            copy_preserve_mode: Some(false),
+            copy_preserve_timestamps: Some(true),
+            ..SessionSettings::default()
+        };
+        assert_eq!(
+            resolve_copy_options(&settings, &global),
+            CopyOptions {
+                preserve_links: true,
+                preserve_mode: false,
+                preserve_timestamps: true,
+            }
+        );
+
+        // A partial override: the unset entries still inherit.
+        let settings = SessionSettings {
+            copy_preserve_mode: Some(false),
+            ..SessionSettings::default()
+        };
+        let resolved = resolve_copy_options(&settings, &global);
+        assert!(!resolved.preserve_links, "unset entry inherits global");
+        assert!(!resolved.preserve_mode, "explicit value wins");
+        assert!(!resolved.preserve_timestamps, "unset entry inherits global");
     }
 
     #[test]
