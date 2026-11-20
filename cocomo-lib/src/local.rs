@@ -1315,14 +1315,14 @@ async fn copy_file(
     options: &CopyOptions,
     hard_links: &mut HardLinks,
 ) -> Result<()> {
-    if options.preserve_links {
-        if let Some(existing) = hard_links.linked_dst(meta) {
-            // Second occurrence of a multi-linked source file: mirror the
-            // link instead of copying the content again.
-            std::fs::hard_link(&existing, dst)
-                .map_err(|e| wrap(e, FsOperation::Copy, dst.to_path_buf()))?;
-            return Ok(());
-        }
+    if options.preserve_links
+        && let Some(existing) = hard_links.linked_dst(meta)
+    {
+        // Second occurrence of a multi-linked source file: mirror the
+        // link instead of copying the content again.
+        std::fs::hard_link(&existing, dst)
+            .map_err(|e| wrap(e, FsOperation::Copy, dst.to_path_buf()))?;
+        return Ok(());
     }
     fs_err::tokio::copy(src, dst)
         .await
