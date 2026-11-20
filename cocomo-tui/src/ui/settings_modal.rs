@@ -55,42 +55,69 @@ pub(super) fn SettingsModal(
     // hints always reflect the effective state. Only the entries that
     // apply to the session kind are listed, so no toggle is a silent
     // no-op; the list cursor stays on the same row across rebuilds.
-    let rows: Option<Vec<OptionItem<SettingItem>>> = app_handle
-        .read()
-        .active()
-        .filter(|s| matches!(s.ui.mode, SessionMode::Settings))
-        .map(|s| {
-            if let Some(dir) = s.dir() {
-                vec![
-                    OptionItem::new(
-                        SettingItem::CompareContent,
-                        "Compare content",
-                    )
-                    .hint(on_off(dir.compare_content)),
-                    OptionItem::new(SettingItem::HideSame, "Hide identical")
+    let rows: Option<Vec<OptionItem<SettingItem>>> = {
+        let app = app_handle.read();
+        app.active()
+            .filter(|s| matches!(s.ui.mode, SessionMode::Settings))
+            .map(|s| {
+                if let Some(dir) = s.dir() {
+                    // The copy rows show the effective values: the
+                    // per-session overrides resolved against the global
+                    // copy defaults.
+                    let copy = dir.resolved_copy_options(&app.copy_options);
+                    vec![
+                        OptionItem::new(
+                            SettingItem::CompareContent,
+                            "Compare content",
+                        )
+                        .hint(on_off(dir.compare_content)),
+                        OptionItem::new(
+                            SettingItem::HideSame,
+                            "Hide identical",
+                        )
                         .hint(on_off(!dir.shows_equal())),
-                ]
-            } else {
-                let rules = s.text().map(|t| t.source.rules);
-                vec![
-                    OptionItem::new(
-                        SettingItem::IgnoreWhitespace,
-                        "Ignore whitespace",
-                    )
-                    .hint(on_off(rules.is_some_and(|r| r.ignore_whitespace))),
-                    OptionItem::new(
-                        SettingItem::SkipBlankLines,
-                        "Skip blank lines",
-                    )
-                    .hint(on_off(rules.is_some_and(|r| r.skip_blank_lines))),
-                    OptionItem::new(
-                        SettingItem::SkipComments,
-                        "Skip comments",
-                    )
-                    .hint(on_off(rules.is_some_and(|r| r.skip_comments))),
-                ]
-            }
-        });
+                        OptionItem::new(
+                            SettingItem::CopyPreserveLinks,
+                            "Preserve links",
+                        )
+                        .hint(on_off(copy.preserve_links)),
+                        OptionItem::new(
+                            SettingItem::CopyPreserveMode,
+                            "Preserve mode",
+                        )
+                        .hint(on_off(copy.preserve_mode)),
+                        OptionItem::new(
+                            SettingItem::CopyPreserveTimestamps,
+                            "Preserve timestamps",
+                        )
+                        .hint(on_off(copy.preserve_timestamps)),
+                    ]
+                } else {
+                    let rules = s.text().map(|t| t.source.rules);
+                    vec![
+                        OptionItem::new(
+                            SettingItem::IgnoreWhitespace,
+                            "Ignore whitespace",
+                        )
+                        .hint(on_off(
+                            rules.is_some_and(|r| r.ignore_whitespace),
+                        )),
+                        OptionItem::new(
+                            SettingItem::SkipBlankLines,
+                            "Skip blank lines",
+                        )
+                        .hint(on_off(
+                            rules.is_some_and(|r| r.skip_blank_lines),
+                        )),
+                        OptionItem::new(
+                            SettingItem::SkipComments,
+                            "Skip comments",
+                        )
+                        .hint(on_off(rules.is_some_and(|r| r.skip_comments))),
+                    ]
+                }
+            })
+    };
     let open = rows.is_some();
 
     let layer = hooks.use_input_layer(open, true);
@@ -126,7 +153,7 @@ pub(super) fn SettingsModal(
         Modal(
             open: true,
             // Reuse this component's layer; see `FilterPanel`. The height
-            // follows the entry count (2 rows for dir, 3 for text) plus
+            // follows the entry count (5 rows for dir, 3 for text) plus
             // the border, padding and titles.
             layer: Some(layer),
             width: Constraint::Length(48),

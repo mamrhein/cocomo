@@ -17,7 +17,7 @@
 //! [`dropdown_hit_item`]), so the rendered layout and the mouse hit-testing
 //! in the App shell cannot drift apart.
 
-use cocomo_lib::filter::DisplayFilters;
+use cocomo_lib::{CopyOptions, filter::DisplayFilters};
 use ratatui_kit::{
     crossterm::event::MouseButton,
     prelude::*,
@@ -73,9 +73,10 @@ pub(super) fn menu_title(menu: &MenuDef) -> Line<'static> {
 fn entry_label(
     entry: &MenuEntry,
     display: Option<&DisplayFilters>,
+    copy: &CopyOptions,
 ) -> Option<String> {
     match entry {
-        MenuEntry::Item(item) => Some(item_label(item, display)),
+        MenuEntry::Item(item) => Some(item_label(item, display, copy)),
         MenuEntry::SubMenu { label, .. } => Some(format!("{label} \u{25b8}")),
         MenuEntry::Separator => None,
     }
@@ -85,16 +86,19 @@ fn entry_label(
 /// `entries` (separators do not contribute).
 ///
 /// Labels are measured through [`entry_label`] because visibility toggles
-/// render a state-dependent `show`/`hide` prefix; `display` is the active
-/// session's filter state (`None` without a directory session).
+/// render a state-dependent `show`/`hide` prefix and copy toggles a
+/// state-dependent `preserve` prefix; `display` is the active session's
+/// filter state (`None` without a directory session) and `copy` the
+/// effective copy options.
 fn content_widths(
     entries: &[MenuEntry],
     display: Option<&DisplayFilters>,
+    copy: &CopyOptions,
 ) -> (u16, u16) {
     let mut label_width = 0u16;
     let mut hint_width = 0u16;
     for entry in entries {
-        if let Some(label) = entry_label(entry, display) {
+        if let Some(label) = entry_label(entry, display, copy) {
             label_width = label_width.max(label.chars().count() as u16);
         }
         if let Some(hint) = entry.cmd().and_then(key_hint) {
@@ -117,16 +121,17 @@ fn hint_columns(hint_width: u16) -> u16 {
 /// `bar_origin` is the screen position of the menu bar's first cell. The
 /// dropdown is anchored under its title's text (one cell past the tab's
 /// left padding) and opens directly below the bar. `display` is the active
-/// session's filter state, needed to size the state-dependent Filter
-/// labels.
+/// session's filter state and `copy` its effective copy options, needed to
+/// size the state-dependent Filter and Options labels.
 pub(super) fn dropdown_rect(
     titles: &[Line<'static>],
     def: &MenuDef,
     bar_pos: usize,
     bar_origin: Position,
     display: Option<&DisplayFilters>,
+    copy: &CopyOptions,
 ) -> Rect {
-    let (label_width, hint_width) = content_widths(def.entries, display);
+    let (label_width, hint_width) = content_widths(def.entries, display, copy);
     // The row itself is `▸ label… hint `, the box adds two border columns.
     Rect {
         x: bar_origin.x
@@ -148,8 +153,9 @@ pub(super) fn flyout_rect(
     parent_row: usize,
     dropdown: Rect,
     display: Option<&DisplayFilters>,
+    copy: &CopyOptions,
 ) -> Rect {
-    let (label_width, hint_width) = content_widths(children, display);
+    let (label_width, hint_width) = content_widths(children, display, copy);
     Rect {
         x: dropdown.x + dropdown.width - 1,
         y: dropdown.y + parent_row as u16,
@@ -256,6 +262,9 @@ pub(super) struct MenuDropdownProps {
     /// state-dependent `show`/`hide` labels (`None` without a directory
     /// session).
     pub(super) display: Option<DisplayFilters>,
+    /// The effective copy options, used to resolve the state-dependent
+    /// copy toggle labels.
+    pub(super) copy: CopyOptions,
 }
 
 /// Dropdown listing the entries of the open menu.
@@ -283,7 +292,7 @@ pub(super) fn MenuDropdown(
         return element!(Modal(open: false)).into_any();
     };
     let (label_width, hint_width) =
-        content_widths(def.entries, props.display.as_ref());
+        content_widths(def.entries, props.display.as_ref(), &props.copy);
     let rect = props.rect;
     element!(
         Positioned(
@@ -307,6 +316,7 @@ pub(super) fn MenuDropdown(
                             hint_width,
                             props.view,
                             props.display.as_ref(),
+                            &props.copy,
                             theme,
                         ),
                     )
@@ -329,6 +339,9 @@ pub(super) struct MenuFlyoutProps {
     pub(super) view: Option<MenuView>,
     /// The active session's display filters.
     pub(super) display: Option<DisplayFilters>,
+    /// The effective copy options, used to resolve the state-dependent
+    /// copy toggle labels.
+    pub(super) copy: CopyOptions,
 }
 
 /// Flyout listing the children of the highlighted submenu parent.
@@ -354,7 +367,7 @@ pub(super) fn MenuFlyout(
         return element!(Modal(open: false)).into_any();
     };
     let (label_width, hint_width) =
-        content_widths(children, props.display.as_ref());
+        content_widths(children, props.display.as_ref(), &props.copy);
     let rect = props.rect;
     element!(
         Positioned(
@@ -378,6 +391,7 @@ pub(super) fn MenuFlyout(
                             hint_width,
                             props.view,
                             props.display.as_ref(),
+                            &props.copy,
                             theme,
                         ),
                     )
@@ -399,6 +413,7 @@ pub(super) fn MenuFlyout(
 /// The hint is underlined on top of its dim bold style: the key code must
 /// also read on terminals without color, matching the underlined
 /// accelerators of [`menu_title`] and [`super::option_list::OptionList`].
+#[allow(clippy::too_many_arguments)]
 fn dropdown_row(
     entry: &MenuEntry,
     current: bool,
@@ -406,6 +421,7 @@ fn dropdown_row(
     hint_width: u16,
     view: Option<MenuView>,
     display: Option<&DisplayFilters>,
+    copy: &CopyOptions,
     theme: CocomoTheme,
 ) -> Line<'static> {
     let hint_columns = hint_columns(hint_width);
@@ -416,7 +432,7 @@ fn dropdown_row(
         return Line::from("\u{2500}".repeat(width as usize))
             .style(theme.border);
     }
-    let label = entry_label(entry, display).unwrap_or_default();
+    let label = entry_label(entry, display, copy).unwrap_or_default();
     let label_pad = " ".repeat(
         label_width.saturating_sub(label.chars().count() as u16) as usize,
     );
@@ -472,6 +488,12 @@ mod tests {
 
     /// Screen position of the menu bar's first cell.
     const BAR_ORIGIN: Position = Position { x: 0, y: 0 };
+
+    /// Built-in copy defaults; these tests do not exercise the label
+    /// states of the copy toggles.
+    fn copy() -> CopyOptions {
+        CopyOptions::default()
+    }
 
     #[test]
     fn menu_titles_underline_their_accelerator_once() {
@@ -537,7 +559,8 @@ mod tests {
     fn dropdown_rect_anchors_under_its_title() {
         let items = titles();
         for (index, def) in MENUS.iter().enumerate() {
-            let rect = dropdown_rect(&items, def, index, BAR_ORIGIN, None);
+            let rect =
+                dropdown_rect(&items, def, index, BAR_ORIGIN, None, &copy());
             let title_x =
                 tabs_item_x(&items, index, DIVIDER_WIDTH).unwrap() + 1;
             assert_eq!(rect.x, title_x, "menu {}", def.title);
@@ -598,8 +621,14 @@ mod tests {
             sub: None,
         };
         let def = menu.menu().unwrap();
-        let rect =
-            dropdown_rect(&items, def, menu.bar_index, BAR_ORIGIN, None);
+        let rect = dropdown_rect(
+            &items,
+            def,
+            menu.bar_index,
+            BAR_ORIGIN,
+            None,
+            &copy(),
+        );
         let buf = render_frames(
             element!(PaletteProvider(palette: cocomo_palette()) {
                 MenuDropdown(
@@ -607,6 +636,7 @@ mod tests {
                     rect: rect,
                     view: None,
                     display: None,
+                    copy: copy(),
                 )
             }),
             100,
@@ -657,6 +687,7 @@ mod tests {
             hint.chars().count() as u16,
             None,
             None,
+            &copy(),
             theme,
         );
         let hint_span =
@@ -681,6 +712,7 @@ mod tests {
             4,
             None,
             None,
+            &copy(),
             theme,
         );
         assert_eq!(sep.spans.len(), 1);
@@ -702,6 +734,7 @@ mod tests {
             0,
             None,
             None,
+            &copy(),
             theme,
         );
         assert!(parent.spans[2].content.starts_with("group"), "{parent:?}");
@@ -717,7 +750,8 @@ mod tests {
             views: MenuViews::DIR,
         });
         let row = |view| {
-            let row = dropdown_row(&entry, false, 12, 0, view, None, theme);
+            let row =
+                dropdown_row(&entry, false, 12, 0, view, None, &copy(), theme);
             row.spans[2].style
         };
         // Dimmed on the welcome screen and on a text session, lit on a
@@ -747,7 +781,7 @@ mod tests {
             width: 20,
             height: 8,
         };
-        let rect = flyout_rect(&children, 3, dropdown, None);
+        let rect = flyout_rect(&children, 3, dropdown, None, &copy());
         // The flyout shares the dropdown's right border column and aligns
         // its top border with the parent row.
         assert_eq!(rect.x, dropdown.x + dropdown.width - 1);

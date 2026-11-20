@@ -185,12 +185,13 @@ async fn plan_sync_session(
     right: &Endpoint,
     operation: SyncOperation,
     compare_content: bool,
+    copy_options: &CopyOptions,
 ) -> Result<SyncResult> {
     let rules = SyncRules {
         operation,
         dry_run: true,
         compare_content,
-        copy_options: CopyOptions::default(),
+        copy_options: *copy_options,
     };
 
     if left.same_provider(right) {
@@ -223,12 +224,13 @@ async fn execute_sync_session(
     right: &Endpoint,
     operation: SyncOperation,
     compare_content: bool,
+    copy_options: &CopyOptions,
 ) -> Result<SyncResult> {
     let rules = SyncRules {
         operation,
         dry_run: false,
         compare_content,
-        copy_options: CopyOptions::default(),
+        copy_options: *copy_options,
     };
 
     if left.same_provider(right) {
@@ -328,6 +330,12 @@ async fn open_dir_session(
         }
         dir.display.show_statuses = mask;
         dir.display.show_hidden = config.settings.show_hidden;
+        // Restore the per-session copy overrides; `None` keeps following
+        // the global copy defaults.
+        dir.copy_preserve_links = config.settings.copy_preserve_links;
+        dir.copy_preserve_mode = config.settings.copy_preserve_mode;
+        dir.copy_preserve_timestamps =
+            config.settings.copy_preserve_timestamps;
     }
     // Restore the name filter; a saved pattern that no longer compiles is
     // skipped with a warning instead of failing the whole load.
@@ -387,18 +395,25 @@ struct SessionSnapshot {
     right: Endpoint,
     compare_content: bool,
     sync_operation: SyncOperation,
+    /// Per-session copy overrides resolved against the global defaults,
+    /// captured with the rest of the session inputs.
+    copy_options: CopyOptions,
 }
 
 impl SessionSnapshot {
     /// Capture the snapshot from a directory session; `None` for a text
     /// session, which has no directory-scoped async work.
-    fn from_session(session: &SessionView) -> Option<Self> {
+    fn from_session(
+        session: &SessionView,
+        global: &CopyOptions,
+    ) -> Option<Self> {
         let dir = session.dir()?;
         Some(Self {
             left: session.core.left.clone(),
             right: session.core.right.clone(),
             compare_content: dir.compare_content,
             sync_operation: dir.sync_operation,
+            copy_options: dir.resolved_copy_options(global),
         })
     }
 }
@@ -414,10 +429,12 @@ struct TransferSnapshot {
     right_root: PathBuf,
     is_dir: bool,
     compare_content: bool,
+    /// Per-session copy overrides resolved against the global defaults.
+    copy_options: CopyOptions,
 }
 
 impl TransferSnapshot {
-    fn from_session(session: &SessionView) -> Self {
+    fn from_session(session: &SessionView, global: &CopyOptions) -> Self {
         // A text session's endpoints are the files themselves, while the
         // executor addresses an entry as `root.join(name)`.
         let root = |path: &Path, is_dir: bool| {
@@ -437,6 +454,9 @@ impl TransferSnapshot {
             compare_content: session
                 .dir()
                 .is_some_and(|dir| dir.compare_content),
+            copy_options: session
+                .dir()
+                .map_or(*global, |dir| dir.resolved_copy_options(global)),
         }
     }
 }
@@ -605,7 +625,9 @@ pub(crate) fn process_session_action(action: SessionAction) {
             };
             spawn_task(
                 move |app| {
-                    app.session(id).and_then(SessionSnapshot::from_session)
+                    app.session(id).and_then(|s| {
+                        SessionSnapshot::from_session(s, &app.copy_options)
+                    })
                 },
                 move |snapshot| async move {
                     // Clear the comparison so the view shows a loading
@@ -634,7 +656,9 @@ pub(crate) fn process_session_action(action: SessionAction) {
             };
             spawn_task(
                 move |app| {
-                    app.session(id).and_then(SessionSnapshot::from_session)
+                    app.session(id).and_then(|s| {
+                        SessionSnapshot::from_session(s, &app.copy_options)
+                    })
                 },
                 move |snapshot| async move {
                     // Record the requested operation before planning.
@@ -649,6 +673,7 @@ pub(crate) fn process_session_action(action: SessionAction) {
                         &snapshot.right,
                         operation,
                         snapshot.compare_content,
+                        &snapshot.copy_options,
                     )
                     .await
                     .map_err(|e| {
@@ -686,7 +711,9 @@ pub(crate) fn process_session_action(action: SessionAction) {
             };
             spawn_task(
                 move |app| {
-                    app.session(id).and_then(SessionSnapshot::from_session)
+                    app.session(id).and_then(|s| {
+                        SessionSnapshot::from_session(s, &app.copy_options)
+                    })
                 },
                 move |snapshot| async move {
                     let endpoints =
@@ -696,6 +723,7 @@ pub(crate) fn process_session_action(action: SessionAction) {
                         &snapshot.right,
                         snapshot.sync_operation,
                         snapshot.compare_content,
+                        &snapshot.copy_options,
                     )
                     .await
                     .map_err(|e| e.with_context(endpoints.clone()))?;
@@ -828,7 +856,11 @@ pub(crate) fn process_session_action(action: SessionAction) {
                 return;
             };
             spawn_task(
-                move |app| app.session(id).map(TransferSnapshot::from_session),
+                move |app| {
+                    app.session(id).map(|s| {
+                        TransferSnapshot::from_session(s, &app.copy_options)
+                    })
+                },
                 move |snapshot| async move {
                     let pair = if snapshot.left.same_provider(&snapshot.right)
                     {
@@ -844,7 +876,7 @@ pub(crate) fn process_session_action(action: SessionAction) {
                         &snapshot.left_root,
                         &snapshot.right_root,
                         pair,
-                        &CopyOptions::default(),
+                        &snapshot.copy_options,
                     )
                     .await;
                     // Non-fatal per-item failures are collected by the
@@ -1318,47 +1350,81 @@ pub(crate) fn load_saved_session(name: String) {
 /// the entries that apply to the active session kind, so a dir-only item
 /// on a text session (or vice versa) is a no-op by construction.
 pub(crate) fn toggle_setting(item: SettingItem) {
-    if let Some(session) = APP_STATE.state().write().active_mut()
-        && matches!(session.ui.mode, SessionMode::Settings)
-    {
-        match item {
-            SettingItem::CompareContent => {
-                if let Some(dir) = session.dir_mut() {
-                    dir.compare_content = !dir.compare_content;
-                }
+    let state = APP_STATE.state();
+    let mut app = state.write();
+    // Resolve the active dir session's effective copy options up front:
+    // the copy rows toggle against the *resolved* value, and the global
+    // defaults cannot be read while the session is mutably borrowed below.
+    let resolved_copy = app
+        .active()
+        .and_then(|s| s.dir())
+        .map(|dir| dir.resolved_copy_options(&app.copy_options));
+    let Some(session) = app.active_mut() else {
+        return;
+    };
+    if !matches!(session.ui.mode, SessionMode::Settings) {
+        return;
+    }
+    match item {
+        SettingItem::CompareContent => {
+            if let Some(dir) = session.dir_mut() {
+                dir.compare_content = !dir.compare_content;
             }
-            SettingItem::HideSame => {
-                if let Some(dir) = session.dir_mut() {
-                    dir.display.show_statuses =
-                        StatusFilter::Equal.toggle(dir.display.show_statuses);
-                    session.ui.table_state.select(Some(0));
-                }
+        }
+        SettingItem::HideSame => {
+            if let Some(dir) = session.dir_mut() {
+                dir.display.show_statuses =
+                    StatusFilter::Equal.toggle(dir.display.show_statuses);
+                session.ui.table_state.select(Some(0));
             }
-            SettingItem::IgnoreWhitespace
-            | SettingItem::SkipBlankLines
-            | SettingItem::SkipComments => {
-                if let Some(text) = session.text_mut() {
-                    match item {
-                        SettingItem::IgnoreWhitespace => {
-                            text.source.rules.ignore_whitespace =
-                                !text.source.rules.ignore_whitespace;
-                        }
-                        SettingItem::SkipBlankLines => {
-                            text.source.rules.skip_blank_lines =
-                                !text.source.rules.skip_blank_lines;
-                        }
-                        _ => {
-                            text.source.rules.skip_comments =
-                                !text.source.rules.skip_comments;
-                        }
+        }
+        SettingItem::CopyPreserveLinks
+        | SettingItem::CopyPreserveMode
+        | SettingItem::CopyPreserveTimestamps => {
+            if let Some(dir) = session.dir_mut() {
+                // The copy rows show the effective value; toggling records
+                // the opposite as this session's explicit override, so the
+                // session stops following the global copy default.
+                let resolved = resolved_copy.unwrap_or_default();
+                match item {
+                    SettingItem::CopyPreserveLinks => {
+                        dir.copy_preserve_links =
+                            Some(!resolved.preserve_links);
                     }
-                    // Re-run the comparison from the retained contents so
-                    // the diff reflects the rule immediately.
-                    text.recompare_with_rules();
-                    // The row model may have shrunk; reset the cursor so it
-                    // (and any stale drag anchor) cannot point past the end.
-                    session.set_cursor(Some(0));
+                    SettingItem::CopyPreserveMode => {
+                        dir.copy_preserve_mode = Some(!resolved.preserve_mode);
+                    }
+                    _ => {
+                        dir.copy_preserve_timestamps =
+                            Some(!resolved.preserve_timestamps);
+                    }
                 }
+            }
+        }
+        SettingItem::IgnoreWhitespace
+        | SettingItem::SkipBlankLines
+        | SettingItem::SkipComments => {
+            if let Some(text) = session.text_mut() {
+                match item {
+                    SettingItem::IgnoreWhitespace => {
+                        text.source.rules.ignore_whitespace =
+                            !text.source.rules.ignore_whitespace;
+                    }
+                    SettingItem::SkipBlankLines => {
+                        text.source.rules.skip_blank_lines =
+                            !text.source.rules.skip_blank_lines;
+                    }
+                    _ => {
+                        text.source.rules.skip_comments =
+                            !text.source.rules.skip_comments;
+                    }
+                }
+                // Re-run the comparison from the retained contents so the
+                // diff reflects the rule immediately.
+                text.recompare_with_rules();
+                // The row model may have shrunk; reset the cursor so it
+                // (and any stale drag anchor) cannot point past the end.
+                session.set_cursor(Some(0));
             }
         }
     }
@@ -1717,6 +1783,30 @@ pub(crate) fn confirm_menu_item() -> MenuOutcome {
             }
             Cmd::ToggleShortcuts => {
                 app.show_shortcuts = !app.show_shortcuts;
+                return MenuOutcome::Handled;
+            }
+            Cmd::ToggleCopyPreserveLinks
+            | Cmd::ToggleCopyPreserveMode
+            | Cmd::ToggleCopyPreserveTimestamps => {
+                // App-level command: flip the global copy default (the
+                // `[copy]` section shared with the GUI) and persist it.
+                let field = match item.cmd {
+                    Cmd::ToggleCopyPreserveLinks => {
+                        &mut app.copy_options.preserve_links
+                    }
+                    Cmd::ToggleCopyPreserveMode => {
+                        &mut app.copy_options.preserve_mode
+                    }
+                    _ => &mut app.copy_options.preserve_timestamps,
+                };
+                *field = !*field;
+                let copy = app.copy_options;
+                // `report_error` takes the state lock itself, so persist
+                // and report only after the guard above is dropped.
+                drop(app);
+                if let Err(e) = cocomo_lib::set_copy_defaults(&copy) {
+                    report_error(format!("Failed to save copy defaults: {e}"));
+                }
                 return MenuOutcome::Handled;
             }
             cmd => {
@@ -2315,6 +2405,42 @@ mod tests {
         // The diff was re-run from the retained contents: with whitespace
         // ignored the two files are equal and no differences remain.
         assert!(text.text_diff.as_ref().unwrap().is_empty());
+    }
+
+    #[test]
+    fn toggle_setting_records_explicit_copy_override() {
+        let mut app = AppState::new();
+        // A global default of "don't preserve mode"; the session follows
+        // it while its override is unset.
+        app.copy_options.preserve_mode = false;
+        app.add_session(SessionView::new_dir_compare(
+            Endpoint::local("/left"),
+            Endpoint::local("/right"),
+            true,
+        ));
+        app.active_mut().unwrap().ui.mode = SessionMode::Settings;
+        APP_STATE.set(app);
+
+        // The row shows the resolved global value, so toggling records
+        // its negation as an explicit override; the other copy settings
+        // stay unset and keep following the global defaults.
+        toggle_setting(SettingItem::CopyPreserveMode);
+        {
+            let state = APP_STATE.state();
+            let app = state.read();
+            let dir = app.active().unwrap().dir().unwrap();
+            assert_eq!(dir.copy_preserve_mode, Some(true));
+            assert_eq!(dir.copy_preserve_links, None);
+        }
+
+        // Toggling again flips the explicit override; the global default
+        // is untouched (that is the Options menu's job).
+        toggle_setting(SettingItem::CopyPreserveMode);
+        let state = APP_STATE.state();
+        let app = state.read();
+        let dir = app.active().unwrap().dir().unwrap();
+        assert_eq!(dir.copy_preserve_mode, Some(false));
+        assert!(!app.copy_options.preserve_mode);
     }
 
     #[test]

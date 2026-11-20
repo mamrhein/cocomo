@@ -47,6 +47,12 @@ pub(crate) fn session_to_config(session: &SessionView) -> SessionConfig {
                 skip_blank_lines: false,
                 skip_comments: false,
                 show_hidden: dir.display.show_hidden,
+                // The per-session copy overrides; `None` fields are
+                // omitted from the TOML so the session keeps following the
+                // global copy defaults.
+                copy_preserve_links: dir.copy_preserve_links,
+                copy_preserve_mode: dir.copy_preserve_mode,
+                copy_preserve_timestamps: dir.copy_preserve_timestamps,
                 // The shown status bits by name, so the TOML stays
                 // human-readable like the old coarse booleans.
                 show_statuses: dir
@@ -125,6 +131,24 @@ mod tests {
         assert_eq!(config.left.path, std::path::PathBuf::from("/left"));
         assert_eq!(config.right.path, std::path::PathBuf::from("/right"));
         assert!(config.settings.compare_files);
+    }
+
+    #[test]
+    fn dir_copy_overrides_round_trip_through_toml() {
+        // Cross-frontend portability: per-session copy overrides must
+        // survive the shared TOML format; an unset override must stay
+        // unset so the session keeps following the global copy defaults.
+        let mut session = dir_session();
+        if let Some(dir) = session.dir_mut() {
+            dir.copy_preserve_links = Some(false);
+            dir.copy_preserve_mode = Some(true);
+        }
+        let config = session_to_config(&session);
+        let loaded =
+            SessionConfig::from_toml(&config.to_toml().unwrap()).unwrap();
+        assert_eq!(loaded.settings.copy_preserve_links, Some(false));
+        assert_eq!(loaded.settings.copy_preserve_mode, Some(true));
+        assert_eq!(loaded.settings.copy_preserve_timestamps, None);
     }
 
     #[test]

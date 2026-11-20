@@ -18,8 +18,8 @@
 use std::sync::Arc;
 
 use cocomo_lib::{
-    DirComparison, DirEntry, DirEntryStatus, Endpoint, EntryInfo, Grammar,
-    SyncOperation, SyncResult, TextCompareSettings, compare_texts,
+    CopyOptions, DirComparison, DirEntry, DirEntryStatus, Endpoint, EntryInfo,
+    Grammar, SyncOperation, SyncResult, TextCompareSettings, compare_texts,
 };
 use cocomo_tui::{
     keys::{Cmd, KeyScope, handle_session_key, lookup, run_menu_command},
@@ -215,6 +215,52 @@ fn sync_menu_commands_plan_and_sync_key_replans() {
             operation: SyncOperation::UpdateBoth
         })
     );
+}
+
+#[test]
+fn copy_toggle_menu_commands_leave_the_session_untouched() {
+    // The copy toggles are app-level menu commands the controller executes
+    // itself (they flip the persisted global default), so the session-level
+    // dispatch must be a no-op that touches no session state.
+    let mut session = dir_session();
+    for cmd in [
+        Cmd::ToggleCopyPreserveLinks,
+        Cmd::ToggleCopyPreserveMode,
+        Cmd::ToggleCopyPreserveTimestamps,
+    ] {
+        assert_eq!(run_menu_command(&mut session, cmd), SessionAction::None);
+    }
+    let dir = session.dir().unwrap();
+    assert_eq!(dir.copy_preserve_links, None);
+    assert_eq!(dir.copy_preserve_mode, None);
+    assert_eq!(dir.copy_preserve_timestamps, None);
+}
+
+#[test]
+fn dir_copy_overrides_resolve_against_global_defaults() {
+    let global = CopyOptions {
+        preserve_links: true,
+        preserve_mode: false,
+        preserve_timestamps: true,
+    };
+    let mut session = dir_session();
+    // Without overrides the session follows the global defaults exactly.
+    assert_eq!(
+        session.dir().unwrap().resolved_copy_options(&global),
+        global
+    );
+
+    // An explicit override wins over its global counterpart; unset
+    // settings keep inheriting.
+    {
+        let dir = session.dir_mut().unwrap();
+        dir.copy_preserve_mode = Some(true);
+        dir.copy_preserve_timestamps = Some(false);
+    }
+    let resolved = session.dir().unwrap().resolved_copy_options(&global);
+    assert!(resolved.preserve_links);
+    assert!(resolved.preserve_mode);
+    assert!(!resolved.preserve_timestamps);
 }
 
 #[test]

@@ -25,7 +25,7 @@
 //! state machine is unit-testable without a terminal. The controller is the
 //! only caller that applies them to the global atom.
 
-use cocomo_lib::filter::DisplayFilters;
+use cocomo_lib::{CopyOptions, filter::DisplayFilters};
 
 use crate::{
     keys::Cmd,
@@ -382,11 +382,24 @@ pub const MENUS: &[MenuDef] = &[
         title: "Options",
         accel: 'o',
         views: MenuViews::DIR,
-        entries: &[item(
-            "Compare content on/off",
-            Cmd::ToggleCompareContent,
-            MenuViews::DIR,
-        )],
+        entries: &[
+            item(
+                "Compare content on/off",
+                Cmd::ToggleCompareContent,
+                MenuViews::DIR,
+            ),
+            MenuEntry::Separator,
+            // The global `cp`-like copy defaults; `item_label` renders them
+            // as `Preserve …`/`Don't preserve …` state verbs, and toggling
+            // persists to the shared `config.toml`.
+            item("links", Cmd::ToggleCopyPreserveLinks, MenuViews::DIR),
+            item("mode", Cmd::ToggleCopyPreserveMode, MenuViews::DIR),
+            item(
+                "timestamps",
+                Cmd::ToggleCopyPreserveTimestamps,
+                MenuViews::DIR,
+            ),
+        ],
     },
     MenuDef {
         title: "Help",
@@ -419,18 +432,35 @@ fn bar_indices_in(menus: &[MenuDef], view: Option<MenuView>) -> Vec<usize> {
 }
 
 /// The dropdown label of `item`, resolved against the active session's
-/// display filters.
+/// display filters and the app's global copy defaults.
 ///
 /// Visibility toggle items read `Show …` while their group is filtered
 /// out and `Hide …` while it is shown (a partial umbrella — one sub-bit
-/// shown, its sibling hidden — counts as filtered out). Every other item
-/// renders its static label. Without a directory session (`display` is
-/// `None`) the toggles advertise `Show …`, matching their dimmed
-/// no-op state.
+/// shown, its sibling hidden — counts as filtered out). The copy-default
+/// toggles follow the same "label names the action" rule: they read
+/// `Don't preserve …` while the global default preserves and `Preserve …`
+/// while it does not. Every other item renders its static label. Without
+/// a directory session (`display` is `None`) the visibility toggles
+/// advertise `Show …`, matching their dimmed no-op state.
 pub fn item_label(
     item: &MenuItemDef,
     display: Option<&DisplayFilters>,
+    copy: &CopyOptions,
 ) -> String {
+    let preserved = match item.cmd {
+        Cmd::ToggleCopyPreserveLinks => Some(copy.preserve_links),
+        Cmd::ToggleCopyPreserveMode => Some(copy.preserve_mode),
+        Cmd::ToggleCopyPreserveTimestamps => Some(copy.preserve_timestamps),
+        _ => None,
+    };
+    if let Some(preserved) = preserved {
+        let verb = if preserved {
+            "Don't preserve"
+        } else {
+            "Preserve"
+        };
+        return format!("{verb} {}", item.label);
+    }
     let shown = match item.cmd {
         Cmd::ToggleHidden => display.is_some_and(|d| d.show_hidden),
         Cmd::ToggleStatusFilter(filter) => {
@@ -895,7 +925,7 @@ mod tests {
     }
 
     #[test]
-    fn options_menu_lists_compare_content() {
+    fn options_menu_lists_content_and_copy_toggles() {
         let options = MENUS
             .iter()
             .find(|m| m.title == "Options")
@@ -904,6 +934,16 @@ mod tests {
             lists(options.entries, Cmd::ToggleCompareContent),
             "Options menu misses the content toggle",
         );
+        for cmd in [
+            Cmd::ToggleCopyPreserveLinks,
+            Cmd::ToggleCopyPreserveMode,
+            Cmd::ToggleCopyPreserveTimestamps,
+        ] {
+            assert!(
+                lists(options.entries, cmd),
+                "Options menu misses the {cmd:?} item",
+            );
+        }
     }
 
     #[test]
@@ -964,14 +1004,24 @@ mod tests {
 
         // Shown groups offer "Hide …", hidden ones "Show …".
         let all = DisplayFilters::all();
-        assert_eq!(item_label(&hidden, Some(&all)), "Hide hidden items");
-        assert_eq!(item_label(&different, Some(&all)), "Hide different items");
+        let copy = CopyOptions::default();
+        assert_eq!(
+            item_label(&hidden, Some(&all), &copy),
+            "Hide hidden items"
+        );
+        assert_eq!(
+            item_label(&different, Some(&all), &copy),
+            "Hide different items"
+        );
         let off = DisplayFilters {
             show_statuses: DirEntryStatus::all(),
             show_hidden: false,
             suppress_content_filters: false,
         };
-        assert_eq!(item_label(&hidden, Some(&off)), "Show hidden items");
+        assert_eq!(
+            item_label(&hidden, Some(&off), &copy),
+            "Show hidden items"
+        );
 
         // A partial umbrella reads unchecked, so the item offers "Show".
         let partial = DisplayFilters {
@@ -980,15 +1030,49 @@ mod tests {
             suppress_content_filters: false,
         };
         assert_eq!(
-            item_label(&different, Some(&partial)),
+            item_label(&different, Some(&partial), &copy),
             "Show different items"
         );
 
         // Static items keep their label; without a session the toggles
         // advertise "Show".
         let open = leaf(view.entries, Cmd::OpenFilterPanel);
-        assert_eq!(item_label(&open, None), "Filter panel\u{2026}");
-        assert_eq!(item_label(&hidden, None), "Show hidden items");
+        assert_eq!(item_label(&open, None, &copy), "Filter panel\u{2026}");
+        assert_eq!(item_label(&hidden, None, &copy), "Show hidden items");
+    }
+
+    #[test]
+    fn copy_items_switch_between_preserve_and_dont_preserve() {
+        let options = MENUS
+            .iter()
+            .find(|m| m.title == "Options")
+            .expect("no Options menu");
+        let links = leaf(options.entries, Cmd::ToggleCopyPreserveLinks);
+        let mode = leaf(options.entries, Cmd::ToggleCopyPreserveMode);
+        let timestamps =
+            leaf(options.entries, Cmd::ToggleCopyPreserveTimestamps);
+
+        // The label names the action the item performs, i.e. the opposite
+        // of the current default.
+        let on = CopyOptions {
+            preserve_links: true,
+            preserve_mode: false,
+            preserve_timestamps: true,
+        };
+        assert_eq!(item_label(&links, None, &on), "Don't preserve links");
+        assert_eq!(item_label(&mode, None, &on), "Preserve mode");
+        assert_eq!(
+            item_label(&timestamps, None, &on),
+            "Don't preserve timestamps"
+        );
+        let off = CopyOptions {
+            preserve_links: false,
+            preserve_mode: true,
+            preserve_timestamps: false,
+        };
+        assert_eq!(item_label(&links, None, &off), "Preserve links");
+        assert_eq!(item_label(&mode, None, &off), "Don't preserve mode");
+        assert_eq!(item_label(&timestamps, None, &off), "Preserve timestamps");
     }
 
     #[test]

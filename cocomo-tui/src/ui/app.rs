@@ -264,14 +264,18 @@ pub(crate) fn App(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // While a dropdown is open its input layer blocks every handler below
     // (keys and mouse), exactly like a modal blocks the shell. Read the
     // state the layer and its handler need before registering them.
-    let (open_menu, menu_view, display) = {
+    let (open_menu, menu_view, display, copy) = {
         let app = app_state.read();
+        let dir = app.active().and_then(|s| s.dir());
         (
             app.menu,
             app.menu_view(),
-            app.active()
-                .and_then(|s| s.dir())
-                .map(|d| d.display.clone()),
+            dir.map(|d| d.display.clone()),
+            // The menu's copy toggles show the session's effective
+            // options: its overrides resolved against the global defaults.
+            dir.map_or(app.copy_options, |d| {
+                d.resolved_copy_options(&app.copy_options)
+            }),
         )
     };
     // Titles with their accelerator letter underlined, one per menu the
@@ -292,13 +296,20 @@ pub(crate) fn App(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             bar_pos,
             BAR_ORIGIN,
             display.as_ref(),
+            &copy,
         );
         let flyout = menu
             .sub
             .is_some()
             .then(|| {
                 menu.sub_entries().map(|children| {
-                    flyout_rect(children, menu.item, rect, display.as_ref())
+                    flyout_rect(
+                        children,
+                        menu.item,
+                        rect,
+                        display.as_ref(),
+                        &copy,
+                    )
                 })
             })
             .flatten();
@@ -598,6 +609,7 @@ pub(crate) fn App(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     rect: rect,
                     view: menu_view,
                     display: display.clone(),
+                    copy: copy,
                 )
                 // Only mounted while a submenu flyout is actually open, so
                 // a closed dropdown never adds a layout child below.
@@ -607,6 +619,7 @@ pub(crate) fn App(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         rect: flyout,
                         view: menu_view,
                         display: display.clone(),
+                        copy: copy,
                     )
                 }
             }
@@ -1139,6 +1152,8 @@ mod render_tests {
 
 #[cfg(test)]
 mod menu_mouse_tests {
+    use cocomo_lib::CopyOptions;
+
     use super::*;
     use crate::{menu::MENUS, state::AppState};
 
@@ -1191,6 +1206,7 @@ mod menu_mouse_tests {
             menu.bar_index,
             BAR_ORIGIN,
             None,
+            &CopyOptions::default(),
         );
         let dropdown = Some((menu, rect, None));
         APP_STATE.state().write().menu = Some(menu);
@@ -1219,6 +1235,7 @@ mod menu_mouse_tests {
             menu.bar_index,
             BAR_ORIGIN,
             None,
+            &CopyOptions::default(),
         );
         let dropdown = Some((menu, rect, None));
         APP_STATE.set(AppState::new());
@@ -1253,6 +1270,7 @@ mod menu_mouse_tests {
             menu.bar_index,
             BAR_ORIGIN,
             None,
+            &CopyOptions::default(),
         );
         let dropdown = Some((menu, rect, None));
         APP_STATE.state().write().menu = Some(menu);

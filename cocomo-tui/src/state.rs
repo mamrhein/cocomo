@@ -24,11 +24,13 @@ use std::{
 };
 
 use cocomo_lib::{
-    DirComparison, DirEntry, DirEntryStatus, Endpoint, Grammar, MergedDiffRow,
-    SessionSettings, SyncOperation, SyncResult, TextCompareSettings, TextDiff,
-    TransferAction, TransferItem, WhitespaceMode, compare_texts,
+    CopyOptions, DirComparison, DirEntry, DirEntryStatus, Endpoint, Grammar,
+    MergedDiffRow, SessionSettings, SyncOperation, SyncResult,
+    TextCompareSettings, TextDiff, TransferAction, TransferItem,
+    WhitespaceMode, compare_texts,
     filter::DisplayFilters,
     report::{ReportConfig, ReportFormat},
+    resolve_copy_options,
 };
 use ratatui_kit::{Atom, components::table::TableState};
 use regex::RegexBuilder;
@@ -614,15 +616,24 @@ impl FilterRow {
 /// A toggleable entry of the settings modal (`,`).
 ///
 /// The modal only offers the items that apply to the active session kind:
-/// [`SettingItem::CompareContent`] and [`SettingItem::HideSame`] are
-/// folder-session items, the text-rule items are text-session items, so no
-/// control in the modal is ever a no-op.
+/// [`SettingItem::CompareContent`], [`SettingItem::HideSame`] and the
+/// per-session copy overrides are folder-session items, the text-rule items
+/// are text-session items, so no control in the modal is ever a no-op.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SettingItem {
     /// Toggle content comparison (mirrors `C`, folder sessions).
     CompareContent,
     /// Toggle hiding identical entries (mirrors `F`, folder sessions).
     HideSame,
+    /// Override whether copies preserve symlinks and hard links (folder
+    /// sessions; `None` inherits the global default).
+    CopyPreserveLinks,
+    /// Override whether copies preserve mode bits, ACLs and extended
+    /// attributes (folder sessions).
+    CopyPreserveMode,
+    /// Override whether copies preserve all available timestamps (folder
+    /// sessions).
+    CopyPreserveTimestamps,
     /// Ignore whitespace differences in the diff (mirrors
     /// `SessionSettings::ignore_whitespace`, text sessions).
     IgnoreWhitespace,
@@ -786,6 +797,15 @@ pub struct DirView {
     /// drives the `sync` command-line command, and is snapshotted by the
     /// execute task).
     pub sync_operation: SyncOperation,
+    /// Per-session override of the global `preserve_links` copy default
+    /// (`cp -d`). `None` inherits the global default.
+    pub copy_preserve_links: Option<bool>,
+    /// Per-session override of the global `preserve_mode` copy default.
+    /// `None` inherits the global default.
+    pub copy_preserve_mode: Option<bool>,
+    /// Per-session override of the global `preserve_timestamps` copy
+    /// default. `None` inherits the global default.
+    pub copy_preserve_timestamps: Option<bool>,
 }
 
 impl DirView {
@@ -799,6 +819,23 @@ impl DirView {
     /// filters (the state of the filter panel's "hidden" checkbox).
     pub fn shows_hidden(&self) -> bool {
         self.display.show_hidden
+    }
+
+    /// The copy options this session applies to transfers: its explicit
+    /// overrides where set, `global` elsewhere.
+    ///
+    /// Delegates to the lib's [`resolve_copy_options`] so the inheritance
+    /// rule lives in one place shared with the GUI.
+    pub fn resolved_copy_options(&self, global: &CopyOptions) -> CopyOptions {
+        resolve_copy_options(
+            &SessionSettings {
+                copy_preserve_links: self.copy_preserve_links,
+                copy_preserve_mode: self.copy_preserve_mode,
+                copy_preserve_timestamps: self.copy_preserve_timestamps,
+                ..SessionSettings::default()
+            },
+            global,
+        )
     }
 }
 
@@ -972,6 +1009,9 @@ impl SessionView {
                 display: DisplayFilters::all(),
                 pending_sync: None,
                 sync_operation: SyncOperation::default(),
+                copy_preserve_links: None,
+                copy_preserve_mode: None,
+                copy_preserve_timestamps: None,
             }),
             ui: UiState::default(),
         }
@@ -1513,6 +1553,15 @@ pub struct AppState {
     /// confirmation prompt that `Esc`, `Enter` or a click dismiss (see
     /// `controller::cancel_quit`).
     pub quit_armed: bool,
+    /// The global `cp`-like copy defaults, shared by all sessions.
+    ///
+    /// Loaded from the `[copy]` section of the shared `config.toml` at
+    /// startup (see [`cocomo_lib::copy_defaults`]); the Options menu
+    /// toggles flip an entry and persist it through
+    /// [`cocomo_lib::set_copy_defaults`]. A session's own overrides take
+    /// precedence over these values (see
+    /// [`DirView::resolved_copy_options`]).
+    pub copy_options: CopyOptions,
 }
 
 /// Global reactive application state, subscribed to via
@@ -1539,6 +1588,7 @@ impl AppState {
             error_message: None,
             pending_tasks: Vec::new(),
             quit_armed: false,
+            copy_options: CopyOptions::default(),
         }
     }
 

@@ -101,6 +101,10 @@ pub async fn run() -> Result<()> {
     let cli = Cli::parse();
 
     let mut app = AppState::new();
+    // Load the global copy defaults (the `[copy]` section of the shared
+    // config, common with the GUI); an unreadable config falls back to the
+    // built-in defaults instead of failing startup.
+    app.copy_options = cocomo_lib::copy_defaults().unwrap_or_default();
     match cli.startup().await? {
         Startup::Session(session) => app.add_session(*session),
         Startup::ComparisonFailed(err) => {

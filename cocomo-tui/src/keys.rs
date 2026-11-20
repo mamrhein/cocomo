@@ -128,6 +128,16 @@ pub enum Cmd {
     ToggleHelp,
     /// Toggle the shortcut overlay (`F1`).
     ToggleShortcuts,
+    // -- App-level Options menu toggles: executed by the controller's
+    //    menu confirmation, never by a key binding or `execute`. They
+    //    flip one entry of the global copy defaults and persist them to
+    //    the shared `config.toml`.
+    /// Toggle the global `preserve_links` copy default.
+    ToggleCopyPreserveLinks,
+    /// Toggle the global `preserve_mode` copy default.
+    ToggleCopyPreserveMode,
+    /// Toggle the global `preserve_timestamps` copy default.
+    ToggleCopyPreserveTimestamps,
     // -- Session scopes: executed by `execute`. --
     /// Move the selection one row down.
     NextRow,
@@ -1393,7 +1403,8 @@ fn execute(cmd: Cmd, session: &mut SessionView) -> SessionAction {
         }
         // Global and menu commands are dispatched by the App shell, never
         // here. `SessionNew` is owned by the app-level session browser
-        // (`controller::dispatch_browser_key`).
+        // (`controller::dispatch_browser_key`), and the copy-default toggles
+        // by the controller's menu confirmation (`confirm_menu_item`).
         Cmd::CloseTab
         | Cmd::SessionNew
         | Cmd::SwitchTab
@@ -1406,7 +1417,10 @@ fn execute(cmd: Cmd, session: &mut SessionView) -> SessionAction {
         | Cmd::MenuClose
         | Cmd::Quit
         | Cmd::ToggleHelp
-        | Cmd::ToggleShortcuts => SessionAction::None,
+        | Cmd::ToggleShortcuts
+        | Cmd::ToggleCopyPreserveLinks
+        | Cmd::ToggleCopyPreserveMode
+        | Cmd::ToggleCopyPreserveTimestamps => SessionAction::None,
     }
 }
 
