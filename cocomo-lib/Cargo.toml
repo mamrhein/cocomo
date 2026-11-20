@@ -11,6 +11,13 @@ license-file = "../LICENSE.TXT"
 keywords = ["compare", "copy", "directory", "file", "move"]
 categories = ["command-line-utilities", "filesystem"]
 
+[features]
+default = ["keychain", "prompt"]
+# Credential lookup from the macOS keychain via `/usr/bin/security`.
+keychain = []
+# Interactive one-time credential prompts on a TTY via `rpassword`.
+prompt = ["dep:rpassword"]
+
 [dependencies]
 async_ftp = "6.0.0"
 async-trait = "0.1"
@@ -60,18 +67,10 @@ tokio-util = { version = "0.7", features = ["codec"] }
 toml = "1"
 uuid = { version = "1", features = ["serde", "v4"] }
 zip = { version = "9", default-features = false, features = ["deflate"] }
-filetime = "0.2.30"
 
 [dev-dependencies]
 temp-env = "0.3"
 tempfile = "3"
-
-[features]
-default = ["keychain", "prompt"]
-# Credential lookup from the macOS keychain via `/usr/bin/security`.
-keychain = []
-# Interactive one-time credential prompts on a TTY via `rpassword`.
-prompt = ["dep:rpassword"]
 
 [target."cfg(unix)".dependencies]
 xattr = "1.7.0"

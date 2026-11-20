@@ -22,13 +22,12 @@ use std::{
         atomic::{AtomicU64, Ordering},
     },
     task::{Context, Poll},
-    time::{SystemTime, UNIX_EPOCH},
+    time::SystemTime,
 };
 
 use async_trait::async_trait;
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
-use filetime::FileTime;
 use futures::{Stream, StreamExt, TryStreamExt, stream};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio_util::codec::Decoder;
@@ -1435,33 +1434,24 @@ fn copy_xattrs(src: &Path, dst: &Path) {
 /// skipped; note that the *creation* time has no portable setter and is
 /// therefore not restored.
 fn preserve_timestamps(dst: &Path, meta: &fs::Metadata) {
-    fn to_file_time(t: SystemTime) -> Option<FileTime> {
-        let d = t.duration_since(UNIX_EPOCH).ok()?;
-        Some(FileTime::from_unix_time(
-            d.as_secs() as i64,
-            d.subsec_nanos(),
-        ))
+    let atime = meta.accessed().ok();
+    let mtime = meta.modified().ok();
+    let mut times = fs::FileTimes::new();
+    if let Some(a) = atime {
+        times = times.set_accessed(a);
     }
-
-    let atime = meta.accessed().ok().and_then(to_file_time);
-    let mtime = meta.modified().ok().and_then(to_file_time);
+    if let Some(m) = mtime {
+        times = times.set_modified(m);
+    }
     let set = match (atime, mtime) {
-        (Some(a), Some(m)) => {
-            if meta.is_symlink() {
-                filetime::set_symlink_file_times(dst, a, m)
-            } else {
-                filetime::set_file_times(dst, a, m)
-            }
+        (None, None) => Ok(()),
+        (Some(_), Some(_)) if meta.is_symlink() => {
+            fs::set_times_nofollow(dst, times)
         }
         // A filesystem that hides one timestamp must still not block
-        // restoring the other; the single-time setters leave the unknown
+        // restoring the other; the partial setters leave the unknown
         // value untouched. Symlinks only expose both times together.
-        (Some(a), None) if !meta.is_symlink() => {
-            filetime::set_file_atime(dst, a)
-        }
-        (None, Some(m)) if !meta.is_symlink() => {
-            filetime::set_file_mtime(dst, m)
-        }
+        _ if !meta.is_symlink() => fs::set_times(dst, times),
         _ => Ok(()),
     };
     let _ = set;
@@ -2235,12 +2225,8 @@ mod tests {
         fs_err::create_dir_all(&dst_dir_path).unwrap();
         let src_file = src_dir_path.join("timed.txt");
         fs_err::write(&src_file, "time me").unwrap();
-        filetime::set_file_times(
-            &src_file,
-            FileTime::from_unix_time(1_000_000_000, 0),
-            FileTime::from_unix_time(1_000_000_000, 0),
-        )
-        .unwrap();
+        let timed = fs::FileTimes::new().set_accessed(old).set_modified(old);
+        fs::set_times(&src_file, timed).unwrap();
 
         let fs = LocalFs::new("node_test");
         let src = fs.resolve_path(&src_dir_path).await.unwrap();
