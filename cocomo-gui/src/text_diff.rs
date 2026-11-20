@@ -2459,8 +2459,21 @@ impl TextDiffSession {
         };
         let (src, dst) =
             (source.path().to_path_buf(), target.path().to_path_buf());
+        // The copy honors the parent folder session's resolved copy
+        // options, like the table transfers do.
+        let Ok(copy_options) =
+            parent.update(cx, |state, _| state.resolved_copy_options())
+        else {
+            log::push(
+                LogLevel::Warning,
+                "Copy file and open next needs a parent folder session."
+                    .to_string(),
+                cx,
+            );
+            return;
+        };
         let join = crate::runtime::spawn_on_tokio(async move {
-            fs_err::tokio::copy(&src, &dst)
+            crate::fsops::copy_tree(&src, &dst, &copy_options)
                 .await
                 .map(|_| ())
                 .map_err(|e| anyhow::anyhow!("{e}"))

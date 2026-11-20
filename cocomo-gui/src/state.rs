@@ -26,11 +26,12 @@ use cocomo_lib::{
     DirComparison, DirEntry, DirEntryStatus, Endpoint, FsPair, ProviderRef,
     SessionConfig, SessionSettings, SessionType, TransferAction, TransferItem,
     compare_content_pair_node, compare_directories_node,
-    compare_directories_pair_node, execute_transfers,
+    compare_directories_pair_node, copy_defaults, execute_transfers,
     filter::{
         DisplayFilters as LibDisplayFilters, FilterSet, NameFilter,
         OtherFilters, Pattern,
     },
+    resolve_copy_options,
 };
 use gpui::{App, Context, FocusHandle, SharedString};
 use serde::{Deserialize, Serialize};
@@ -1510,6 +1511,17 @@ impl AppState {
         &self.settings
     }
 
+    /// The effective copy options for this session: the per-session
+    /// overrides in the settings resolved against the global defaults in
+    /// the shared `config.toml`.
+    ///
+    /// An unreadable config (first run, restrictive permissions) falls
+    /// back to the built-in defaults rather than failing the transfer.
+    pub(crate) fn resolved_copy_options(&self) -> CopyOptions {
+        let global = copy_defaults().unwrap_or_default();
+        resolve_copy_options(&self.settings, &global)
+    }
+
     /// Whether the entry name is marked ignored in the session settings.
     pub fn is_ignored(&self, name: &str) -> bool {
         self.settings.ignored.iter().any(|n| n == name)
@@ -2509,6 +2521,7 @@ impl AppState {
         // Endpoint label for failure messages: names the sides (and their
         // providers) a transfer error happened between.
         let endpoints = self.endpoints_label();
+        let copy_options = self.resolved_copy_options();
         let join_handle = crate::runtime::spawn_on_tokio(async move {
             let pair = if left.same_provider(&right) {
                 FsPair::Shared(left.fs())
@@ -2520,7 +2533,7 @@ impl AppState {
                 left.path(),
                 right.path(),
                 pair,
-                &CopyOptions::default(),
+                &copy_options,
             )
             .await;
             if result.is_ok() {
@@ -2849,12 +2862,18 @@ impl AppState {
         } else {
             "Copied the selected entry"
         };
+        let copy_options = self.resolved_copy_options();
         self.run_fs_op(
             busy,
             done,
             async move {
-                crate::fsops::copy_to_folder(source, dest_dir, move_entry)
-                    .await
+                crate::fsops::copy_to_folder(
+                    source,
+                    dest_dir,
+                    move_entry,
+                    copy_options,
+                )
+                .await
             },
             cx,
         );
@@ -2889,6 +2908,7 @@ impl AppState {
         let right = self.right.clone();
         // Endpoint label for failure messages (see `run_transfer_items`).
         let endpoints = self.endpoints_label();
+        let copy_options = self.resolved_copy_options();
         let join_handle = crate::runtime::spawn_on_tokio(async move {
             let pair = if left.same_provider(&right) {
                 FsPair::Shared(left.fs())
@@ -2900,7 +2920,7 @@ impl AppState {
                 left.path(),
                 right.path(),
                 pair,
-                &CopyOptions::default(),
+                &copy_options,
             )
             .await;
             if result.is_ok() {

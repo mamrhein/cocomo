@@ -18,11 +18,11 @@
 //! modification time, exchanging across providers) is rejected with a
 //! clear message rather than silently doing nothing.
 
-use std::{ffi::OsStr, path::Path, time::SystemTime};
+use std::{ffi::OsStr, fs::Metadata, path::Path, time::SystemTime};
 
 use cocomo_lib::{
-    DirId, Endpoint, FsError, NodeFileSystem, NodeId, Provider,
-    WritableFileSystem,
+    CopyOptions, DirId, Endpoint, FsError, NodeFileSystem, NodeId, NodeKind,
+    Provider, WritableFileSystem,
 };
 
 /// Human-readable error for the status bar and the log.
@@ -199,11 +199,13 @@ async fn child_exists(
 /// falls back to a recursive copy. A remote source is pulled through the
 /// provider: the node tree is walked with `read_dir_node` and every file
 /// is read and written locally; a move removes the remote node once the
-/// copy succeeded.
+/// copy succeeded. The copy honors `copy_options` (links, timestamps,
+/// mode bits); a move carries content over unchanged instead.
 pub(crate) async fn copy_to_folder(
     source: Endpoint,
     dest_dir: std::path::PathBuf,
     move_entry: bool,
+    copy_options: CopyOptions,
 ) -> FsResult {
     let verb = if move_entry { "Move" } else { "Copy" };
     let Some(name) = source.path().file_name().map(|n| n.to_os_string())
@@ -217,7 +219,7 @@ pub(crate) async fn copy_to_folder(
             .resolve_path(source.path())
             .await
             .map_err(|e| format!("{verb} to folder failed: {e}"))?;
-        pull_node(&fs, id, &to)
+        pull_node(&fs, id, &to, &copy_options)
             .await
             .map_err(|e| format!("{verb} to folder failed: {e}"))?;
         if move_entry {
@@ -234,7 +236,7 @@ pub(crate) async fn copy_to_folder(
             return Ok(());
         }
     }
-    copy_tree(&from, &to)
+    copy_tree(&from, &to, &copy_options)
         .await
         .map_err(|e| format!("{verb} to folder failed: {e}"))?;
     if move_entry {
@@ -253,8 +255,18 @@ async fn pull_node(
     fs: &Provider,
     id: NodeId<u64>,
     to: &Path,
+    options: &CopyOptions,
 ) -> Result<(), String> {
     let node = fs.get_node(id).map_err(|e| e.to_string())?;
+    if node.kind().is_symlink() && options.preserve_links {
+        // Recreate the link verbatim instead of pulling its target.
+        if let NodeKind::Symlink { target } = node.kind() {
+            create_local_symlink(target.path(), to)
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+        return Ok(());
+    }
     if !node.kind().is_directory() {
         let bytes = fs
             .read_node(cocomo_lib::FileId::new(*id.get()), None)
@@ -263,6 +275,9 @@ async fn pull_node(
         fs_err::tokio::write(to, bytes)
             .await
             .map_err(|e| e.to_string())?;
+        if options.preserve_timestamps {
+            preserve_modified(to, node.metadata().modified);
+        }
         return Ok(());
     }
     let dir = DirId::new(*id.get());
@@ -283,26 +298,152 @@ async fn pull_node(
             .resolve_path(&child_path)
             .await
             .map_err(|e| e.to_string())?;
-        Box::pin(pull_node(fs, child, &to.join(name))).await?;
+        Box::pin(pull_node(fs, child, &to.join(name), options)).await?;
+    }
+    // The directory's own time goes last: writing the children above
+    // bumped it.
+    if options.preserve_timestamps {
+        preserve_modified(to, node.metadata().modified);
     }
     Ok(())
 }
 
-/// Recursively copy a file or directory tree.
-async fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
+/// Best-effort restore of a provider node's modification time onto the
+/// local `path`. Directories are opened read-only (a write open fails on
+/// macOS), the same trick as [`touch`].
+fn preserve_modified(path: &Path, modified: chrono::DateTime<chrono::Utc>) {
+    let is_dir = fs_err::metadata(path).is_ok_and(|m| m.is_dir());
+    let mut options = std::fs::File::options();
+    if is_dir {
+        options.read(true);
+    } else {
+        options.write(true);
+    }
+    if let Ok(file) = options.open(path) {
+        let _ = file.set_modified(modified.into());
+    }
+}
+
+/// Copy a file, symlink, or directory tree to `to`, honoring `options`.
+///
+/// With `preserve_links` a symlink is recreated as a symlink; otherwise
+/// the linked file or tree is copied instead (the behavior from before
+/// the copy options existed). Timestamps and mode bits are best-effort:
+/// the destination is complete even where the platform refuses to
+/// restore them.
+pub(crate) async fn copy_tree(
+    from: &Path,
+    to: &Path,
+    options: &CopyOptions,
+) -> std::io::Result<()> {
     let meta = fs_err::tokio::symlink_metadata(from).await?;
+    copy_tree_at(from, to, &meta, options).await
+}
+
+/// [`copy_tree`] over a source whose metadata is already known.
+async fn copy_tree_at(
+    from: &Path,
+    to: &Path,
+    meta: &Metadata,
+    options: &CopyOptions,
+) -> std::io::Result<()> {
+    if meta.file_type().is_symlink() {
+        if options.preserve_links {
+            let target = fs_err::tokio::read_link(from).await?;
+            create_local_symlink(&target, to).await?;
+            if options.preserve_timestamps {
+                preserve_timestamps(to, meta);
+            }
+            return Ok(());
+        }
+        // Dereference: `canonicalize` resolves every link, so the target
+        // is never a symlink and cannot re-enter the link branch.
+        let target = fs_err::tokio::canonicalize(from).await?;
+        let target_meta = fs_err::tokio::symlink_metadata(&target).await?;
+        return Box::pin(copy_tree_at(&target, to, &target_meta, options))
+            .await;
+    }
     if meta.is_dir() {
         fs_err::tokio::create_dir_all(to).await?;
         let mut entries = fs_err::tokio::read_dir(from).await?;
         while let Some(entry) = entries.next_entry().await? {
             let name = entry.file_name();
-            Box::pin(copy_tree(&entry.path(), &to.join(name))).await?;
+            Box::pin(copy_tree(&entry.path(), &to.join(name), options))
+                .await?;
         }
-        Ok(())
     } else {
         fs_err::tokio::copy(from, to).await?;
-        Ok(())
     }
+    // Attributes go last: writing the children above bumped a directory's
+    // own mtime, and a restrictive source mode applied first would block
+    // the child copies.
+    if options.preserve_timestamps {
+        preserve_timestamps(to, meta);
+    }
+    if options.preserve_mode {
+        preserve_mode(to, meta);
+    }
+    Ok(())
+}
+
+/// Create a symlink at `link` pointing at `target`, verbatim.
+///
+/// On Windows the link flavor is picked from what the target currently
+/// is; a missing target is treated as a file link.
+async fn create_local_symlink(
+    target: &Path,
+    link: &Path,
+) -> std::io::Result<()> {
+    #[cfg(unix)]
+    let created = fs_err::tokio::symlink(target, link).await;
+    #[cfg(windows)]
+    let created = if fs_err::tokio::metadata(target)
+        .await
+        .is_ok_and(|m| m.is_dir())
+    {
+        fs_err::tokio::symlink_dir(target, link).await
+    } else {
+        fs_err::tokio::symlink_file(target, link).await
+    };
+    created
+}
+
+/// Best-effort restore of the timestamps `meta` describes onto `dst`.
+///
+/// `meta` must describe `dst`'s source itself (from `symlink_metadata`)
+/// so a symlink is timed without touching its target. Timestamps the
+/// source does not expose are skipped; the creation time has no portable
+/// setter and is not restored.
+fn preserve_timestamps(dst: &Path, meta: &Metadata) {
+    let atime = meta.accessed().ok();
+    let mtime = meta.modified().ok();
+    let mut times = std::fs::FileTimes::new();
+    if let Some(a) = atime {
+        times = times.set_accessed(a);
+    }
+    if let Some(m) = mtime {
+        times = times.set_modified(m);
+    }
+    let set = match (atime, mtime) {
+        (None, None) => Ok(()),
+        (Some(_), Some(_)) if meta.is_symlink() => {
+            std::fs::set_times_nofollow(dst, times)
+        }
+        // A filesystem that hides one timestamp must still not block
+        // restoring the other; symlinks only expose both times together.
+        _ if !meta.is_symlink() => std::fs::set_times(dst, times),
+        _ => Ok(()),
+    };
+    let _ = set;
+}
+
+/// Best-effort copy of the source mode bits onto `dst`.
+///
+/// Mode bits the kernel rejects are skipped, never fatal. ACLs and
+/// extended attributes are carried by the transfer engine's copy; this
+/// context-menu fallback restores the mode bits only.
+fn preserve_mode(dst: &Path, meta: &Metadata) {
+    let _ = fs_err::set_permissions(dst, meta.permissions());
 }
 
 /// Spawn the platform's "open this path" helper.
@@ -497,5 +638,130 @@ mod tests {
     #[test]
     fn reveal_names_the_platform_file_manager() {
         assert!(!reveal_label().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_tree_recreates_symlinks_by_default() {
+        let dir = TempDir::new("links");
+        let rt = runtime();
+        std::fs::create_dir_all(dir.0.join("src")).unwrap();
+        std::fs::write(dir.0.join("src/file.txt"), b"content").unwrap();
+        std::os::unix::fs::symlink("file.txt", dir.0.join("src/link.txt"))
+            .unwrap();
+        rt.block_on(copy_tree(
+            &dir.0.join("src"),
+            &dir.0.join("dst"),
+            &CopyOptions::default(),
+        ))
+        .unwrap();
+        let link = dir.0.join("dst/link.txt");
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the default options must not dereference the link"
+        );
+        assert_eq!(std::fs::read_link(&link).unwrap(), Path::new("file.txt"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_tree_follows_symlinks_when_links_are_not_preserved() {
+        let dir = TempDir::new("follow-links");
+        let rt = runtime();
+        std::fs::write(dir.0.join("src.txt"), b"content").unwrap();
+        std::os::unix::fs::symlink("src.txt", dir.0.join("link.txt")).unwrap();
+        let options = CopyOptions {
+            preserve_links: false,
+            ..CopyOptions::default()
+        };
+        rt.block_on(copy_tree(
+            &dir.0.join("link.txt"),
+            &dir.0.join("dst.txt"),
+            &options,
+        ))
+        .unwrap();
+        assert!(
+            !std::fs::symlink_metadata(dir.0.join("dst.txt"))
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "without preserve_links the copy holds the linked content"
+        );
+        assert_eq!(std::fs::read(dir.0.join("dst.txt")).unwrap(), b"content");
+    }
+
+    #[test]
+    fn copy_tree_restores_timestamps_only_when_asked() {
+        let dir = TempDir::new("times");
+        let rt = runtime();
+        let src = dir.0.join("src.txt");
+        std::fs::write(&src, b"x").unwrap();
+        let old = std::time::UNIX_EPOCH
+            + std::time::Duration::from_secs(1_700_000_000);
+        std::fs::File::options()
+            .write(true)
+            .open(&src)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        rt.block_on(copy_tree(
+            &src,
+            &dir.0.join("kept.txt"),
+            &CopyOptions::default(),
+        ))
+        .unwrap();
+        assert_eq!(
+            std::fs::metadata(dir.0.join("kept.txt"))
+                .unwrap()
+                .modified()
+                .unwrap(),
+            old,
+            "timestamps are preserved by default"
+        );
+        let options = CopyOptions {
+            preserve_timestamps: false,
+            ..CopyOptions::default()
+        };
+        rt.block_on(copy_tree(&src, &dir.0.join("fresh.txt"), &options))
+            .unwrap();
+        assert_ne!(
+            std::fs::metadata(dir.0.join("fresh.txt"))
+                .unwrap()
+                .modified()
+                .unwrap(),
+            old,
+            "without preserve_timestamps the copy is freshly timed"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_tree_carries_mode_bits_when_preserved() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = TempDir::new("mode");
+        let rt = runtime();
+        let src = dir.0.join("src.sh");
+        std::fs::write(&src, b"#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o750))
+            .unwrap();
+        let options = CopyOptions {
+            preserve_mode: true,
+            ..CopyOptions::default()
+        };
+        rt.block_on(copy_tree(&src, &dir.0.join("kept.sh"), &options))
+            .unwrap();
+        assert_eq!(
+            std::fs::metadata(dir.0.join("kept.sh"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o750,
+            "preserve_mode must carry the source mode bits"
+        );
     }
 }

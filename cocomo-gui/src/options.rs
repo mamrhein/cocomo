@@ -18,7 +18,9 @@
 use std::{collections::HashMap, path::PathBuf};
 
 use anyhow::{Context as _, Result};
-use cocomo_lib::ColorOverrides;
+use cocomo_lib::{
+    ColorOverrides, CopyOptions, copy_defaults, set_copy_defaults,
+};
 use gpui::{
     AnyElement, App, AppContext as _, ElementId, Entity, FontWeight, Rgba,
     SharedString, Window,
@@ -272,6 +274,10 @@ struct OptionsDraft {
     page: usize,
     /// The copy being edited; only applied on OK.
     working: AppOptions,
+    /// Drafted global copy defaults. They live in the lib's shared
+    /// `config.toml` (the TUI edits the same section), not in
+    /// [`AppOptions`], so they are drafted alongside it.
+    copy: CopyOptions,
     /// Color inputs, created on first visit of the Colors page.
     color_inputs: Option<HashMap<String, Entity<InputState>>>,
     /// Binding inputs, created on first visit of the Commands page.
@@ -283,9 +289,13 @@ struct OptionsDraft {
 /// Open the Tools → Options dialog in the given window.
 pub fn open_options_dialog(window: &mut Window, cx: &mut App) {
     let working = cx.global::<AppOptions>().clone();
+    // An unreadable `config.toml` starts the draft from the built-in
+    // defaults; saving still reports a write failure.
+    let copy = copy_defaults().unwrap_or_default();
     let draft = cx.new(|_| OptionsDraft {
         page: 0,
         working,
+        copy,
         color_inputs: None,
         binding_inputs: None,
         message: None,
@@ -459,6 +469,52 @@ fn render_general_page(draft: &Entity<OptionsDraft>, cx: &App) -> AnyElement {
             ))
     };
 
+    // The global copy defaults, shared with the TUI through the lib's
+    // `config.toml`. Folder sessions override them in their rules.
+    let copy = draft.read(cx).copy;
+    let copy_switch = |id: &'static str,
+                       label: &'static str,
+                       checked: bool,
+                       field: fn(&mut CopyOptions, bool),
+                       draft: &Entity<OptionsDraft>| {
+        let draft_switch = draft.clone();
+        Switch::new(id).label(label).checked(checked).on_click(
+            move |checked, _, cx| {
+                let checked = *checked;
+                draft_switch.update(cx, |d, cx| {
+                    field(&mut d.copy, checked);
+                    cx.notify();
+                });
+            },
+        )
+    };
+    let copy_heading = div()
+        .text_xs()
+        .font_weight(FontWeight::BOLD)
+        .text_color(cx.theme().muted_foreground)
+        .child("Copy");
+    let preserve_links_switch = copy_switch(
+        "options_copy_preserve_links",
+        "Preserve symbolic and hard links",
+        copy.preserve_links,
+        |options, checked| options.preserve_links = checked,
+        draft,
+    );
+    let preserve_mode_switch = copy_switch(
+        "options_copy_preserve_mode",
+        "Preserve permissions and attributes",
+        copy.preserve_mode,
+        |options, checked| options.preserve_mode = checked,
+        draft,
+    );
+    let preserve_timestamps_switch = copy_switch(
+        "options_copy_preserve_timestamps",
+        "Preserve timestamps",
+        copy.preserve_timestamps,
+        |options, checked| options.preserve_timestamps = checked,
+        draft,
+    );
+
     v_flex()
         .gap_3()
         .child(restore_switch)
@@ -473,6 +529,20 @@ fn render_general_page(draft: &Entity<OptionsDraft>, cx: &App) -> AnyElement {
                 .child(
                     "Auto-save writes a snapshot of open sessions so an \
                      unexpected quit can be recovered at the next launch.",
+                ),
+        )
+        .child(div().w_full().h_px().bg(cx.theme().border))
+        .child(copy_heading)
+        .child(preserve_links_switch)
+        .child(preserve_mode_switch)
+        .child(preserve_timestamps_switch)
+        .child(
+            div()
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child(
+                    "A folder session overrides these defaults in its rules \
+                     dialog.",
                 ),
         )
         .into_any_element()
@@ -669,10 +739,11 @@ fn ensure_binding_inputs(
 /// An invalid color or binding aborts the apply and leaves the dialog
 /// open with a message, so a typo never silently drops a preference.
 fn apply_options(draft: Entity<OptionsDraft>, cx: &mut App) {
-    let (working, color_inputs, binding_inputs) = {
+    let (working, copy, color_inputs, binding_inputs) = {
         let d = draft.read(cx);
         (
             d.working.clone(),
+            d.copy,
             d.color_inputs.clone(),
             d.binding_inputs.clone(),
         )
@@ -736,6 +807,16 @@ fn apply_options(draft: Entity<OptionsDraft>, cx: &mut App) {
 
     if let Err(e) = save_options(&options) {
         set_message(&draft, format!("Couldn't save the options. {e}"), cx);
+        return;
+    }
+    // The copy defaults go to the lib's shared `config.toml`; a failed
+    // write keeps the dialog open so the change is not silently lost.
+    if let Err(e) = set_copy_defaults(&copy) {
+        set_message(
+            &draft,
+            format!("Couldn't save the copy defaults. {e}"),
+            cx,
+        );
         return;
     }
     cx.set_global(options);

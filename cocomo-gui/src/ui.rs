@@ -13,7 +13,9 @@
 //! status indicators, sortable entry columns, navigation, and entry
 //! rendering.
 
-use cocomo_lib::{DirEntryStatus, Endpoint, StatusColor, TransferAction};
+use cocomo_lib::{
+    CopyOptions, DirEntryStatus, Endpoint, StatusColor, TransferAction,
+};
 use gpui::{
     Action, Anchor, AnyElement, App, ClipboardItem, Context, Div, Entity,
     FocusHandle, Focusable, FontWeight, Hsla, KeyBinding, Render,
@@ -2621,6 +2623,14 @@ struct FolderRulesBody {
     ignore_whitespace: bool,
     skip_blank_lines: bool,
     skip_comments: bool,
+    /// Drafted copy checkbox states, seeded with the resolved values.
+    copy_preserve_links: bool,
+    copy_preserve_mode: bool,
+    copy_preserve_timestamps: bool,
+    /// The resolved copy options when the dialog opened: a copy checkbox
+    /// whose draft differs from them on Apply records an explicit
+    /// per-session override; an untouched one keeps inheriting.
+    copy_resolved: CopyOptions,
     name_filter: Entity<InputState>,
     colors: ColorFields,
     /// A validation problem to show above the Apply button, if any.
@@ -2634,12 +2644,20 @@ impl FolderRulesBody {
         cx: &mut Context<Self>,
     ) -> Self {
         let settings = state.read(cx).settings().clone();
+        // The checkboxes show the effective copy options (session
+        // override, else the global defaults from the shared
+        // `config.toml`), so the user sees what a transfer will do.
+        let copy_resolved = state.read(cx).resolved_copy_options();
         Self {
             compare_files: settings.compare_files,
             compare_structure: settings.compare_structure,
             ignore_whitespace: settings.ignore_whitespace,
             skip_blank_lines: settings.skip_blank_lines,
             skip_comments: settings.skip_comments,
+            copy_preserve_links: copy_resolved.preserve_links,
+            copy_preserve_mode: copy_resolved.preserve_mode,
+            copy_preserve_timestamps: copy_resolved.preserve_timestamps,
+            copy_resolved,
             name_filter: cx.new(|cx| {
                 InputState::new(window, cx)
                     .placeholder("Name filters (comma-separated globs)")
@@ -2667,6 +2685,21 @@ impl FolderRulesBody {
         settings.ignore_whitespace = self.ignore_whitespace;
         settings.skip_blank_lines = self.skip_blank_lines;
         settings.skip_comments = self.skip_comments;
+        // A moved copy checkbox records an explicit override; an
+        // untouched one keeps whatever the session stored (typically
+        // `None`, i.e. follow the global defaults).
+        if self.copy_preserve_links != self.copy_resolved.preserve_links {
+            settings.copy_preserve_links = Some(self.copy_preserve_links);
+        }
+        if self.copy_preserve_mode != self.copy_resolved.preserve_mode {
+            settings.copy_preserve_mode = Some(self.copy_preserve_mode);
+        }
+        if self.copy_preserve_timestamps
+            != self.copy_resolved.preserve_timestamps
+        {
+            settings.copy_preserve_timestamps =
+                Some(self.copy_preserve_timestamps);
+        }
         settings.color_overrides = colors;
         settings.name_filter = self
             .name_filter
@@ -2727,6 +2760,29 @@ impl Render for FolderRulesBody {
                 this.skip_comments = v
             }))
             .child(Input::new(&self.name_filter).small())
+            .child(div().w_full().h_px().bg(theme.border))
+            .child(
+                div()
+                    .text_xs()
+                    .font_weight(gpui::FontWeight::BOLD)
+                    .text_color(theme.muted_foreground)
+                    .child("Copy"),
+            )
+            .child(row(
+                "Preserve symbolic and hard links",
+                self.copy_preserve_links,
+                |this, v| this.copy_preserve_links = v,
+            ))
+            .child(row(
+                "Preserve permissions and attributes",
+                self.copy_preserve_mode,
+                |this, v| this.copy_preserve_mode = v,
+            ))
+            .child(row(
+                "Preserve timestamps",
+                self.copy_preserve_timestamps,
+                |this, v| this.copy_preserve_timestamps = v,
+            ))
             .child(div().w_full().h_px().bg(theme.border))
             .child(
                 div()
@@ -3083,5 +3139,124 @@ mod tests {
             assert_eq!(state.entry_count(), 1);
             assert_eq!(state.entry_at(0).unwrap().name, "b.txt");
         });
+    }
+
+    /// UI integration test: the folder rules dialog round-trips the copy
+    /// options. The checkboxes open at the resolved values, a moved
+    /// checkbox stores an explicit per-session override on Apply, and an
+    /// untouched one keeps inheriting the global defaults.
+    #[gpui::test]
+    fn rules_dialog_round_trips_the_copy_overrides(cx: &mut TestAppContext) {
+        use gpui::{Bounds, WindowBounds, WindowOptions};
+
+        // Apply re-runs the comparison over the tokio bridge, whose
+        // completion wake lands on a tokio worker thread.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        {
+            let _guard = rt.enter();
+            crate::runtime::set_handle();
+        }
+        cx.update(|cx| {
+            gpui::init(cx);
+            cx.set_global(crate::options::AppOptions::default());
+            cx.set_global(crate::log::LogBuffer::default());
+        });
+        cx.executor().allow_parking();
+
+        // The re-run comparison touches the pair, so both sides exist.
+        let base = std::env::temp_dir().join("cocomo-ui-rules-copy");
+        let left = base.join("left");
+        let right = base.join("right");
+        std::fs::create_dir_all(&left).unwrap();
+        std::fs::create_dir_all(&right).unwrap();
+        let state = cx.new(|cx| {
+            AppState::new(
+                Endpoint::local(left),
+                Endpoint::local(right),
+                "rules-copy".into(),
+                cx,
+            )
+        });
+        let store = cx.new(|_| SavedSessionStore::new(std::env::temp_dir()));
+        let manager = cx.new(|_| GuiSessionManager::new(store));
+        let (window, _view) = cx.update(|cx| {
+            gpui::open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(
+                        Bounds::maximized(None, cx),
+                    )),
+                    ..Default::default()
+                },
+                cx,
+                |_, cx| {
+                    cx.new(|cx| {
+                        FolderCompareView::new(
+                            state.clone(),
+                            manager.clone(),
+                            cx,
+                        )
+                    })
+                },
+            )
+            .expect("failed to open the test window")
+        });
+
+        let body = cx
+            .update_window(window, |_, window, cx| {
+                cx.new(|cx| FolderRulesBody::new(state.clone(), window, cx))
+            })
+            .expect("failed to build the rules body");
+
+        // The dialog seeds its checkboxes with the same resolved values
+        // the transfers use (session override, else the global defaults).
+        let global = cocomo_lib::copy_defaults().unwrap_or_default();
+        body.update(cx, |body, _| {
+            assert_eq!(body.copy_preserve_links, global.preserve_links);
+            assert_eq!(body.copy_preserve_mode, global.preserve_mode);
+            assert_eq!(
+                body.copy_preserve_timestamps,
+                global.preserve_timestamps
+            );
+            // Move exactly one checkbox.
+            body.copy_preserve_mode = !global.preserve_mode;
+        });
+        body.update(cx, |body, cx| body.apply(cx));
+        cx.run_until_parked();
+
+        cx.update(|cx| {
+            let settings = state.read(cx).settings();
+            assert_eq!(
+                settings.copy_preserve_mode,
+                Some(!global.preserve_mode),
+                "the moved checkbox must store an explicit override"
+            );
+            assert_eq!(
+                settings.copy_preserve_links, None,
+                "an untouched checkbox must keep inheriting"
+            );
+            assert_eq!(settings.copy_preserve_timestamps, None);
+            // The session config carries the override through a save.
+            let config = state.read(cx).to_config("rules-copy".into());
+            assert_eq!(
+                config.settings.copy_preserve_mode,
+                Some(!global.preserve_mode)
+            );
+        });
+
+        // A freshly opened dialog shows the override as the effective
+        // value, so the session visibly stopped following the global
+        // default.
+        let reopened = cx
+            .update_window(window, |_, window, cx| {
+                cx.new(|cx| FolderRulesBody::new(state.clone(), window, cx))
+            })
+            .expect("failed to rebuild the rules body");
+        reopened.update(cx, |body, _| {
+            assert_eq!(body.copy_preserve_mode, !global.preserve_mode);
+        });
+        let _ = std::fs::remove_dir_all(&base);
     }
 }
