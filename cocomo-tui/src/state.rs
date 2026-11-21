@@ -165,6 +165,11 @@ impl TransferChoice {
     /// is always active. `both` stays a delete-only option: transferring in
     /// both directions is order-dependent and nets out to a no-op in a 2-way
     /// compare.
+    ///
+    /// The sides come from [`transferable_sides`], which already drops the
+    /// targets a copy or move cannot reconcile (name clashes, equal
+    /// content), so those options are disabled for them without an extra
+    /// flag here.
     pub fn is_enabled(
         self,
         op: TransferOp,
@@ -222,6 +227,10 @@ pub struct TransferTarget {
     /// type. A delete only removes the half that exists, so deletes stay
     /// offered.
     pub name_conflict: bool,
+    /// The entry is present on both sides with equal content, so a copy or
+    /// move would only rewrite identical content: like the GUI, those
+    /// transfers are not offered for equal entries. Deletes stay offered.
+    pub is_equal: bool,
     /// Why no side option could be offered, shown dimmed in the dialog.
     pub note: Option<&'static str>,
 }
@@ -233,13 +242,15 @@ impl TransferTarget {
     /// not support, so a stale accelerator can never transfer something
     /// the dialog never offered. Across a file-vs-directory name clash
     /// only deletes are supported: each half stays deletable on the side
-    /// that holds it, while copy and move are impossible.
+    /// that holds it, while copy and move are impossible. Copying or
+    /// moving an equal entry would only rewrite identical content, so
+    /// those options are empty for it too; deletes stay offered.
     pub fn items(
         &self,
         op: TransferOp,
         choice: TransferChoice,
     ) -> Vec<TransferItem> {
-        if self.name_conflict && op != TransferOp::Delete {
+        if op != TransferOp::Delete && (self.name_conflict || self.is_equal) {
             return Vec::new();
         }
         let actions: Vec<TransferAction> = match (op, choice) {
@@ -292,18 +303,77 @@ impl TransferTarget {
 ///
 /// An option activates when at least one target holds the side it acts
 /// on. A file-vs-directory name clash blocks copy and move for its
-/// halves, since the counterpart could not hold the transferred entry;
-/// deletes stay offered because they only remove the half that exists.
+/// halves, since the counterpart could not hold the transferred entry, and
+/// an equal entry offers nothing to reconcile in either direction;
+/// deletes stay offered because they only remove what exists.
 pub fn transferable_sides(
     op: TransferOp,
     targets: &[TransferTarget],
 ) -> (bool, bool) {
-    let fits =
-        |t: &TransferTarget| op == TransferOp::Delete || !t.name_conflict;
+    let fits = |t: &TransferTarget| {
+        op == TransferOp::Delete || !(t.name_conflict || t.is_equal)
+    };
     (
         targets.iter().any(|t| t.has_left && fits(t)),
         targets.iter().any(|t| t.has_right && fits(t)),
     )
+}
+
+/// Availability of the File menu's per-entry transfer commands for the
+/// current selection.
+///
+/// A bitset over `(TransferOp, TransferChoice)` derived from the active
+/// session's [`transfer_targets`](SessionView::transfer_targets), so the
+/// dropdown, its flyouts and the confirmation path share one snapshot of
+/// the selection-aware rules. An option is enabled exactly when its
+/// [`TransferChoice::preview`] over the targets is non-empty, which is
+/// also what dims the options of the `c`/`d`/`v` dialog.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TransferMenuState(u16);
+
+impl TransferMenuState {
+    /// Bit index of `(op, choice)` in the set.
+    fn bit(op: TransferOp, choice: TransferChoice) -> u16 {
+        let op = match op {
+            TransferOp::Copy => 0,
+            TransferOp::Delete => 1,
+            TransferOp::Move => 2,
+        };
+        let choice = match choice {
+            TransferChoice::Left => 0,
+            TransferChoice::Right => 1,
+            TransferChoice::Both => 2,
+            // `abort` is not a menu command; its bit stays unset.
+            TransferChoice::Abort => 3,
+        };
+        1 << (op * 4 + choice)
+    }
+
+    /// Derive the command availability from `targets`: a command is
+    /// enabled when at least one target would transfer under it. The
+    /// `Default` state denies everything, so a missing selection never
+    /// lights a menu row.
+    pub fn from_targets(targets: &[TransferTarget]) -> Self {
+        let mut bits = 0_u16;
+        for op in [TransferOp::Copy, TransferOp::Delete, TransferOp::Move] {
+            for choice in [
+                TransferChoice::Left,
+                TransferChoice::Right,
+                TransferChoice::Both,
+            ] {
+                if !choice.preview(op, targets).is_empty() {
+                    bits |= Self::bit(op, choice);
+                }
+            }
+        }
+        Self(bits)
+    }
+
+    /// Whether the menu command for `(op, choice)` is available for the
+    /// selection this snapshot was derived from.
+    pub fn is_enabled(self, op: TransferOp, choice: TransferChoice) -> bool {
+        self.0 & Self::bit(op, choice) != 0
+    }
 }
 
 impl SessionMode {
@@ -1402,6 +1472,9 @@ impl SessionView {
                     has_right: shared,
                     same_side,
                     name_conflict: false,
+                    // Text sessions compare their two files on every
+                    // transfer; content equality is not decided here.
+                    is_equal: false,
                     note: (!shared)
                         .then_some("the two sides have different file names"),
                 })
@@ -1457,6 +1530,12 @@ impl SessionView {
     ) -> Option<TransferTarget> {
         let entry = row.entry;
         let info = entry.left.as_ref().or(entry.right.as_ref())?;
+        // Equal content has nothing to reconcile, so copy and move are
+        // blocked for it (matching the GUI's `transfer_plan_for`); only a
+        // status entirely within `EQUAL` counts, on both sides.
+        let is_equal = entry.left.is_some()
+            && entry.right.is_some()
+            && entry.status.intersection(!DirEntryStatus::EQUAL).is_empty();
         Some(TransferTarget {
             name: entry.name.clone(),
             rel_path: info.path.clone(),
@@ -1465,6 +1544,7 @@ impl SessionView {
             has_right: entry.right.is_some(),
             same_side,
             name_conflict: entry.name_conflict,
+            is_equal,
             note: entry
                 .name_conflict
                 .then_some("a file and a directory share this name"),
@@ -1925,7 +2005,10 @@ mod tests {
         // input layer; the name buffer it carries is fixed, not editable
         // (changing the name returns to `SaveSession`).
         assert!(
-            !SessionMode::SaveOverwrite { name: "demo".into() }.is_editing()
+            !SessionMode::SaveOverwrite {
+                name: "demo".into()
+            }
+            .is_editing()
         );
     }
 
@@ -2378,6 +2461,7 @@ mod tests {
             has_right,
             same_side,
             name_conflict: false,
+            is_equal: false,
             note: None,
         }
     }
@@ -2410,6 +2494,138 @@ mod tests {
         for choice in [TransferChoice::Left, TransferChoice::Both] {
             assert!(dir_half.items(TransferOp::Delete, choice).is_empty());
         }
+    }
+
+    #[test]
+    fn equal_targets_block_copy_and_move_but_stay_deletable() {
+        let mut equal = target(true, true, false);
+        equal.is_equal = true;
+        // There is nothing to reconcile, so copy and move are inert.
+        for op in [TransferOp::Copy, TransferOp::Move] {
+            for choice in [TransferChoice::Left, TransferChoice::Right] {
+                assert!(equal.items(op, choice).is_empty(), "{op:?}");
+            }
+        }
+        // A delete only removes what exists, so it stays offered for an
+        // equal entry.
+        for (choice, action) in [
+            (TransferChoice::Left, TransferAction::DeleteLeft),
+            (TransferChoice::Right, TransferAction::DeleteRight),
+        ] {
+            let items = equal.items(TransferOp::Delete, choice);
+            assert_eq!(items.len(), 1);
+            assert_eq!(items[0].action, action);
+        }
+        assert_eq!(
+            equal.items(TransferOp::Delete, TransferChoice::Both).len(),
+            2
+        );
+    }
+
+    #[test]
+    fn transferable_sides_skip_targets_without_reconciliation() {
+        let equal = || {
+            let mut t = target(true, true, false);
+            t.is_equal = true;
+            t
+        };
+        // An all-equal selection offers neither side to copy or move...
+        assert_eq!(
+            transferable_sides(TransferOp::Copy, &[equal()]),
+            (false, false)
+        );
+        assert_eq!(
+            transferable_sides(TransferOp::Move, &[equal()]),
+            (false, false)
+        );
+        // ...while a delete stays offered on both sides.
+        assert_eq!(
+            transferable_sides(TransferOp::Delete, &[equal()]),
+            (true, true)
+        );
+        // In a mixed drag range the equal half contributes nothing: only
+        // the left-only entry lights the left side for a copy.
+        let mixed = vec![equal(), target(true, false, false)];
+        assert_eq!(
+            transferable_sides(TransferOp::Copy, &mixed),
+            (true, false)
+        );
+    }
+
+    #[test]
+    fn transfer_menu_state_denies_everything_by_default() {
+        let state = TransferMenuState::default();
+        for op in [TransferOp::Copy, TransferOp::Delete, TransferOp::Move] {
+            for choice in [
+                TransferChoice::Left,
+                TransferChoice::Right,
+                TransferChoice::Both,
+            ] {
+                assert!(!state.is_enabled(op, choice), "{op:?} {choice:?}");
+            }
+        }
+        // A selection without targets denies just as completely.
+        assert_eq!(
+            TransferMenuState::from_targets(&[]),
+            TransferMenuState::default()
+        );
+    }
+
+    #[test]
+    fn transfer_menu_state_enables_the_choices_the_selection_can_run() {
+        use TransferChoice as C;
+        use TransferOp as O;
+
+        // A left-only orphan can be copied, moved, and deleted toward the
+        // right; nothing reads from the missing right side.
+        let left_only =
+            TransferMenuState::from_targets(&[target(true, false, false)]);
+        for op in [O::Copy, O::Move, O::Delete] {
+            assert!(left_only.is_enabled(op, C::Left), "{op:?}");
+            assert!(!left_only.is_enabled(op, C::Right), "{op:?}");
+            assert!(!left_only.is_enabled(op, C::Both), "{op:?}");
+        }
+        // A differing entry on both sides lights both copy directions and
+        // all three deletes.
+        let differing =
+            TransferMenuState::from_targets(&[target(true, true, false)]);
+        assert!(differing.is_enabled(O::Copy, C::Left));
+        assert!(differing.is_enabled(O::Copy, C::Right));
+        assert!(differing.is_enabled(O::Delete, C::Both));
+        // An equal entry offers no copy or move direction, but the deletes
+        // stay enabled, `both` included — also on a shared root, where the
+        // preview collapses to the single delete the executor runs.
+        let mut equal = target(true, true, false);
+        equal.is_equal = true;
+        let state = TransferMenuState::from_targets(&[equal]);
+        for op in [O::Copy, O::Move] {
+            for choice in [C::Left, C::Right] {
+                assert!(!state.is_enabled(op, choice), "{op:?} {choice:?}");
+            }
+        }
+        for choice in [C::Left, C::Right, C::Both] {
+            assert!(state.is_enabled(O::Delete, choice), "{choice:?}");
+        }
+        let mut shared = target(true, true, true);
+        shared.is_equal = true;
+        let shared = TransferMenuState::from_targets(&[shared]);
+        assert!(shared.is_enabled(O::Delete, C::Both));
+        assert!(!shared.is_enabled(O::Copy, C::Left));
+        // Each half of a name clash stays deletable on its own side, while
+        // copy and move are blocked across the clash.
+        let mut file_half = target(true, false, false);
+        file_half.name_conflict = true;
+        let mut dir_half = target(false, true, false);
+        dir_half.name_conflict = true;
+        let clash = TransferMenuState::from_targets(&[file_half, dir_half]);
+        assert!(clash.is_enabled(O::Delete, C::Left));
+        assert!(clash.is_enabled(O::Delete, C::Right));
+        assert!(!clash.is_enabled(O::Delete, C::Both));
+        assert!(!clash.is_enabled(O::Copy, C::Left));
+        assert!(!clash.is_enabled(O::Move, C::Right));
+        // `abort` is not a menu command and is never enabled.
+        assert!(!clash.is_enabled(O::Copy, C::Abort));
+        assert!(!differing.is_enabled(O::Copy, C::Abort));
     }
 
     #[test]
