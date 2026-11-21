@@ -34,7 +34,7 @@ dirs.workspace = true
 fs-err.workspace = true
 gpui = {
     package = "gpui-kit",
-    version = "0.9",
+    version = "0.10",
     features = [
         "tree-sitter",
         "tree-sitter-rust",
@@ -55,5 +55,5 @@ serde_json.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
-gpui = { package = "gpui-kit", version = "0.9", features = ["test-support"] }
+gpui = { package = "gpui-kit", version = "0.10", features = ["test-support"] }
 tempfile.workspace = true
