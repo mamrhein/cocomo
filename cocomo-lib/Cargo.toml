@@ -1,14 +1,13 @@
 [package]
 name = "cocomo-lib"
-version = "0.0.1"
-edition = "2024"
 description = "COmpare, COpy & MOve directories and files [core library]."
-documentation = "https://docs.rs/cocomo-lib/"
-readme = "../README.md"
-repository = "https://github.com/mamrhein/cocomo"
-license-file = "../LICENSE.TXT"
-keywords = ["compare", "copy", "directory", "file", "move"]
-categories = ["command-line-utilities", "filesystem"]
+version.workspace = true
+edition.workspace = true
+readme.workspace = true
+repository.workspace = true
+license-file.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [features]
 default = ["keychain", "prompt"]
@@ -25,43 +24,26 @@ bitflags = "2"
 blake3 = "1"
 bytes = "1"
 chacha20poly1305 = "0.11"
-chrono = { version = "0.4", features = ["serde"] }
+chrono.workspace = true
 diff = "0.1"
-dirs = "7"
-fs-err = { version = "3", features = ["tokio"] }
+dirs.workspace = true
+fs-err.workspace = true
 futures = "0.3"
 getrandom = "0.4"
-globset = "0.4"
+globset.workspace = true
 hex = "0.4"
 hmac = "0.13"
 parking_lot = "0.13"
-regex = {
-  version = "1",
-  default-features = false,
-  features = [
-    "perf",
-    "std",
-    "unicode-perl",
-  ]
-}
+regex.workspace = true
 rpassword = { version = "7.5", optional = true }
 russh = "0.65"
 russh-sftp = "3.0.1"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde.workspace = true
+serde_json.workspace = true
 sha1 = "0.11"
 sha2 = "0.11"
-thiserror = "2"
-tokio = {
-  version = "1",
-  features = [
-    "fs",
-    "io-util",
-    "macros",
-    "rt-multi-thread",
-    "sync",
-  ]
-}
+thiserror.workspace = true
+tokio.workspace = true
 tokio-util = { version = "0.7", features = ["codec"] }
 toml = "1"
 uuid = { version = "1", features = ["serde", "v4"] }
@@ -69,7 +51,7 @@ zip = { version = "9", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
 temp-env = "0.3"
-tempfile = "3"
+tempfile.workspace = true
 
 [target."cfg(unix)".dependencies]
 xattr = "1.7.0"

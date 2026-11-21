@@ -1,31 +1,26 @@
 [package]
 name = "cocomo-tui"
-version = "0.0.1"
-edition = "2024"
 description = "TUI-App: COmpare, COpy & MOve directories and files."
-documentation = "https://docs.rs/cocomo-tui/"
-readme = "../README.md"
-repository = "https://github.com/mamrhein/cocomo"
-license-file = "../LICENSE.TXT"
-keywords = ["compare", "copy", "directory", "file", "move"]
-categories = ["command-line-utilities", "filesystem"]
-
-[[bin]]
-name = "cocomo-tui"
-path = "src/main.rs"
+version.workspace = true
+edition.workspace = true
+readme.workspace = true
+repository.workspace = true
+license-file.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
-anyhow = "1"
-clap = { version = "4", features = ["derive"] }
-cocomo-lib = { path = "../cocomo-lib" }
-dirs = "7"
-fs-err = { version = "3", features = ["tokio"] }
+anyhow.workspace = true
+clap.workspace = true
+cocomo-lib.workspace = true
+dirs.workspace = true
+fs-err.workspace = true
 ratatui-kit = { version = "0.12", features = ["full"] }
 regex = "1"
 textwrap = "0.16"
-thiserror = "2"
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+thiserror.workspace = true
+tokio.workspace = true
 
 [dev-dependencies]
 ratatui-kit = { version = "0.12", features = ["full", "test-util"] }
-tempfile = "3"
+tempfile.workspace = true

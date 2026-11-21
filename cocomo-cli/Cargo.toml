@@ -1,28 +1,26 @@
 [package]
 name = "cocomo-cli"
-version = "0.0.1"
-edition = "2024"
-
 description = "CLI-App: COmpare, COpy & MOve directories and files."
-documentation = "https://docs.rs/cocomo-cli/"
-readme = "../README.md"
-repository = "https://github.com/mamrhein/cocomo"
-license-file = "../LICENSE.TXT"
-keywords = ["compare", "copy", "directory", "file", "move"]
-categories = ["command-line-utilities", "filesystem"]
+version.workspace = true
+edition.workspace = true
+readme.workspace = true
+repository.workspace = true
+license-file.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
-chrono = { version = "0.4", features = ["serde"] }
-clap = { version = "4", features = ["derive"] }
-cocomo-lib = { path = "../cocomo-lib" }
-globset = "0.4"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+chrono.workspace = true
+clap.workspace = true
+cocomo-lib.workspace = true
+globset.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 terminal_size = "0.4"
-thiserror = "2"
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+thiserror.workspace = true
+tokio.workspace = true
 
 [dev-dependencies]
 assert_cmd = "2"
 predicates = "3"
-tempfile = "3"
+tempfile.workspace = true
