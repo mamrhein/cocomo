@@ -970,15 +970,27 @@ pub(crate) struct TransferPlan {
 ///
 /// The action names the destination side: `CopyLeft`/`MoveLeft` take the
 /// right side as source, `CopyRight`/`MoveRight` the left side, and the
-/// deletes remove the entry from the named side. An action is offered
-/// whenever its source (or delete target) exists; it requires
+/// deletes remove the entry from the named side. A delete is offered
+/// whenever its target exists, whatever the entry's status; a copy or
+/// move additionally requires something to reconcile. An action requires
 /// confirmation whenever it overwrites an existing target or deletes
 /// content.
 pub(crate) fn transfer_plan_for(
     entry: &DirEntry,
     action: TransferAction,
 ) -> Option<TransferPlan> {
-    if entry.name_conflict {
+    // A delete removes content instead of reconciling it, so it is
+    // offered for every status (equal, same, differing, and orphans
+    // alike) whenever the named side holds the entry; only the copy and
+    // move shapes below are restricted.
+    let deletes = matches!(
+        action,
+        TransferAction::DeleteLeft | TransferAction::DeleteRight
+    );
+    // Copying either half of a file-vs-directory name clash onto the
+    // other half is impossible, so those transfers are blocked; deleting
+    // one of the halves is fine.
+    if entry.name_conflict && !deletes {
         return None;
     }
     let (source, overwrite, busy, done) = match action {
@@ -1019,9 +1031,11 @@ pub(crate) fn transfer_plan_for(
             "Deleted from the right",
         ),
     };
-    // Entries equal on both sides need no reconciliation; copying them
-    // would only rewrite equal content.
-    if entry.status.intersection(!DirEntryStatus::EQUAL).is_empty() {
+    // Copying or moving an entry that is equal on both sides would only
+    // rewrite equal content, so those actions are not offered for equal
+    // entries.
+    if !deletes && entry.status.intersection(!DirEntryStatus::EQUAL).is_empty()
+    {
         return None;
     }
     Some(TransferPlan {
@@ -2467,8 +2481,7 @@ impl AppState {
     }
 
     /// The two delete items that remove the selected entry from both
-    /// sides, or `None` when either side lacks the entry or the entry's
-    /// shape blocks deleting (name clash, equal content).
+    /// sides, or `None` when either side lacks the entry.
     pub fn delete_both_items(&self) -> Option<Vec<TransferItem>> {
         let entry = self.selected_entry()?;
         let left = transfer_plan_for(entry, TransferAction::DeleteLeft)?;
@@ -4535,7 +4548,8 @@ mod tests {
                 .confirm
         );
 
-        // Identical entries need no reconciliation at all.
+        // Identical entries offer no copy or move, but deletes still
+        // apply: they remove content, not reconcile it.
         let same = entry(
             "same.txt",
             DirEntryStatus::Same,
@@ -4543,15 +4557,22 @@ mod tests {
             Some(info("same.txt", 1, "")),
         );
         assert!(transfer_plan_for(&same, TransferAction::CopyRight).is_none());
+        assert!(transfer_plan_for(&same, TransferAction::MoveRight).is_none());
         assert!(
-            transfer_plan_for(&same, TransferAction::DeleteLeft).is_none()
+            transfer_plan_for(&same, TransferAction::DeleteLeft)
+                .unwrap()
+                .confirm
+        );
+        assert!(
+            transfer_plan_for(&same, TransferAction::DeleteRight).is_some()
         );
     }
 
     #[test]
     fn transfer_plan_blocks_name_conflicts() {
-        // Both halves of a file-vs-directory clash are blocked even though
-        // their orphan statuses would map to a copy direction.
+        // Both halves of a file-vs-directory clash are blocked for copy
+        // and move even though their orphan statuses would map to a copy
+        // direction.
         let mut file_half = entry(
             "notes",
             DirEntryStatus::LeftOrphan,
@@ -4573,6 +4594,57 @@ mod tests {
         assert!(
             transfer_plan_for(&dir_half, TransferAction::CopyLeft).is_none()
         );
+
+        // Deletes stay offered for each half: removing one side of a
+        // clash is a valid cleanup, on the side that holds the entry.
+        assert!(
+            transfer_plan_for(&file_half, TransferAction::DeleteLeft)
+                .is_some()
+        );
+        assert!(
+            transfer_plan_for(&file_half, TransferAction::DeleteRight)
+                .is_none()
+        );
+        assert!(
+            transfer_plan_for(&dir_half, TransferAction::DeleteRight)
+                .is_some()
+        );
+        assert!(
+            transfer_plan_for(&dir_half, TransferAction::DeleteLeft).is_none()
+        );
+    }
+
+    #[test]
+    fn transfer_plan_offers_deletes_for_every_status() {
+        // A delete is offered on every side that holds the entry,
+        // whatever the comparison status says.
+        let cases = [
+            (DirEntryStatus::Same, true, true),
+            (DirEntryStatus::Equal, true, true),
+            (DirEntryStatus::DIFFERENT, true, true),
+            (DirEntryStatus::LeftOrphan, true, false),
+            (DirEntryStatus::RightOrphan, false, true),
+        ];
+        for (status, on_left, on_right) in cases {
+            let entry = entry(
+                "x.txt",
+                status,
+                on_left.then(|| info("x.txt", 1, "")),
+                on_right.then(|| info("x.txt", 1, "")),
+            );
+            assert_eq!(
+                transfer_plan_for(&entry, TransferAction::DeleteLeft)
+                    .is_some(),
+                on_left,
+                "delete-left for {status:?}"
+            );
+            assert_eq!(
+                transfer_plan_for(&entry, TransferAction::DeleteRight)
+                    .is_some(),
+                on_right,
+                "delete-right for {status:?}"
+            );
+        }
     }
 
     #[gpui::test]
@@ -5036,7 +5108,7 @@ mod tests {
     }
 
     /// Delete-both is offered exactly when both single-side deletes are:
-    /// the entry exists on both sides and its shape allows deleting.
+    /// the entry exists on both sides.
     #[gpui::test]
     fn delete_both_items_require_the_entry_on_both_sides(
         cx: &mut TestAppContext,
@@ -5087,7 +5159,8 @@ mod tests {
             assert!(state.delete_both_items().is_none());
         });
 
-        // Equal content is not deletable through reconciliation at all.
+        // Equal content is still deletable: deletes remove content, they
+        // do not reconcile it.
         let equal = differing(
             cx,
             vec![entry(
@@ -5098,7 +5171,8 @@ mod tests {
             )],
         );
         equal.update(cx, |state, _cx| {
-            assert!(state.delete_both_items().is_none());
+            let items = state.delete_both_items().expect("both sides exist");
+            assert_eq!(items.len(), 2);
         });
     }
 
