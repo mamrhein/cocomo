@@ -1157,8 +1157,8 @@ pub(crate) fn confirm_sync() {
 /// plan.
 ///
 /// Bound to the modal's cancel action (`n`/`Esc`, or `Enter` while the
-/// list highlights Cancel). A sync command (`S` or the File / Folder
-/// menu) plans afresh from the current filesystem state.
+/// list highlights Cancel). A sync command (`S` or the File menu) plans
+/// afresh from the current filesystem state.
 pub(crate) fn reject_sync() {
     let state = APP_STATE.state();
     let mut app = state.write();

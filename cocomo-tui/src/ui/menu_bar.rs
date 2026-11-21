@@ -192,8 +192,8 @@ pub(super) struct MenuBarProps {
     pub(super) on_select: Handler<'static, usize>,
 }
 
-/// Top menu bar with tab-like navigation items (Sessions, File / Folder,
-/// Search, View, Options, Help).
+/// Top menu bar with tab-like navigation items (Sessions, File, Search,
+/// View, Options, Help).
 ///
 /// Rendered borderless on a single row to keep the chrome compact; the
 /// title of the open dropdown is highlighted with the theme's title style.
@@ -516,27 +516,27 @@ mod tests {
                 .contains(Modifier::UNDERLINED)
         };
         // Tabs pad each title by one cell, so "Sessions" spans x=1..=8,
-        // the divider x=10..=12, and "File / Folder" starts at x=14.
+        // the divider x=10..=12, and "File" starts at x=14.
         assert_eq!(buf[(1, 0)].symbol(), "S");
         assert!(underlined(1));
         // The further `s` letters of "Sessions" are not the accelerator.
         assert!(!underlined(2));
         assert!(!underlined(3));
         assert!(!underlined(8));
-        // "File / Folder" marks its leading `F` (at x=14..=26).
+        // "File" marks its leading `F` (at x=14..=17).
         assert_eq!(buf[(14, 0)].symbol(), "F");
         assert!(underlined(14));
         assert!(!underlined(15));
         // "Search" is addressed by `Alt+/`, which is not a letter of the
-        // title, so nothing in it is underlined (title spans x=32..=37).
-        assert_eq!(buf[(32, 0)].symbol(), "S");
-        assert!(!underlined(32));
-        assert!(!underlined(37));
+        // title, so nothing in it is underlined (title spans x=23..=28).
+        assert_eq!(buf[(23, 0)].symbol(), "S");
+        assert!(!underlined(23));
+        assert!(!underlined(28));
     }
 
     #[test]
     fn selected_title_carries_the_highlight_style() {
-        // Index 2 of `MENUS` is "Search", which starts at x=32.
+        // Index 2 of `MENUS` is "Search", which starts at x=23.
         let buf = render_frames(
             element!(PaletteProvider(palette: cocomo_palette()) {
                 MenuBar(
@@ -550,9 +550,9 @@ mod tests {
             1,
         );
         // The open title is highlighted, its neighbours are not.
-        assert_eq!(buf[(32, 0)].style().fg, Some(Color::Yellow));
+        assert_eq!(buf[(23, 0)].style().fg, Some(Color::Yellow));
         assert_ne!(buf[(1, 0)].style().fg, Some(Color::Yellow));
-        assert_ne!(buf[(43, 0)].style().fg, Some(Color::Yellow));
+        assert_ne!(buf[(34, 0)].style().fg, Some(Color::Yellow));
     }
 
     #[test]

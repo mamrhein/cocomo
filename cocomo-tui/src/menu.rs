@@ -180,10 +180,10 @@ const fn item(label: &'static str, cmd: Cmd, views: MenuViews) -> MenuEntry {
     MenuEntry::Item(MenuItemDef { label, cmd, views })
 }
 
-/// Every menu, in bar order: Sessions, File / Folder, Search, View,
-/// Options, Help.
+/// Every menu, in bar order: Sessions, File, Search, View, Options,
+/// Help.
 ///
-/// The File / Folder menu groups the per-entry reconcile transfers
+/// The File menu groups the per-entry reconcile transfers
 /// (Copy, Move, Delete) and the whole-comparison sync commands (Update,
 /// Mirror) in submenus; the sync commands each plan a dry-run and show a
 /// confirmation dialog before anything changes on disk, while the
@@ -217,7 +217,7 @@ pub const MENUS: &[MenuDef] = &[
         ],
     },
     MenuDef {
-        title: "File / Folder",
+        title: "File",
         accel: 'f',
         views: MenuViews::ALL,
         entries: &[
@@ -820,8 +820,8 @@ mod tests {
     fn file_menu_lists_the_reconcile_submenus() {
         let file = MENUS
             .iter()
-            .find(|m| m.title == "File / Folder")
-            .expect("no File / Folder menu");
+            .find(|m| m.title == "File")
+            .expect("no File menu");
         let transfers: [(&str, &[Cmd]); 3] = [
             (
                 "Copy",
@@ -893,8 +893,8 @@ mod tests {
     fn file_menu_lists_the_sync_submenus() {
         let file = MENUS
             .iter()
-            .find(|m| m.title == "File / Folder")
-            .expect("no File / Folder menu");
+            .find(|m| m.title == "File")
+            .expect("no File menu");
         let update = submenu(file.entries, "Update");
         for cmd in [Cmd::SyncUpdateLeft, Cmd::SyncUpdateRight, Cmd::SyncBoth] {
             assert!(
@@ -1157,13 +1157,13 @@ mod tests {
     fn current_addresses_the_highlighted_item() {
         let menu = MenuState::open(1).unwrap();
         let MenuEntry::Item(first) = MENUS[1].entries[0] else {
-            panic!("first File / Folder entry is not a leaf");
+            panic!("first File entry is not a leaf");
         };
         assert_eq!(menu.current().copied(), Some(first));
         let mut menu = menu;
         menu.move_item(1);
         let MenuEntry::Item(second) = MENUS[1].entries[1] else {
-            panic!("second File / Folder entry is not a leaf");
+            panic!("second File entry is not a leaf");
         };
         assert_eq!(menu.current().copied(), Some(second));
     }

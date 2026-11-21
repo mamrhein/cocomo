@@ -169,10 +169,10 @@ pub enum Cmd {
     /// confirmation dialog.
     SyncBoth,
     /// Update the left panel from the right (no deletions), after a
-    /// confirmation dialog (menu-only; the File / Folder submenu).
+    /// confirmation dialog (menu-only; the File submenu).
     SyncUpdateLeft,
     /// Update the right panel from the left (no deletions), after a
-    /// confirmation dialog (menu-only; the File / Folder submenu).
+    /// confirmation dialog (menu-only; the File submenu).
     SyncUpdateRight,
     /// Toggle the visibility of one entry-status class (dropdown item).
     ToggleStatusFilter(StatusFilter),
@@ -222,7 +222,7 @@ pub enum Cmd {
     /// Close the transfer dialog without transferring.
     DialogAbort,
     /// Execute the given transfer choice on the current selection
-    /// immediately (File / Folder menu submenu item), without opening
+    /// immediately (File menu submenu item), without opening
     /// the dialog.
     TransferExecute(TransferOp, TransferChoice),
     /// Enter search mode (`/`).

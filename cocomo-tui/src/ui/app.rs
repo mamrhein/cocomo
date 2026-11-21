@@ -1173,8 +1173,8 @@ mod menu_mouse_tests {
         let mut exits = 0;
         let mut exit = || exits += 1;
         APP_STATE.set(AppState::new());
-        // Tabs pad each title by one cell, so "File / Folder" (index 1)
-        // spans x=13..=27 and the bar ends (after "Help") at x=68.
+        // Tabs pad each title by one cell, so "File" (index 1) spans
+        // x=13..=18 and the bar ends (after "Help") at x=59.
         menu_mouse(Position { x: 14, y: 0 }, &titles, &bar, &None, &mut exit);
         assert_eq!(
             APP_STATE.state().read().menu.map(|m| m.bar_index),

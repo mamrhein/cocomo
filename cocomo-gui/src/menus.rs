@@ -9,11 +9,11 @@
 
 //! Application menu bar definitions and global action handlers.
 //!
-//! Provides the unified menu bar (Sessions, File / Folder, Edit, Merge,
-//! Search, View, Options, Help) per the menu-structure proposal. The
-//! File / Folder entry is titled after the active view, the Merge menu
-//! only appears on a merge tab, and a base menu whose items do not apply
-//! to the active view is hidden entirely. The module also registers the
+//! Provides the unified menu bar (Sessions, File, Edit, Merge, Search,
+//! View, Options, Help) per the menu-structure proposal. The File entry
+//! holds the groups of the active view, the Merge menu only appears on a
+//! merge tab, and a base menu whose items do not apply to the active
+//! view is hidden entirely. The module also registers the
 //! global action handlers on the App. Commands whose operations arrive
 //! in later phases are present but disabled, so the menu never promises
 //! an action that does nothing.
@@ -368,8 +368,8 @@ fn filter_label(shown: bool, group: &str) -> SharedString {
     format!("{} {group} items", if shown { "Hide" } else { "Show" }).into()
 }
 
-/// The "Open with" submenu shared by the File / Folder menu's open
-/// groups; its commands need a concrete file to act on.
+/// The "Open with" submenu shared by the File menu's open groups; its
+/// commands need a concrete file to act on.
 fn open_with_submenu(
     hidden: &HashSet<&'static str>,
     can_open_file: bool,
@@ -418,8 +418,8 @@ fn build_app_menus(
     // text compare, or the selected entry of a folder compare.
     let can_open_file =
         state.is_text || (state.is_folder && state.has_selection);
-    // A tab the File / Folder menu can act on: Home has neither a file
-    // pair nor a folder pair, so the menu is hidden there.
+    // A tab the File menu can act on: Home has neither a file pair nor a
+    // folder pair, so the menu is hidden there.
     let has_file_view = state.is_folder || state.is_text || state.is_merge;
 
     // Sessions: every session-related command; Quit closes the run.
@@ -550,7 +550,7 @@ fn build_app_menus(
         })]),
     ]));
 
-    // File / Folder: one bar entry titled after the active view. The
+    // File: one bar entry whose groups vary with the active view. The
     // open and save groups serve text and merge tabs, the reconcile,
     // to-folder, and sync groups serve folder tabs.
     let file_items = has_file_view.then(|| {
@@ -713,8 +713,7 @@ fn build_app_menus(
     });
     let mut menus = vec![sessions];
     if let Some(items) = file_items {
-        let title = if state.is_folder { "Folder" } else { "File" };
-        menus.push(Menu::new(title).items(items));
+        menus.push(Menu::new("File").items(items));
     }
 
     // The Edit menu is view-specific: folder views offer path copying and
