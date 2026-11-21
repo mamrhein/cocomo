@@ -62,7 +62,7 @@ use crate::{
     controller::{dispatch_dialog_key, pick_transfer_choice},
     state::{
         APP_STATE, SessionContent, SessionMode, SessionView, TransferChoice,
-        TransferOp, TransferTarget,
+        TransferOp, TransferTarget, transferable_sides,
     },
 };
 
@@ -112,11 +112,9 @@ pub(super) fn TransferDialog(
             }
             // An option activates when any target in the range supports
             // it; the items are then built per target, skipping the ones
-            // that do not. Name clashes support nothing.
-            let has_left =
-                targets.iter().any(|t| t.has_left && !t.name_conflict);
-            let has_right =
-                targets.iter().any(|t| t.has_right && !t.name_conflict);
+            // that do not. Name clashes only support deletes of their own
+            // halves.
+            let (has_left, has_right) = transferable_sides(op, &targets);
             Some(DialogData {
                 op,
                 summary: summary_lines(s, &targets, &theme),

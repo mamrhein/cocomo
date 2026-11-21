@@ -49,6 +49,7 @@ use crate::{
         FilterDraft, FilterFocus, FilterRow, NamePattern, ReportDraft,
         ReportFocus, ReportSelection, SessionAction, SessionContent,
         SessionMode, SessionView, StatusFilter, TransferChoice, TransferOp,
+        transferable_sides,
     },
 };
 
@@ -1594,10 +1595,9 @@ pub fn dialog_choice(
         return SessionAction::None;
     }
     // The option activates when any target supports it; `items` then
-    // contributes nothing for the targets that do not. Name clashes
-    // support nothing.
-    let has_left = targets.iter().any(|t| t.has_left && !t.name_conflict);
-    let has_right = targets.iter().any(|t| t.has_right && !t.name_conflict);
+    // contributes nothing for the targets that do not. Name clashes only
+    // support deletes of their own halves.
+    let (has_left, has_right) = transferable_sides(op, &targets);
     if !choice.is_enabled(op, has_left, has_right) {
         return SessionAction::None;
     }

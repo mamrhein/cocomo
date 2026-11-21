@@ -217,8 +217,10 @@ pub struct TransferTarget {
     /// for both sides.
     pub same_side: bool,
     /// The name denotes a file on one side and a directory on the other.
-    /// Such a clash is never transferable: the counterpart would have to
-    /// be replaced by an entry of a different type.
+    /// Copying or moving across such a clash is impossible: the
+    /// counterpart would have to be replaced by an entry of a different
+    /// type. A delete only removes the half that exists, so deletes stay
+    /// offered.
     pub name_conflict: bool,
     /// Why no side option could be offered, shown dimmed in the dialog.
     pub note: Option<&'static str>,
@@ -227,16 +229,17 @@ pub struct TransferTarget {
 impl TransferTarget {
     /// Build the [`TransferItem`]s for `choice`.
     ///
-    /// Empty for [`TransferChoice::Abort`], for entries caught in a
-    /// file-vs-directory name clash, and for options the entry does not
-    /// support, so a stale accelerator can never transfer something the
-    /// dialog never offered.
+    /// Empty for [`TransferChoice::Abort`] and for options the entry does
+    /// not support, so a stale accelerator can never transfer something
+    /// the dialog never offered. Across a file-vs-directory name clash
+    /// only deletes are supported: each half stays deletable on the side
+    /// that holds it, while copy and move are impossible.
     pub fn items(
         &self,
         op: TransferOp,
         choice: TransferChoice,
     ) -> Vec<TransferItem> {
-        if self.name_conflict {
+        if self.name_conflict && op != TransferOp::Delete {
             return Vec::new();
         }
         let actions: Vec<TransferAction> = match (op, choice) {
@@ -283,6 +286,24 @@ impl TransferTarget {
             })
             .collect()
     }
+}
+
+/// Which sides any target in `targets` offers under `op`.
+///
+/// An option activates when at least one target holds the side it acts
+/// on. A file-vs-directory name clash blocks copy and move for its
+/// halves, since the counterpart could not hold the transferred entry;
+/// deletes stay offered because they only remove the half that exists.
+pub fn transferable_sides(
+    op: TransferOp,
+    targets: &[TransferTarget],
+) -> (bool, bool) {
+    let fits =
+        |t: &TransferTarget| op == TransferOp::Delete || !t.name_conflict;
+    (
+        targets.iter().any(|t| t.has_left && fits(t)),
+        targets.iter().any(|t| t.has_right && fits(t)),
+    )
 }
 
 impl SessionMode {
@@ -2362,28 +2383,32 @@ mod tests {
     }
 
     #[test]
-    fn name_conflict_targets_offer_no_transfer() {
-        // Even a clash entry that exists on both sides (a file on one, a
-        // directory on the other) transfers in no direction.
-        let mut conflicted = target(true, true, false);
-        assert!(
-            !conflicted
-                .items(TransferOp::Copy, TransferChoice::Left)
-                .is_empty()
-        );
-        conflicted.name_conflict = true;
-        for op in [TransferOp::Copy, TransferOp::Move, TransferOp::Delete] {
-            for choice in [
-                TransferChoice::Left,
-                TransferChoice::Right,
-                TransferChoice::Both,
-                TransferChoice::Abort,
-            ] {
-                assert!(
-                    conflicted.items(op, choice).is_empty(),
-                    "{op:?} / {choice:?} must not transfer a name conflict"
-                );
-            }
+    fn name_conflict_targets_only_delete_their_own_side() {
+        // A real clash splits into two one-sided rows: the file half on
+        // the left, the directory half on the right.
+        let mut file_half = target(true, false, false);
+        file_half.name_conflict = true;
+        let mut dir_half = target(false, true, false);
+        dir_half.name_conflict = true;
+        // Copy and move are impossible across the clash in both
+        // directions.
+        for op in [TransferOp::Copy, TransferOp::Move] {
+            assert!(file_half.items(op, TransferChoice::Left).is_empty());
+            assert!(dir_half.items(op, TransferChoice::Right).is_empty());
+        }
+        // A delete removes the half on the side that holds it; the other
+        // side and `both` need the missing counterpart.
+        let items = file_half.items(TransferOp::Delete, TransferChoice::Left);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].action, TransferAction::DeleteLeft);
+        for choice in [TransferChoice::Right, TransferChoice::Both] {
+            assert!(file_half.items(TransferOp::Delete, choice).is_empty());
+        }
+        let items = dir_half.items(TransferOp::Delete, TransferChoice::Right);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].action, TransferAction::DeleteRight);
+        for choice in [TransferChoice::Left, TransferChoice::Both] {
+            assert!(dir_half.items(TransferOp::Delete, choice).is_empty());
         }
     }
 
