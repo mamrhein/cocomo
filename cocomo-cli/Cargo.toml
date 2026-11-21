@@ -6,7 +6,6 @@ edition = "2024"
 description = "CLI-App: COmpare, COpy & MOve directories and files."
 documentation = "https://docs.rs/cocomo-cli/"
 readme = "../README.md"
-homepage = "https://github.com/mamrhein/cocomo"
 repository = "https://github.com/mamrhein/cocomo"
 license-file = "../LICENSE.TXT"
 keywords = ["compare", "copy", "directory", "file", "move"]

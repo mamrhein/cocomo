@@ -5,7 +5,6 @@ edition = "2024"
 description = "COmpare, COpy & MOve directories and files [core library]."
 documentation = "https://docs.rs/cocomo-lib/"
 readme = "../README.md"
-homepage = "https://github.com/mamrhein/cocomo"
 repository = "https://github.com/mamrhein/cocomo"
 license-file = "../LICENSE.TXT"
 keywords = ["compare", "copy", "directory", "file", "move"]
