@@ -372,7 +372,12 @@ async fn copy_tree_at(
                 .await?;
         }
     } else {
-        fs_err::tokio::copy(from, to).await?;
+        // Content-only copy: `std::fs::copy` also duplicates mode and (on
+        // macOS, via `copyfile`) timestamps and xattrs, which would
+        // silently override the `preserve_*` options applied below.
+        let mut reader = fs_err::tokio::File::open(from).await?;
+        let mut writer = fs_err::tokio::File::create(to).await?;
+        tokio::io::copy(&mut reader, &mut writer).await?;
     }
     // Attributes go last: writing the children above bumped a directory's
     // own mtime, and a restrictive source mode applied first would block

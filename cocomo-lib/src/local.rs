@@ -681,14 +681,6 @@ impl LocalFs {
         })?;
         Ok(())
     }
-
-    #[allow(dead_code)]
-    pub(crate) async fn copy(&self, src: &Path, dst: &Path) -> Result<()> {
-        fs_err::tokio::copy(src, dst).await.map_err(|e| {
-            wrap(e, crate::error::FsOperation::Copy, src.to_path_buf())
-        })?;
-        Ok(())
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1323,7 +1315,17 @@ async fn copy_file(
             .map_err(|e| wrap(e, FsOperation::Copy, dst.to_path_buf()))?;
         return Ok(());
     }
-    fs_err::tokio::copy(src, dst)
+    // Content-only copy: `std::fs::copy` (behind `tokio::fs::copy`) also
+    // duplicates the mode everywhere, and on macOS its `copyfile` backend
+    // duplicates timestamps and xattrs too. That would silently override
+    // the `preserve_*` options applied below, so copy bytes only.
+    let mut reader = fs_err::tokio::File::open(src)
+        .await
+        .map_err(|e| wrap(e, FsOperation::Open, src.to_path_buf()))?;
+    let mut writer = fs_err::tokio::File::create(dst)
+        .await
+        .map_err(|e| wrap(e, FsOperation::CreateFile, dst.to_path_buf()))?;
+    tokio::io::copy(&mut reader, &mut writer)
         .await
         .map_err(|e| wrap(e, FsOperation::Copy, src.to_path_buf()))?;
     hard_links.record(meta, dst);
@@ -1636,26 +1638,6 @@ mod tests {
         fs.rename(&src, &dst).await.unwrap();
         assert!(!src.exists());
         assert!(dst.exists());
-
-        fs_err::remove_dir_all(&base).ok();
-    }
-
-    #[tokio::test]
-    async fn copy_file() {
-        let base = temp_dir().join("copy_file");
-        let _ = fs_err::remove_dir_all(&base);
-        fs_err::create_dir_all(&base).unwrap();
-
-        let fs = LocalFs::new("test");
-        let src = base.join("src.txt");
-        let dst = base.join("dst.txt");
-        fs.write(&src, Bytes::from_static(b"copy me"))
-            .await
-            .unwrap();
-
-        fs.copy(&src, &dst).await.unwrap();
-        let content = fs.read(&dst, None).await.unwrap();
-        assert_eq!(content, Bytes::from_static(b"copy me"));
 
         fs_err::remove_dir_all(&base).ok();
     }
