@@ -793,32 +793,38 @@ mod error_dialog_size_tests {
 #[cfg(test)]
 mod render_tests {
     use cocomo_lib::{
-        DirComparison, DirEntry, DirEntryStatus, Endpoint, EntryInfo,
-        SyncResult, TransferAction, TransferItem,
+        CopyOptions, DirComparison, DirEntry, DirEntryStatus, Endpoint,
+        EntryInfo, SyncResult, TransferAction, TransferItem,
     };
     use ratatui_kit::{ratatui::buffer::Buffer, test_util::render_frames};
 
     use super::*;
     use crate::{
+        menu::{MenuEntry, MenuView},
         state::{APP_STATE, AppState, SessionMode, SessionView, TransferOp},
         ui::{frame::SPINNER_FRAMES, theme::cocomo_palette},
     };
 
-    /// Render the full `App` offscreen and flatten the buffer to text.
+    /// Render the full `App` offscreen and hand out the raw buffer, so
+    /// style-sensitive assertions can inspect cell colors.
     ///
     /// Three frames: the session table windows its rows against the draw
     /// area measured in the previous frame, so a single frame would render
     /// the first-frame placeholder instead of the settled layout.
-    fn render(app: AppState) -> String {
+    fn render_buf(app: AppState) -> Buffer {
         APP_STATE.set(app);
-        let buf: Buffer = render_frames(
+        render_frames(
             element!(PaletteProvider(palette: cocomo_palette()) {
                 App()
             }),
             100,
             30,
             3,
-        );
+        )
+    }
+
+    /// Flatten a rendered buffer to text.
+    fn buf_text(buf: &Buffer) -> String {
         let mut out = String::new();
         for y in 0..buf.area().height {
             for x in 0..buf.area().width {
@@ -827,6 +833,11 @@ mod render_tests {
             out.push('\n');
         }
         out
+    }
+
+    /// Render the full `App` offscreen and flatten the buffer to text.
+    fn render(app: AppState) -> String {
+        buf_text(&render_buf(app))
     }
 
     fn dir_session_state() -> AppState {
@@ -1001,6 +1012,115 @@ mod render_tests {
             .lines()
             .find(|row| row.contains(needle))
             .unwrap_or_else(|| panic!("{needle:?} not on screen:\n{screen}"))
+    }
+
+    /// Dir session whose single entry is a left-only orphan, selected,
+    /// with the File menu open on submenu parent `parent` and its flyout
+    /// showing. Also returns the flyout's screen rect, computed exactly
+    /// like the App shell computes it for the directory view bar.
+    fn orphan_file_menu_state(parent: &str) -> (AppState, Rect) {
+        let info = |name: &str| EntryInfo {
+            name: name.into(),
+            path: name.into(),
+            is_dir: false,
+            ..Default::default()
+        };
+        let mut session = SessionView::new_dir_compare(
+            Endpoint::local("/left"),
+            Endpoint::local("/right"),
+            false,
+        );
+        session.set_comparison(Some(DirComparison {
+            entries: vec![DirEntry {
+                name: "left.txt".into(),
+                status: DirEntryStatus::LeftOrphan,
+                left: Some(info("left.txt")),
+                right: None,
+                center: None,
+                sub_entries: None,
+                name_conflict: false,
+            }],
+            ..Default::default()
+        }));
+        session.ui.table_state.select(Some(0));
+        let mut app = AppState::new();
+        app.add_session(session);
+        let item = menu::MENUS[1]
+            .entries
+            .iter()
+            .position(|entry| {
+                matches!(entry,
+                    MenuEntry::SubMenu { label, .. } if *label == parent)
+            })
+            .expect("File submenu parent");
+        app.menu = Some(MenuState {
+            bar_index: 1,
+            item,
+            sub: Some(0),
+        });
+        let bar = menu::bar_indices(Some(MenuView::Dir));
+        let titles: Vec<Line<'static>> =
+            bar.iter().map(|&i| menu_title(&menu::MENUS[i])).collect();
+        let bar_pos = bar.iter().position(|&i| i == 1).expect("File on bar");
+        let def = &menu::MENUS[1];
+        let rect = dropdown_rect(
+            &titles,
+            def,
+            bar_pos,
+            BAR_ORIGIN,
+            None,
+            &CopyOptions::default(),
+        );
+        let children = def.entries[item].children().expect("submenu children");
+        let fly =
+            flyout_rect(children, item, rect, None, &CopyOptions::default());
+        (app, fly)
+    }
+
+    #[test]
+    fn transfer_submenu_rows_dim_choices_the_selection_denies() {
+        let palette = cocomo_palette();
+        // A left-only orphan has no right side, so every File transfer
+        // choice that reads from or deletes the right side must render
+        // dimmed, exactly like the `c`/`d`/`v` dialog dims its options.
+        // `(submenu parent, flyout child row, first label cell)`.
+        for (parent, child, first) in [
+            ("Copy", 1_u16, "R"),
+            ("Move", 1, "R"),
+            ("Delete", 1, "R"),
+            ("Delete", 2, "B"),
+        ] {
+            let (app, fly) = orphan_file_menu_state(parent);
+            let buf = render_buf(app);
+            let (x, y) = (fly.x + 3, fly.y + 1 + child);
+            assert_eq!(
+                buf[(x, y)].symbol(),
+                first,
+                "unexpected {parent} flyout row:\n{}",
+                buf_text(&buf)
+            );
+            assert_eq!(
+                buf[(x, y)].style().fg,
+                Some(palette.fg_dim),
+                "{parent} offers a choice the left-only selection cannot run \
+                 without dimming it:\n{}",
+                buf_text(&buf)
+            );
+        }
+        // The choices the orphan does support stay lit; the first child
+        // row is the highlighted current one, so only its fg is checked.
+        for parent in ["Copy", "Move", "Delete"] {
+            let (app, fly) = orphan_file_menu_state(parent);
+            let buf = render_buf(app);
+            let (x, y) = (fly.x + 3, fly.y + 1);
+            assert_eq!(buf[(x, y)].symbol(), "L");
+            assert_ne!(
+                buf[(x, y)].style().fg,
+                Some(palette.fg_dim),
+                "the supported first choice of {parent} rendered dimmed:\n{}",
+                buf_text(&buf)
+            );
+        }
     }
 
     #[test]
