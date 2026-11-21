@@ -42,6 +42,8 @@ pub enum MenuView {
     Dir,
     /// Text diff tab.
     Text,
+    /// Welcome screen (no active session).
+    Welcome,
 }
 
 impl MenuView {
@@ -50,6 +52,7 @@ impl MenuView {
         match self {
             Self::Dir => 1,
             Self::Text => 2,
+            Self::Welcome => 4,
         }
     }
 
@@ -71,8 +74,14 @@ impl MenuViews {
     pub const DIR: Self = Self(MenuView::Dir.bit());
     /// Text diff view only.
     pub const TEXT: Self = Self(MenuView::Text.bit());
-    /// Every session view; also stays lit on the welcome screen.
-    pub const ALL: Self = Self(MenuView::Dir.bit() | MenuView::Text.bit());
+    /// Welcome screen only.
+    pub const WELCOME: Self = Self(MenuView::Welcome.bit());
+    /// Every view, including the welcome screen.
+    pub const ALL: Self = Self(
+        MenuView::Dir.bit() | MenuView::Text.bit() | MenuView::Welcome.bit(),
+    );
+    /// Both session views; dimmed on the welcome screen.
+    pub const SESSION: Self = Self(MenuView::Dir.bit() | MenuView::Text.bit());
 
     /// Whether `view` is part of this mask.
     pub const fn contains(self, view: MenuView) -> bool {
@@ -98,11 +107,12 @@ pub struct MenuItemDef {
 
 impl MenuItemDef {
     /// Whether the item's view mask admits it while `view` is active
-    /// (`None` on the welcome screen, where only view-independent items
-    /// stay lit).
+    /// (`None` on the welcome screen, where only items that include the
+    /// welcome bit stay lit).
     fn shows_in(&self, view: Option<MenuView>) -> bool {
-        view.is_some_and(|v| self.views.contains(v))
-            || self.views == MenuViews::ALL
+        // Membership alone: items lit on the welcome screen are exactly
+        // the ones whose mask carries the welcome bit.
+        self.views.contains(view.unwrap_or(MenuView::Welcome))
     }
 
     /// Whether the item can run in `view` for the selection `transfers`
@@ -242,6 +252,9 @@ pub const MENUS: &[MenuDef] = &[
                 Cmd::OpenSettings,
                 MenuViews::ALL,
             ),
+            MenuEntry::Separator,
+            item("Swap sides", Cmd::SwapSides, MenuViews::SESSION),
+            MenuEntry::Separator,
             item("Report\u{2026}", Cmd::OpenReport, MenuViews::DIR),
             MenuEntry::Separator,
             item("Close tab", Cmd::CloseTab, MenuViews::ALL),
@@ -836,6 +849,7 @@ mod tests {
             Cmd::OpenSessionBrowser,
             Cmd::StartSaveSession,
             Cmd::OpenSettings,
+            Cmd::SwapSides,
             Cmd::CloseTab,
             Cmd::Quit,
         ] {
@@ -854,6 +868,22 @@ mod tests {
                 Some(MenuView::Text),
                 &TransferMenuState::default()
             )
+        );
+        // Swap sides runs in either session view but stays dimmed on
+        // the welcome screen.
+        let swap = leaf(sessions.entries, Cmd::SwapSides);
+        assert!(
+            swap.available(Some(MenuView::Dir), &TransferMenuState::default())
+        );
+        assert!(
+            swap.available(
+                Some(MenuView::Text),
+                &TransferMenuState::default()
+            )
+        );
+        assert!(
+            !swap.available(None, &TransferMenuState::default()),
+            "Swap sides must stay dimmed on the welcome screen"
         );
     }
 

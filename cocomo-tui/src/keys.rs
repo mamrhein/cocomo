@@ -186,6 +186,8 @@ pub enum Cmd {
     OpenReport,
     /// Re-run the current comparison.
     Reload,
+    /// Exchange the left and right sides of the session (`X`).
+    SwapSides,
     /// Open the selected entry in a new session.
     OpenEntry,
     /// Open the parent directories in a new session.
@@ -456,6 +458,13 @@ const KEYMAP: &[KeyBinding] = &[
         help: Some(("v", "move")),
     },
     KeyBinding {
+        key: KeyCode::Char('X'),
+        modifiers: NONE,
+        scope: KeyScope::DirNormal,
+        cmd: Cmd::SwapSides,
+        help: Some(("X", "swap")),
+    },
+    KeyBinding {
         key: KeyCode::Char('r'),
         modifiers: NONE,
         scope: KeyScope::DirNormal,
@@ -602,6 +611,13 @@ const KEYMAP: &[KeyBinding] = &[
         scope: KeyScope::TextNormal,
         cmd: Cmd::MoveDialog,
         help: Some(("v", "move")),
+    },
+    KeyBinding {
+        key: KeyCode::Char('X'),
+        modifiers: NONE,
+        scope: KeyScope::TextNormal,
+        cmd: Cmd::SwapSides,
+        help: Some(("X", "swap")),
     },
     KeyBinding {
         key: KeyCode::Char('/'),
@@ -1277,6 +1293,10 @@ fn execute(cmd: Cmd, session: &mut SessionView) -> SessionAction {
             SessionAction::None
         }
         Cmd::Reload => SessionAction::Reload,
+        Cmd::SwapSides => {
+            swap_sides(session);
+            SessionAction::None
+        }
         Cmd::OpenEntry => handle_enter(session),
         Cmd::GoUp => {
             // Inside an expanded subtree, Backspace collapses the
@@ -1813,6 +1833,52 @@ fn apply_filter_draft(session: &mut SessionView) -> SessionAction {
     SessionAction::None
 }
 
+/// Exchange the two sides of the session and re-orient the loaded result.
+///
+/// The comparison is mirrored in place (no filesystem access), so the swap
+/// is instant and involutive. While a compare or recompare is still in
+/// flight the command is a no-op: the pending result would arrive built
+/// for the old orientation.
+fn swap_sides(session: &mut SessionView) {
+    match &session.content {
+        SessionContent::Dir(dir) if dir.comparison.is_none() => return,
+        SessionContent::Text(text) if text.text_diff.is_none() => return,
+        _ => {}
+    }
+    // The dir cursor follows the selected entry by path, mirroring how
+    // the GUI keeps the selection across a swap.
+    let selected = session.selected_row().map(|row| row.rel_path.clone());
+    std::mem::swap(&mut session.core.left, &mut session.core.right);
+    session.core.name = session.core.left.pair_title(&session.core.right);
+    let is_dir = session.content.is_dir();
+    match &mut session.content {
+        SessionContent::Dir(dir) => {
+            if let Some(comparison) = &mut dir.comparison {
+                comparison.swap_sides();
+            }
+            dir.display.show_statuses = dir.display.show_statuses.swapped();
+            // The staged sync plan refers to the old orientation.
+            dir.pending_sync = None;
+        }
+        SessionContent::Text(text) => {
+            std::mem::swap(&mut text.source.left, &mut text.source.right);
+            text.recompare_with_rules();
+        }
+    }
+    if is_dir {
+        let index = selected
+            .as_deref()
+            .and_then(|path| session.row_index_of(path));
+        session.set_cursor(Some(index.unwrap_or(0)));
+    } else {
+        // The mirrored diff aligns the same rows; keep the cursor where
+        // it is but drop the drag anchor, which belongs to the old
+        // orientation (`set_cursor` clears it).
+        let index = session.ui.table_state.selected();
+        session.set_cursor(index);
+    }
+}
+
 /// Run a session-scoped [`Cmd`] activated from the menu bar.
 ///
 /// The menu items map onto the same commands the keybindings execute, so a
@@ -1922,7 +1988,7 @@ mod tests {
 
     use cocomo_lib::{
         DirComparison, DirEntry, DirEntryStatus, Endpoint, EntryInfo, Grammar,
-        TextCompareSettings, TransferAction, compare_texts,
+        SyncResult, TextCompareSettings, TransferAction, compare_texts,
     };
     use ratatui_kit::crossterm::event::KeyEvent;
 
@@ -3394,5 +3460,128 @@ mod tests {
             panic!("modal must stay open without a destination");
         };
         assert!(draft.error.is_some());
+    }
+
+    #[test]
+    fn x_is_bound_to_swap_sides_in_both_session_scopes() {
+        for scope in [KeyScope::DirNormal, KeyScope::TextNormal] {
+            assert_eq!(
+                lookup(scope, key(KeyCode::Char('X'))),
+                Some(Cmd::SwapSides),
+                "the {scope:?} scope must bind X to Swap sides"
+            );
+        }
+    }
+
+    #[test]
+    fn swap_sides_mirrors_a_dir_session_and_is_involutive() {
+        let mut session = dir_session_with_sides();
+        // Stage a sync plan; it refers to the old orientation and must go.
+        session.dir_mut().unwrap().pending_sync = Some(SyncResult::default());
+        session.ui.table_state.select(Some(1));
+        assert_eq!(
+            press(&mut session, KeyCode::Char('X')),
+            Some(SessionAction::None)
+        );
+        assert_eq!(session.core.left.path(), PathBuf::from("/right"));
+        assert_eq!(session.core.right.path(), PathBuf::from("/left"));
+        assert_eq!(session.core.name, "right vs left");
+        let dir = session.dir().unwrap();
+        assert!(dir.pending_sync.is_none());
+        // Every entry's status and side metadata are mirrored; the row
+        // order is untouched.
+        let rows = session.visible_rows();
+        let mirrored = [
+            ("left-only.txt", DirEntryStatus::RightOrphan, (false, true)),
+            ("right-only.txt", DirEntryStatus::LeftOrphan, (true, false)),
+            ("both.txt", DirEntryStatus::RightNewer, (true, true)),
+        ];
+        for (row, (name, status, sides)) in rows.iter().zip(mirrored) {
+            assert_eq!(row.entry.name, name);
+            assert_eq!(row.entry.status, status);
+            // The metadata followed the entry onto the side it now
+            // belongs to: an orphan holds only that side.
+            assert_eq!(
+                (row.entry.left.is_some(), row.entry.right.is_some()),
+                sides,
+                "side metadata of {} were not mirrored",
+                row.entry.name
+            );
+        }
+        // The cursor followed the selected entry by path.
+        assert_eq!(session.ui.table_state.selected(), Some(1));
+        // Swapping twice restores the original orientation exactly.
+        press(&mut session, KeyCode::Char('X'));
+        assert_eq!(session.core.left.path(), PathBuf::from("/left"));
+        assert_eq!(session.core.name, "left vs right");
+        let statuses: Vec<_> = session
+            .visible_rows()
+            .iter()
+            .map(|row| row.entry.status)
+            .collect();
+        assert_eq!(
+            statuses,
+            [
+                DirEntryStatus::LeftOrphan,
+                DirEntryStatus::RightOrphan,
+                DirEntryStatus::LeftNewer,
+            ]
+        );
+    }
+
+    #[test]
+    fn swap_sides_mirrors_a_text_session_and_is_involutive() {
+        let mut session = text_session();
+        session.ui.table_state.select(Some(2));
+        assert_eq!(
+            press(&mut session, KeyCode::Char('X')),
+            Some(SessionAction::None)
+        );
+        assert_eq!(session.core.left.path(), PathBuf::from("/right"));
+        let text = session.text().unwrap();
+        assert_eq!(text.source.left, "a\nb\nC\nd\ne\nf\nG\nh\ni\nj\n");
+        assert_eq!(text.source.right, "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\n");
+        // The mirrored diff aligns the same rows; the changed rows keep
+        // their positions with their cells exchanged.
+        let rows = &text.merged_rows;
+        assert_eq!(rows.len(), 10);
+        assert_eq!(rows[2].left.as_ref().unwrap().content, "C");
+        assert_eq!(rows[2].right.as_ref().unwrap().content, "c");
+        assert!(rows[2].status.is_difference());
+        assert_eq!(session.ui.table_state.selected(), Some(2));
+        // Swapping twice restores the original diff exactly.
+        press(&mut session, KeyCode::Char('X'));
+        let rows = &session.text().unwrap().merged_rows;
+        assert_eq!(rows[2].left.as_ref().unwrap().content, "c");
+        assert_eq!(rows[2].right.as_ref().unwrap().content, "C");
+    }
+
+    #[test]
+    fn swap_sides_is_a_noop_while_the_comparison_is_loading() {
+        // A session without a loaded comparison must not swap: the
+        // in-flight result would arrive built for the old orientation.
+        let mut session = SessionView::new_dir_compare(
+            Endpoint::local(PathBuf::from("/left")),
+            Endpoint::local(PathBuf::from("/right")),
+            false,
+        );
+        assert_eq!(
+            press(&mut session, KeyCode::Char('X')),
+            Some(SessionAction::None)
+        );
+        assert_eq!(session.core.left.path(), PathBuf::from("/left"));
+        assert_eq!(session.core.name, "left vs right");
+    }
+
+    #[test]
+    fn swap_sides_menu_command_swaps_the_session() {
+        // The menu bar path shares the keyboard dispatch, so the item
+        // must swap exactly like the `X` binding.
+        let mut session = dir_session_with_sides();
+        assert_eq!(
+            run_menu_command(&mut session, Cmd::SwapSides),
+            SessionAction::None
+        );
+        assert_eq!(session.core.left.path(), PathBuf::from("/right"));
     }
 }
