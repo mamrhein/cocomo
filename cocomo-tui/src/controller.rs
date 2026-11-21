@@ -46,7 +46,7 @@ use crate::{
     state::{
         APP_STATE, AppState, NamePattern, SessionAction, SessionContent,
         SessionMode, SessionView, SettingItem, StatusFilter, TextRules,
-        TextSource, TransferChoice,
+        TextSource, TransferChoice, TransferMenuState,
     },
 };
 
@@ -1810,7 +1810,17 @@ pub(crate) fn confirm_menu_item() -> MenuOutcome {
                 return MenuOutcome::Handled;
             }
             cmd => {
-                if !item.available(view) {
+                // Confirming a row the dropdown renders dimmed stays a
+                // no-op: either its view does not offer the command, or
+                // (for a per-entry transfer) the current selection cannot
+                // run it.
+                let transfers = app
+                    .active()
+                    .map(|s| {
+                        TransferMenuState::from_targets(&s.transfer_targets())
+                    })
+                    .unwrap_or_default();
+                if !item.available(view, &transfers) {
                     return MenuOutcome::Handled;
                 }
                 if cmd == Cmd::OpenSessionBrowser {
@@ -2221,6 +2231,70 @@ mod tests {
         let app = state.read();
         assert_eq!(app.menu, None);
         assert!(!app.active().unwrap().dir().unwrap().shows_equal());
+    }
+
+    /// Dir session whose single entry exists on the left only, selected.
+    fn left_orphan_app_state() -> AppState {
+        use cocomo_lib::{DirEntry, EntryInfo};
+        let mut app = dir_app_state();
+        let session = app.active_mut().unwrap();
+        session.set_comparison(Some(DirComparison {
+            entries: vec![DirEntry {
+                name: "left.txt".into(),
+                status: DirEntryStatus::LeftOrphan,
+                left: Some(EntryInfo {
+                    name: "left.txt".into(),
+                    path: "/left/left.txt".into(),
+                    ..Default::default()
+                }),
+                right: None,
+                center: None,
+                sub_entries: None,
+                name_conflict: false,
+            }],
+            ..Default::default()
+        }));
+        session.set_cursor(Some(0));
+        app
+    }
+
+    /// Dropdown row of the `File ▸ <parent>` submenu.
+    fn file_submenu_row(parent: &str) -> usize {
+        menu::menu_at(menu_index("File"))
+            .unwrap()
+            .entries
+            .iter()
+            .position(|entry| {
+                matches!(entry, MenuEntry::SubMenu { label, .. }
+                    if *label == parent)
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn confirm_menu_item_absorbs_a_transfer_the_selection_denies() {
+        // A left-only orphan holds no right side, so `Delete ▸ Right`
+        // renders dimmed. Confirming that row closes the dropdown and
+        // dispatches nothing, so no transfer task is ever started.
+        APP_STATE.set(left_orphan_app_state());
+        APP_STATE.state().write().menu = Some(MenuState {
+            bar_index: menu_index("File"),
+            item: file_submenu_row("Delete"),
+            sub: Some(1),
+        });
+        assert_eq!(confirm_menu_item(), MenuOutcome::Handled);
+        let state = APP_STATE.state();
+        let app = state.read();
+        assert_eq!(app.menu, None);
+        assert!(
+            app.pending_tasks.is_empty(),
+            "a denied transfer was dispatched: {:?}",
+            app.pending_tasks
+        );
+        assert!(
+            matches!(app.active().unwrap().ui.mode, SessionMode::Normal),
+            "the denied transfer left the session in a dialog mode"
+        );
     }
 
     #[test]

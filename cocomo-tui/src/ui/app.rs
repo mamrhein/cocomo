@@ -47,7 +47,7 @@ use crate::{
     controller,
     keys::{self, Cmd, KeyScope},
     menu::{self, MenuState},
-    state::{APP_STATE, SessionContent},
+    state::{APP_STATE, SessionContent, TransferMenuState},
 };
 
 /// Screen position of the menu bar's first cell.
@@ -264,7 +264,7 @@ pub(crate) fn App(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // While a dropdown is open its input layer blocks every handler below
     // (keys and mouse), exactly like a modal blocks the shell. Read the
     // state the layer and its handler need before registering them.
-    let (open_menu, menu_view, display, copy) = {
+    let (open_menu, menu_view, display, copy, transfers) = {
         let app = app_state.read();
         let dir = app.active().and_then(|s| s.dir());
         (
@@ -276,6 +276,14 @@ pub(crate) fn App(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             dir.map_or(app.copy_options, |d| {
                 d.resolved_copy_options(&app.copy_options)
             }),
+            // Which per-entry transfer commands the current selection can
+            // run. Without a session the deny-all default dims every
+            // transfer row, as on the welcome screen.
+            app.active()
+                .map(|s| {
+                    TransferMenuState::from_targets(&s.transfer_targets())
+                })
+                .unwrap_or_default(),
         )
     };
     // Titles with their accelerator letter underlined, one per menu the
@@ -610,6 +618,7 @@ pub(crate) fn App(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     view: menu_view,
                     display: display.clone(),
                     copy: copy,
+                    transfers: transfers,
                 )
                 // Only mounted while a submenu flyout is actually open, so
                 // a closed dropdown never adds a layout child below.
@@ -620,6 +629,7 @@ pub(crate) fn App(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         view: menu_view,
                         display: display.clone(),
                         copy: copy,
+                        transfers: transfers,
                     )
                 }
             }
@@ -1121,6 +1131,61 @@ mod render_tests {
                 buf_text(&buf)
             );
         }
+    }
+
+    #[test]
+    fn welcome_screen_dims_every_transfer_choice() {
+        let palette = cocomo_palette();
+        // Without a session there is no selection, so every per-entry
+        // transfer command is denied and its row dims: both children of
+        // `File ▸ Copy` and, with all children dimmed, the parent row.
+        let item = menu::MENUS[1]
+            .entries
+            .iter()
+            .position(|entry| {
+                matches!(entry,
+                    MenuEntry::SubMenu { label, .. } if *label == "Copy")
+            })
+            .expect("File submenu parent");
+        let mut app = AppState::new();
+        app.menu = Some(MenuState {
+            bar_index: 1,
+            item,
+            sub: Some(0),
+        });
+        // Geometry as the App shell computes it for the welcome bar.
+        let bar = menu::bar_indices(None);
+        let titles: Vec<Line<'static>> =
+            bar.iter().map(|&i| menu_title(&menu::MENUS[i])).collect();
+        let bar_pos = bar.iter().position(|&i| i == 1).expect("File on bar");
+        let def = &menu::MENUS[1];
+        let children = def.entries[item].children().expect("Copy children");
+        let rect = dropdown_rect(
+            &titles,
+            def,
+            bar_pos,
+            BAR_ORIGIN,
+            None,
+            &CopyOptions::default(),
+        );
+        let fly =
+            flyout_rect(children, item, rect, None, &CopyOptions::default());
+        let buf = render_buf(app);
+        let dimmed = |x: u16, y: u16| {
+            assert_eq!(
+                buf[(x, y)].style().fg,
+                Some(palette.fg_dim),
+                "the row at ({x}, {y}) is available without a session:\n{}",
+                buf_text(&buf)
+            );
+        };
+        assert_eq!(buf[(fly.x + 3, fly.y + 1)].symbol(), "L");
+        dimmed(fly.x + 3, fly.y + 1);
+        assert_eq!(buf[(fly.x + 3, fly.y + 2)].symbol(), "R");
+        dimmed(fly.x + 3, fly.y + 2);
+        let parent = (rect.x + 3, rect.y + 1 + item as u16);
+        assert_eq!(buf[parent].symbol(), "C");
+        dimmed(parent.0, parent.1);
     }
 
     #[test]
