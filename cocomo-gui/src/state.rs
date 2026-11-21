@@ -2480,12 +2480,21 @@ impl AppState {
         self.run_transfer_items(vec![item], busy, done, cx);
     }
 
-    /// The two delete items that remove the selected entry from both
-    /// sides, or `None` when either side lacks the entry.
+    /// The delete items that remove the selected entry from both sides,
+    /// or `None` when either side lacks the entry. On a shared root one
+    /// item suffices: both sides address the same file.
     pub fn delete_both_items(&self) -> Option<Vec<TransferItem>> {
         let entry = self.selected_entry()?;
         let left = transfer_plan_for(entry, TransferAction::DeleteLeft)?;
         let right = transfer_plan_for(entry, TransferAction::DeleteRight)?;
+        // When both endpoints address the same directory the entry is a
+        // single file, so a second delete would fail on what the first
+        // one just removed.
+        if self.left.same_provider(&self.right)
+            && self.left.path() == self.right.path()
+        {
+            return Some(vec![left.item]);
+        }
         Some(vec![left.item, right.item])
     }
 
@@ -5173,6 +5182,29 @@ mod tests {
         equal.update(cx, |state, _cx| {
             let items = state.delete_both_items().expect("both sides exist");
             assert_eq!(items.len(), 2);
+        });
+
+        // A shared root is one file, so delete-both submits a single
+        // item: a second delete would fail on what the first removed.
+        let shared = cx.new(|cx| {
+            let mut state = AppState::new(
+                Endpoint::local("/same"),
+                Endpoint::local("/same"),
+                "test".into(),
+                cx,
+            );
+            state.set_comparison_for_test(comparison(vec![entry(
+                "pair.txt",
+                DirEntryStatus::DIFFERENT,
+                Some(info("pair.txt", 1, "")),
+                Some(info("pair.txt", 2, "")),
+            )]));
+            state
+        });
+        shared.update(cx, |state, _cx| {
+            let items = state.delete_both_items().expect("both sides exist");
+            assert_eq!(items.len(), 1);
+            assert_eq!(items[0].action, TransferAction::DeleteLeft);
         });
     }
 
