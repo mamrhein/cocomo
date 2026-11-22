@@ -1199,6 +1199,11 @@ pub(crate) fn dispatch_settings_key(key: KeyEvent) -> bool {
     dispatch_key(|s| matches!(s.ui.mode, SessionMode::Settings), key)
 }
 
+/// Handle a key press for the open session info modal.
+pub(crate) fn dispatch_info_key(key: KeyEvent) -> bool {
+    dispatch_key(|s| matches!(s.ui.mode, SessionMode::Info), key)
+}
+
 /// Handle a key press for the open report modal.
 pub(crate) fn dispatch_report_key(key: KeyEvent) -> bool {
     dispatch_key(|s| matches!(s.ui.mode, SessionMode::Report { .. }), key)

@@ -257,6 +257,7 @@ pub const MENUS: &[MenuDef] = &[
             item("Reload", Cmd::Reload, MenuViews::SESSION),
             MenuEntry::Separator,
             item("Report\u{2026}", Cmd::OpenReport, MenuViews::DIR),
+            item("Info\u{2026}", Cmd::OpenSessionInfo, MenuViews::SESSION),
             MenuEntry::Separator,
             item("Close tab", Cmd::CloseTab, MenuViews::ALL),
             item(
@@ -857,6 +858,7 @@ mod tests {
             Cmd::OpenSettings,
             Cmd::SwapSides,
             Cmd::Reload,
+            Cmd::OpenSessionInfo,
             Cmd::CloseTab,
             Cmd::Quit,
         ] {
@@ -876,10 +878,15 @@ mod tests {
                 &TransferMenuState::default()
             )
         );
-        // Swap sides, reload and close-all run in either session view but
-        // stay dimmed on the welcome screen (where there is nothing to
-        // close).
-        for cmd in [Cmd::SwapSides, Cmd::Reload, Cmd::CloseAllSessions] {
+        // Swap sides, reload, the info modal and close-all run in either
+        // session view but stay dimmed on the welcome screen (where there
+        // is nothing to close).
+        for cmd in [
+            Cmd::SwapSides,
+            Cmd::Reload,
+            Cmd::OpenSessionInfo,
+            Cmd::CloseAllSessions,
+        ] {
             let entry = leaf(sessions.entries, cmd);
             assert!(entry.available(
                 Some(MenuView::Dir),

@@ -93,6 +93,10 @@ pub enum KeyScope {
     /// The settings modal is open. `Enter` toggles the highlighted entry
     /// through its `OptionList` child and is deliberately not listed.
     Settings,
+    /// The session info modal is open. `Enter` and `Esc` both close it;
+    /// neither is labelled in the keymap, as the modal's own hint line
+    /// documents them.
+    SessionInfo,
     /// The sync approval modal is open. `y` executes the planned batch, `n`
     /// and `Esc` reject it; `j`/`k`/`Enter` are owned by its `OptionList`
     /// child and deliberately not listed.
@@ -187,6 +191,8 @@ pub enum Cmd {
     OpenSettings,
     /// Open the report modal (`R`).
     OpenReport,
+    /// Open the session info modal (`I`).
+    OpenSessionInfo,
     /// Re-run the current comparison.
     Reload,
     /// Exchange the left and right sides of the session (`X`).
@@ -503,6 +509,13 @@ const KEYMAP: &[KeyBinding] = &[
         help: Some(("R", "report")),
     },
     KeyBinding {
+        key: KeyCode::Char('I'),
+        modifiers: NONE,
+        scope: KeyScope::DirNormal,
+        cmd: Cmd::OpenSessionInfo,
+        help: Some(("I", "info")),
+    },
+    KeyBinding {
         key: KeyCode::Char('/'),
         modifiers: NONE,
         scope: KeyScope::DirNormal,
@@ -664,6 +677,13 @@ const KEYMAP: &[KeyBinding] = &[
         cmd: Cmd::OpenSettings,
         help: Some((",", "settings")),
     },
+    KeyBinding {
+        key: KeyCode::Char('I'),
+        modifiers: NONE,
+        scope: KeyScope::TextNormal,
+        cmd: Cmd::OpenSessionInfo,
+        help: Some(("I", "info")),
+    },
     // -- Transfer dialog (its own input layer; the `OptionList` inside
     //    owns j/k/Enter, so only the accelerators are listed here). --
     KeyBinding {
@@ -751,6 +771,22 @@ const KEYMAP: &[KeyBinding] = &[
         key: KeyCode::Esc,
         modifiers: NONE,
         scope: KeyScope::Settings,
+        cmd: Cmd::PanelClose,
+        help: None,
+    },
+    // -- Session info modal (its own input layer; both closing keys are
+    //    documented by the modal's hint line, so they are unlabelled). --
+    KeyBinding {
+        key: KeyCode::Esc,
+        modifiers: NONE,
+        scope: KeyScope::SessionInfo,
+        cmd: Cmd::PanelClose,
+        help: None,
+    },
+    KeyBinding {
+        key: KeyCode::Enter,
+        modifiers: NONE,
+        scope: KeyScope::SessionInfo,
         cmd: Cmd::PanelClose,
         help: None,
     },
@@ -1149,6 +1185,7 @@ pub fn handle_session_key(
             return handle_filter_panel_key(session, key);
         }
         SessionMode::Settings => return handle_settings_key(session, key),
+        SessionMode::Info => return handle_session_info_key(session, key),
         SessionMode::Report { .. } => return handle_report_key(session, key),
         SessionMode::SyncConfirm => {
             return handle_sync_confirm_key(session, key);
@@ -1300,6 +1337,10 @@ fn execute(cmd: Cmd, session: &mut SessionView) -> SessionAction {
             session.ui.mode = SessionMode::Report {
                 draft: Box::new(ReportDraft::default()),
             };
+            SessionAction::None
+        }
+        Cmd::OpenSessionInfo => {
+            session.ui.mode = SessionMode::Info;
             SessionAction::None
         }
         Cmd::Reload => SessionAction::Reload,
@@ -1728,6 +1769,22 @@ fn handle_settings_key(
         return None;
     }
     let cmd = lookup(KeyScope::Settings, key)?;
+    Some(execute(cmd, session))
+}
+
+/// Handle a key for the open session info modal.
+///
+/// The modal is a pure viewer: `Enter` and `Esc` both close it, every
+/// other key is ignored (its exclusive input layer keeps the shell and
+/// the table from seeing it).
+fn handle_session_info_key(
+    session: &mut SessionView,
+    key: KeyEvent,
+) -> Option<SessionAction> {
+    if !matches!(session.ui.mode, SessionMode::Info) {
+        return None;
+    }
+    let cmd = lookup(KeyScope::SessionInfo, key)?;
     Some(execute(cmd, session))
 }
 
@@ -3425,6 +3482,36 @@ mod tests {
             Some(SessionAction::None)
         );
         assert_eq!(session.ui.mode, SessionMode::Normal);
+    }
+
+    #[test]
+    fn info_modal_opens_and_closes_on_both_session_types() {
+        for mut session in [dir_session(), text_session()] {
+            assert_eq!(
+                press(&mut session, KeyCode::Char('I')),
+                Some(SessionAction::None)
+            );
+            assert_eq!(session.ui.mode, SessionMode::Info);
+            // Unbound keys are ignored; the modal's layer swallows them.
+            assert_eq!(press(&mut session, KeyCode::Char('j')), None);
+            assert_eq!(
+                press(&mut session, KeyCode::Enter),
+                Some(SessionAction::None)
+            );
+            assert_eq!(session.ui.mode, SessionMode::Normal);
+
+            // The modal re-opens and `Esc` closes it as well.
+            assert_eq!(
+                press(&mut session, KeyCode::Char('I')),
+                Some(SessionAction::None)
+            );
+            assert_eq!(session.ui.mode, SessionMode::Info);
+            assert_eq!(
+                press(&mut session, KeyCode::Esc),
+                Some(SessionAction::None)
+            );
+            assert_eq!(session.ui.mode, SessionMode::Normal);
+        }
     }
 
     #[test]

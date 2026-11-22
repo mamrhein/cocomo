@@ -35,6 +35,7 @@ use super::{
     report_modal::ReportModal,
     save_overwrite::SaveOverwriteModal,
     session_browser::SessionBrowser,
+    session_info::SessionInfoModal,
     settings_modal::SettingsModal,
     sync_confirm::SyncConfirmModal,
     tab_bar::TabBar,
@@ -585,6 +586,7 @@ pub(crate) fn App(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             SessionBrowser()
             SettingsModal()
             ReportModal()
+            SessionInfoModal()
             // Full keymap reference behind F1 (idea d3). The framework
             // modal owns an exclusive input layer while open and closes on
             // its close keys or any click; `j`/`k` scroll its body. The
@@ -804,14 +806,18 @@ mod error_dialog_size_tests {
 mod render_tests {
     use cocomo_lib::{
         CopyOptions, DirComparison, DirEntry, DirEntryStatus, Endpoint,
-        EntryInfo, SyncResult, TransferAction, TransferItem,
+        EntryInfo, Grammar, SyncResult, TransferAction, TransferItem,
+        compare_texts,
     };
     use ratatui_kit::{ratatui::buffer::Buffer, test_util::render_frames};
 
     use super::*;
     use crate::{
         menu::{MenuEntry, MenuView},
-        state::{APP_STATE, AppState, SessionMode, SessionView, TransferOp},
+        state::{
+            APP_STATE, AppState, NamePattern, SessionMode, SessionView,
+            TextRules, TextSource, TransferOp,
+        },
         ui::{frame::SPINNER_FRAMES, theme::cocomo_palette},
     };
 
@@ -1333,6 +1339,119 @@ mod render_tests {
         assert!(!closed.contains("Keyboard shortcuts"), "{closed}");
         assert!(closed.contains("Loading comparison"), "{closed}");
     }
+
+    #[test]
+    fn info_modal_lists_the_folder_summary() {
+        let mut app = dir_session_state();
+        {
+            let session = app.active_mut().unwrap();
+            let info = |name: &str| EntryInfo {
+                name: name.into(),
+                path: name.into(),
+                ..Default::default()
+            };
+            let entry =
+                |name: &str, status, left: bool, right: bool| DirEntry {
+                    name: name.into(),
+                    status,
+                    left: left.then(|| info(name)),
+                    right: right.then(|| info(name)),
+                    center: None,
+                    sub_entries: None,
+                    name_conflict: false,
+                };
+            session.set_comparison(Some(DirComparison {
+                entries: vec![
+                    entry("same.txt", DirEntryStatus::Equal, true, true),
+                    entry("newer.txt", DirEntryStatus::LeftNewer, true, true),
+                    entry(
+                        "extra.txt",
+                        DirEntryStatus::RightOrphan,
+                        false,
+                        true,
+                    ),
+                ],
+                ..Default::default()
+            }));
+            session.ui.mode = SessionMode::Info;
+        }
+        let screen = render(app);
+        assert!(screen.contains("Session info"), "{screen}");
+        assert!(
+            row_with(&screen, "Left:").contains("/left"),
+            "pair paths missing:\n{screen}"
+        );
+        assert!(
+            screen.contains("Entries: 3 (3 files, 0 directories)"),
+            "{screen}"
+        );
+        assert!(screen.contains("Identical: 1"), "{screen}");
+        assert!(screen.contains("Different: 1"), "{screen}");
+        assert!(screen.contains("Orphans: 1"), "{screen}");
+        assert!(
+            screen.contains("Filters: same, different, orphans"),
+            "{screen}"
+        );
+        assert!(screen.contains("Hidden items: shown"), "{screen}");
+        assert!(!screen.contains("Name filter"), "{screen}");
+        assert!(
+            screen.contains("Enter close") && screen.contains("Esc close"),
+            "closing hints missing:\n{screen}"
+        );
+        // Closed by default: the main view shows through again.
+        let closed = render(dir_session_state());
+        assert!(!closed.contains("Session info"), "{closed}");
+        assert!(closed.contains("Loading comparison"), "{closed}");
+    }
+
+    #[test]
+    fn info_modal_reports_the_unloaded_state_and_active_filters() {
+        let mut app = dir_session_state();
+        {
+            let session = app.active_mut().unwrap();
+            let dir = session.dir_mut().unwrap();
+            dir.display.show_statuses =
+                DirEntryStatus::DIFFERENT | DirEntryStatus::ORPHAN;
+            dir.display.show_hidden = false;
+            session.ui.name_filter = Some(NamePattern::new("^log").unwrap());
+            session.ui.mode = SessionMode::Info;
+        }
+        let screen = render(app);
+        assert!(screen.contains("Comparison: not loaded yet"), "{screen}");
+        assert!(screen.contains("Filters: different, orphans"), "{screen}");
+        assert!(screen.contains("Hidden items: hidden"), "{screen}");
+        assert!(screen.contains("Name filter: ^log"), "{screen}");
+    }
+
+    #[test]
+    fn info_modal_lists_the_text_stats() {
+        let mut app = AppState::new();
+        let left = "alpha\nbeta\ngamma\ndelta".to_string();
+        let right = "alpha\nBETA\ngamma\ndelta\nepsilon".to_string();
+        let rules = TextRules::default();
+        let diff = compare_texts(
+            &left,
+            &right,
+            &rules.compare_settings(&Grammar::plain_text()),
+        );
+        app.add_session(SessionView::new_text_compare(
+            Endpoint::local("/left/a.txt"),
+            Endpoint::local("/right/b.txt"),
+            diff,
+            Grammar::plain_text(),
+            TextSource { left, right, rules },
+        ));
+        app.active_mut().unwrap().ui.mode = SessionMode::Info;
+        let screen = render(app);
+        assert!(screen.contains("Left lines:  4"), "{screen}");
+        assert!(screen.contains("Right lines: 5"), "{screen}");
+        assert!(screen.contains("Difference sections: 2"), "{screen}");
+        assert!(screen.contains("Inserted lines: 1"), "{screen}");
+        assert!(screen.contains("Deleted lines: 0"), "{screen}");
+        assert!(screen.contains("Changed lines: 1"), "{screen}");
+        // The folder-only rows stay away from a text session.
+        assert!(!screen.contains("Identical:"), "{screen}");
+    }
 }
 
 #[cfg(test)]
@@ -1425,12 +1544,13 @@ mod menu_mouse_tests {
         let dropdown = Some((menu, rect, None));
         APP_STATE.set(AppState::new());
         APP_STATE.state().write().menu = Some(menu);
-        // The quit row is the thirteenth entry, i.e. the fourteenth
-        // content row of the box (below its top border).
+        // The quit row is the fourteenth entry (the info item shifted it
+        // down), i.e. the fifteenth content row of the box (below its top
+        // border).
         menu_mouse(
             Position {
                 x: rect.x + 2,
-                y: rect.y + 13,
+                y: rect.y + 14,
             },
             &titles,
             &bar,

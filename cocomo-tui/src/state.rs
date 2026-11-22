@@ -25,7 +25,7 @@ use std::{
 
 use cocomo_lib::{
     CopyOptions, DirComparison, DirEntry, DirEntryStatus, Endpoint, Grammar,
-    MergedDiffRow, SessionSettings, SyncOperation, SyncResult,
+    MergedDiffRow, SessionSettings, SummaryBucket, SyncOperation, SyncResult,
     TextCompareSettings, TextDiff, TransferAction, TransferItem,
     WhitespaceMode, compare_texts,
     filter::DisplayFilters,
@@ -78,6 +78,11 @@ pub enum SessionMode {
     /// [`SessionMode::SyncConfirm`], the modal's exclusive input layer owns
     /// every key while it is open, so this is not a text-entry mode either.
     SaveOverwrite { name: String },
+    /// The session info modal (`I`) is open, showing the pair paths, the
+    /// status summary and the active filters of the current session. Like
+    /// [`SessionMode::Settings`], the modal's exclusive input layer owns
+    /// every key while it is open, so this is not a text-entry mode either.
+    Info,
 }
 
 /// Which transfer the [`SessionMode::Transfer`] dialog offers.
@@ -386,9 +391,10 @@ impl SessionMode {
     /// `controller::dispatch_save_key` and the `Editing` keymap
     /// scope is only a fallback guard; `Search` and `Command` raise their
     /// layer from their `SearchInput` once editing is activated. The modal
-    /// panels (`FilterPanel`, `Settings`, `Report`) are not text-entry
-    /// modes: like [`SessionMode::Transfer`] they own an exclusive input
-    /// layer that keeps the shell and the table from seeing keys.
+    /// panels (`FilterPanel`, `Settings`, `Report`, `Info`) are not
+    /// text-entry modes: like [`SessionMode::Transfer`] they own an
+    /// exclusive input layer that keeps the shell and the table from seeing
+    /// keys.
     pub fn is_editing(&self) -> bool {
         matches!(
             self,
@@ -930,6 +936,28 @@ impl DirView {
     }
 }
 
+/// Per-status entry counts for the session info modal.
+///
+/// Mirrors the GUI's `StatusSummary`: the counts are taken over the
+/// entries the display and name filters show, split by kind (file vs.
+/// directory) and by summary bucket (see
+/// [`DirEntryStatus::summary_bucket`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct StatusSummary {
+    /// Total number of entries.
+    pub total: usize,
+    /// Number of entries that are directories on either side.
+    pub dirs: usize,
+    /// Number of entries that are files on both existing sides.
+    pub files: usize,
+    /// Number of identical entries.
+    pub same: usize,
+    /// Number of different entries.
+    pub different: usize,
+    /// Number of orphan entries (exist on one side only).
+    pub orphans: usize,
+}
+
 /// One visible row of the directory view's expandable tree.
 ///
 /// The rows are the filtered comparison flattened depth-first: a directory
@@ -1358,6 +1386,53 @@ impl SessionView {
         }
 
         true
+    }
+
+    /// Per-status counts over all entries the display and name filters
+    /// show, or `None` while no comparison is loaded.
+    ///
+    /// Unlike [`Self::visible_rows`] this walks collapsed subtrees too, so
+    /// the info modal reports the whole filtered comparison rather than
+    /// only the rows the user happens to have expanded. A directory
+    /// excluded by a filter drops its whole subtree, exactly as in the
+    /// tree view.
+    pub fn visible_summary(&self) -> Option<StatusSummary> {
+        let dir = self.dir()?;
+        let comparison = dir.comparison.as_ref()?;
+        let mut summary = StatusSummary::default();
+        self.collect_summary(&comparison.entries, dir, &mut summary);
+        Some(summary)
+    }
+
+    /// Recursively add the visible entries of one comparison level to
+    /// `summary`.
+    fn collect_summary(
+        &self,
+        entries: &[DirEntry],
+        dir: &DirView,
+        summary: &mut StatusSummary,
+    ) {
+        for entry in entries {
+            if !self.entry_visible(dir, entry) {
+                continue;
+            }
+            summary.total += 1;
+            if entry.left.as_ref().is_some_and(|l| l.is_dir)
+                || entry.right.as_ref().is_some_and(|r| r.is_dir)
+            {
+                summary.dirs += 1;
+            } else {
+                summary.files += 1;
+            }
+            match entry.status.summary_bucket() {
+                SummaryBucket::Same => summary.same += 1,
+                SummaryBucket::Different => summary.different += 1,
+                SummaryBucket::Orphan => summary.orphans += 1,
+            }
+            if let Some(sub) = entry.sub_entries.as_deref() {
+                self.collect_summary(&sub.entries, dir, summary);
+            }
+        }
     }
 
     /// The row under the table selection, `None` when nothing is selected
@@ -2071,6 +2146,97 @@ mod tests {
             .map(|r| r.entry.name.as_str())
             .collect();
         assert_eq!(names, ["plain.txt"]);
+    }
+
+    #[test]
+    fn visible_summary_counts_the_whole_tree_not_just_expanded_rows() {
+        let mut session = dir_session();
+        let sub = comparison(&[
+            ("same.txt", DirEntryStatus::Equal),
+            ("newer.txt", DirEntryStatus::LeftNewer),
+        ]);
+        session.set_comparison(Some(DirComparison {
+            entries: vec![
+                dir_entry("sub", DirEntryStatus::LeftNewer, Some(sub)),
+                DirEntry {
+                    name: "loose.txt".into(),
+                    status: DirEntryStatus::LeftOrphan,
+                    left: None,
+                    right: None,
+                    center: None,
+                    sub_entries: None,
+                    name_conflict: false,
+                },
+            ],
+            ..Default::default()
+        }));
+        // `sub` is collapsed: the tree shows one row, the summary counts
+        // the whole subtree.
+        assert_eq!(session.visible_rows().len(), 2);
+        assert_eq!(
+            session.visible_summary().unwrap(),
+            StatusSummary {
+                total: 4,
+                dirs: 1,
+                files: 3,
+                same: 1,
+                different: 2,
+                orphans: 1,
+            }
+        );
+
+        // The status filter excludes whole subtrees: switching off the
+        // different group drops `sub` and its two children.
+        session
+            .dir_mut()
+            .unwrap()
+            .display
+            .show_statuses
+            .remove(DirEntryStatus::DIFFERENT);
+        assert_eq!(
+            session.visible_summary().unwrap(),
+            StatusSummary {
+                total: 1,
+                dirs: 0,
+                files: 1,
+                same: 0,
+                different: 0,
+                orphans: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn visible_summary_applies_hidden_and_name_filters() {
+        let mut session = dir_session();
+        session.set_comparison(Some(comparison(&[
+            (".secret", DirEntryStatus::Equal),
+            ("alpha", DirEntryStatus::LeftNewer),
+            ("beta.txt", DirEntryStatus::LeftOrphan),
+        ])));
+        assert_eq!(session.visible_summary().unwrap().total, 3);
+
+        session.dir_mut().unwrap().display.show_hidden = false;
+        assert_eq!(session.visible_summary().unwrap().total, 2);
+
+        session.ui.name_filter = Some(NamePattern::new("alpha").unwrap());
+        assert_eq!(
+            session.visible_summary().unwrap(),
+            StatusSummary {
+                total: 1,
+                dirs: 0,
+                files: 1,
+                same: 0,
+                different: 1,
+                orphans: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn visible_summary_is_none_without_a_loaded_comparison() {
+        let session = dir_session();
+        assert!(session.visible_summary().is_none());
     }
 
     #[test]
