@@ -1912,6 +1912,15 @@ pub(crate) fn confirm_menu_item() -> MenuOutcome {
                     // active session, so it runs on the welcome screen
                     // too.
                     SessionAction::OpenSessionBrowser
+                } else if cmd == Cmd::CloseAllSessions {
+                    // App-level command: close every tab and land on the
+                    // welcome screen. Deliberately not a quit and not
+                    // `CloseTab`: the app keeps running no matter how many
+                    // tabs were open (unlike closing the last tab, which
+                    // exits).
+                    app.sessions.clear();
+                    app.active_tab = 0;
+                    return MenuOutcome::Handled;
                 } else {
                     let Some(session) = app.active_mut() else {
                         return MenuOutcome::Handled;
@@ -2674,6 +2683,71 @@ mod tests {
         });
         assert_eq!(confirm_menu_item(), MenuOutcome::CloseTab);
         assert_eq!(APP_STATE.state().read().menu, None);
+    }
+
+    /// Open the Sessions dropdown with the highlight resting on the leaf
+    /// running `cmd` (the menu-state shape a click on that row produces).
+    fn open_sessions_item(cmd: Cmd) {
+        let sessions = menu::menu_at(menu_index("Sessions")).unwrap();
+        let item = sessions
+            .entries
+            .iter()
+            .position(|e| e.cmd() == Some(cmd))
+            .unwrap();
+        APP_STATE.state().write().menu = Some(MenuState {
+            bar_index: menu_index("Sessions"),
+            item,
+            sub: None,
+        });
+    }
+
+    #[test]
+    fn confirm_menu_item_close_all_sessions_shows_the_welcome_screen() {
+        // Two open tabs; close-all drops every one of them instead of
+        // quitting.
+        let mut app = dir_app_state();
+        app.add_session(SessionView::new_dir_compare(
+            Endpoint::local("/left2"),
+            Endpoint::local("/right2"),
+            false,
+        ));
+        APP_STATE.set(app);
+        open_sessions_item(Cmd::CloseAllSessions);
+        assert_eq!(confirm_menu_item(), MenuOutcome::Handled);
+        let state = APP_STATE.state();
+        let app = state.read();
+        assert!(
+            app.sessions.is_empty(),
+            "close-all must drop every open tab"
+        );
+        assert_eq!(app.active_tab, 0);
+        assert_eq!(app.menu, None);
+    }
+
+    #[test]
+    fn confirm_menu_item_close_all_on_the_last_tab_does_not_quit() {
+        APP_STATE.set(dir_app_state());
+        open_sessions_item(Cmd::CloseAllSessions);
+        // `Handled` (not `Quit` or `CloseTab`): with the last tab closed
+        // the app stays alive and the welcome screen takes over.
+        assert_eq!(confirm_menu_item(), MenuOutcome::Handled);
+        let state = APP_STATE.state();
+        let app = state.read();
+        assert!(app.sessions.is_empty());
+        assert_eq!(app.menu, None);
+    }
+
+    #[test]
+    fn confirm_menu_item_close_all_is_a_noop_on_the_welcome_screen() {
+        APP_STATE.set(AppState::new());
+        open_sessions_item(Cmd::CloseAllSessions);
+        // The item is dimmed on the welcome screen; confirming it stays a
+        // no-op.
+        assert_eq!(confirm_menu_item(), MenuOutcome::Handled);
+        let state = APP_STATE.state();
+        let app = state.read();
+        assert!(app.sessions.is_empty());
+        assert_eq!(app.menu, None);
     }
 
     #[tokio::test]

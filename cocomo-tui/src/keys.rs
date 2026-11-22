@@ -114,6 +114,9 @@ pub enum Cmd {
     // -- Global scope: executed by the App shell. --
     /// Close the active tab (quit when it was the last one).
     CloseTab,
+    /// Close every open tab, landing on the welcome screen (menu-only;
+    /// never bound to a key, and explicitly not a quit).
+    CloseAllSessions,
     /// Switch to the next tab, or the previous one with Shift.
     SwitchTab,
     /// Open the menu at the given bar index (`Alt+<accel>`; a test keeps
@@ -1431,9 +1434,11 @@ fn execute(cmd: Cmd, session: &mut SessionView) -> SessionAction {
         }
         // Global and menu commands are dispatched by the App shell, never
         // here. `SessionNew` is owned by the app-level session browser
-        // (`controller::dispatch_browser_key`), and the copy-default toggles
-        // by the controller's menu confirmation (`confirm_menu_item`).
+        // (`controller::dispatch_browser_key`), `CloseAllSessions` and the
+        // copy-default toggles by the controller's menu confirmation
+        // (`confirm_menu_item`).
         Cmd::CloseTab
+        | Cmd::CloseAllSessions
         | Cmd::SessionNew
         | Cmd::SwitchTab
         | Cmd::MenuOpen(_)

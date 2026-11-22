@@ -1425,12 +1425,12 @@ mod menu_mouse_tests {
         let dropdown = Some((menu, rect, None));
         APP_STATE.set(AppState::new());
         APP_STATE.state().write().menu = Some(menu);
-        // The quit row is the twelfth entry, i.e. the thirteenth content
-        // row of the box (below its top border).
+        // The quit row is the thirteenth entry, i.e. the fourteenth
+        // content row of the box (below its top border).
         menu_mouse(
             Position {
                 x: rect.x + 2,
-                y: rect.y + 12,
+                y: rect.y + 13,
             },
             &titles,
             &bar,
