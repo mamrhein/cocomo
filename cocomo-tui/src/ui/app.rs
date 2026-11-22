@@ -359,6 +359,10 @@ pub(crate) fn App(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             Cmd::ToggleShortcuts => {
                                 controller::toggle_shortcuts()
                             }
+                            Cmd::SaveWorkspace => controller::save_workspace(),
+                            Cmd::RestoreWorkspace => {
+                                controller::restore_workspace()
+                            }
                             _ => {}
                         }
                     }
@@ -452,6 +456,22 @@ pub(crate) fn App(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 }
                 Cmd::ToggleShortcuts => {
                     controller::toggle_shortcuts();
+                }
+                Cmd::SaveWorkspace => {
+                    // Text-entry modes own the keyboard; while one is
+                    // open, `W` types into its field instead of saving
+                    // (same belt-and-braces guard as `q` for Quit).
+                    if app_state
+                        .read()
+                        .active()
+                        .is_some_and(|s| s.ui.mode.is_editing())
+                    {
+                        return EventResult::Ignored;
+                    }
+                    controller::save_workspace();
+                }
+                Cmd::RestoreWorkspace => {
+                    controller::restore_workspace();
                 }
                 // Session keys are owned by the session view components.
                 _ => return EventResult::Ignored,
@@ -1544,13 +1564,13 @@ mod menu_mouse_tests {
         let dropdown = Some((menu, rect, None));
         APP_STATE.set(AppState::new());
         APP_STATE.state().write().menu = Some(menu);
-        // The quit row is the fourteenth entry (the info item shifted it
-        // down), i.e. the fifteenth content row of the box (below its top
-        // border).
+        // The quit row is the seventeenth entry (the info item and the
+        // workspace group shifted it down), i.e. the eighteenth content
+        // row of the box (below its top border).
         menu_mouse(
             Position {
                 x: rect.x + 2,
-                y: rect.y + 14,
+                y: rect.y + 17,
             },
             &titles,
             &bar,

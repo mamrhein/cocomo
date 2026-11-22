@@ -121,6 +121,10 @@ pub enum Cmd {
     /// Close every open tab, landing on the welcome screen (menu-only;
     /// never bound to a key, and explicitly not a quit).
     CloseAllSessions,
+    /// Save every open session as the persisted workspace (`W`).
+    SaveWorkspace,
+    /// Replace the open tabs with the persisted workspace (`Ctrl+R`).
+    RestoreWorkspace,
     /// Switch to the next tab, or the previous one with Shift.
     SwitchTab,
     /// Open the menu at the given bar index (`Alt+<accel>`; a test keeps
@@ -1052,6 +1056,22 @@ const KEYMAP: &[KeyBinding] = &[
         cmd: Cmd::ToggleShortcuts,
         help: Some(("F1", "shortcuts")),
     },
+    KeyBinding {
+        // Capital W keeps the workspace commands out of the way of the
+        // lowercase session keys (`w` writes files in editor modes).
+        key: KeyCode::Char('W'),
+        modifiers: NONE,
+        scope: KeyScope::Global,
+        cmd: Cmd::SaveWorkspace,
+        help: Some(("W", "save workspace")),
+    },
+    KeyBinding {
+        key: KeyCode::Char('r'),
+        modifiers: CTRL,
+        scope: KeyScope::Global,
+        cmd: Cmd::RestoreWorkspace,
+        help: Some(("Ctrl+R", "restore workspace")),
+    },
 ];
 
 /// Return the command bound to `key` in `scope`, if any.
@@ -1475,11 +1495,13 @@ fn execute(cmd: Cmd, session: &mut SessionView) -> SessionAction {
         }
         // Global and menu commands are dispatched by the App shell, never
         // here. `SessionNew` is owned by the app-level session browser
-        // (`controller::dispatch_browser_key`), `CloseAllSessions` and the
-        // copy-default toggles by the controller's menu confirmation
-        // (`confirm_menu_item`).
+        // (`controller::dispatch_browser_key`), `CloseAllSessions`, the
+        // workspace commands and the copy-default toggles by the
+        // controller's menu confirmation (`confirm_menu_item`).
         Cmd::CloseTab
         | Cmd::CloseAllSessions
+        | Cmd::SaveWorkspace
+        | Cmd::RestoreWorkspace
         | Cmd::SessionNew
         | Cmd::SwitchTab
         | Cmd::MenuOpen(_)
@@ -3568,6 +3590,28 @@ mod tests {
                 lookup(scope, key(KeyCode::Char('X'))),
                 Some(Cmd::SwapSides),
                 "the {scope:?} scope must bind X to Swap sides"
+            );
+        }
+    }
+
+    #[test]
+    fn workspace_keys_are_bound_globally_only() {
+        // `W` saves and `Ctrl+R` restores, in the shell only: session
+        // scopes keep their lowercase `w` and `r` keys untouched.
+        assert_eq!(
+            lookup(KeyScope::Global, key(KeyCode::Char('W'))),
+            Some(Cmd::SaveWorkspace)
+        );
+        assert_eq!(
+            lookup(KeyScope::Global, KeyEvent::new(KeyCode::Char('r'), CTRL)),
+            Some(Cmd::RestoreWorkspace)
+        );
+        for scope in [KeyScope::DirNormal, KeyScope::TextNormal] {
+            assert_eq!(lookup(scope, key(KeyCode::Char('W'))), None);
+            assert_eq!(
+                lookup(scope, KeyEvent::new(KeyCode::Char('r'), CTRL)),
+                None,
+                "the {scope:?} scope must keep Ctrl+R free for the shell"
             );
         }
     }

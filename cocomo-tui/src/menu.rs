@@ -265,6 +265,9 @@ pub const MENUS: &[MenuDef] = &[
                 Cmd::CloseAllSessions,
                 MenuViews::SESSION,
             ),
+            MenuEntry::Separator,
+            item("Save workspace", Cmd::SaveWorkspace, MenuViews::ALL),
+            item("Restore workspace", Cmd::RestoreWorkspace, MenuViews::ALL),
             item("Quit", Cmd::Quit, MenuViews::ALL),
         ],
     },
@@ -860,6 +863,8 @@ mod tests {
             Cmd::Reload,
             Cmd::OpenSessionInfo,
             Cmd::CloseTab,
+            Cmd::SaveWorkspace,
+            Cmd::RestoreWorkspace,
             Cmd::Quit,
         ] {
             assert!(
@@ -899,6 +904,24 @@ mod tests {
             assert!(
                 !entry.available(None, &TransferMenuState::default()),
                 "{cmd:?} must stay dimmed on the welcome screen"
+            );
+        }
+        // The workspace commands run everywhere: saving without an open
+        // session is a harmless no-op, and restoring is exactly what the
+        // welcome screen is for.
+        for cmd in [Cmd::SaveWorkspace, Cmd::RestoreWorkspace] {
+            let entry = leaf(sessions.entries, cmd);
+            assert!(entry.available(
+                Some(MenuView::Dir),
+                &TransferMenuState::default()
+            ));
+            assert!(entry.available(
+                Some(MenuView::Text),
+                &TransferMenuState::default()
+            ));
+            assert!(
+                entry.available(None, &TransferMenuState::default()),
+                "{cmd:?} must also run from the welcome screen"
             );
         }
     }

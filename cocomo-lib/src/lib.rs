@@ -56,6 +56,8 @@
 //! - [`session`] — Session management for workspaces.
 //! - [`snapshot`] — Point-in-time snapshots of directory trees.
 //! - [`url`] — Credential-free remote-filesystem URL parsing.
+//! - [`workspace`] — Window workspace persistence (`workspace.json`), shared
+//!   by the frontends.
 
 #![forbid(unsafe_code)]
 
@@ -91,6 +93,7 @@ pub mod text;
 pub mod transfer;
 pub mod url;
 pub mod webdav;
+pub mod workspace;
 pub mod zip;
 
 // Re-exports for convenience.

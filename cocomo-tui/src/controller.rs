@@ -33,8 +33,10 @@ use cocomo_lib::{
     Endpoint, FsError, FsPair, Grammar, NodeFileSystem, NullPrompter,
     Prompter, Provider, SessionConfig, SessionType as LibSessionType,
     SyncOperation, SyncResult, SyncRules, compare_texts, default_session_dir,
-    execute_transfers, list_saved_sessions, report::generate_report,
+    execute_transfers, list_saved_sessions,
+    report::generate_report,
     session_file_exists_in,
+    workspace::{WindowWorkspace, Workspace},
 };
 use ratatui_kit::crossterm::event::{KeyCode, KeyEvent};
 
@@ -1926,6 +1928,17 @@ pub(crate) fn confirm_menu_item() -> MenuOutcome {
                     app.sessions.clear();
                     app.active_tab = 0;
                     return MenuOutcome::Handled;
+                } else if cmd == Cmd::SaveWorkspace {
+                    // App-level command: persist every open session. Drop
+                    // the guard first; the spawned task takes the state
+                    // lock itself.
+                    drop(app);
+                    save_workspace();
+                    return MenuOutcome::Handled;
+                } else if cmd == Cmd::RestoreWorkspace {
+                    drop(app);
+                    restore_workspace();
+                    return MenuOutcome::Handled;
                 } else {
                     let Some(session) = app.active_mut() else {
                         return MenuOutcome::Handled;
@@ -1987,6 +2000,88 @@ fn sanitize_paste(text: &str) -> Option<String> {
                 .to_string()
         })
         .filter(|line| !line.is_empty())
+}
+
+/// Persist every open session as the saved workspace file.
+///
+/// All open tabs are written as a single window (the TUI keeps its
+/// sessions in one window); a welcome screen with no tabs writes nothing,
+/// leaving any previously saved workspace in place.
+pub(crate) fn save_workspace() {
+    save_workspace_to(cocomo_lib::workspace::workspace_path());
+}
+
+/// Save the open tabs of [`AppState`] as one window at `path`.
+fn save_workspace_to(path: PathBuf) {
+    spawn_task(
+        |app| {
+            let tabs: Vec<SessionConfig> =
+                app.sessions.iter().map(session_to_config).collect();
+            (!tabs.is_empty())
+                .then(|| WindowWorkspace::new(tabs, app.active_index()))
+        },
+        move |tabs| async move {
+            let mut workspace = Workspace::new();
+            workspace.windows.push(tabs);
+            cocomo_lib::workspace::save_workspace_to(&workspace, &path)?;
+            Ok(())
+        },
+        |_, ()| {},
+        "Failed to save workspace",
+        "Saving workspace",
+    );
+}
+
+/// Replace the open tabs with the saved workspace file.
+///
+/// The last window's active tab is restored; a missing or stale file is
+/// reported and leaves the current tabs untouched.
+pub(crate) fn restore_workspace() {
+    restore_workspace_from(cocomo_lib::workspace::workspace_path());
+}
+
+/// Load the workspace at `path` and replace the tabs with its sessions.
+fn restore_workspace_from(path: PathBuf) {
+    spawn_task(
+        move |_| Some(path),
+        move |path| async move {
+            let Some(workspace) =
+                cocomo_lib::workspace::load_workspace_from(&path)
+            else {
+                report_error("No saved workspace to restore");
+                return Ok((Vec::new(), 0));
+            };
+            let active_index =
+                workspace.windows.first().map_or(0, |w| w.active_index);
+            let mut restored = Vec::new();
+            for window in &workspace.windows {
+                for config in &window.tabs {
+                    // A tab that no longer opens (missing directory,
+                    // unreachable provider) is reported and skipped: the
+                    // rest of the workspace is still worth restoring.
+                    match create_session_from_config(config).await {
+                        Ok(session) => restored.push(session),
+                        Err(e) => report_error(format!(
+                            "Failed to restore session `{}`: {e}",
+                            config.name
+                        )),
+                    }
+                }
+            }
+            Ok((restored, active_index))
+        },
+        |app, (sessions, active_index)| {
+            if sessions.is_empty() {
+                // Nothing restored (empty file, or every tab failed to
+                // open): keep the current tabs.
+                return;
+            }
+            app.active_tab = active_index.min(sessions.len() - 1);
+            app.sessions = sessions;
+        },
+        "Failed to restore workspace",
+        "Restoring workspace",
+    );
 }
 
 /// Toggle the bottom help bar.
@@ -2622,6 +2717,132 @@ mod tests {
         assert_eq!(text.source.right, "gamma\n");
         // With equal contents the fresh diff holds no differences.
         assert!(text.text_diff.as_ref().unwrap().is_empty());
+    }
+
+    /// Wait for spawned tasks to drain their busy registrations.
+    async fn wait_for_pending_tasks() {
+        for _ in 0..500 {
+            if APP_STATE.state().read().pending_tasks.is_empty() {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        panic!("the spawned task did not finish in time");
+    }
+
+    fn dir_config(left: &Path, right: &Path) -> SessionConfig {
+        SessionConfig {
+            name: "dir".to_string(),
+            session_type: LibSessionType::DirCompare,
+            left: cocomo_lib::ProviderRef {
+                provider: "local".to_string(),
+                path: left.to_path_buf(),
+            },
+            right: cocomo_lib::ProviderRef {
+                provider: "local".to_string(),
+                path: right.to_path_buf(),
+            },
+            center: None,
+            settings: Default::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn save_workspace_writes_all_open_tabs() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("workspace.json");
+        let mut app = dir_app_state();
+        app.add_session(SessionView::new_dir_compare(
+            Endpoint::local("/left2"),
+            Endpoint::local("/right2"),
+            false,
+        ));
+        APP_STATE.set(app);
+
+        save_workspace_to(path.clone());
+        wait_for_pending_tasks().await;
+
+        let workspace = cocomo_lib::workspace::load_workspace_from(&path)
+            .expect("the saved workspace must be readable");
+        assert_eq!(workspace.windows.len(), 1, "the TUI saves one window");
+        assert_eq!(workspace.windows[0].tabs.len(), 2);
+        assert_eq!(
+            workspace.windows[0].active_index, 1,
+            "the active tab was the second one"
+        );
+        assert!(
+            APP_STATE.state().read().error_message.is_none(),
+            "saving must not report an error"
+        );
+    }
+
+    #[tokio::test]
+    async fn restore_workspace_replaces_the_open_tabs() {
+        let dir = tempfile::tempdir().unwrap();
+        // Restored tabs really open (and compare), so their directories
+        // must exist on disk.
+        let old_left = dir.path().join("old-left");
+        let old_right = dir.path().join("old-right");
+        let new_left = dir.path().join("new-left");
+        let new_right = dir.path().join("new-right");
+        for d in [&old_left, &old_right, &new_left, &new_right] {
+            fs_err::create_dir(d).unwrap();
+        }
+        let path = dir.path().join("workspace.json");
+        let mut workspace = Workspace::new();
+        workspace.windows.push(WindowWorkspace::new(
+            vec![dir_config(&new_left, &new_right)],
+            0,
+        ));
+        cocomo_lib::workspace::save_workspace_to(&workspace, &path).unwrap();
+
+        let mut app = AppState::new();
+        app.add_session(SessionView::new_dir_compare(
+            Endpoint::local(old_left),
+            Endpoint::local(old_right),
+            false,
+        ));
+        APP_STATE.set(app);
+
+        restore_workspace_from(path);
+        wait_for_pending_tasks().await;
+
+        let state = APP_STATE.state();
+        let app = state.read();
+        assert!(
+            app.error_message.is_none(),
+            "restoring must not report an error: {:?}",
+            app.error_message
+        );
+        assert_eq!(app.sessions.len(), 1);
+        assert_eq!(
+            app.sessions[0].core.left.url(),
+            Endpoint::local(new_left).url(),
+            "the stale tab must be replaced by the restored one"
+        );
+    }
+
+    #[tokio::test]
+    async fn restoring_a_missing_workspace_keeps_the_tabs() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("does-not-exist.json");
+        APP_STATE.set(dir_app_state());
+
+        restore_workspace_from(path);
+        wait_for_pending_tasks().await;
+
+        let state = APP_STATE.state();
+        let app = state.read();
+        assert_eq!(
+            app.error_message.as_deref(),
+            Some("No saved workspace to restore"),
+            "a missing workspace file must be reported explicitly"
+        );
+        assert_eq!(
+            app.sessions.len(),
+            1,
+            "the current tabs must survive a failed restore"
+        );
     }
 
     #[test]
