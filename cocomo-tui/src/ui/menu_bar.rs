@@ -671,10 +671,13 @@ mod tests {
         // dimmed on the welcome screen.
         assert_eq!(buf[(rect.x + 3, rect.y + 6)].symbol(), "S");
         assert_eq!(cell(3, 6).fg, Some(cocomo_palette().fg_dim));
-        // The "Report…" row (eighth entry) is directory-only and dimmed
+        // The "Reload" row (seventh entry) also needs a session.
+        assert_eq!(buf[(rect.x + 3, rect.y + 7)].symbol(), "R");
+        assert_eq!(cell(3, 7).fg, Some(cocomo_palette().fg_dim));
+        // The "Report…" row (ninth entry) is directory-only and dimmed
         // on the welcome screen.
-        assert_eq!(buf[(rect.x + 3, rect.y + 8)].symbol(), "R");
-        assert_eq!(cell(3, 8).fg, Some(cocomo_palette().fg_dim));
+        assert_eq!(buf[(rect.x + 3, rect.y + 9)].symbol(), "R");
+        assert_eq!(cell(3, 9).fg, Some(cocomo_palette().fg_dim));
         // The box is drawn closed on the right, i.e. it is wide enough for
         // its longest label.
         assert_eq!(

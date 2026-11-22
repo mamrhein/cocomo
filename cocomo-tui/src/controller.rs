@@ -418,6 +418,31 @@ impl SessionSnapshot {
     }
 }
 
+/// The inputs a text-reload task needs, captured under a single read
+/// lock.
+struct TextReloadSnapshot {
+    left: Endpoint,
+    right: Endpoint,
+    /// Grammar and rules retained from the original comparison; a reload
+    /// only re-reads the contents.
+    grammar: Grammar,
+    rules: TextRules,
+}
+
+impl TextReloadSnapshot {
+    /// Capture the snapshot from a text session; `None` for a dir
+    /// session, which reloads through [`SessionSnapshot`].
+    fn from_session(session: &SessionView) -> Option<Self> {
+        let text = session.text()?;
+        Some(Self {
+            left: session.core.left.clone(),
+            right: session.core.right.clone(),
+            grammar: text.grammar.clone(),
+            rules: text.source.rules,
+        })
+    }
+}
+
 /// The inputs of a single transfer, captured under one read lock.
 struct TransferSnapshot {
     left: Endpoint,
@@ -620,35 +645,94 @@ pub(crate) fn process_session_action(action: SessionAction) {
             );
         }
         SessionAction::Reload => {
-            let Some(id) = active_dir_session_id() else {
+            // A dir session re-runs the folder comparison, a text session
+            // re-reads both files and recomputes the diff. Both write the
+            // fresh result back into the originating tab.
+            let Some(id) = active_session_id() else {
                 return;
             };
-            spawn_task(
-                move |app| {
-                    app.session(id).and_then(|s| {
-                        SessionSnapshot::from_session(s, &app.copy_options)
-                    })
-                },
-                move |snapshot| async move {
-                    // Clear the comparison so the view shows a loading
-                    // state.
-                    update_session(id, |s| s.set_comparison(None));
+            let is_dir = APP_STATE
+                .state()
+                .read()
+                .session(id)
+                .is_some_and(|s| s.content.is_dir());
+            if is_dir {
+                spawn_task(
+                    move |app| {
+                        app.session(id).and_then(|s| {
+                            SessionSnapshot::from_session(s, &app.copy_options)
+                        })
+                    },
+                    move |snapshot| async move {
+                        // Clear the comparison so the view shows a
+                        // loading state.
+                        update_session(id, |s| s.set_comparison(None));
 
-                    compare(
-                        &snapshot.left,
-                        &snapshot.right,
-                        snapshot.compare_content,
-                    )
-                    .await
-                },
-                move |app, comparison| {
-                    if let Some(s) = app.session_mut(id) {
-                        s.set_comparison(Some(comparison));
-                    }
-                },
-                "Comparison failed",
-                "Comparing",
-            );
+                        compare(
+                            &snapshot.left,
+                            &snapshot.right,
+                            snapshot.compare_content,
+                        )
+                        .await
+                    },
+                    move |app, comparison| {
+                        if let Some(s) = app.session_mut(id) {
+                            s.set_comparison(Some(comparison));
+                        }
+                    },
+                    "Comparison failed",
+                    "Comparing",
+                );
+            } else {
+                spawn_task(
+                    move |app| {
+                        app.session(id)
+                            .and_then(TextReloadSnapshot::from_session)
+                    },
+                    move |snapshot| async move {
+                        // Clear the diff so the view shows a loading
+                        // state.
+                        update_session(id, |s| {
+                            if let Some(text) = s.text_mut() {
+                                text.set_text_diff(None);
+                            }
+                        });
+
+                        let left = read_text_file(
+                            snapshot.left.fs(),
+                            snapshot.left.path(),
+                        )
+                        .await?;
+                        let right = read_text_file(
+                            snapshot.right.fs(),
+                            snapshot.right.path(),
+                        )
+                        .await?;
+                        let settings =
+                            snapshot.rules.compare_settings(&snapshot.grammar);
+                        let text_diff =
+                            compare_texts(&left, &right, &settings);
+                        Ok((
+                            TextSource {
+                                left,
+                                right,
+                                rules: snapshot.rules,
+                            },
+                            text_diff,
+                        ))
+                    },
+                    move |app, (source, text_diff)| {
+                        if let Some(text) =
+                            app.session_mut(id).and_then(|s| s.text_mut())
+                        {
+                            text.source = source;
+                            text.set_text_diff(Some(text_diff));
+                        }
+                    },
+                    "Text comparison failed",
+                    "Comparing",
+                );
+            }
         }
         SessionAction::PlanSync { operation } => {
             let Some(id) = active_dir_session_id() else {
@@ -2478,6 +2562,51 @@ mod tests {
         assert!(text.source.rules.ignore_whitespace);
         // The diff was re-run from the retained contents: with whitespace
         // ignored the two files are equal and no differences remain.
+        assert!(text.text_diff.as_ref().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn reload_text_session_rereads_files_and_keeps_the_tab() {
+        let dir = tempfile::tempdir().unwrap();
+        let left = dir.path().join("a.txt");
+        let right = dir.path().join("b.txt");
+        fs_err::write(&left, "alpha\n").unwrap();
+        fs_err::write(&right, "beta\n").unwrap();
+        let session = run_text_comparison(
+            Endpoint::local(left.clone()),
+            Endpoint::local(right.clone()),
+        )
+        .await
+        .unwrap();
+        let id = session.core.id;
+        let mut app = AppState::new();
+        app.add_session(session);
+        APP_STATE.set(app);
+
+        // Both files gained the same content on disk; the reload must
+        // pick that up and converge the diff.
+        fs_err::write(&left, "gamma\n").unwrap();
+        fs_err::write(&right, "gamma\n").unwrap();
+        process_session_action(SessionAction::Reload);
+
+        // The task writes its result back asynchronously; wait for its
+        // busy registration to clear.
+        for _ in 0..500 {
+            if APP_STATE.state().read().pending_tasks.is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        let state = APP_STATE.state();
+        let app = state.read();
+        assert_eq!(app.sessions.len(), 1, "reload must keep the same tab");
+        let session = app
+            .session(id)
+            .expect("the reloaded tab must keep its session");
+        let text = session.text().unwrap();
+        assert_eq!(text.source.left, "gamma\n");
+        assert_eq!(text.source.right, "gamma\n");
+        // With equal contents the fresh diff holds no differences.
         assert!(text.text_diff.as_ref().unwrap().is_empty());
     }
 

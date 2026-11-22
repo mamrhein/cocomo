@@ -620,6 +620,13 @@ const KEYMAP: &[KeyBinding] = &[
         help: Some(("X", "swap")),
     },
     KeyBinding {
+        key: KeyCode::Char('r'),
+        modifiers: NONE,
+        scope: KeyScope::TextNormal,
+        cmd: Cmd::Reload,
+        help: Some(("r", "reload")),
+    },
+    KeyBinding {
         key: KeyCode::Char('/'),
         modifiers: NONE,
         scope: KeyScope::TextNormal,
@@ -3469,6 +3476,17 @@ mod tests {
                 lookup(scope, key(KeyCode::Char('X'))),
                 Some(Cmd::SwapSides),
                 "the {scope:?} scope must bind X to Swap sides"
+            );
+        }
+    }
+
+    #[test]
+    fn r_is_bound_to_reload_in_both_session_scopes() {
+        for scope in [KeyScope::DirNormal, KeyScope::TextNormal] {
+            assert_eq!(
+                lookup(scope, key(KeyCode::Char('r'))),
+                Some(Cmd::Reload),
+                "the {scope:?} scope must bind r to Reload"
             );
         }
     }

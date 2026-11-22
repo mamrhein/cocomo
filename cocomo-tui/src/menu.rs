@@ -254,6 +254,7 @@ pub const MENUS: &[MenuDef] = &[
             ),
             MenuEntry::Separator,
             item("Swap sides", Cmd::SwapSides, MenuViews::SESSION),
+            item("Reload", Cmd::Reload, MenuViews::SESSION),
             MenuEntry::Separator,
             item("Report\u{2026}", Cmd::OpenReport, MenuViews::DIR),
             MenuEntry::Separator,
@@ -850,6 +851,7 @@ mod tests {
             Cmd::StartSaveSession,
             Cmd::OpenSettings,
             Cmd::SwapSides,
+            Cmd::Reload,
             Cmd::CloseTab,
             Cmd::Quit,
         ] {
@@ -869,22 +871,23 @@ mod tests {
                 &TransferMenuState::default()
             )
         );
-        // Swap sides runs in either session view but stays dimmed on
-        // the welcome screen.
-        let swap = leaf(sessions.entries, Cmd::SwapSides);
-        assert!(
-            swap.available(Some(MenuView::Dir), &TransferMenuState::default())
-        );
-        assert!(
-            swap.available(
+        // Swap sides and reload run in either session view but stay
+        // dimmed on the welcome screen.
+        for cmd in [Cmd::SwapSides, Cmd::Reload] {
+            let entry = leaf(sessions.entries, cmd);
+            assert!(entry.available(
+                Some(MenuView::Dir),
+                &TransferMenuState::default()
+            ));
+            assert!(entry.available(
                 Some(MenuView::Text),
                 &TransferMenuState::default()
-            )
-        );
-        assert!(
-            !swap.available(None, &TransferMenuState::default()),
-            "Swap sides must stay dimmed on the welcome screen"
-        );
+            ));
+            assert!(
+                !entry.available(None, &TransferMenuState::default()),
+                "{cmd:?} must stay dimmed on the welcome screen"
+            );
+        }
     }
 
     #[test]
