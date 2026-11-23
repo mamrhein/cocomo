@@ -553,7 +553,7 @@ pub fn toolbar_element(
 
     // Expand/collapse every directory of the tree in one step.
     let expand_btn = Button::new("toolbar_expand")
-        .icon(IconName::UnfoldVertical)
+        .icon(Icon::default().path("icons/expand-all.svg"))
         .ghost()
         .small()
         .disabled(no_folder)
@@ -568,7 +568,7 @@ pub fn toolbar_element(
             }
         });
     let collapse_btn = Button::new("toolbar_collapse")
-        .icon(IconName::FoldVertical)
+        .icon(Icon::default().path("icons/collapse-all.svg"))
         .ghost()
         .small()
         .disabled(no_folder)

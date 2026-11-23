@@ -52,3 +52,13 @@ rendered reference.
 `left-orphans.svg`, `right-orphans.svg`, `orphans-only.svg` (orphan layer
 only) and `same-only.svg` (same layer only) contain a single color and are
 not split.
+
+## Action icons
+
+`expand-all.svg` and `collapse-all.svg` are the folder-tree toolbar glyphs
+for "Expand all" and "Collapse all". They mirror the dir view's tree
+indicators: two folders and one file stacked and connected by guide lines,
+stepped across three indent levels (expand) or held on a single rail at one
+level (collapse). Like the Lucide catalog icons they draw with
+`stroke="currentColor"` so the theme foreground tints them, and are rendered
+through `Icon::path()` rather than the `icon_assets!` catalog.
