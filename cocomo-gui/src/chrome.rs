@@ -290,9 +290,9 @@ fn preset_icon(preset: FilterPreset, size: Pixels) -> AnyElement {
 /// Build toolbar row 1 using `gpui-component`'s [`Toolbar`].
 ///
 /// Row 1 is shared across all views: Home, the Sessions dropdown, the
-/// display-filter preset toggle group, the Structure and Context
-/// dropdowns, the Ops controls (copy, expand/collapse, Select, Files),
-/// Refresh, and Rules. Folder-only controls disable on text tabs and
+/// display-filter preset toggle group, the Context dropdown, the Ops
+/// controls (copy, expand/collapse, Select, Files), Refresh, and
+/// Rules. Folder-only controls disable on text tabs and
 /// vice versa. `active_state` is the active folder tab's state, or
 /// `None` for text-diff tabs and an empty window.
 pub fn toolbar_element(
@@ -406,59 +406,6 @@ pub fn toolbar_element(
                 .into_any_element()
         })
         .collect();
-
-    // Structure (folder tabs): the sparse-display toggle plus the
-    // expand/collapse presets for the mirrored tree.
-    let sparse = active_state
-        .as_ref()
-        .is_some_and(|state| state.read(cx).is_sparse());
-    let structure_state = active_state.clone();
-    let structure_btn = DropdownButton::new("toolbar_structure")
-        .button(
-            Button::new("toolbar_structure_btn")
-                .label("Structure")
-                .ghost()
-                .small()
-                .disabled(no_folder),
-        )
-        .menu_accessibility_label("Tree structure")
-        .dropdown_menu(move |menu, _, _| {
-            let Some(state) = structure_state.clone() else {
-                return menu;
-            };
-            let mut menu = menu.item(
-                PopupMenuItem::new("Sparse display")
-                    .checked(sparse)
-                    .on_click({
-                        let state = state.clone();
-                        move |_, _, cx| {
-                            state.update(cx, |state, cx| {
-                                state.toggle_sparse(cx);
-                            });
-                        }
-                    }),
-            );
-            menu = menu.separator();
-            for (label, action) in [
-                ("Expand all", 0usize),
-                ("Expand 1 level", 1),
-                ("Expand 2 levels", 2),
-                ("Expand 3 levels", 3),
-                ("Collapse all", usize::MAX),
-            ] {
-                let state = state.clone();
-                menu = menu.item(PopupMenuItem::new(label).on_click(
-                    move |_, _, cx| {
-                        state.update(cx, |state, cx| match action {
-                            0 => state.expand_all(cx),
-                            usize::MAX => state.collapse_all(cx),
-                            depth => state.expand_to_depth(depth, cx),
-                        });
-                    },
-                ));
-            }
-            menu
-        });
 
     // Context (text tabs): how many context lines stay visible around
     // each difference section.
@@ -719,9 +666,6 @@ pub fn toolbar_element(
         display_group = display_group.content(
             h_flex().items_center().gap_0p5().children(preset_buttons),
         );
-    }
-    if commands::is_visible("toolbar.structure", cx) {
-        display_group = display_group.content(structure_btn);
     }
     if commands::is_visible("toolbar.context", cx) {
         display_group = display_group.content(context_btn);
