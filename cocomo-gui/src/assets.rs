@@ -181,6 +181,16 @@ mod tests {
     }
 
     #[test]
+    fn toolbar_action_icons_are_served() {
+        for path in ["icons/expand-all.svg", "icons/collapse-all.svg"] {
+            let bytes = AppAssets
+                .load(path)
+                .unwrap_or_else(|e| panic!("{path}: {e}"));
+            assert!(bytes.is_some(), "{path} is not embedded");
+        }
+    }
+
+    #[test]
     fn default_component_icons_still_resolve() {
         assert!(AppAssets.load("icons/eye.svg").unwrap().is_some());
         assert!(AppAssets.load("icons/close.svg").unwrap().is_some());

@@ -969,7 +969,8 @@ fn build_app_menus(
     menus.push(Menu::new("View").items(groups(vec![
         // Folder tree commands: the directory pair acts on the
         // selection, the all pair on the whole loaded tree. Both share
-        // the expansion state with the toolbar's structure controls.
+        // the expansion state with the toolbar's expand/collapse
+        // buttons.
         when(state.is_folder, || {
             items([
                 show(hidden, "view.expand_dir", || {

@@ -552,9 +552,6 @@ struct TreeWalk<'a> {
     filters: &'a DisplayFilters,
     name_filter: Option<&'a FilterSet>,
     expanded: &'a HashSet<String>,
-    /// Hide directories whose aggregated subtree holds no difference
-    /// or orphan (sparse display).
-    sparse: bool,
 }
 
 /// Flatten the expanded subtree into display rows, depth-first.
@@ -569,7 +566,6 @@ fn compute_tree_rows(
     filters: &DisplayFilters,
     name_filter: Option<&FilterSet>,
     expanded: &HashSet<String>,
-    sparse: bool,
 ) -> Vec<TreeRow> {
     let walk = TreeWalk {
         key,
@@ -577,7 +573,6 @@ fn compute_tree_rows(
         filters,
         name_filter,
         expanded,
-        sparse,
     };
     let mut rows = Vec::new();
     collect_tree_rows(None, &comparison.entries, 0, &walk, &mut rows);
@@ -599,16 +594,6 @@ fn collect_tree_rows(
         walk.name_filter,
     ) {
         let entry = &entries[entry_index];
-        // Sparse display hides directories whose recursively
-        // aggregated status holds nothing the user could act on.
-        if walk.sparse
-            && entry_is_dir(entry)
-            && !entry
-                .status
-                .intersects(DirEntryStatus::DIFFERENT | DirEntryStatus::ORPHAN)
-        {
-            continue;
-        }
         let path = entry_tree_path(entry);
         rows.push(TreeRow {
             parent: parent.cloned(),
@@ -1159,9 +1144,6 @@ pub struct AppState {
     tree_rows: Vec<TreeRow>,
     /// Root-relative paths of the directories expanded in place.
     expanded: HashSet<String>,
-    /// Whether directories without differences or orphans in their
-    /// subtree are hidden from the tree (sparse display).
-    sparse: bool,
     /// Which entry categories the table displays.
     filters: DisplayFilters,
     /// Selected row index in display order (the cursor).
@@ -1246,7 +1228,6 @@ impl AppState {
             sort_descending: false,
             tree_rows: Vec::new(),
             expanded: HashSet::new(),
-            sparse: false,
             filters: DisplayFilters::default(),
             selected_index: 0,
             selected_paths: HashSet::new(),
@@ -1308,7 +1289,6 @@ impl AppState {
             sort_descending: false,
             tree_rows: Vec::new(),
             expanded: HashSet::new(),
-            sparse: false,
             filters,
             selected_index: 0,
             selected_paths: HashSet::new(),
@@ -3249,7 +3229,6 @@ impl AppState {
                 &self.filters,
                 self.name_filter.as_ref(),
                 &self.expanded,
-                self.sparse,
             )
         });
     }
@@ -3295,36 +3274,9 @@ impl AppState {
         cx.notify();
     }
 
-    /// Whether the tree hides directories whose subtree holds no
-    /// difference or orphan (sparse display).
-    pub fn is_sparse(&self) -> bool {
-        self.sparse
-    }
-
-    /// Toggle sparse display: directories whose recursively aggregated
-    /// status carries neither a difference nor an orphan disappear from
-    /// the tree, leaving only the subtrees the user can act on.
-    pub fn toggle_sparse(&mut self, cx: &mut Context<Self>) {
-        self.sparse = !self.sparse;
-        let selected_name = self.selected_entry().map(|e| e.name.clone());
-        self.recompute_display_order();
-        self.selected_index = selected_name
-            .as_deref()
-            .and_then(|name| self.display_index_of_name(name))
-            .unwrap_or(0);
-        cx.notify();
-    }
-
     /// Expand every directory in the loaded tree.
     pub fn expand_all(&mut self, cx: &mut Context<Self>) {
         self.apply_expansion(usize::MAX, cx);
-    }
-
-    /// Expand directories down to `depth` levels: `1` expands the root
-    /// level's directories, `3` also expands their children and
-    /// grandchildren.
-    pub fn expand_to_depth(&mut self, depth: usize, cx: &mut Context<Self>) {
-        self.apply_expansion(depth, cx);
     }
 
     /// Collapse every expanded directory.
@@ -5210,7 +5162,7 @@ mod tests {
     }
 
     /// A two-directory comparison: `quiet` holds only identical files,
-    /// `loud` holds a difference, for sparse-display tests.
+    /// `loud` holds a difference.
     fn sparse_comparison() -> DirComparison {
         comparison(vec![
             dir_with_sub(
@@ -5242,46 +5194,8 @@ mod tests {
         ])
     }
 
-    #[gpui::test]
-    fn sparse_display_hides_dirs_without_differences(cx: &mut TestAppContext) {
-        init_log_globals(cx);
-        let state = cx.new(|cx| {
-            let mut state = AppState::new(
-                Endpoint::local("/left"),
-                Endpoint::local("/right"),
-                "test".into(),
-                cx,
-            );
-            state.set_comparison_for_test(sparse_comparison());
-            state
-        });
-
-        // Without sparse display all three root rows are visible.
-        state.update(cx, |state, _cx| {
-            assert_eq!(state.entry_count(), 3);
-            assert!(!state.is_sparse());
-        });
-
-        // Sparse display hides the identical directory but keeps the
-        // differing one and the plain file row.
-        state.update(cx, |state, cx| {
-            state.toggle_sparse(cx);
-            assert!(state.is_sparse());
-            let names: Vec<&str> = (0..state.entry_count())
-                .map(|i| state.entry_at(i).unwrap().name.as_str())
-                .collect();
-            assert_eq!(names, ["loud", "top.txt"]);
-        });
-
-        // Toggling back restores the hidden directory.
-        state.update(cx, |state, cx| {
-            state.toggle_sparse(cx);
-            assert_eq!(state.entry_count(), 3);
-        });
-    }
-
     /// A chain of nested directories `a/b/c` with a `leaf.txt` file at
-    /// the bottom, for expand-depth tests.
+    /// the bottom, for tree expansion tests.
     fn nested_dirs() -> DirComparison {
         let dir = |path: &str, sub: DirComparison| DirEntry {
             sub_entries: Some(Arc::new(sub)),
@@ -5337,38 +5251,6 @@ mod tests {
             state.collapse_all(cx);
             assert_eq!(state.entry_count(), 1);
             assert!(!state.is_expanded("a"));
-        });
-    }
-
-    #[gpui::test]
-    fn expand_to_depth_expands_only_n_levels(cx: &mut TestAppContext) {
-        init_log_globals(cx);
-        let state = cx.new(|cx| {
-            let mut state = AppState::new(
-                Endpoint::local("/left"),
-                Endpoint::local("/right"),
-                "test".into(),
-                cx,
-            );
-            state.set_comparison_for_test(nested_dirs());
-            state
-        });
-
-        // One level: `a` expands, showing `b`, but `b` stays collapsed.
-        state.update(cx, |state, cx| {
-            state.expand_to_depth(1, cx);
-            assert!(state.is_expanded("a"));
-            assert!(!state.is_expanded("a/b"));
-            assert_eq!(state.entry_count(), 2);
-        });
-
-        // Two levels: `a` and `b` expand, showing `c` collapsed.
-        state.update(cx, |state, cx| {
-            state.expand_to_depth(2, cx);
-            assert!(state.is_expanded("a"));
-            assert!(state.is_expanded("a/b"));
-            assert!(!state.is_expanded("a/b/c"));
-            assert_eq!(state.entry_count(), 3);
         });
     }
 

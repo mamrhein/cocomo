@@ -1072,13 +1072,6 @@ pub fn all_commands() -> Vec<CommandSpec> {
             action: None,
         },
         CommandSpec {
-            id: "toolbar.structure",
-            label: "Structure menu",
-            category: "Toolbar",
-            default_binding: None,
-            action: None,
-        },
-        CommandSpec {
             id: "toolbar.context",
             label: "Context menu",
             category: "Toolbar",
