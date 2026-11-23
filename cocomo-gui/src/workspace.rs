@@ -7,129 +7,24 @@
 // $Source$
 // $Revision$
 
-//! Workspace persistence: the set of open windows and their tabs.
+//! GUI-side workspace persistence.
 //!
-//! A workspace is the serializable shape of a whole application run: every
-//! window's open tabs (as [`SessionConfig`]s) plus which tab was active.
-//! It is written to the config directory on quit and periodically while
-//! dirty sessions are open, and read back at launch (spec section 8,
-//! "workspace, persistence").
+//! The workspace file itself (`workspace.json`, the set of open windows
+//! and their tabs) is owned by [`cocomo_lib::workspace`] and re-exported
+//! here, so the GUI and the TUI save and restore the same file.
 //!
-//! The same file doubles as the crash-recovery snapshot: a *running*
-//! marker file records that the process did not shut down cleanly, so the
-//! next launch can offer to restore the tabs that were open when it died.
+//! On top of that, this module handles crash recovery: a *running* marker
+//! file records that the process did not shut down cleanly, and periodic
+//! session snapshots (`autosave/*.bcs`) capture unsaved work, so the next
+//! launch can offer to restore the tabs that were open when the app died.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
-use cocomo_lib::SessionConfig;
-use serde::{Deserialize, Serialize};
-
-/// Schema version of the workspace file, so a future format change can
-/// migrate or discard old files instead of failing to parse them.
-pub const WORKSPACE_VERSION: u8 = 1;
-
-/// The full set of open windows, as persisted to disk.
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct Workspace {
-    /// File format version.
-    pub version: u8,
-    /// One entry per open window, in window-creation order.
-    pub windows: Vec<WindowWorkspace>,
-}
-
-impl Workspace {
-    /// An empty workspace at the current schema version.
-    pub fn new() -> Self {
-        Self {
-            version: WORKSPACE_VERSION,
-            windows: Vec::new(),
-        }
-    }
-
-    /// Whether the workspace holds no tabs in any window.
-    pub fn is_empty(&self) -> bool {
-        self.windows.iter().all(|w| w.tabs.is_empty())
-    }
-
-    /// Total number of tabs across all windows.
-    #[allow(dead_code)]
-    pub fn tab_count(&self) -> usize {
-        self.windows.iter().map(|w| w.tabs.len()).sum()
-    }
-}
-
-impl Default for Workspace {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// One window's tabs, as persisted to disk.
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct WindowWorkspace {
-    /// The window's open tabs, in tab-bar order.
-    pub tabs: Vec<SessionConfig>,
-    /// Index of the active tab when the workspace was written.
-    pub active_index: usize,
-}
-
-impl WindowWorkspace {
-    /// A window snapshot with the given tabs and active index.
-    pub fn new(tabs: Vec<SessionConfig>, active_index: usize) -> Self {
-        Self { tabs, active_index }
-    }
-}
-
-/// Directory holding the application's own state files.
-fn config_dir() -> PathBuf {
-    if let Some(config_dir) = dirs::config_dir() {
-        config_dir.join("cocomo")
-    } else {
-        PathBuf::from(".cocomo")
-    }
-}
-
-/// Path of the workspace file.
-pub fn workspace_path() -> PathBuf {
-    config_dir().join("workspace.json")
-}
-
-/// Path of the marker file that records a live (or crashed) session.
-fn running_marker_path() -> PathBuf {
-    config_dir().join(".running")
-}
-
-/// Load the persisted workspace, if any.
-///
-/// A missing, unreadable, unparseable, or version-mismatched file yields
-/// `None`: a broken workspace must never prevent the app from starting.
-pub fn load_workspace() -> Option<Workspace> {
-    let text = fs_err::read_to_string(workspace_path()).ok()?;
-    let workspace: Workspace = serde_json::from_str(&text).ok()?;
-    (workspace.version == WORKSPACE_VERSION).then_some(workspace)
-}
-
-/// Persist `workspace` to disk, creating the config directory as needed.
-///
-/// An empty workspace is never written: the last non-empty state stays on
-/// disk, so closing every tab does not erase a restorable workspace.
-pub fn save_workspace(workspace: &Workspace) -> Result<()> {
-    if workspace.is_empty() {
-        return Ok(());
-    }
-    let path = workspace_path();
-    if let Some(parent) = path.parent() {
-        fs_err::create_dir_all(parent).with_context(|| {
-            format!("failed to create workspace directory: {:?}", parent)
-        })?;
-    }
-    let text = serde_json::to_string_pretty(workspace)
-        .context("failed to serialize the workspace")?;
-    fs_err::write(&path, text)
-        .with_context(|| format!("failed to write workspace: {:?}", path))?;
-    Ok(())
-}
+pub use cocomo_lib::workspace::{
+    WindowWorkspace, Workspace, load_workspace, save_workspace, workspace_path,
+};
+use cocomo_lib::{SessionConfig, workspace::config_dir};
 
 /// Record that a cocomo run is live and report whether the previous run
 /// left its marker behind.
@@ -153,6 +48,11 @@ fn mark_running_in(dir: &Path) -> bool {
 /// Remove the running marker after a clean shutdown.
 pub fn clear_running_marker() {
     let _ = fs_err::remove_file(running_marker_path());
+}
+
+/// Path of the marker file that records a live (or crashed) session.
+fn running_marker_path() -> PathBuf {
+    config_dir().join(".running")
 }
 
 /// Path of the auto-saved session snapshots used for crash recovery.
@@ -264,38 +164,6 @@ mod tests {
             center: None,
             settings: SessionSettings::default(),
         }
-    }
-
-    #[test]
-    fn workspace_round_trips_through_json() {
-        let workspace = Workspace {
-            version: WORKSPACE_VERSION,
-            windows: vec![
-                WindowWorkspace::new(
-                    vec![config_named("alpha"), config_named("beta")],
-                    1,
-                ),
-                WindowWorkspace::new(vec![config_named("gamma")], 0),
-            ],
-        };
-        let text = serde_json::to_string(&workspace).unwrap();
-        let back: Workspace = serde_json::from_str(&text).unwrap();
-        assert_eq!(back.version, WORKSPACE_VERSION);
-        assert_eq!(back.tab_count(), 3);
-        assert_eq!(back.windows[0].active_index, 1);
-        assert_eq!(back.windows[1].tabs[0].name, "gamma");
-    }
-
-    #[test]
-    fn empty_workspace_reports_no_tabs() {
-        let mut workspace = Workspace::new();
-        assert!(workspace.is_empty());
-        workspace.windows.push(WindowWorkspace::new(Vec::new(), 0));
-        assert!(workspace.is_empty());
-        workspace
-            .windows
-            .push(WindowWorkspace::new(vec![config_named("alpha")], 0));
-        assert!(!workspace.is_empty());
     }
 
     #[test]

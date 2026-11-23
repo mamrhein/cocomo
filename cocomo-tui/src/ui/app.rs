@@ -35,6 +35,7 @@ use super::{
     report_modal::ReportModal,
     save_overwrite::SaveOverwriteModal,
     session_browser::SessionBrowser,
+    session_info::SessionInfoModal,
     settings_modal::SettingsModal,
     sync_confirm::SyncConfirmModal,
     tab_bar::TabBar,
@@ -47,7 +48,7 @@ use crate::{
     controller,
     keys::{self, Cmd, KeyScope},
     menu::{self, MenuState},
-    state::{APP_STATE, SessionContent},
+    state::{APP_STATE, SessionContent, TransferMenuState},
 };
 
 /// Screen position of the menu bar's first cell.
@@ -264,7 +265,7 @@ pub(crate) fn App(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // While a dropdown is open its input layer blocks every handler below
     // (keys and mouse), exactly like a modal blocks the shell. Read the
     // state the layer and its handler need before registering them.
-    let (open_menu, menu_view, display, copy) = {
+    let (open_menu, menu_view, display, copy, transfers) = {
         let app = app_state.read();
         let dir = app.active().and_then(|s| s.dir());
         (
@@ -276,6 +277,14 @@ pub(crate) fn App(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             dir.map_or(app.copy_options, |d| {
                 d.resolved_copy_options(&app.copy_options)
             }),
+            // Which per-entry transfer commands the current selection can
+            // run. Without a session the deny-all default dims every
+            // transfer row, as on the welcome screen.
+            app.active()
+                .map(|s| {
+                    TransferMenuState::from_targets(&s.transfer_targets())
+                })
+                .unwrap_or_default(),
         )
     };
     // Titles with their accelerator letter underlined, one per menu the
@@ -349,6 +358,10 @@ pub(crate) fn App(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             Cmd::ToggleHelp => controller::toggle_help(),
                             Cmd::ToggleShortcuts => {
                                 controller::toggle_shortcuts()
+                            }
+                            Cmd::SaveWorkspace => controller::save_workspace(),
+                            Cmd::RestoreWorkspace => {
+                                controller::restore_workspace()
                             }
                             _ => {}
                         }
@@ -443,6 +456,22 @@ pub(crate) fn App(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 }
                 Cmd::ToggleShortcuts => {
                     controller::toggle_shortcuts();
+                }
+                Cmd::SaveWorkspace => {
+                    // Text-entry modes own the keyboard; while one is
+                    // open, `W` types into its field instead of saving
+                    // (same belt-and-braces guard as `q` for Quit).
+                    if app_state
+                        .read()
+                        .active()
+                        .is_some_and(|s| s.ui.mode.is_editing())
+                    {
+                        return EventResult::Ignored;
+                    }
+                    controller::save_workspace();
+                }
+                Cmd::RestoreWorkspace => {
+                    controller::restore_workspace();
                 }
                 // Session keys are owned by the session view components.
                 _ => return EventResult::Ignored,
@@ -577,6 +606,7 @@ pub(crate) fn App(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             SessionBrowser()
             SettingsModal()
             ReportModal()
+            SessionInfoModal()
             // Full keymap reference behind F1 (idea d3). The framework
             // modal owns an exclusive input layer while open and closes on
             // its close keys or any click; `j`/`k` scroll its body. The
@@ -610,6 +640,7 @@ pub(crate) fn App(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     view: menu_view,
                     display: display.clone(),
                     copy: copy,
+                    transfers: transfers,
                 )
                 // Only mounted while a submenu flyout is actually open, so
                 // a closed dropdown never adds a layout child below.
@@ -620,6 +651,7 @@ pub(crate) fn App(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         view: menu_view,
                         display: display.clone(),
                         copy: copy,
+                        transfers: transfers,
                     )
                 }
             }
@@ -793,32 +825,42 @@ mod error_dialog_size_tests {
 #[cfg(test)]
 mod render_tests {
     use cocomo_lib::{
-        DirComparison, DirEntry, DirEntryStatus, Endpoint, EntryInfo,
-        SyncResult, TransferAction, TransferItem,
+        CopyOptions, DirComparison, DirEntry, DirEntryStatus, Endpoint,
+        EntryInfo, Grammar, SyncResult, TransferAction, TransferItem,
+        compare_texts,
     };
     use ratatui_kit::{ratatui::buffer::Buffer, test_util::render_frames};
 
     use super::*;
     use crate::{
-        state::{APP_STATE, AppState, SessionMode, SessionView, TransferOp},
+        menu::{MenuEntry, MenuView},
+        state::{
+            APP_STATE, AppState, NamePattern, SessionMode, SessionView,
+            TextRules, TextSource, TransferOp,
+        },
         ui::{frame::SPINNER_FRAMES, theme::cocomo_palette},
     };
 
-    /// Render the full `App` offscreen and flatten the buffer to text.
+    /// Render the full `App` offscreen and hand out the raw buffer, so
+    /// style-sensitive assertions can inspect cell colors.
     ///
     /// Three frames: the session table windows its rows against the draw
     /// area measured in the previous frame, so a single frame would render
     /// the first-frame placeholder instead of the settled layout.
-    fn render(app: AppState) -> String {
+    fn render_buf(app: AppState) -> Buffer {
         APP_STATE.set(app);
-        let buf: Buffer = render_frames(
+        render_frames(
             element!(PaletteProvider(palette: cocomo_palette()) {
                 App()
             }),
             100,
             30,
             3,
-        );
+        )
+    }
+
+    /// Flatten a rendered buffer to text.
+    fn buf_text(buf: &Buffer) -> String {
         let mut out = String::new();
         for y in 0..buf.area().height {
             for x in 0..buf.area().width {
@@ -827,6 +869,11 @@ mod render_tests {
             out.push('\n');
         }
         out
+    }
+
+    /// Render the full `App` offscreen and flatten the buffer to text.
+    fn render(app: AppState) -> String {
+        buf_text(&render_buf(app))
     }
 
     fn dir_session_state() -> AppState {
@@ -1003,6 +1050,170 @@ mod render_tests {
             .unwrap_or_else(|| panic!("{needle:?} not on screen:\n{screen}"))
     }
 
+    /// Dir session whose single entry is a left-only orphan, selected,
+    /// with the File menu open on submenu parent `parent` and its flyout
+    /// showing. Also returns the flyout's screen rect, computed exactly
+    /// like the App shell computes it for the directory view bar.
+    fn orphan_file_menu_state(parent: &str) -> (AppState, Rect) {
+        let info = |name: &str| EntryInfo {
+            name: name.into(),
+            path: name.into(),
+            is_dir: false,
+            ..Default::default()
+        };
+        let mut session = SessionView::new_dir_compare(
+            Endpoint::local("/left"),
+            Endpoint::local("/right"),
+            false,
+        );
+        session.set_comparison(Some(DirComparison {
+            entries: vec![DirEntry {
+                name: "left.txt".into(),
+                status: DirEntryStatus::LeftOrphan,
+                left: Some(info("left.txt")),
+                right: None,
+                center: None,
+                sub_entries: None,
+                name_conflict: false,
+            }],
+            ..Default::default()
+        }));
+        session.ui.table_state.select(Some(0));
+        let mut app = AppState::new();
+        app.add_session(session);
+        let item = menu::MENUS[1]
+            .entries
+            .iter()
+            .position(|entry| {
+                matches!(entry,
+                    MenuEntry::SubMenu { label, .. } if *label == parent)
+            })
+            .expect("File submenu parent");
+        app.menu = Some(MenuState {
+            bar_index: 1,
+            item,
+            sub: Some(0),
+        });
+        let bar = menu::bar_indices(Some(MenuView::Dir));
+        let titles: Vec<Line<'static>> =
+            bar.iter().map(|&i| menu_title(&menu::MENUS[i])).collect();
+        let bar_pos = bar.iter().position(|&i| i == 1).expect("File on bar");
+        let def = &menu::MENUS[1];
+        let rect = dropdown_rect(
+            &titles,
+            def,
+            bar_pos,
+            BAR_ORIGIN,
+            None,
+            &CopyOptions::default(),
+        );
+        let children = def.entries[item].children().expect("submenu children");
+        let fly =
+            flyout_rect(children, item, rect, None, &CopyOptions::default());
+        (app, fly)
+    }
+
+    #[test]
+    fn transfer_submenu_rows_dim_choices_the_selection_denies() {
+        let palette = cocomo_palette();
+        // A left-only orphan has no right side, so every File transfer
+        // choice that reads from or deletes the right side must render
+        // dimmed, exactly like the `c`/`d`/`v` dialog dims its options.
+        // `(submenu parent, flyout child row, first label cell)`.
+        for (parent, child, first) in [
+            ("Copy", 1_u16, "R"),
+            ("Move", 1, "R"),
+            ("Delete", 1, "R"),
+            ("Delete", 2, "B"),
+        ] {
+            let (app, fly) = orphan_file_menu_state(parent);
+            let buf = render_buf(app);
+            let (x, y) = (fly.x + 3, fly.y + 1 + child);
+            assert_eq!(
+                buf[(x, y)].symbol(),
+                first,
+                "unexpected {parent} flyout row:\n{}",
+                buf_text(&buf)
+            );
+            assert_eq!(
+                buf[(x, y)].style().fg,
+                Some(palette.fg_dim),
+                "{parent} offers a choice the left-only selection cannot run \
+                 without dimming it:\n{}",
+                buf_text(&buf)
+            );
+        }
+        // The choices the orphan does support stay lit; the first child
+        // row is the highlighted current one, so only its fg is checked.
+        for parent in ["Copy", "Move", "Delete"] {
+            let (app, fly) = orphan_file_menu_state(parent);
+            let buf = render_buf(app);
+            let (x, y) = (fly.x + 3, fly.y + 1);
+            assert_eq!(buf[(x, y)].symbol(), "L");
+            assert_ne!(
+                buf[(x, y)].style().fg,
+                Some(palette.fg_dim),
+                "the supported first choice of {parent} rendered dimmed:\n{}",
+                buf_text(&buf)
+            );
+        }
+    }
+
+    #[test]
+    fn welcome_screen_dims_every_transfer_choice() {
+        let palette = cocomo_palette();
+        // Without a session there is no selection, so every per-entry
+        // transfer command is denied and its row dims: both children of
+        // `File ▸ Copy` and, with all children dimmed, the parent row.
+        let item = menu::MENUS[1]
+            .entries
+            .iter()
+            .position(|entry| {
+                matches!(entry,
+                    MenuEntry::SubMenu { label, .. } if *label == "Copy")
+            })
+            .expect("File submenu parent");
+        let mut app = AppState::new();
+        app.menu = Some(MenuState {
+            bar_index: 1,
+            item,
+            sub: Some(0),
+        });
+        // Geometry as the App shell computes it for the welcome bar.
+        let bar = menu::bar_indices(None);
+        let titles: Vec<Line<'static>> =
+            bar.iter().map(|&i| menu_title(&menu::MENUS[i])).collect();
+        let bar_pos = bar.iter().position(|&i| i == 1).expect("File on bar");
+        let def = &menu::MENUS[1];
+        let children = def.entries[item].children().expect("Copy children");
+        let rect = dropdown_rect(
+            &titles,
+            def,
+            bar_pos,
+            BAR_ORIGIN,
+            None,
+            &CopyOptions::default(),
+        );
+        let fly =
+            flyout_rect(children, item, rect, None, &CopyOptions::default());
+        let buf = render_buf(app);
+        let dimmed = |x: u16, y: u16| {
+            assert_eq!(
+                buf[(x, y)].style().fg,
+                Some(palette.fg_dim),
+                "the row at ({x}, {y}) is available without a session:\n{}",
+                buf_text(&buf)
+            );
+        };
+        assert_eq!(buf[(fly.x + 3, fly.y + 1)].symbol(), "L");
+        dimmed(fly.x + 3, fly.y + 1);
+        assert_eq!(buf[(fly.x + 3, fly.y + 2)].symbol(), "R");
+        dimmed(fly.x + 3, fly.y + 2);
+        let parent = (rect.x + 3, rect.y + 1 + item as u16);
+        assert_eq!(buf[parent].symbol(), "C");
+        dimmed(parent.0, parent.1);
+    }
+
     #[test]
     fn transfer_dialog_lists_every_option_with_its_key_code() {
         let screen = render(sides_state(TransferOp::Copy));
@@ -1148,6 +1359,119 @@ mod render_tests {
         assert!(!closed.contains("Keyboard shortcuts"), "{closed}");
         assert!(closed.contains("Loading comparison"), "{closed}");
     }
+
+    #[test]
+    fn info_modal_lists_the_folder_summary() {
+        let mut app = dir_session_state();
+        {
+            let session = app.active_mut().unwrap();
+            let info = |name: &str| EntryInfo {
+                name: name.into(),
+                path: name.into(),
+                ..Default::default()
+            };
+            let entry =
+                |name: &str, status, left: bool, right: bool| DirEntry {
+                    name: name.into(),
+                    status,
+                    left: left.then(|| info(name)),
+                    right: right.then(|| info(name)),
+                    center: None,
+                    sub_entries: None,
+                    name_conflict: false,
+                };
+            session.set_comparison(Some(DirComparison {
+                entries: vec![
+                    entry("same.txt", DirEntryStatus::Equal, true, true),
+                    entry("newer.txt", DirEntryStatus::LeftNewer, true, true),
+                    entry(
+                        "extra.txt",
+                        DirEntryStatus::RightOrphan,
+                        false,
+                        true,
+                    ),
+                ],
+                ..Default::default()
+            }));
+            session.ui.mode = SessionMode::Info;
+        }
+        let screen = render(app);
+        assert!(screen.contains("Session info"), "{screen}");
+        assert!(
+            row_with(&screen, "Left:").contains("/left"),
+            "pair paths missing:\n{screen}"
+        );
+        assert!(
+            screen.contains("Entries: 3 (3 files, 0 directories)"),
+            "{screen}"
+        );
+        assert!(screen.contains("Identical: 1"), "{screen}");
+        assert!(screen.contains("Different: 1"), "{screen}");
+        assert!(screen.contains("Orphans: 1"), "{screen}");
+        assert!(
+            screen.contains("Filters: same, different, orphans"),
+            "{screen}"
+        );
+        assert!(screen.contains("Hidden items: shown"), "{screen}");
+        assert!(!screen.contains("Name filter"), "{screen}");
+        assert!(
+            screen.contains("Enter close") && screen.contains("Esc close"),
+            "closing hints missing:\n{screen}"
+        );
+        // Closed by default: the main view shows through again.
+        let closed = render(dir_session_state());
+        assert!(!closed.contains("Session info"), "{closed}");
+        assert!(closed.contains("Loading comparison"), "{closed}");
+    }
+
+    #[test]
+    fn info_modal_reports_the_unloaded_state_and_active_filters() {
+        let mut app = dir_session_state();
+        {
+            let session = app.active_mut().unwrap();
+            let dir = session.dir_mut().unwrap();
+            dir.display.show_statuses =
+                DirEntryStatus::DIFFERENT | DirEntryStatus::ORPHAN;
+            dir.display.show_hidden = false;
+            session.ui.name_filter = Some(NamePattern::new("^log").unwrap());
+            session.ui.mode = SessionMode::Info;
+        }
+        let screen = render(app);
+        assert!(screen.contains("Comparison: not loaded yet"), "{screen}");
+        assert!(screen.contains("Filters: different, orphans"), "{screen}");
+        assert!(screen.contains("Hidden items: hidden"), "{screen}");
+        assert!(screen.contains("Name filter: ^log"), "{screen}");
+    }
+
+    #[test]
+    fn info_modal_lists_the_text_stats() {
+        let mut app = AppState::new();
+        let left = "alpha\nbeta\ngamma\ndelta".to_string();
+        let right = "alpha\nBETA\ngamma\ndelta\nepsilon".to_string();
+        let rules = TextRules::default();
+        let diff = compare_texts(
+            &left,
+            &right,
+            &rules.compare_settings(&Grammar::plain_text()),
+        );
+        app.add_session(SessionView::new_text_compare(
+            Endpoint::local("/left/a.txt"),
+            Endpoint::local("/right/b.txt"),
+            diff,
+            Grammar::plain_text(),
+            TextSource { left, right, rules },
+        ));
+        app.active_mut().unwrap().ui.mode = SessionMode::Info;
+        let screen = render(app);
+        assert!(screen.contains("Left lines:  4"), "{screen}");
+        assert!(screen.contains("Right lines: 5"), "{screen}");
+        assert!(screen.contains("Difference sections: 2"), "{screen}");
+        assert!(screen.contains("Inserted lines: 1"), "{screen}");
+        assert!(screen.contains("Deleted lines: 0"), "{screen}");
+        assert!(screen.contains("Changed lines: 1"), "{screen}");
+        // The folder-only rows stay away from a text session.
+        assert!(!screen.contains("Identical:"), "{screen}");
+    }
 }
 
 #[cfg(test)]
@@ -1240,12 +1564,13 @@ mod menu_mouse_tests {
         let dropdown = Some((menu, rect, None));
         APP_STATE.set(AppState::new());
         APP_STATE.state().write().menu = Some(menu);
-        // The quit row is the eighth entry, i.e. the ninth content row of
-        // the box (below its top border).
+        // The quit row is the seventeenth entry (the info item and the
+        // workspace group shifted it down), i.e. the eighteenth content
+        // row of the box (below its top border).
         menu_mouse(
             Position {
                 x: rect.x + 2,
-                y: rect.y + 8,
+                y: rect.y + 17,
             },
             &titles,
             &bar,

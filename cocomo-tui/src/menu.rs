@@ -29,7 +29,10 @@ use cocomo_lib::{CopyOptions, filter::DisplayFilters};
 
 use crate::{
     keys::Cmd,
-    state::{SessionContent, StatusFilter, TransferChoice, TransferOp},
+    state::{
+        SessionContent, StatusFilter, TransferChoice, TransferMenuState,
+        TransferOp,
+    },
 };
 
 /// The session view a menu bar is composed for.
@@ -39,6 +42,8 @@ pub enum MenuView {
     Dir,
     /// Text diff tab.
     Text,
+    /// Welcome screen (no active session).
+    Welcome,
 }
 
 impl MenuView {
@@ -47,6 +52,7 @@ impl MenuView {
         match self {
             Self::Dir => 1,
             Self::Text => 2,
+            Self::Welcome => 4,
         }
     }
 
@@ -68,8 +74,14 @@ impl MenuViews {
     pub const DIR: Self = Self(MenuView::Dir.bit());
     /// Text diff view only.
     pub const TEXT: Self = Self(MenuView::Text.bit());
-    /// Every session view; also stays lit on the welcome screen.
-    pub const ALL: Self = Self(MenuView::Dir.bit() | MenuView::Text.bit());
+    /// Welcome screen only.
+    pub const WELCOME: Self = Self(MenuView::Welcome.bit());
+    /// Every view, including the welcome screen.
+    pub const ALL: Self = Self(
+        MenuView::Dir.bit() | MenuView::Text.bit() | MenuView::Welcome.bit(),
+    );
+    /// Both session views; dimmed on the welcome screen.
+    pub const SESSION: Self = Self(MenuView::Dir.bit() | MenuView::Text.bit());
 
     /// Whether `view` is part of this mask.
     pub const fn contains(self, view: MenuView) -> bool {
@@ -94,11 +106,36 @@ pub struct MenuItemDef {
 }
 
 impl MenuItemDef {
-    /// Whether the item can run while `view` is active (`None` on the
-    /// welcome screen, where only view-independent items stay lit).
-    pub fn available(&self, view: Option<MenuView>) -> bool {
-        view.is_some_and(|v| self.views.contains(v))
-            || self.views == MenuViews::ALL
+    /// Whether the item's view mask admits it while `view` is active
+    /// (`None` on the welcome screen, where only items that include the
+    /// welcome bit stay lit).
+    fn shows_in(&self, view: Option<MenuView>) -> bool {
+        // Membership alone: items lit on the welcome screen are exactly
+        // the ones whose mask carries the welcome bit.
+        self.views.contains(view.unwrap_or(MenuView::Welcome))
+    }
+
+    /// Whether the item can run in `view` for the selection `transfers`
+    /// describes.
+    ///
+    /// A per-entry transfer command needs both its view and a selection
+    /// that can actually run it, so an option the selection denies dims
+    /// here exactly as the matching option of the `c`/`d`/`v` dialog
+    /// does.
+    pub fn available(
+        &self,
+        view: Option<MenuView>,
+        transfers: &TransferMenuState,
+    ) -> bool {
+        if !self.shows_in(view) {
+            return false;
+        }
+        match self.cmd {
+            Cmd::TransferExecute(op, choice) => {
+                transfers.is_enabled(op, choice)
+            }
+            _ => true,
+        }
     }
 }
 
@@ -140,14 +177,19 @@ impl MenuEntry {
         !matches!(self, Self::Separator)
     }
 
-    /// Whether the row can run while `view` is active. A submenu is
-    /// available when at least one child is.
-    pub fn available(&self, view: Option<MenuView>) -> bool {
+    /// Whether the row can run in `view` for the selection `transfers`
+    /// describes. A submenu is available when at least one child is, so a
+    /// parent dims exactly when every one of its children does.
+    pub fn available(
+        &self,
+        view: Option<MenuView>,
+        transfers: &TransferMenuState,
+    ) -> bool {
         match self {
-            Self::Item(item) => item.available(view),
-            Self::SubMenu { children, .. } => {
-                children.iter().any(|child| child.available(view))
-            }
+            Self::Item(item) => item.available(view, transfers),
+            Self::SubMenu { children, .. } => children
+                .iter()
+                .any(|child| child.available(view, transfers)),
             Self::Separator => true,
         }
     }
@@ -210,9 +252,22 @@ pub const MENUS: &[MenuDef] = &[
                 Cmd::OpenSettings,
                 MenuViews::ALL,
             ),
+            MenuEntry::Separator,
+            item("Swap sides", Cmd::SwapSides, MenuViews::SESSION),
+            item("Reload", Cmd::Reload, MenuViews::SESSION),
+            MenuEntry::Separator,
             item("Report\u{2026}", Cmd::OpenReport, MenuViews::DIR),
+            item("Info\u{2026}", Cmd::OpenSessionInfo, MenuViews::SESSION),
             MenuEntry::Separator,
             item("Close tab", Cmd::CloseTab, MenuViews::ALL),
+            item(
+                "Close all sessions",
+                Cmd::CloseAllSessions,
+                MenuViews::SESSION,
+            ),
+            MenuEntry::Separator,
+            item("Save workspace", Cmd::SaveWorkspace, MenuViews::ALL),
+            item("Restore workspace", Cmd::RestoreWorkspace, MenuViews::ALL),
             item("Quit", Cmd::Quit, MenuViews::ALL),
         ],
     },
@@ -678,6 +733,7 @@ mod tests {
     use cocomo_lib::DirEntryStatus;
 
     use super::*;
+    use crate::state::TransferTarget;
 
     /// Synthetic table exercising separators, submenus, and view masks.
     /// The navigation cores resolve against an injected table so the state
@@ -803,7 +859,12 @@ mod tests {
             Cmd::OpenSessionBrowser,
             Cmd::StartSaveSession,
             Cmd::OpenSettings,
+            Cmd::SwapSides,
+            Cmd::Reload,
+            Cmd::OpenSessionInfo,
             Cmd::CloseTab,
+            Cmd::SaveWorkspace,
+            Cmd::RestoreWorkspace,
             Cmd::Quit,
         ] {
             assert!(
@@ -812,8 +873,57 @@ mod tests {
             );
         }
         let report = leaf(sessions.entries, Cmd::OpenReport);
-        assert!(report.available(Some(MenuView::Dir)));
-        assert!(!report.available(Some(MenuView::Text)));
+        assert!(
+            report
+                .available(Some(MenuView::Dir), &TransferMenuState::default())
+        );
+        assert!(
+            !report.available(
+                Some(MenuView::Text),
+                &TransferMenuState::default()
+            )
+        );
+        // Swap sides, reload, the info modal and close-all run in either
+        // session view but stay dimmed on the welcome screen (where there
+        // is nothing to close).
+        for cmd in [
+            Cmd::SwapSides,
+            Cmd::Reload,
+            Cmd::OpenSessionInfo,
+            Cmd::CloseAllSessions,
+        ] {
+            let entry = leaf(sessions.entries, cmd);
+            assert!(entry.available(
+                Some(MenuView::Dir),
+                &TransferMenuState::default()
+            ));
+            assert!(entry.available(
+                Some(MenuView::Text),
+                &TransferMenuState::default()
+            ));
+            assert!(
+                !entry.available(None, &TransferMenuState::default()),
+                "{cmd:?} must stay dimmed on the welcome screen"
+            );
+        }
+        // The workspace commands run everywhere: saving without an open
+        // session is a harmless no-op, and restoring is exactly what the
+        // welcome screen is for.
+        for cmd in [Cmd::SaveWorkspace, Cmd::RestoreWorkspace] {
+            let entry = leaf(sessions.entries, cmd);
+            assert!(entry.available(
+                Some(MenuView::Dir),
+                &TransferMenuState::default()
+            ));
+            assert!(entry.available(
+                Some(MenuView::Text),
+                &TransferMenuState::default()
+            ));
+            assert!(
+                entry.available(None, &TransferMenuState::default()),
+                "{cmd:?} must also run from the welcome screen"
+            );
+        }
     }
 
     #[test]
@@ -1254,21 +1364,96 @@ mod tests {
         else {
             panic!("entry 2 is not a submenu");
         };
+        let none = TransferMenuState::default();
         let dir_only = leaf(children, Cmd::CloseTab);
-        assert!(dir_only.available(Some(MenuView::Dir)));
-        assert!(!dir_only.available(Some(MenuView::Text)));
+        assert!(dir_only.available(Some(MenuView::Dir), &none));
+        assert!(!dir_only.available(Some(MenuView::Text), &none));
         // On the welcome screen only view-independent items stay lit.
-        assert!(!dir_only.available(None));
+        assert!(!dir_only.available(None, &none));
         let any_view = leaf(children, Cmd::ToggleHelp);
-        assert!(any_view.available(Some(MenuView::Dir)));
-        assert!(any_view.available(Some(MenuView::Text)));
-        assert!(any_view.available(None));
+        assert!(any_view.available(Some(MenuView::Dir), &none));
+        assert!(any_view.available(Some(MenuView::Text), &none));
+        assert!(any_view.available(None, &none));
         // A submenu is available when at least one child is.
         let group = MenuEntry::SubMenu {
             label: "group",
             children,
         };
-        assert!(group.available(Some(MenuView::Dir)));
-        assert!(group.available(Some(MenuView::Text)));
+        assert!(group.available(Some(MenuView::Dir), &none));
+        assert!(group.available(Some(MenuView::Text), &none));
+    }
+
+    #[test]
+    fn transfer_items_need_a_selection_that_can_run_them() {
+        let file = MENUS
+            .iter()
+            .find(|m| m.title == "File")
+            .expect("no File menu");
+        let copy_left = leaf(
+            submenu(file.entries, "Copy"),
+            Cmd::TransferExecute(TransferOp::Copy, TransferChoice::Left),
+        );
+        let copy_right = leaf(
+            submenu(file.entries, "Copy"),
+            Cmd::TransferExecute(TransferOp::Copy, TransferChoice::Right),
+        );
+        let delete_left = leaf(
+            submenu(file.entries, "Delete"),
+            Cmd::TransferExecute(TransferOp::Delete, TransferChoice::Left),
+        );
+        let delete_right = leaf(
+            submenu(file.entries, "Delete"),
+            Cmd::TransferExecute(TransferOp::Delete, TransferChoice::Right),
+        );
+        let view = Some(MenuView::Dir);
+        // Without a selection no transfer command is available, so the
+        // welcome screen dims every transfer submenu.
+        let none = TransferMenuState::default();
+        assert!(!copy_left.available(view, &none));
+        assert!(!delete_right.available(view, &none));
+        assert!(!submenu(file.entries, "Copy")[0].available(view, &none));
+        // A left-only entry can be copied to the right and deleted on the
+        // left, but nothing exists on the right to copy from or delete.
+        let orphan = TransferMenuState::from_targets(&[TransferTarget {
+            has_right: false,
+            ..pair_target()
+        }]);
+        assert!(copy_left.available(view, &orphan));
+        assert!(!copy_right.available(view, &orphan));
+        assert!(delete_left.available(view, &orphan));
+        assert!(!delete_right.available(view, &orphan));
+        // The parent follows its children: it stays lit while one child
+        // can run and dims once none of them can.
+        let copy = MenuEntry::SubMenu {
+            label: "Copy",
+            children: submenu(file.entries, "Copy"),
+        };
+        assert!(copy.available(view, &orphan));
+        let equal = TransferMenuState::from_targets(&[TransferTarget {
+            is_equal: true,
+            ..pair_target()
+        }]);
+        assert!(!copy.available(view, &equal));
+        let delete = MenuEntry::SubMenu {
+            label: "Delete",
+            children: submenu(file.entries, "Delete"),
+        };
+        assert!(delete.available(view, &equal));
+    }
+
+    /// A pair present on both sides with differing content, so every
+    /// transfer command has something to do.
+    fn pair_target() -> TransferTarget {
+        TransferTarget {
+            name: "a".into(),
+            rel_path: "a".into(),
+            is_dir: false,
+            has_left: true,
+            has_right: true,
+            same_side: false,
+            name_conflict: false,
+            is_equal: false,
+            note: None,
+        }
     }
 }

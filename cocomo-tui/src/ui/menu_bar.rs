@@ -37,6 +37,7 @@ use super::{
 use crate::{
     keys::key_hint,
     menu::{MenuDef, MenuEntry, MenuState, MenuView, item_label},
+    state::TransferMenuState,
 };
 
 /// Width of the `" | "` divider between menu items.
@@ -265,6 +266,10 @@ pub(super) struct MenuDropdownProps {
     /// The effective copy options, used to resolve the state-dependent
     /// copy toggle labels.
     pub(super) copy: CopyOptions,
+    /// Which per-entry transfer commands the current selection can run.
+    /// Transfer rows it denies render dimmed (`Default` denies them all,
+    /// as on the welcome screen).
+    pub(super) transfers: TransferMenuState,
 }
 
 /// Dropdown listing the entries of the open menu.
@@ -315,6 +320,7 @@ pub(super) fn MenuDropdown(
                             label_width,
                             hint_width,
                             props.view,
+                            &props.transfers,
                             props.display.as_ref(),
                             &props.copy,
                             theme,
@@ -342,6 +348,8 @@ pub(super) struct MenuFlyoutProps {
     /// The effective copy options, used to resolve the state-dependent
     /// copy toggle labels.
     pub(super) copy: CopyOptions,
+    /// Which per-entry transfer commands the current selection can run.
+    pub(super) transfers: TransferMenuState,
 }
 
 /// Flyout listing the children of the highlighted submenu parent.
@@ -390,6 +398,7 @@ pub(super) fn MenuFlyout(
                             label_width,
                             hint_width,
                             props.view,
+                            &props.transfers,
                             props.display.as_ref(),
                             &props.copy,
                             theme,
@@ -420,6 +429,7 @@ fn dropdown_row(
     label_width: u16,
     hint_width: u16,
     view: Option<MenuView>,
+    transfers: &TransferMenuState,
     display: Option<&DisplayFilters>,
     copy: &CopyOptions,
     theme: CocomoTheme,
@@ -436,9 +446,10 @@ fn dropdown_row(
     let label_pad = " ".repeat(
         label_width.saturating_sub(label.chars().count() as u16) as usize,
     );
-    // Entries unavailable in the active view (or on the welcome screen)
-    // are dimmed; confirming one stays a no-op, mirroring the controller.
-    let label_style = if entry.available(view) {
+    // Entries unavailable in the active view (or on the welcome screen),
+    // and transfers the selection cannot run, are dimmed; confirming one
+    // stays a no-op, mirroring the controller.
+    let label_style = if entry.available(view, transfers) {
         Style::default()
     } else {
         theme.dim
@@ -478,6 +489,9 @@ mod tests {
     use crate::{
         keys::Cmd,
         menu::{MENUS, MenuItemDef, MenuViews},
+        state::{
+            TransferChoice, TransferMenuState, TransferOp, TransferTarget,
+        },
         ui::theme::cocomo_palette,
     };
 
@@ -653,10 +667,17 @@ mod tests {
         assert_eq!(buf[(rect.x + 1, rect.y + 2)].symbol(), "\u{25b8}");
         assert_eq!(cell(3, 2).bg, Some(cocomo_palette().selection));
         assert_eq!(buf[(rect.x + 3, rect.y + 2)].symbol(), "S");
-        // The "Report…" row (fifth entry) is directory-only and dimmed on
-        // the welcome screen.
-        assert_eq!(buf[(rect.x + 3, rect.y + 5)].symbol(), "R");
-        assert_eq!(cell(3, 5).fg, Some(cocomo_palette().fg_dim));
+        // The "Swap sides" row (sixth entry) needs a session, so it is
+        // dimmed on the welcome screen.
+        assert_eq!(buf[(rect.x + 3, rect.y + 6)].symbol(), "S");
+        assert_eq!(cell(3, 6).fg, Some(cocomo_palette().fg_dim));
+        // The "Reload" row (seventh entry) also needs a session.
+        assert_eq!(buf[(rect.x + 3, rect.y + 7)].symbol(), "R");
+        assert_eq!(cell(3, 7).fg, Some(cocomo_palette().fg_dim));
+        // The "Report…" row (ninth entry) is directory-only and dimmed
+        // on the welcome screen.
+        assert_eq!(buf[(rect.x + 3, rect.y + 9)].symbol(), "R");
+        assert_eq!(cell(3, 9).fg, Some(cocomo_palette().fg_dim));
         // The box is drawn closed on the right, i.e. it is wide enough for
         // its longest label.
         assert_eq!(
@@ -686,6 +707,7 @@ mod tests {
             20,
             hint.chars().count() as u16,
             None,
+            &TransferMenuState::default(),
             None,
             &copy(),
             theme,
@@ -711,6 +733,7 @@ mod tests {
             10,
             4,
             None,
+            &TransferMenuState::default(),
             None,
             &copy(),
             theme,
@@ -733,6 +756,7 @@ mod tests {
             10,
             0,
             None,
+            &TransferMenuState::default(),
             None,
             &copy(),
             theme,
@@ -750,8 +774,17 @@ mod tests {
             views: MenuViews::DIR,
         });
         let row = |view| {
-            let row =
-                dropdown_row(&entry, false, 12, 0, view, None, &copy(), theme);
+            let row = dropdown_row(
+                &entry,
+                false,
+                12,
+                0,
+                view,
+                &TransferMenuState::default(),
+                None,
+                &copy(),
+                theme,
+            );
             row.spans[2].style
         };
         // Dimmed on the welcome screen and on a text session, lit on a
@@ -759,6 +792,63 @@ mod tests {
         assert_eq!(row(None), theme.dim);
         assert_eq!(row(Some(MenuView::Text)), theme.dim);
         assert_ne!(row(Some(MenuView::Dir)), theme.dim);
+    }
+
+    #[test]
+    fn dropdown_rows_dim_transfers_the_selection_denies() {
+        let theme = CocomoTheme::default();
+        static COPY_RIGHT: MenuEntry = MenuEntry::Item(MenuItemDef {
+            label: "Right to left",
+            cmd: Cmd::TransferExecute(TransferOp::Copy, TransferChoice::Right),
+            views: MenuViews::ALL,
+        });
+        let label_style = |transfers: &TransferMenuState| {
+            let row = dropdown_row(
+                &COPY_RIGHT,
+                false,
+                14,
+                0,
+                Some(MenuView::Dir),
+                transfers,
+                None,
+                &copy(),
+                theme,
+            );
+            row.spans[2].style
+        };
+        // Without a selection nothing can be copied, so the row dims.
+        assert_eq!(label_style(&TransferMenuState::default()), theme.dim);
+        // A pair that differs on both sides can be copied in either
+        // direction, so the row lights.
+        assert_ne!(
+            label_style(&TransferMenuState::from_targets(&[pair_target(
+                false
+            )])),
+            theme.dim
+        );
+        // Once the pair holds equal content, a copy has nothing to do.
+        assert_eq!(
+            label_style(&TransferMenuState::from_targets(&[pair_target(
+                true
+            )])),
+            theme.dim
+        );
+    }
+
+    /// A pair present on both sides; `is_equal` says whether its content
+    /// differs.
+    fn pair_target(is_equal: bool) -> TransferTarget {
+        TransferTarget {
+            name: "a.txt".into(),
+            rel_path: "a.txt".into(),
+            is_dir: false,
+            has_left: true,
+            has_right: true,
+            same_side: false,
+            name_conflict: false,
+            is_equal,
+            note: None,
+        }
     }
 
     #[test]

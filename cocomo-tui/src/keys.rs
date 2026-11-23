@@ -93,6 +93,10 @@ pub enum KeyScope {
     /// The settings modal is open. `Enter` toggles the highlighted entry
     /// through its `OptionList` child and is deliberately not listed.
     Settings,
+    /// The session info modal is open. `Enter` and `Esc` both close it;
+    /// neither is labelled in the keymap, as the modal's own hint line
+    /// documents them.
+    SessionInfo,
     /// The sync approval modal is open. `y` executes the planned batch, `n`
     /// and `Esc` reject it; `j`/`k`/`Enter` are owned by its `OptionList`
     /// child and deliberately not listed.
@@ -114,6 +118,13 @@ pub enum Cmd {
     // -- Global scope: executed by the App shell. --
     /// Close the active tab (quit when it was the last one).
     CloseTab,
+    /// Close every open tab, landing on the welcome screen (menu-only;
+    /// never bound to a key, and explicitly not a quit).
+    CloseAllSessions,
+    /// Save every open session as the persisted workspace (`W`).
+    SaveWorkspace,
+    /// Replace the open tabs with the persisted workspace (`Ctrl+R`).
+    RestoreWorkspace,
     /// Switch to the next tab, or the previous one with Shift.
     SwitchTab,
     /// Open the menu at the given bar index (`Alt+<accel>`; a test keeps
@@ -184,8 +195,12 @@ pub enum Cmd {
     OpenSettings,
     /// Open the report modal (`R`).
     OpenReport,
+    /// Open the session info modal (`I`).
+    OpenSessionInfo,
     /// Re-run the current comparison.
     Reload,
+    /// Exchange the left and right sides of the session (`X`).
+    SwapSides,
     /// Open the selected entry in a new session.
     OpenEntry,
     /// Open the parent directories in a new session.
@@ -456,6 +471,13 @@ const KEYMAP: &[KeyBinding] = &[
         help: Some(("v", "move")),
     },
     KeyBinding {
+        key: KeyCode::Char('X'),
+        modifiers: NONE,
+        scope: KeyScope::DirNormal,
+        cmd: Cmd::SwapSides,
+        help: Some(("X", "swap")),
+    },
+    KeyBinding {
         key: KeyCode::Char('r'),
         modifiers: NONE,
         scope: KeyScope::DirNormal,
@@ -489,6 +511,13 @@ const KEYMAP: &[KeyBinding] = &[
         scope: KeyScope::DirNormal,
         cmd: Cmd::OpenReport,
         help: Some(("R", "report")),
+    },
+    KeyBinding {
+        key: KeyCode::Char('I'),
+        modifiers: NONE,
+        scope: KeyScope::DirNormal,
+        cmd: Cmd::OpenSessionInfo,
+        help: Some(("I", "info")),
     },
     KeyBinding {
         key: KeyCode::Char('/'),
@@ -604,6 +633,20 @@ const KEYMAP: &[KeyBinding] = &[
         help: Some(("v", "move")),
     },
     KeyBinding {
+        key: KeyCode::Char('X'),
+        modifiers: NONE,
+        scope: KeyScope::TextNormal,
+        cmd: Cmd::SwapSides,
+        help: Some(("X", "swap")),
+    },
+    KeyBinding {
+        key: KeyCode::Char('r'),
+        modifiers: NONE,
+        scope: KeyScope::TextNormal,
+        cmd: Cmd::Reload,
+        help: Some(("r", "reload")),
+    },
+    KeyBinding {
         key: KeyCode::Char('/'),
         modifiers: NONE,
         scope: KeyScope::TextNormal,
@@ -637,6 +680,13 @@ const KEYMAP: &[KeyBinding] = &[
         scope: KeyScope::TextNormal,
         cmd: Cmd::OpenSettings,
         help: Some((",", "settings")),
+    },
+    KeyBinding {
+        key: KeyCode::Char('I'),
+        modifiers: NONE,
+        scope: KeyScope::TextNormal,
+        cmd: Cmd::OpenSessionInfo,
+        help: Some(("I", "info")),
     },
     // -- Transfer dialog (its own input layer; the `OptionList` inside
     //    owns j/k/Enter, so only the accelerators are listed here). --
@@ -725,6 +775,22 @@ const KEYMAP: &[KeyBinding] = &[
         key: KeyCode::Esc,
         modifiers: NONE,
         scope: KeyScope::Settings,
+        cmd: Cmd::PanelClose,
+        help: None,
+    },
+    // -- Session info modal (its own input layer; both closing keys are
+    //    documented by the modal's hint line, so they are unlabelled). --
+    KeyBinding {
+        key: KeyCode::Esc,
+        modifiers: NONE,
+        scope: KeyScope::SessionInfo,
+        cmd: Cmd::PanelClose,
+        help: None,
+    },
+    KeyBinding {
+        key: KeyCode::Enter,
+        modifiers: NONE,
+        scope: KeyScope::SessionInfo,
         cmd: Cmd::PanelClose,
         help: None,
     },
@@ -990,6 +1056,22 @@ const KEYMAP: &[KeyBinding] = &[
         cmd: Cmd::ToggleShortcuts,
         help: Some(("F1", "shortcuts")),
     },
+    KeyBinding {
+        // Capital W keeps the workspace commands out of the way of the
+        // lowercase session keys (`w` writes files in editor modes).
+        key: KeyCode::Char('W'),
+        modifiers: NONE,
+        scope: KeyScope::Global,
+        cmd: Cmd::SaveWorkspace,
+        help: Some(("W", "save workspace")),
+    },
+    KeyBinding {
+        key: KeyCode::Char('r'),
+        modifiers: CTRL,
+        scope: KeyScope::Global,
+        cmd: Cmd::RestoreWorkspace,
+        help: Some(("Ctrl+R", "restore workspace")),
+    },
 ];
 
 /// Return the command bound to `key` in `scope`, if any.
@@ -1123,6 +1205,7 @@ pub fn handle_session_key(
             return handle_filter_panel_key(session, key);
         }
         SessionMode::Settings => return handle_settings_key(session, key),
+        SessionMode::Info => return handle_session_info_key(session, key),
         SessionMode::Report { .. } => return handle_report_key(session, key),
         SessionMode::SyncConfirm => {
             return handle_sync_confirm_key(session, key);
@@ -1276,7 +1359,15 @@ fn execute(cmd: Cmd, session: &mut SessionView) -> SessionAction {
             };
             SessionAction::None
         }
+        Cmd::OpenSessionInfo => {
+            session.ui.mode = SessionMode::Info;
+            SessionAction::None
+        }
         Cmd::Reload => SessionAction::Reload,
+        Cmd::SwapSides => {
+            swap_sides(session);
+            SessionAction::None
+        }
         Cmd::OpenEntry => handle_enter(session),
         Cmd::GoUp => {
             // Inside an expanded subtree, Backspace collapses the
@@ -1404,9 +1495,13 @@ fn execute(cmd: Cmd, session: &mut SessionView) -> SessionAction {
         }
         // Global and menu commands are dispatched by the App shell, never
         // here. `SessionNew` is owned by the app-level session browser
-        // (`controller::dispatch_browser_key`), and the copy-default toggles
-        // by the controller's menu confirmation (`confirm_menu_item`).
+        // (`controller::dispatch_browser_key`), `CloseAllSessions`, the
+        // workspace commands and the copy-default toggles by the
+        // controller's menu confirmation (`confirm_menu_item`).
         Cmd::CloseTab
+        | Cmd::CloseAllSessions
+        | Cmd::SaveWorkspace
+        | Cmd::RestoreWorkspace
         | Cmd::SessionNew
         | Cmd::SwitchTab
         | Cmd::MenuOpen(_)
@@ -1699,6 +1794,22 @@ fn handle_settings_key(
     Some(execute(cmd, session))
 }
 
+/// Handle a key for the open session info modal.
+///
+/// The modal is a pure viewer: `Enter` and `Esc` both close it, every
+/// other key is ignored (its exclusive input layer keeps the shell and
+/// the table from seeing it).
+fn handle_session_info_key(
+    session: &mut SessionView,
+    key: KeyEvent,
+) -> Option<SessionAction> {
+    if !matches!(session.ui.mode, SessionMode::Info) {
+        return None;
+    }
+    let cmd = lookup(KeyScope::SessionInfo, key)?;
+    Some(execute(cmd, session))
+}
+
 /// Handle a key for the open sync approval modal.
 ///
 /// The modal owns `y` (execute) and `n`/`Esc` (reject, i.e. close and keep
@@ -1813,6 +1924,52 @@ fn apply_filter_draft(session: &mut SessionView) -> SessionAction {
     SessionAction::None
 }
 
+/// Exchange the two sides of the session and re-orient the loaded result.
+///
+/// The comparison is mirrored in place (no filesystem access), so the swap
+/// is instant and involutive. While a compare or recompare is still in
+/// flight the command is a no-op: the pending result would arrive built
+/// for the old orientation.
+fn swap_sides(session: &mut SessionView) {
+    match &session.content {
+        SessionContent::Dir(dir) if dir.comparison.is_none() => return,
+        SessionContent::Text(text) if text.text_diff.is_none() => return,
+        _ => {}
+    }
+    // The dir cursor follows the selected entry by path, mirroring how
+    // the GUI keeps the selection across a swap.
+    let selected = session.selected_row().map(|row| row.rel_path.clone());
+    std::mem::swap(&mut session.core.left, &mut session.core.right);
+    session.core.name = session.core.left.pair_title(&session.core.right);
+    let is_dir = session.content.is_dir();
+    match &mut session.content {
+        SessionContent::Dir(dir) => {
+            if let Some(comparison) = &mut dir.comparison {
+                comparison.swap_sides();
+            }
+            dir.display.show_statuses = dir.display.show_statuses.swapped();
+            // The staged sync plan refers to the old orientation.
+            dir.pending_sync = None;
+        }
+        SessionContent::Text(text) => {
+            std::mem::swap(&mut text.source.left, &mut text.source.right);
+            text.recompare_with_rules();
+        }
+    }
+    if is_dir {
+        let index = selected
+            .as_deref()
+            .and_then(|path| session.row_index_of(path));
+        session.set_cursor(Some(index.unwrap_or(0)));
+    } else {
+        // The mirrored diff aligns the same rows; keep the cursor where
+        // it is but drop the drag anchor, which belongs to the old
+        // orientation (`set_cursor` clears it).
+        let index = session.ui.table_state.selected();
+        session.set_cursor(index);
+    }
+}
+
 /// Run a session-scoped [`Cmd`] activated from the menu bar.
 ///
 /// The menu items map onto the same commands the keybindings execute, so a
@@ -1922,7 +2079,7 @@ mod tests {
 
     use cocomo_lib::{
         DirComparison, DirEntry, DirEntryStatus, Endpoint, EntryInfo, Grammar,
-        TextCompareSettings, TransferAction, compare_texts,
+        SyncResult, TextCompareSettings, TransferAction, compare_texts,
     };
     use ratatui_kit::crossterm::event::KeyEvent;
 
@@ -3350,6 +3507,36 @@ mod tests {
     }
 
     #[test]
+    fn info_modal_opens_and_closes_on_both_session_types() {
+        for mut session in [dir_session(), text_session()] {
+            assert_eq!(
+                press(&mut session, KeyCode::Char('I')),
+                Some(SessionAction::None)
+            );
+            assert_eq!(session.ui.mode, SessionMode::Info);
+            // Unbound keys are ignored; the modal's layer swallows them.
+            assert_eq!(press(&mut session, KeyCode::Char('j')), None);
+            assert_eq!(
+                press(&mut session, KeyCode::Enter),
+                Some(SessionAction::None)
+            );
+            assert_eq!(session.ui.mode, SessionMode::Normal);
+
+            // The modal re-opens and `Esc` closes it as well.
+            assert_eq!(
+                press(&mut session, KeyCode::Char('I')),
+                Some(SessionAction::None)
+            );
+            assert_eq!(session.ui.mode, SessionMode::Info);
+            assert_eq!(
+                press(&mut session, KeyCode::Esc),
+                Some(SessionAction::None)
+            );
+            assert_eq!(session.ui.mode, SessionMode::Normal);
+        }
+    }
+
+    #[test]
     fn report_modal_generates_on_enter_with_a_destination() {
         let mut session = dir_session();
         assert_eq!(
@@ -3394,5 +3581,161 @@ mod tests {
             panic!("modal must stay open without a destination");
         };
         assert!(draft.error.is_some());
+    }
+
+    #[test]
+    fn x_is_bound_to_swap_sides_in_both_session_scopes() {
+        for scope in [KeyScope::DirNormal, KeyScope::TextNormal] {
+            assert_eq!(
+                lookup(scope, key(KeyCode::Char('X'))),
+                Some(Cmd::SwapSides),
+                "the {scope:?} scope must bind X to Swap sides"
+            );
+        }
+    }
+
+    #[test]
+    fn workspace_keys_are_bound_globally_only() {
+        // `W` saves and `Ctrl+R` restores, in the shell only: session
+        // scopes keep their lowercase `w` and `r` keys untouched.
+        assert_eq!(
+            lookup(KeyScope::Global, key(KeyCode::Char('W'))),
+            Some(Cmd::SaveWorkspace)
+        );
+        assert_eq!(
+            lookup(KeyScope::Global, KeyEvent::new(KeyCode::Char('r'), CTRL)),
+            Some(Cmd::RestoreWorkspace)
+        );
+        for scope in [KeyScope::DirNormal, KeyScope::TextNormal] {
+            assert_eq!(lookup(scope, key(KeyCode::Char('W'))), None);
+            assert_eq!(
+                lookup(scope, KeyEvent::new(KeyCode::Char('r'), CTRL)),
+                None,
+                "the {scope:?} scope must keep Ctrl+R free for the shell"
+            );
+        }
+    }
+
+    #[test]
+    fn r_is_bound_to_reload_in_both_session_scopes() {
+        for scope in [KeyScope::DirNormal, KeyScope::TextNormal] {
+            assert_eq!(
+                lookup(scope, key(KeyCode::Char('r'))),
+                Some(Cmd::Reload),
+                "the {scope:?} scope must bind r to Reload"
+            );
+        }
+    }
+
+    #[test]
+    fn swap_sides_mirrors_a_dir_session_and_is_involutive() {
+        let mut session = dir_session_with_sides();
+        // Stage a sync plan; it refers to the old orientation and must go.
+        session.dir_mut().unwrap().pending_sync = Some(SyncResult::default());
+        session.ui.table_state.select(Some(1));
+        assert_eq!(
+            press(&mut session, KeyCode::Char('X')),
+            Some(SessionAction::None)
+        );
+        assert_eq!(session.core.left.path(), PathBuf::from("/right"));
+        assert_eq!(session.core.right.path(), PathBuf::from("/left"));
+        assert_eq!(session.core.name, "right vs left");
+        let dir = session.dir().unwrap();
+        assert!(dir.pending_sync.is_none());
+        // Every entry's status and side metadata are mirrored; the row
+        // order is untouched.
+        let rows = session.visible_rows();
+        let mirrored = [
+            ("left-only.txt", DirEntryStatus::RightOrphan, (false, true)),
+            ("right-only.txt", DirEntryStatus::LeftOrphan, (true, false)),
+            ("both.txt", DirEntryStatus::RightNewer, (true, true)),
+        ];
+        for (row, (name, status, sides)) in rows.iter().zip(mirrored) {
+            assert_eq!(row.entry.name, name);
+            assert_eq!(row.entry.status, status);
+            // The metadata followed the entry onto the side it now
+            // belongs to: an orphan holds only that side.
+            assert_eq!(
+                (row.entry.left.is_some(), row.entry.right.is_some()),
+                sides,
+                "side metadata of {} were not mirrored",
+                row.entry.name
+            );
+        }
+        // The cursor followed the selected entry by path.
+        assert_eq!(session.ui.table_state.selected(), Some(1));
+        // Swapping twice restores the original orientation exactly.
+        press(&mut session, KeyCode::Char('X'));
+        assert_eq!(session.core.left.path(), PathBuf::from("/left"));
+        assert_eq!(session.core.name, "left vs right");
+        let statuses: Vec<_> = session
+            .visible_rows()
+            .iter()
+            .map(|row| row.entry.status)
+            .collect();
+        assert_eq!(
+            statuses,
+            [
+                DirEntryStatus::LeftOrphan,
+                DirEntryStatus::RightOrphan,
+                DirEntryStatus::LeftNewer,
+            ]
+        );
+    }
+
+    #[test]
+    fn swap_sides_mirrors_a_text_session_and_is_involutive() {
+        let mut session = text_session();
+        session.ui.table_state.select(Some(2));
+        assert_eq!(
+            press(&mut session, KeyCode::Char('X')),
+            Some(SessionAction::None)
+        );
+        assert_eq!(session.core.left.path(), PathBuf::from("/right"));
+        let text = session.text().unwrap();
+        assert_eq!(text.source.left, "a\nb\nC\nd\ne\nf\nG\nh\ni\nj\n");
+        assert_eq!(text.source.right, "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\n");
+        // The mirrored diff aligns the same rows; the changed rows keep
+        // their positions with their cells exchanged.
+        let rows = &text.merged_rows;
+        assert_eq!(rows.len(), 10);
+        assert_eq!(rows[2].left.as_ref().unwrap().content, "C");
+        assert_eq!(rows[2].right.as_ref().unwrap().content, "c");
+        assert!(rows[2].status.is_difference());
+        assert_eq!(session.ui.table_state.selected(), Some(2));
+        // Swapping twice restores the original diff exactly.
+        press(&mut session, KeyCode::Char('X'));
+        let rows = &session.text().unwrap().merged_rows;
+        assert_eq!(rows[2].left.as_ref().unwrap().content, "c");
+        assert_eq!(rows[2].right.as_ref().unwrap().content, "C");
+    }
+
+    #[test]
+    fn swap_sides_is_a_noop_while_the_comparison_is_loading() {
+        // A session without a loaded comparison must not swap: the
+        // in-flight result would arrive built for the old orientation.
+        let mut session = SessionView::new_dir_compare(
+            Endpoint::local(PathBuf::from("/left")),
+            Endpoint::local(PathBuf::from("/right")),
+            false,
+        );
+        assert_eq!(
+            press(&mut session, KeyCode::Char('X')),
+            Some(SessionAction::None)
+        );
+        assert_eq!(session.core.left.path(), PathBuf::from("/left"));
+        assert_eq!(session.core.name, "left vs right");
+    }
+
+    #[test]
+    fn swap_sides_menu_command_swaps_the_session() {
+        // The menu bar path shares the keyboard dispatch, so the item
+        // must swap exactly like the `X` binding.
+        let mut session = dir_session_with_sides();
+        assert_eq!(
+            run_menu_command(&mut session, Cmd::SwapSides),
+            SessionAction::None
+        );
+        assert_eq!(session.core.left.path(), PathBuf::from("/right"));
     }
 }

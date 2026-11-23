@@ -478,3 +478,73 @@ fn report_flow_from_open_to_generate_action() {
     assert!(config.0.include_orphans);
     assert_eq!(destination, std::path::PathBuf::from("report.json"));
 }
+
+#[test]
+fn swap_sides_mirrors_a_folder_session() {
+    let mut session = dir_session();
+    session.ui.table_state.select(Some(1));
+    // `X` exchanges the sides in place: endpoints, tab title, statuses
+    // and side metadata.
+    assert_eq!(
+        press(&mut session, KeyCode::Char('X')),
+        Some(SessionAction::None)
+    );
+    assert_eq!(
+        session.core.left.path(),
+        std::path::Path::new("/base/right")
+    );
+    assert_eq!(
+        session.core.right.path(),
+        std::path::Path::new("/base/left")
+    );
+    assert_eq!(session.core.name, "right vs left");
+    let rows = session.visible_rows();
+    assert_eq!(rows[0].entry.status, DirEntryStatus::RightNewer);
+    assert_eq!(rows[1].entry.status, DirEntryStatus::RightOrphan);
+    // The orphan moved to the right side, metadata included.
+    assert!(rows[1].entry.left.is_none());
+    assert_eq!(
+        rows[1].entry.right.as_ref().unwrap().name,
+        "file.txt".to_string()
+    );
+    // The cursor followed `file.txt` instead of jumping to the top.
+    assert_eq!(session.ui.table_state.selected(), Some(1));
+    // Pressing `X` again is an involution.
+    press(&mut session, KeyCode::Char('X'));
+    assert_eq!(session.core.left.path(), std::path::Path::new("/base/left"));
+    assert_eq!(
+        session
+            .visible_rows()
+            .iter()
+            .map(|row| row.entry.status)
+            .collect::<Vec<_>>(),
+        [DirEntryStatus::LeftNewer, DirEntryStatus::LeftOrphan]
+    );
+}
+
+#[test]
+fn swap_sides_menu_command_mirrors_a_text_session() {
+    let mut session = text_session();
+    // The Sessions menu item dispatches the same command as the key.
+    assert_eq!(
+        run_menu_command(&mut session, Cmd::SwapSides),
+        SessionAction::None
+    );
+    assert_eq!(
+        session.core.left.path(),
+        std::path::Path::new("/base/right")
+    );
+    let text = session.text().unwrap();
+    assert_eq!(text.source.left, "a\nB\nc\n");
+    assert_eq!(text.source.right, "a\nb\nc\n");
+    // The recomputed diff aligns the same rows with the cells exchanged.
+    let rows = &text.merged_rows;
+    assert_eq!(rows.len(), 3);
+    assert_eq!(rows[1].left.as_ref().unwrap().content, "B");
+    assert_eq!(rows[1].right.as_ref().unwrap().content, "b");
+    // Swapping back through the keyboard binding restores the diff.
+    press(&mut session, KeyCode::Char('X'));
+    let rows = &session.text().unwrap().merged_rows;
+    assert_eq!(rows[1].left.as_ref().unwrap().content, "b");
+    assert_eq!(rows[1].right.as_ref().unwrap().content, "B");
+}

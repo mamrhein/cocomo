@@ -33,8 +33,10 @@ use cocomo_lib::{
     Endpoint, FsError, FsPair, Grammar, NodeFileSystem, NullPrompter,
     Prompter, Provider, SessionConfig, SessionType as LibSessionType,
     SyncOperation, SyncResult, SyncRules, compare_texts, default_session_dir,
-    execute_transfers, list_saved_sessions, report::generate_report,
+    execute_transfers, list_saved_sessions,
+    report::generate_report,
     session_file_exists_in,
+    workspace::{WindowWorkspace, Workspace},
 };
 use ratatui_kit::crossterm::event::{KeyCode, KeyEvent};
 
@@ -46,7 +48,7 @@ use crate::{
     state::{
         APP_STATE, AppState, NamePattern, SessionAction, SessionContent,
         SessionMode, SessionView, SettingItem, StatusFilter, TextRules,
-        TextSource, TransferChoice,
+        TextSource, TransferChoice, TransferMenuState,
     },
 };
 
@@ -418,6 +420,31 @@ impl SessionSnapshot {
     }
 }
 
+/// The inputs a text-reload task needs, captured under a single read
+/// lock.
+struct TextReloadSnapshot {
+    left: Endpoint,
+    right: Endpoint,
+    /// Grammar and rules retained from the original comparison; a reload
+    /// only re-reads the contents.
+    grammar: Grammar,
+    rules: TextRules,
+}
+
+impl TextReloadSnapshot {
+    /// Capture the snapshot from a text session; `None` for a dir
+    /// session, which reloads through [`SessionSnapshot`].
+    fn from_session(session: &SessionView) -> Option<Self> {
+        let text = session.text()?;
+        Some(Self {
+            left: session.core.left.clone(),
+            right: session.core.right.clone(),
+            grammar: text.grammar.clone(),
+            rules: text.source.rules,
+        })
+    }
+}
+
 /// The inputs of a single transfer, captured under one read lock.
 struct TransferSnapshot {
     left: Endpoint,
@@ -620,35 +647,94 @@ pub(crate) fn process_session_action(action: SessionAction) {
             );
         }
         SessionAction::Reload => {
-            let Some(id) = active_dir_session_id() else {
+            // A dir session re-runs the folder comparison, a text session
+            // re-reads both files and recomputes the diff. Both write the
+            // fresh result back into the originating tab.
+            let Some(id) = active_session_id() else {
                 return;
             };
-            spawn_task(
-                move |app| {
-                    app.session(id).and_then(|s| {
-                        SessionSnapshot::from_session(s, &app.copy_options)
-                    })
-                },
-                move |snapshot| async move {
-                    // Clear the comparison so the view shows a loading
-                    // state.
-                    update_session(id, |s| s.set_comparison(None));
+            let is_dir = APP_STATE
+                .state()
+                .read()
+                .session(id)
+                .is_some_and(|s| s.content.is_dir());
+            if is_dir {
+                spawn_task(
+                    move |app| {
+                        app.session(id).and_then(|s| {
+                            SessionSnapshot::from_session(s, &app.copy_options)
+                        })
+                    },
+                    move |snapshot| async move {
+                        // Clear the comparison so the view shows a
+                        // loading state.
+                        update_session(id, |s| s.set_comparison(None));
 
-                    compare(
-                        &snapshot.left,
-                        &snapshot.right,
-                        snapshot.compare_content,
-                    )
-                    .await
-                },
-                move |app, comparison| {
-                    if let Some(s) = app.session_mut(id) {
-                        s.set_comparison(Some(comparison));
-                    }
-                },
-                "Comparison failed",
-                "Comparing",
-            );
+                        compare(
+                            &snapshot.left,
+                            &snapshot.right,
+                            snapshot.compare_content,
+                        )
+                        .await
+                    },
+                    move |app, comparison| {
+                        if let Some(s) = app.session_mut(id) {
+                            s.set_comparison(Some(comparison));
+                        }
+                    },
+                    "Comparison failed",
+                    "Comparing",
+                );
+            } else {
+                spawn_task(
+                    move |app| {
+                        app.session(id)
+                            .and_then(TextReloadSnapshot::from_session)
+                    },
+                    move |snapshot| async move {
+                        // Clear the diff so the view shows a loading
+                        // state.
+                        update_session(id, |s| {
+                            if let Some(text) = s.text_mut() {
+                                text.set_text_diff(None);
+                            }
+                        });
+
+                        let left = read_text_file(
+                            snapshot.left.fs(),
+                            snapshot.left.path(),
+                        )
+                        .await?;
+                        let right = read_text_file(
+                            snapshot.right.fs(),
+                            snapshot.right.path(),
+                        )
+                        .await?;
+                        let settings =
+                            snapshot.rules.compare_settings(&snapshot.grammar);
+                        let text_diff =
+                            compare_texts(&left, &right, &settings);
+                        Ok((
+                            TextSource {
+                                left,
+                                right,
+                                rules: snapshot.rules,
+                            },
+                            text_diff,
+                        ))
+                    },
+                    move |app, (source, text_diff)| {
+                        if let Some(text) =
+                            app.session_mut(id).and_then(|s| s.text_mut())
+                        {
+                            text.source = source;
+                            text.set_text_diff(Some(text_diff));
+                        }
+                    },
+                    "Text comparison failed",
+                    "Comparing",
+                );
+            }
         }
         SessionAction::PlanSync { operation } => {
             let Some(id) = active_dir_session_id() else {
@@ -1113,6 +1199,11 @@ pub(crate) fn dispatch_browser_key(key: KeyEvent) -> bool {
 /// Handle a key press for the open settings modal.
 pub(crate) fn dispatch_settings_key(key: KeyEvent) -> bool {
     dispatch_key(|s| matches!(s.ui.mode, SessionMode::Settings), key)
+}
+
+/// Handle a key press for the open session info modal.
+pub(crate) fn dispatch_info_key(key: KeyEvent) -> bool {
+    dispatch_key(|s| matches!(s.ui.mode, SessionMode::Info), key)
 }
 
 /// Handle a key press for the open report modal.
@@ -1810,7 +1901,17 @@ pub(crate) fn confirm_menu_item() -> MenuOutcome {
                 return MenuOutcome::Handled;
             }
             cmd => {
-                if !item.available(view) {
+                // Confirming a row the dropdown renders dimmed stays a
+                // no-op: either its view does not offer the command, or
+                // (for a per-entry transfer) the current selection cannot
+                // run it.
+                let transfers = app
+                    .active()
+                    .map(|s| {
+                        TransferMenuState::from_targets(&s.transfer_targets())
+                    })
+                    .unwrap_or_default();
+                if !item.available(view, &transfers) {
                     return MenuOutcome::Handled;
                 }
                 if cmd == Cmd::OpenSessionBrowser {
@@ -1818,6 +1919,26 @@ pub(crate) fn confirm_menu_item() -> MenuOutcome {
                     // active session, so it runs on the welcome screen
                     // too.
                     SessionAction::OpenSessionBrowser
+                } else if cmd == Cmd::CloseAllSessions {
+                    // App-level command: close every tab and land on the
+                    // welcome screen. Deliberately not a quit and not
+                    // `CloseTab`: the app keeps running no matter how many
+                    // tabs were open (unlike closing the last tab, which
+                    // exits).
+                    app.sessions.clear();
+                    app.active_tab = 0;
+                    return MenuOutcome::Handled;
+                } else if cmd == Cmd::SaveWorkspace {
+                    // App-level command: persist every open session. Drop
+                    // the guard first; the spawned task takes the state
+                    // lock itself.
+                    drop(app);
+                    save_workspace();
+                    return MenuOutcome::Handled;
+                } else if cmd == Cmd::RestoreWorkspace {
+                    drop(app);
+                    restore_workspace();
+                    return MenuOutcome::Handled;
                 } else {
                     let Some(session) = app.active_mut() else {
                         return MenuOutcome::Handled;
@@ -1879,6 +2000,88 @@ fn sanitize_paste(text: &str) -> Option<String> {
                 .to_string()
         })
         .filter(|line| !line.is_empty())
+}
+
+/// Persist every open session as the saved workspace file.
+///
+/// All open tabs are written as a single window (the TUI keeps its
+/// sessions in one window); a welcome screen with no tabs writes nothing,
+/// leaving any previously saved workspace in place.
+pub(crate) fn save_workspace() {
+    save_workspace_to(cocomo_lib::workspace::workspace_path());
+}
+
+/// Save the open tabs of [`AppState`] as one window at `path`.
+fn save_workspace_to(path: PathBuf) {
+    spawn_task(
+        |app| {
+            let tabs: Vec<SessionConfig> =
+                app.sessions.iter().map(session_to_config).collect();
+            (!tabs.is_empty())
+                .then(|| WindowWorkspace::new(tabs, app.active_index()))
+        },
+        move |tabs| async move {
+            let mut workspace = Workspace::new();
+            workspace.windows.push(tabs);
+            cocomo_lib::workspace::save_workspace_to(&workspace, &path)?;
+            Ok(())
+        },
+        |_, ()| {},
+        "Failed to save workspace",
+        "Saving workspace",
+    );
+}
+
+/// Replace the open tabs with the saved workspace file.
+///
+/// The last window's active tab is restored; a missing or stale file is
+/// reported and leaves the current tabs untouched.
+pub(crate) fn restore_workspace() {
+    restore_workspace_from(cocomo_lib::workspace::workspace_path());
+}
+
+/// Load the workspace at `path` and replace the tabs with its sessions.
+fn restore_workspace_from(path: PathBuf) {
+    spawn_task(
+        move |_| Some(path),
+        move |path| async move {
+            let Some(workspace) =
+                cocomo_lib::workspace::load_workspace_from(&path)
+            else {
+                report_error("No saved workspace to restore");
+                return Ok((Vec::new(), 0));
+            };
+            let active_index =
+                workspace.windows.first().map_or(0, |w| w.active_index);
+            let mut restored = Vec::new();
+            for window in &workspace.windows {
+                for config in &window.tabs {
+                    // A tab that no longer opens (missing directory,
+                    // unreachable provider) is reported and skipped: the
+                    // rest of the workspace is still worth restoring.
+                    match create_session_from_config(config).await {
+                        Ok(session) => restored.push(session),
+                        Err(e) => report_error(format!(
+                            "Failed to restore session `{}`: {e}",
+                            config.name
+                        )),
+                    }
+                }
+            }
+            Ok((restored, active_index))
+        },
+        |app, (sessions, active_index)| {
+            if sessions.is_empty() {
+                // Nothing restored (empty file, or every tab failed to
+                // open): keep the current tabs.
+                return;
+            }
+            app.active_tab = active_index.min(sessions.len() - 1);
+            app.sessions = sessions;
+        },
+        "Failed to restore workspace",
+        "Restoring workspace",
+    );
 }
 
 /// Toggle the bottom help bar.
@@ -2223,6 +2426,70 @@ mod tests {
         assert!(!app.active().unwrap().dir().unwrap().shows_equal());
     }
 
+    /// Dir session whose single entry exists on the left only, selected.
+    fn left_orphan_app_state() -> AppState {
+        use cocomo_lib::{DirEntry, EntryInfo};
+        let mut app = dir_app_state();
+        let session = app.active_mut().unwrap();
+        session.set_comparison(Some(DirComparison {
+            entries: vec![DirEntry {
+                name: "left.txt".into(),
+                status: DirEntryStatus::LeftOrphan,
+                left: Some(EntryInfo {
+                    name: "left.txt".into(),
+                    path: "/left/left.txt".into(),
+                    ..Default::default()
+                }),
+                right: None,
+                center: None,
+                sub_entries: None,
+                name_conflict: false,
+            }],
+            ..Default::default()
+        }));
+        session.set_cursor(Some(0));
+        app
+    }
+
+    /// Dropdown row of the `File ▸ <parent>` submenu.
+    fn file_submenu_row(parent: &str) -> usize {
+        menu::menu_at(menu_index("File"))
+            .unwrap()
+            .entries
+            .iter()
+            .position(|entry| {
+                matches!(entry, MenuEntry::SubMenu { label, .. }
+                    if *label == parent)
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn confirm_menu_item_absorbs_a_transfer_the_selection_denies() {
+        // A left-only orphan holds no right side, so `Delete ▸ Right`
+        // renders dimmed. Confirming that row closes the dropdown and
+        // dispatches nothing, so no transfer task is ever started.
+        APP_STATE.set(left_orphan_app_state());
+        APP_STATE.state().write().menu = Some(MenuState {
+            bar_index: menu_index("File"),
+            item: file_submenu_row("Delete"),
+            sub: Some(1),
+        });
+        assert_eq!(confirm_menu_item(), MenuOutcome::Handled);
+        let state = APP_STATE.state();
+        let app = state.read();
+        assert_eq!(app.menu, None);
+        assert!(
+            app.pending_tasks.is_empty(),
+            "a denied transfer was dispatched: {:?}",
+            app.pending_tasks
+        );
+        assert!(
+            matches!(app.active().unwrap().ui.mode, SessionMode::Normal),
+            "the denied transfer left the session in a dialog mode"
+        );
+    }
+
     #[test]
     fn confirm_menu_item_toggles_help_without_a_session() {
         APP_STATE.set(AppState::new());
@@ -2407,6 +2674,177 @@ mod tests {
         assert!(text.text_diff.as_ref().unwrap().is_empty());
     }
 
+    #[tokio::test]
+    async fn reload_text_session_rereads_files_and_keeps_the_tab() {
+        let dir = tempfile::tempdir().unwrap();
+        let left = dir.path().join("a.txt");
+        let right = dir.path().join("b.txt");
+        fs_err::write(&left, "alpha\n").unwrap();
+        fs_err::write(&right, "beta\n").unwrap();
+        let session = run_text_comparison(
+            Endpoint::local(left.clone()),
+            Endpoint::local(right.clone()),
+        )
+        .await
+        .unwrap();
+        let id = session.core.id;
+        let mut app = AppState::new();
+        app.add_session(session);
+        APP_STATE.set(app);
+
+        // Both files gained the same content on disk; the reload must
+        // pick that up and converge the diff.
+        fs_err::write(&left, "gamma\n").unwrap();
+        fs_err::write(&right, "gamma\n").unwrap();
+        process_session_action(SessionAction::Reload);
+
+        // The task writes its result back asynchronously; wait for its
+        // busy registration to clear.
+        for _ in 0..500 {
+            if APP_STATE.state().read().pending_tasks.is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        let state = APP_STATE.state();
+        let app = state.read();
+        assert_eq!(app.sessions.len(), 1, "reload must keep the same tab");
+        let session = app
+            .session(id)
+            .expect("the reloaded tab must keep its session");
+        let text = session.text().unwrap();
+        assert_eq!(text.source.left, "gamma\n");
+        assert_eq!(text.source.right, "gamma\n");
+        // With equal contents the fresh diff holds no differences.
+        assert!(text.text_diff.as_ref().unwrap().is_empty());
+    }
+
+    /// Wait for spawned tasks to drain their busy registrations.
+    async fn wait_for_pending_tasks() {
+        for _ in 0..500 {
+            if APP_STATE.state().read().pending_tasks.is_empty() {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        panic!("the spawned task did not finish in time");
+    }
+
+    fn dir_config(left: &Path, right: &Path) -> SessionConfig {
+        SessionConfig {
+            name: "dir".to_string(),
+            session_type: LibSessionType::DirCompare,
+            left: cocomo_lib::ProviderRef {
+                provider: "local".to_string(),
+                path: left.to_path_buf(),
+            },
+            right: cocomo_lib::ProviderRef {
+                provider: "local".to_string(),
+                path: right.to_path_buf(),
+            },
+            center: None,
+            settings: Default::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn save_workspace_writes_all_open_tabs() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("workspace.json");
+        let mut app = dir_app_state();
+        app.add_session(SessionView::new_dir_compare(
+            Endpoint::local("/left2"),
+            Endpoint::local("/right2"),
+            false,
+        ));
+        APP_STATE.set(app);
+
+        save_workspace_to(path.clone());
+        wait_for_pending_tasks().await;
+
+        let workspace = cocomo_lib::workspace::load_workspace_from(&path)
+            .expect("the saved workspace must be readable");
+        assert_eq!(workspace.windows.len(), 1, "the TUI saves one window");
+        assert_eq!(workspace.windows[0].tabs.len(), 2);
+        assert_eq!(
+            workspace.windows[0].active_index, 1,
+            "the active tab was the second one"
+        );
+        assert!(
+            APP_STATE.state().read().error_message.is_none(),
+            "saving must not report an error"
+        );
+    }
+
+    #[tokio::test]
+    async fn restore_workspace_replaces_the_open_tabs() {
+        let dir = tempfile::tempdir().unwrap();
+        // Restored tabs really open (and compare), so their directories
+        // must exist on disk.
+        let old_left = dir.path().join("old-left");
+        let old_right = dir.path().join("old-right");
+        let new_left = dir.path().join("new-left");
+        let new_right = dir.path().join("new-right");
+        for d in [&old_left, &old_right, &new_left, &new_right] {
+            fs_err::create_dir(d).unwrap();
+        }
+        let path = dir.path().join("workspace.json");
+        let mut workspace = Workspace::new();
+        workspace.windows.push(WindowWorkspace::new(
+            vec![dir_config(&new_left, &new_right)],
+            0,
+        ));
+        cocomo_lib::workspace::save_workspace_to(&workspace, &path).unwrap();
+
+        let mut app = AppState::new();
+        app.add_session(SessionView::new_dir_compare(
+            Endpoint::local(old_left),
+            Endpoint::local(old_right),
+            false,
+        ));
+        APP_STATE.set(app);
+
+        restore_workspace_from(path);
+        wait_for_pending_tasks().await;
+
+        let state = APP_STATE.state();
+        let app = state.read();
+        assert!(
+            app.error_message.is_none(),
+            "restoring must not report an error: {:?}",
+            app.error_message
+        );
+        assert_eq!(app.sessions.len(), 1);
+        assert_eq!(
+            app.sessions[0].core.left.url(),
+            Endpoint::local(new_left).url(),
+            "the stale tab must be replaced by the restored one"
+        );
+    }
+
+    #[tokio::test]
+    async fn restoring_a_missing_workspace_keeps_the_tabs() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("does-not-exist.json");
+        APP_STATE.set(dir_app_state());
+
+        restore_workspace_from(path);
+        wait_for_pending_tasks().await;
+
+        let state = APP_STATE.state();
+        let app = state.read();
+        assert_eq!(
+            app.error_message.as_deref(),
+            Some("No saved workspace to restore"),
+            "a missing workspace file must be reported explicitly"
+        );
+        assert_eq!(
+            app.sessions.len(),
+            1,
+            "the current tabs must survive a failed restore"
+        );
+    }
+
     #[test]
     fn toggle_setting_records_explicit_copy_override() {
         let mut app = AppState::new();
@@ -2471,6 +2909,71 @@ mod tests {
         });
         assert_eq!(confirm_menu_item(), MenuOutcome::CloseTab);
         assert_eq!(APP_STATE.state().read().menu, None);
+    }
+
+    /// Open the Sessions dropdown with the highlight resting on the leaf
+    /// running `cmd` (the menu-state shape a click on that row produces).
+    fn open_sessions_item(cmd: Cmd) {
+        let sessions = menu::menu_at(menu_index("Sessions")).unwrap();
+        let item = sessions
+            .entries
+            .iter()
+            .position(|e| e.cmd() == Some(cmd))
+            .unwrap();
+        APP_STATE.state().write().menu = Some(MenuState {
+            bar_index: menu_index("Sessions"),
+            item,
+            sub: None,
+        });
+    }
+
+    #[test]
+    fn confirm_menu_item_close_all_sessions_shows_the_welcome_screen() {
+        // Two open tabs; close-all drops every one of them instead of
+        // quitting.
+        let mut app = dir_app_state();
+        app.add_session(SessionView::new_dir_compare(
+            Endpoint::local("/left2"),
+            Endpoint::local("/right2"),
+            false,
+        ));
+        APP_STATE.set(app);
+        open_sessions_item(Cmd::CloseAllSessions);
+        assert_eq!(confirm_menu_item(), MenuOutcome::Handled);
+        let state = APP_STATE.state();
+        let app = state.read();
+        assert!(
+            app.sessions.is_empty(),
+            "close-all must drop every open tab"
+        );
+        assert_eq!(app.active_tab, 0);
+        assert_eq!(app.menu, None);
+    }
+
+    #[test]
+    fn confirm_menu_item_close_all_on_the_last_tab_does_not_quit() {
+        APP_STATE.set(dir_app_state());
+        open_sessions_item(Cmd::CloseAllSessions);
+        // `Handled` (not `Quit` or `CloseTab`): with the last tab closed
+        // the app stays alive and the welcome screen takes over.
+        assert_eq!(confirm_menu_item(), MenuOutcome::Handled);
+        let state = APP_STATE.state();
+        let app = state.read();
+        assert!(app.sessions.is_empty());
+        assert_eq!(app.menu, None);
+    }
+
+    #[test]
+    fn confirm_menu_item_close_all_is_a_noop_on_the_welcome_screen() {
+        APP_STATE.set(AppState::new());
+        open_sessions_item(Cmd::CloseAllSessions);
+        // The item is dimmed on the welcome screen; confirming it stays a
+        // no-op.
+        assert_eq!(confirm_menu_item(), MenuOutcome::Handled);
+        let state = APP_STATE.state();
+        let app = state.read();
+        assert!(app.sessions.is_empty());
+        assert_eq!(app.menu, None);
     }
 
     #[tokio::test]

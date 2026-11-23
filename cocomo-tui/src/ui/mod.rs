@@ -62,6 +62,7 @@ mod rows;
 mod save_input;
 mod save_overwrite;
 mod session_browser;
+mod session_info;
 mod session_table;
 mod settings_modal;
 mod summary;
