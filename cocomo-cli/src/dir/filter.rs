@@ -145,6 +145,7 @@ mod tests {
             size: 4096,
             modified: "2024-03-15 14:30".to_string(),
             is_dir: true,
+            is_symlink: false,
             hash: None,
         };
         let entry = DirEntry {
@@ -310,6 +311,7 @@ mod tests {
                 size: 4096,
                 modified: "2024-03-15 14:30".to_string(),
                 is_dir: true,
+                is_symlink: false,
                 hash: None,
             }),
             right: Some(EntryInfo {
@@ -318,6 +320,7 @@ mod tests {
                 size: 4096,
                 modified: "2024-03-15 14:30".to_string(),
                 is_dir: true,
+                is_symlink: false,
                 hash: None,
             }),
             center: None,
@@ -343,6 +346,7 @@ mod tests {
                 size: 4096,
                 modified: "2024-03-15 14:30".to_string(),
                 is_dir: true,
+                is_symlink: false,
                 hash: None,
             }),
             right: None,

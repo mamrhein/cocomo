@@ -302,6 +302,7 @@ mod tests {
             size: 1,
             modified: modified.to_string(),
             is_dir: false,
+            is_symlink: false,
             hash: None,
         }
     }

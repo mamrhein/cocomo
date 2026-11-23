@@ -513,6 +513,7 @@ mod tests {
             size: 0,
             modified: String::new(),
             is_dir,
+            is_symlink: false,
             hash: None,
         };
         let file = |name: &str| DirEntry {
@@ -663,6 +664,7 @@ mod tests {
                 size: 7,
                 modified: String::new(),
                 is_dir: true,
+                is_symlink: false,
                 hash: None,
             }),
             center: None,
@@ -682,6 +684,7 @@ mod tests {
                 size: 1,
                 modified: String::new(),
                 is_dir: false,
+                is_symlink: false,
                 hash: None,
             }),
             right: None,

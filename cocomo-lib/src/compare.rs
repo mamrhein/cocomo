@@ -35,7 +35,7 @@ use crate::{
     hash::{ContentCache, ContentId, hash_and_cache_node},
     identity::{FileId, NodeId},
     meta::Metadata,
-    scan::{ScanConfig, ScanEntry, scan_directory_node},
+    scan::{ScanConfig, ScanEntry, resolve_final_target, scan_directory_node},
 };
 
 bitflags! {
@@ -66,6 +66,10 @@ bitflags! {
         const LeftOrphan = 1 << 4;
         /// The left side is empty (the entry exists only on the right).
         const RightOrphan = 1 << 5;
+        /// The comparison requires the final target of a link and it
+        /// cannot be resolved (broken link, cycle, or a chain longer
+        /// than the resolution budget).
+        const Unresolvable = 1 << 6;
     }
 }
 
@@ -95,7 +99,8 @@ impl DirEntryStatus {
     /// directions flip, the symmetric bits stay. An involution, so
     /// applying it twice restores the original bitmap.
     pub fn swapped(self) -> Self {
-        let mut out = self.intersection(Self::Same | Self::Equal);
+        let mut out =
+            self.intersection(Self::Same | Self::Equal | Self::Unresolvable);
         if self.contains(Self::LeftNewer) {
             out |= Self::RightNewer;
         }
@@ -115,15 +120,18 @@ impl DirEntryStatus {
     ///
     /// A pure orphan (exactly one orphan bit, the status of an entry that
     /// is itself missing on one side) is an `Orphan`. Any other bitmap
-    /// carrying a newer-side or orphan bit — typically the aggregated
-    /// status of a directory whose subtree differs — is `Different`.
+    /// carrying a newer-side, orphan, or unresolvable bit — typically the
+    /// aggregated status of a directory whose subtree differs — is
+    /// `Different`.
     /// Everything else (`Same`, `Equal`, or a directory whose whole
     /// subtree is equal) is `Same`. The buckets are disjoint, so the
     /// summary counts add up to the total.
     pub fn summary_bucket(self) -> SummaryBucket {
         if self == Self::LeftOrphan || self == Self::RightOrphan {
             SummaryBucket::Orphan
-        } else if self.intersects(Self::DIFFERENT | Self::ORPHAN) {
+        } else if self
+            .intersects(Self::DIFFERENT | Self::ORPHAN | Self::Unresolvable)
+        {
             SummaryBucket::Different
         } else {
             SummaryBucket::Same
@@ -134,7 +142,8 @@ impl DirEntryStatus {
     ///
     /// A single-bit status shows its variant's symbol; the exact
     /// [`DIFFERENT`](Self::DIFFERENT) combination (differing content with
-    /// equal modification dates) shows `?`; any other multi-bit bitmap (the
+    /// equal modification dates) shows `?`; an [`Unresolvable`](Self::
+    /// Unresolvable) link shows `¿`; any other multi-bit bitmap (the
     /// aggregated status of a directory) shows `!`.
     pub fn symbol(&self) -> (&'static str, StatusColor) {
         if *self == Self::Same {
@@ -149,6 +158,8 @@ impl DirEntryStatus {
             ("▶", StatusColor::Orphan)
         } else if *self == Self::RightOrphan {
             ("◀", StatusColor::Orphan)
+        } else if *self == Self::Unresolvable {
+            ("¿", StatusColor::Different)
         } else if *self == Self::DIFFERENT {
             ("?", StatusColor::Different)
         } else {
@@ -170,6 +181,8 @@ impl DirEntryStatus {
             "left_orphan"
         } else if *self == Self::RightOrphan {
             "right_orphan"
+        } else if *self == Self::Unresolvable {
+            "unresolvable"
         } else {
             "unknown"
         }
@@ -188,12 +201,13 @@ impl DirEntryStatus {
             "right_newer" => Some(Self::RightNewer),
             "left_orphan" => Some(Self::LeftOrphan),
             "right_orphan" => Some(Self::RightOrphan),
+            "unresolvable" => Some(Self::Unresolvable),
             _ => None,
         }
     }
 
     /// The bit names of every variant, in bit order.
-    pub fn all_bit_names() -> [&'static str; 6] {
+    pub fn all_bit_names() -> [&'static str; 7] {
         [
             "same",
             "equal",
@@ -201,6 +215,7 @@ impl DirEntryStatus {
             "right_newer",
             "left_orphan",
             "right_orphan",
+            "unresolvable",
         ]
     }
 }
@@ -249,6 +264,8 @@ pub struct EntryInfo {
     pub modified: String,
     /// Whether this entry is a directory.
     pub is_dir: bool,
+    /// Whether this entry is a symbolic link.
+    pub is_symlink: bool,
     /// Content hash (hex), present when content was compared.
     pub hash: Option<String>,
 }
@@ -351,14 +368,27 @@ impl DirComparison {
 }
 
 /// Configuration for a directory comparison.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct CompareConfig {
     /// Compare file contents, not just meta data.
     pub compare_content: bool,
     /// Compare node meta data (name, size, modification date).
     pub compare_meta_data: bool,
-    /// Follow symlinks during scan.
-    pub follow_symlinks: bool,
+    /// Resolve links to their final target before comparing them. Only
+    /// meaningful together with `!preserve_links`; a pair of links is
+    /// otherwise compared as a link of its own, by its recorded target.
+    pub follow_links: bool,
+    /// Handle links as content of their own instead of comparing (and
+    /// later transferring) the node they point at.
+    pub preserve_links: bool,
+}
+
+impl Default for CompareConfig {
+    /// The default is a meta-data-only comparison that preserves links,
+    /// matching [`CopyOptions::default`](crate::fs::CopyOptions::default).
+    fn default() -> Self {
+        Self::meta_data_only()
+    }
 }
 
 impl CompareConfig {
@@ -367,7 +397,8 @@ impl CompareConfig {
         Self {
             compare_content: true,
             compare_meta_data: true,
-            follow_symlinks: false,
+            follow_links: false,
+            preserve_links: true,
         }
     }
 
@@ -376,7 +407,8 @@ impl CompareConfig {
         Self {
             compare_content: false,
             compare_meta_data: true,
-            follow_symlinks: false,
+            follow_links: false,
+            preserve_links: true,
         }
     }
 }
@@ -455,7 +487,9 @@ where
         == std::ptr::from_ref(right_fs).cast::<()>();
 
     let scan_config = ScanConfig {
-        follow_symlinks: config.follow_symlinks,
+        // A link is only resolved when the caller follows links and does
+        // not want them preserved as links of their own.
+        resolve_links: config.follow_links || !config.preserve_links,
     };
 
     let left_result =
@@ -980,9 +1014,9 @@ where
     }
 
     // Equal sizes — resolve to node IDs and compare hashes, each side on
-    // its own provider.
-    let left_path = left_root.join(&left.path);
-    let right_path = right_root.join(&right.path);
+    // its own provider. A resolved link is hashed through its target.
+    let left_path = left.content_path(left_root);
+    let right_path = right.content_path(right_root);
     let left_label = left_fs.label();
     let right_label = right_fs.label();
 
@@ -1054,9 +1088,6 @@ where
     lh == rh
 }
 
-/// Max number of symlink hops resolved when establishing node identity.
-const MAX_SYMLINK_HOPS: u32 = 8;
-
 /// Return `true` when both scanned entries denote the identical node.
 ///
 /// Identity is a matching `(device_id, inode)` pair; a symbolic link is
@@ -1077,14 +1108,14 @@ where
     R: NodeFileSystem<Nid = u64>,
 {
     let Some(left_identity) =
-        side_node_identity(left_fs, &left_root.join(&left.path), &left.meta)
+        side_node_identity(left_fs, &left.content_path(left_root), &left.meta)
             .await
     else {
         return false;
     };
     let Some(right_identity) = side_node_identity(
         right_fs,
-        &right_root.join(&right.path),
+        &right.content_path(right_root),
         &right.meta,
     )
     .await
@@ -1119,22 +1150,15 @@ where
     }
 
     // A symlink is the identical node as its final target.
-    let mut id = fs.resolve_path(path).await.ok()?;
-    for _ in 0..MAX_SYMLINK_HOPS {
-        id = fs.resolve_symlink(id).await.ok()?;
-        let node = fs.get_node(id).ok()?;
-        let target = node.metadata();
-        let (Some(device_id), Some(inode)) = (target.device_id, target.inode)
-        else {
-            return None;
-        };
-        if !target.is_symlink {
-            return Some((device_id, inode));
-        }
+    let link_id = fs.resolve_path(path).await.ok()?;
+    let target_id = resolve_final_target(fs, link_id).await?;
+    let target = fs.node_metadata(target_id).ok()?;
+    match (target.device_id, target.inode) {
+        (Some(device_id), Some(inode)) => Some((device_id, inode)),
+        // Providers without identity metadata never classify as the
+        // identical node.
+        _ => None,
     }
-    // The link chain did not settle on a final target within the hop
-    // budget; treat the identity as unknown.
-    None
 }
 
 /// Map two modification dates to the newer-side status bits.
@@ -1160,6 +1184,7 @@ fn scan_entry_to_info(entry: &ScanEntry) -> EntryInfo {
         size: entry.meta.size,
         modified: entry.meta.modified.to_rfc3339(),
         is_dir: entry.meta.is_dir,
+        is_symlink: entry.meta.is_symlink,
         hash: None,
     }
 }
@@ -1269,6 +1294,67 @@ mod tests {
         assert_eq!(agg.swapped().swapped(), agg);
     }
 
+    #[test]
+    fn unresolvable_is_symmetric_and_buckets_as_different() {
+        // Mirroring the sides cannot turn an unresolvable link into a
+        // resolvable one; the bit stays put.
+        assert_eq!(
+            DirEntryStatus::Unresolvable.swapped(),
+            DirEntryStatus::Unresolvable
+        );
+        assert_eq!(
+            (DirEntryStatus::LeftOrphan | DirEntryStatus::Unresolvable)
+                .swapped(),
+            DirEntryStatus::RightOrphan | DirEntryStatus::Unresolvable
+        );
+        assert_eq!(
+            DirEntryStatus::Unresolvable.summary_bucket(),
+            SummaryBucket::Different
+        );
+        // A shared directory with an unresolvable link in its subtree is
+        // not equal; it counts as different.
+        assert_eq!(
+            (DirEntryStatus::Equal | DirEntryStatus::Unresolvable)
+                .summary_bucket(),
+            SummaryBucket::Different
+        );
+    }
+
+    #[test]
+    fn every_single_bit_status_has_its_own_symbol() {
+        assert_eq!(
+            DirEntryStatus::Unresolvable.symbol(),
+            ("¿", StatusColor::Different)
+        );
+        // Symbol and color role together identify the status, so no two
+        // variants render indistinguishably.
+        let mut symbols: Vec<(&str, StatusColor)> =
+            DirEntryStatus::all_bit_names()
+                .iter()
+                .map(|name| {
+                    DirEntryStatus::from_bit_name(name)
+                        .unwrap_or_else(|| panic!("unknown bit name: {name}"))
+                        .symbol()
+                })
+                .collect();
+        let count = symbols.len();
+        symbols.sort_unstable();
+        symbols.dedup();
+        assert_eq!(symbols.len(), count);
+    }
+
+    #[test]
+    fn bit_names_round_trip() {
+        let names = DirEntryStatus::all_bit_names();
+        assert_eq!(names.len(), 7);
+        for name in names {
+            let status = DirEntryStatus::from_bit_name(name)
+                .unwrap_or_else(|| panic!("unknown bit name: {name}"));
+            assert_eq!(status.bit_name(), name);
+        }
+        assert_eq!(DirEntryStatus::from_bit_name("nope"), None);
+    }
+
     fn side_info(path: &str, size: u64) -> EntryInfo {
         EntryInfo {
             name: path.rsplit('/').next().unwrap_or(path).to_string(),
@@ -1276,6 +1362,7 @@ mod tests {
             size,
             modified: String::new(),
             is_dir: false,
+            is_symlink: false,
             hash: None,
         }
     }

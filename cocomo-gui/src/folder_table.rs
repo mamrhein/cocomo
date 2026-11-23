@@ -1753,6 +1753,7 @@ mod tests {
             size: 1,
             modified: String::new(),
             is_dir,
+            is_symlink: false,
             hash: None,
         }
     }

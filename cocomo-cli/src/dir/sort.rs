@@ -79,6 +79,7 @@ mod tests {
             size: s,
             modified: m.to_string(),
             is_dir: false,
+            is_symlink: false,
             hash: None,
         };
         let left = if !status.contains(DirEntryStatus::RightOrphan) {

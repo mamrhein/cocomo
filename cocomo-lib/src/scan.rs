@@ -14,7 +14,11 @@
 //! cache: if a directory resolves to an already-visited node ID, the cycle
 //! is skipped.
 
-use std::{collections::HashMap, mem, path::Path};
+use std::{
+    collections::HashMap,
+    mem,
+    path::{Path, PathBuf},
+};
 
 use tokio_util::sync::CancellationToken;
 
@@ -23,7 +27,7 @@ use crate::{
     fs::NodeFileSystem,
     identity::NodeId,
     meta::Metadata,
-    node::Node,
+    node::{Node, NodeKind},
 };
 
 /// A single entry in the scanned directory tree.
@@ -37,12 +41,29 @@ pub struct ScanEntry {
     pub meta: Metadata,
     /// Children, present only for directories.
     pub children: Option<Vec<ScanEntry>>,
+    /// Target recorded in a symbolic link, `None` for every other entry.
+    pub link_target: Option<String>,
+    /// `true` when the link had to be resolved but its chain never settled
+    /// on a final target (broken link, cycle, or exhausted hop budget).
+    pub link_unresolved: bool,
+    /// Absolute path of the final target this link was resolved to, present
+    /// only when [`ScanConfig::resolve_links`] resolved it. Content is read
+    /// from this path rather than from the link itself.
+    pub resolved_path: Option<PathBuf>,
 }
 
 impl ScanEntry {
     /// Return `true` when this entry is a directory.
     pub fn is_dir(&self) -> bool {
         self.meta.is_dir
+    }
+
+    /// Return the path whose content represents this entry: the final
+    /// target of a resolved link, else the entry's own path below `root`.
+    pub fn content_path(&self, root: &Path) -> PathBuf {
+        self.resolved_path
+            .clone()
+            .unwrap_or_else(|| root.join(&self.path))
     }
 
     /// Return the children of this directory entry, if any.
@@ -56,10 +77,15 @@ impl ScanEntry {
 /// The scan always walks the full tree; there is no depth limit.
 #[derive(Clone, Debug, Default)]
 pub struct ScanConfig {
-    /// Follow symbolic links during traversal. Disabled by default to avoid
-    /// unintended cycles and cross-filesystem traversal.
-    pub follow_symlinks: bool,
+    /// Resolve symbolic links to their final target during traversal. The
+    /// scanned entry keeps reporting a link, but carries the metadata of
+    /// the target and a resolved directory target is walked. Disabled by
+    /// default to avoid unintended cycles and cross-filesystem traversal.
+    pub resolve_links: bool,
 }
+
+/// Max number of symlink hops followed when resolving a link chain.
+pub const MAX_SYMLINK_HOPS: u32 = 8;
 
 /// Result of a directory scan.
 #[derive(Clone, Debug, Default)]
@@ -80,8 +106,15 @@ pub struct ScanResult {
 /// Operates on opaque [`NodeId`] identifiers instead of paths, eliminating
 /// TOCTOU races. The provider's node cache is populated during the scan.
 ///
-/// Symlink cycle detection relies on the provider's cache: if a symlink
-/// resolves to an already-visited node ID, the cycle is detected.
+/// With [`ScanConfig::resolve_links`] a link is scanned with the metadata
+/// of its final target (see [`resolve_final_target`]) while the entry
+/// itself keeps reporting a link; a resolved directory target is walked
+/// under the link's path. Unresolvable links are recorded as such on the
+/// entry.
+///
+/// Cycle detection relies on the provider's node cache: if a directory
+/// (or a resolved link target) resolves to an already-visited node ID,
+/// the cycle is skipped.
 pub async fn scan_directory_node<N>(
     fs: &N,
     path: &Path,
@@ -97,16 +130,10 @@ where
     let root_id = fs.resolve_path(path).await?;
     let root_node = fs.get_node(root_id)?;
 
-    // Use the absolute path of the resolved root for computing relative
-    // entry paths, regardless of whether the caller passed a relative or
-    // absolute scan root.
-    let scan_root = root_node.path();
-
     if !root_node.kind().is_directory() {
-        // The root is not a directory; return the single entry.
-        result
-            .entries
-            .push(scan_node_to_entry(&root_node, &root_id, scan_root));
+        // The root is not a directory; return the single entry, addressed
+        // by the empty relative path.
+        result.entries.push(scan_node_to_entry(&root_node, ""));
         return Ok(result);
     }
 
@@ -180,6 +207,52 @@ where
                 )
             };
 
+            // A link is either scanned as the link node itself or, when
+            // links are resolved, with the metadata of its final target.
+            if child_node.kind().is_symlink() {
+                let mut entry = scan_node_to_entry(&child_node, &rel_path);
+                if config.resolve_links {
+                    match resolve_final_target(fs, child_id).await {
+                        Some(target_id) => match fs.get_node(target_id) {
+                            Ok(target_node) => {
+                                // The entry stays a link (that is what
+                                // the user sees and what a transfer
+                                // preserves); only the content-side
+                                // attributes come from the target.
+                                entry.meta = target_node.metadata().clone();
+                                entry.meta.is_symlink = true;
+                                entry.resolved_path =
+                                    Some(target_node.path().to_path_buf());
+                                if entry.is_dir()
+                                    && visited.insert(*target_id.get())
+                                {
+                                    // Walk the target directory under the
+                                    // link's path, skipping a target that
+                                    // was already visited (a cycle).
+                                    queue.push((
+                                        target_id,
+                                        rel_path.clone(),
+                                        depth + 1,
+                                    ));
+                                }
+                            }
+                            Err(e) => {
+                                result.errors.push(e);
+                                entry.link_unresolved = true;
+                            }
+                        },
+                        None => {
+                            // A broken link, a cycle, or a chain longer
+                            // than the hop budget; the entry keeps the
+                            // link's own metadata.
+                            entry.link_unresolved = true;
+                        }
+                    }
+                }
+                result.entries.push(entry);
+                continue;
+            }
+
             // Cycle detection for directories.
             if child_node.kind().is_directory() {
                 let child_id_val = *child_id.get();
@@ -189,31 +262,17 @@ where
                 visited.insert(child_id_val);
             }
 
-            // Skip symlink targets unless configured to follow them.
-            if child_node.kind().is_symlink() && !config.follow_symlinks {
-                result.entries.push(scan_node_to_entry(
-                    &child_node,
-                    &child_id,
-                    scan_root,
-                ));
-                continue;
-            }
-
             if child_node.kind().is_directory() {
                 // Queue for BFS traversal.
                 queue.push((child_id, rel_path.clone(), depth + 1));
                 // Add placeholder.
-                result.entries.push(scan_node_to_entry(
-                    &child_node,
-                    &child_id,
-                    scan_root,
-                ));
+                result
+                    .entries
+                    .push(scan_node_to_entry(&child_node, &rel_path));
             } else {
-                result.entries.push(scan_node_to_entry(
-                    &child_node,
-                    &child_id,
-                    scan_root,
-                ));
+                result
+                    .entries
+                    .push(scan_node_to_entry(&child_node, &rel_path));
             }
         }
     }
@@ -230,29 +289,56 @@ where
     Ok(result)
 }
 
-/// Convert a `Node` into a `ScanEntry`.
-fn scan_node_to_entry(
-    node: &Node,
-    _node_id: &NodeId<u64>,
-    scan_root: &Path,
-) -> ScanEntry {
+/// Convert a `Node` into a `ScanEntry` addressed by `rel_path`.
+///
+/// The relative path is passed in rather than derived from the node's own
+/// path, because a walked link target lives outside of the scan root: its
+/// children are addressed through the link's path, not their own.
+fn scan_node_to_entry(node: &Node, rel_path: &str) -> ScanEntry {
     let name = node.name().to_string_lossy().into_owned();
     let meta = node.metadata().clone();
-
-    // Compute relative path from scan root.
-    let node_path = node.path();
-    let rel = node_path
-        .strip_prefix(scan_root)
-        .unwrap_or(node_path)
-        .to_string_lossy()
-        .into_owned();
+    let link_target = match node.kind() {
+        NodeKind::Symlink { target } => {
+            Some(target.path().to_string_lossy().into_owned())
+        }
+        _ => None,
+    };
 
     ScanEntry {
         name,
-        path: rel,
+        path: rel_path.to_string(),
         meta,
         children: None,
+        link_target,
+        link_unresolved: false,
+        resolved_path: None,
     }
+}
+
+/// Follow a symlink chain to its final target.
+///
+/// Returns the identifier of the first non-link node reached from `start`,
+/// `None` when a hop is broken, the chain cycles, or it does not settle on
+/// a final target within [`MAX_SYMLINK_HOPS`] hops. Callers must only
+/// invoke this for a node whose kind is [`NodeKind::Symlink`]; for any
+/// other node the first hop fails and the answer is `None`.
+pub async fn resolve_final_target<N>(
+    fs: &N,
+    start: NodeId<N::Nid>,
+) -> Option<NodeId<N::Nid>>
+where
+    N: NodeFileSystem,
+{
+    let mut id = start;
+    for _ in 0..MAX_SYMLINK_HOPS {
+        id = fs.resolve_symlink(id).await.ok()?;
+        let node = fs.get_node(id).ok()?;
+        if !node.kind().is_symlink() {
+            return Some(id);
+        }
+    }
+    // The chain did not settle on a final target within the hop budget.
+    None
 }
 
 /// Derive the size of every directory entry as the sum of the sizes of
@@ -613,5 +699,291 @@ mod tests {
 
         assert_eq!(result.errors.len(), 1);
         assert!(matches!(result.errors[0], FsError::PermissionDenied { .. }));
+    }
+
+    // -----------------------------------------------------------------------
+    // Link resolution tests
+    //
+    // They need real symlinks, so they only run on unix.
+    // -----------------------------------------------------------------------
+
+    /// Look up a scanned entry by its path relative to the scan root.
+    #[cfg(unix)]
+    fn find_entry<'a>(
+        entries: &'a [ScanEntry],
+        path: &str,
+    ) -> Option<&'a ScanEntry> {
+        for entry in entries {
+            if entry.path == path {
+                return Some(entry);
+            }
+            if let Some(children) = entry.children()
+                && let Some(found) = find_entry(children, path)
+            {
+                return Some(found);
+            }
+        }
+        None
+    }
+
+    #[cfg(unix)]
+    fn symlink(target: &Path, link: &Path) {
+        std::os::unix::fs::symlink(target, link).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn resolve_links_adopts_the_metadata_of_a_file_target() {
+        let base = tempfile::TempDir::new().unwrap();
+        let root = base.path();
+        fs_err::write(root.join("target.txt"), "alpha").unwrap();
+        symlink(Path::new("target.txt"), &root.join("link.txt"));
+
+        let fs = LocalFs::new("test");
+        let result = scan_directory_node(
+            &fs,
+            root,
+            &ScanConfig {
+                resolve_links: true,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.errors.len(), 0);
+
+        let link =
+            find_entry(&result.entries, "link.txt").expect("link entry");
+        // The entry keeps reporting a link, but carries the target's
+        // metadata.
+        assert!(link.meta.is_symlink);
+        assert!(!link.meta.is_dir);
+        assert_eq!(link.meta.size, 5);
+        assert_eq!(link.link_target.as_deref(), Some("target.txt"));
+        assert!(!link.link_unresolved);
+        assert_eq!(
+            link.resolved_path.as_deref(),
+            Some(root.join("target.txt").as_path())
+        );
+        // Content is read from the target, not from the link.
+        assert_eq!(link.content_path(root), root.join("target.txt"));
+
+        let target =
+            find_entry(&result.entries, "target.txt").expect("target entry");
+        assert!(!target.meta.is_symlink);
+        assert_eq!(target.content_path(root), root.join("target.txt"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn resolve_links_walks_a_directory_target() {
+        let base = tempfile::TempDir::new().unwrap();
+        // The target lives outside of the scan root, so walking it cannot
+        // collide with an entry the scan reaches by path.
+        let root = base.path().join("root");
+        let outside = base.path().join("outside");
+        fs_err::create_dir_all(&root).unwrap();
+        fs_err::create_dir_all(&outside).unwrap();
+        fs_err::write(outside.join("c.txt"), "charlie").unwrap();
+        symlink(&outside, &root.join("dlink"));
+
+        let fs = LocalFs::new("test");
+        let result = scan_directory_node(
+            &fs,
+            &root,
+            &ScanConfig {
+                resolve_links: true,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.errors.len(), 0);
+
+        let dlink = find_entry(&result.entries, "dlink").expect("link entry");
+        assert!(dlink.meta.is_symlink);
+        assert!(dlink.is_dir());
+        assert!(!dlink.link_unresolved);
+        assert_eq!(dlink.resolved_path.as_deref(), Some(outside.as_path()));
+        let children = dlink.children().expect("walked target directory");
+        let child = children
+            .iter()
+            .find(|e| e.name == "c.txt")
+            .expect("child of the target directory");
+        assert_eq!(child.path, "dlink/c.txt");
+        // The derived size of the walked link is the size of its content.
+        assert_eq!(dlink.meta.size, 7);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_directory_target_is_not_walked_twice() {
+        let base = tempfile::TempDir::new().unwrap();
+        let root = base.path();
+        fs_err::write(root.join("a.txt"), "alpha").unwrap();
+        // A link to its own directory; the target is the scan root, which
+        // the walk has already visited.
+        symlink(Path::new("."), &root.join("self"));
+
+        let fs = LocalFs::new("test");
+        let result = scan_directory_node(
+            &fs,
+            root,
+            &ScanConfig {
+                resolve_links: true,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+
+        let link = find_entry(&result.entries, "self").expect("link entry");
+        assert!(link.meta.is_symlink);
+        assert!(link.is_dir());
+        assert!(!link.link_unresolved);
+        assert_eq!(link.resolved_path.as_deref(), Some(root));
+        // The cycle stop keeps the link without a subtree.
+        assert!(link.children().is_none_or(|c| c.is_empty()));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_broken_link_is_recorded_as_unresolvable() {
+        let base = tempfile::TempDir::new().unwrap();
+        let root = base.path();
+        symlink(Path::new("missing.txt"), &root.join("dangling.txt"));
+
+        let fs = LocalFs::new("test");
+        let result = scan_directory_node(
+            &fs,
+            root,
+            &ScanConfig {
+                resolve_links: true,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+
+        let link = find_entry(&result.entries, "dangling.txt")
+            .expect("broken link entry");
+        assert!(link.meta.is_symlink);
+        assert!(link.link_unresolved);
+        assert_eq!(link.link_target.as_deref(), Some("missing.txt"));
+        assert!(link.resolved_path.is_none());
+        // Content stays addressed by the link's own path.
+        assert_eq!(link.content_path(root), root.join("dangling.txt"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_link_chain_without_final_target_is_unresolvable() {
+        let base = tempfile::TempDir::new().unwrap();
+        let root = base.path();
+        // A chain that never settles on a non-link node, so resolution
+        // runs until the hop budget is exhausted.
+        symlink(Path::new("b"), &root.join("a"));
+        symlink(Path::new("a"), &root.join("b"));
+
+        let fs = LocalFs::new("test");
+        let result = scan_directory_node(
+            &fs,
+            root,
+            &ScanConfig {
+                resolve_links: true,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+
+        for name in ["a", "b"] {
+            let link = find_entry(&result.entries, name).expect("link entry");
+            assert!(link.meta.is_symlink);
+            assert!(link.link_unresolved, "{name} must stay unresolved");
+            assert!(link.resolved_path.is_none());
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_link_chain_needs_a_final_target_within_the_budget() {
+        let base = tempfile::TempDir::new().unwrap();
+        let root = base.path();
+        fs_err::write(root.join("target.txt"), "alpha").unwrap();
+        // A chain of `MAX_SYMLINK_HOPS` links still settles on the
+        // target, one link more does not.
+        let chain_len = MAX_SYMLINK_HOPS as usize;
+        let link_name = |i: usize| format!("l{i}");
+        let mut target = PathBuf::from("target.txt");
+        for i in (1..=chain_len).rev() {
+            symlink(&target, &root.join(link_name(i)));
+            target = PathBuf::from(link_name(i));
+        }
+
+        let fs = LocalFs::new("test");
+        let result = scan_directory_node(
+            &fs,
+            root,
+            &ScanConfig {
+                resolve_links: true,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        let link = find_entry(&result.entries, "l1").expect("link entry");
+        assert!(!link.link_unresolved);
+        assert_eq!(link.meta.size, 5);
+
+        // One more link pushes the final target out of the budget.
+        symlink(Path::new("l1"), &root.join("l0"));
+        let fs2 = LocalFs::new("test2");
+        let result = scan_directory_node(
+            &fs2,
+            root,
+            &ScanConfig {
+                resolve_links: true,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        let link = find_entry(&result.entries, "l0").expect("link entry");
+        assert!(link.link_unresolved);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn without_resolve_links_a_link_is_scanned_as_a_link() {
+        let base = tempfile::TempDir::new().unwrap();
+        let root = base.path();
+        fs_err::create_dir(root.join("sub")).unwrap();
+        fs_err::write(root.join("sub/b.txt"), "bravo").unwrap();
+        symlink(Path::new("sub"), &root.join("dlink"));
+        symlink(Path::new("nowhere"), &root.join("dangling"));
+
+        let fs = LocalFs::new("test");
+        let result =
+            scan_directory_node(&fs, root, &ScanConfig::default(), None)
+                .await
+                .unwrap();
+
+        let dlink = find_entry(&result.entries, "dlink").expect("link entry");
+        // The link is scanned as the link node itself: neither resolved
+        // nor walked.
+        assert!(dlink.meta.is_symlink);
+        assert!(!dlink.is_dir());
+        assert!(!dlink.link_unresolved);
+        assert_eq!(dlink.link_target.as_deref(), Some("sub"));
+        assert!(dlink.resolved_path.is_none());
+        assert!(dlink.children().is_none_or(|c| c.is_empty()));
+
+        // A broken link stays a plain entry; nothing was resolved, so
+        // nothing failed either.
+        let dangling =
+            find_entry(&result.entries, "dangling").expect("link entry");
+        assert!(dangling.meta.is_symlink);
+        assert!(!dangling.link_unresolved);
     }
 }

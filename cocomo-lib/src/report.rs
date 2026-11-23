@@ -505,6 +505,7 @@ mod tests {
                 size: left_size,
                 modified: "2026-01-01T00:00:00Z".to_string(),
                 is_dir: false,
+                is_symlink: false,
                 hash: None,
             }),
             right: right_size.map(|sz| crate::compare::EntryInfo {
@@ -513,6 +514,7 @@ mod tests {
                 size: sz,
                 modified: "2026-01-01T00:00:00Z".to_string(),
                 is_dir: false,
+                is_symlink: false,
                 hash: None,
             }),
             center: None,

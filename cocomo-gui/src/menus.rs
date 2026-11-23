@@ -2755,6 +2755,7 @@ mod tests {
             size: 4,
             modified: "2026-01-01T00:00:00+00:00".to_string(),
             is_dir: false,
+            is_symlink: false,
             hash: None,
         };
         let comparison = DirComparison {

@@ -135,7 +135,10 @@ pub use resolver::{
     resolve_provider,
 };
 pub use s3::{S3Config, S3DirId, S3FileId, S3Fs, S3NodeId};
-pub use scan::{ScanConfig, ScanEntry, ScanResult, scan_directory_node};
+pub use scan::{
+    ScanConfig, ScanEntry, ScanResult, resolve_final_target,
+    scan_directory_node,
+};
 pub use secrets::{NullPrompter, Prompter, Secrets, TtyPrompter};
 pub use session::{
     ColorOverrides, ProviderRef, Session, SessionConfig, SessionManager,

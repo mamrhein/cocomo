@@ -207,7 +207,10 @@ where
     let compare_config = CompareConfig {
         compare_content: rules.compare_content,
         compare_meta_data: true,
-        follow_symlinks: false,
+        // Syncing preserves links as links; following them is wired up
+        // together with the transfer options.
+        follow_links: false,
+        preserve_links: true,
     };
 
     let comparison = match pair {
@@ -884,6 +887,7 @@ mod tests {
                         size: 10,
                         modified: "2026-01-01T00:00:00Z".to_string(),
                         is_dir: false,
+                        is_symlink: false,
                         hash: None,
                     }),
                     right: None,
@@ -900,6 +904,7 @@ mod tests {
                         size: 10,
                         modified: "2026-01-01T00:00:00Z".to_string(),
                         is_dir: false,
+                        is_symlink: false,
                         hash: None,
                     }),
                     right: Some(EntryInfo {
@@ -908,6 +913,7 @@ mod tests {
                         size: 10,
                         modified: "2026-01-01T00:00:00Z".to_string(),
                         is_dir: false,
+                        is_symlink: false,
                         hash: None,
                     }),
                     center: None,
@@ -947,6 +953,7 @@ mod tests {
                         size: 10,
                         modified: "2026-01-01T00:00:00Z".to_string(),
                         is_dir: false,
+                        is_symlink: false,
                         hash: None,
                     }),
                     right: None,
@@ -964,6 +971,7 @@ mod tests {
                         size: 10,
                         modified: "2026-01-01T00:00:00Z".to_string(),
                         is_dir: false,
+                        is_symlink: false,
                         hash: None,
                     }),
                     center: None,
@@ -990,6 +998,7 @@ mod tests {
             size: if is_dir { 4096 } else { 10 },
             modified: "2026-01-01T00:00:00Z".to_string(),
             is_dir,
+            is_symlink: false,
             hash: None,
         }
     }

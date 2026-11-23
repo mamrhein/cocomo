@@ -23,6 +23,7 @@ pub(super) fn make_test_comparison() -> DirComparison {
         size: 6,
         modified: "2024-03-15 14:30".to_string(),
         is_dir: false,
+        is_symlink: false,
         hash: Some("abc".to_string()),
     };
     let diff = EntryInfo {
@@ -31,6 +32,7 @@ pub(super) fn make_test_comparison() -> DirComparison {
         size: 6,
         modified: "2024-03-15 14:30".to_string(),
         is_dir: false,
+        is_symlink: false,
         hash: Some("abc".to_string()),
     };
     let diff_right = EntryInfo {
@@ -39,6 +41,7 @@ pub(super) fn make_test_comparison() -> DirComparison {
         size: 8,
         modified: "2024-03-15 14:30".to_string(),
         is_dir: false,
+        is_symlink: false,
         hash: Some("def".to_string()),
     };
     let left_only = EntryInfo {
@@ -47,6 +50,7 @@ pub(super) fn make_test_comparison() -> DirComparison {
         size: 13,
         modified: "2024-03-15 14:30".to_string(),
         is_dir: false,
+        is_symlink: false,
         hash: None,
     };
     let right_only = EntryInfo {
@@ -55,6 +59,7 @@ pub(super) fn make_test_comparison() -> DirComparison {
         size: 13,
         modified: "2024-03-15 14:30".to_string(),
         is_dir: false,
+        is_symlink: false,
         hash: None,
     };
 
@@ -120,6 +125,7 @@ pub(super) fn make_hidden_file_entry() -> DirEntry {
             size: 4,
             modified: "2024-03-15 14:30".to_string(),
             is_dir: false,
+            is_symlink: false,
             hash: None,
         }),
         right: Some(EntryInfo {
@@ -128,6 +134,7 @@ pub(super) fn make_hidden_file_entry() -> DirEntry {
             size: 4,
             modified: "2024-03-15 14:30".to_string(),
             is_dir: false,
+            is_symlink: false,
             hash: None,
         }),
         center: None,
@@ -147,6 +154,7 @@ pub(super) fn make_dir_entry() -> DirEntry {
             size: 4096,
             modified: "2024-03-15 14:30".to_string(),
             is_dir: true,
+            is_symlink: false,
             hash: None,
         }),
         right: None,
@@ -165,6 +173,7 @@ pub(super) fn make_nested_comparison() -> DirComparison {
         size: 4096,
         modified: "2024-03-15 14:30".to_string(),
         is_dir: true,
+        is_symlink: false,
         hash: None,
     };
     // Sub-entries for the "sub" directory.
@@ -174,6 +183,7 @@ pub(super) fn make_nested_comparison() -> DirComparison {
         size: 6,
         modified: "2024-03-15 14:30".to_string(),
         is_dir: false,
+        is_symlink: false,
         hash: Some("abc".to_string()),
     };
     let sub_diff_left = EntryInfo {
@@ -182,6 +192,7 @@ pub(super) fn make_nested_comparison() -> DirComparison {
         size: 6,
         modified: "2024-03-15 14:30".to_string(),
         is_dir: false,
+        is_symlink: false,
         hash: Some("abc".to_string()),
     };
     let sub_diff_right = EntryInfo {
@@ -190,6 +201,7 @@ pub(super) fn make_nested_comparison() -> DirComparison {
         size: 8,
         modified: "2024-03-15 14:30".to_string(),
         is_dir: false,
+        is_symlink: false,
         hash: Some("def".to_string()),
     };
     let sub_left_only = EntryInfo {
@@ -198,6 +210,7 @@ pub(super) fn make_nested_comparison() -> DirComparison {
         size: 13,
         modified: "2024-03-15 14:30".to_string(),
         is_dir: false,
+        is_symlink: false,
         hash: None,
     };
 
@@ -242,6 +255,7 @@ pub(super) fn make_nested_comparison() -> DirComparison {
         size: 6,
         modified: "2024-03-15 14:30".to_string(),
         is_dir: false,
+        is_symlink: false,
         hash: Some("abc".to_string()),
     };
 
@@ -281,6 +295,7 @@ pub(super) fn make_nested_comparison_with_hidden() -> DirComparison {
         size: 4096,
         modified: "2024-03-15 14:30".to_string(),
         is_dir: true,
+        is_symlink: false,
         hash: None,
     };
     let visible_dir = EntryInfo {
@@ -289,6 +304,7 @@ pub(super) fn make_nested_comparison_with_hidden() -> DirComparison {
         size: 4096,
         modified: "2024-03-15 14:30".to_string(),
         is_dir: true,
+        is_symlink: false,
         hash: None,
     };
     let visible_file = EntryInfo {
@@ -297,6 +313,7 @@ pub(super) fn make_nested_comparison_with_hidden() -> DirComparison {
         size: 6,
         modified: "2024-03-15 14:30".to_string(),
         is_dir: false,
+        is_symlink: false,
         hash: Some("abc".to_string()),
     };
     let child_file = EntryInfo {
@@ -305,6 +322,7 @@ pub(super) fn make_nested_comparison_with_hidden() -> DirComparison {
         size: 6,
         modified: "2024-03-15 14:30".to_string(),
         is_dir: false,
+        is_symlink: false,
         hash: Some("abc".to_string()),
     };
 
@@ -319,6 +337,7 @@ pub(super) fn make_nested_comparison_with_hidden() -> DirComparison {
                 size: 6,
                 modified: "2024-03-15 14:30".to_string(),
                 is_dir: false,
+                is_symlink: false,
                 hash: Some("abc".to_string()),
             }),
             center: None,
@@ -347,6 +366,7 @@ pub(super) fn make_nested_comparison_with_hidden() -> DirComparison {
                     size: 4096,
                     modified: "2024-03-15 14:30".to_string(),
                     is_dir: true,
+                    is_symlink: false,
                     hash: None,
                 }),
                 center: None,
@@ -364,6 +384,7 @@ pub(super) fn make_nested_comparison_with_hidden() -> DirComparison {
                     size: 4096,
                     modified: "2024-03-15 14:30".to_string(),
                     is_dir: true,
+                    is_symlink: false,
                     hash: None,
                 }),
                 center: None,
@@ -380,6 +401,7 @@ pub(super) fn make_nested_comparison_with_hidden() -> DirComparison {
                     size: 6,
                     modified: "2024-03-15 14:30".to_string(),
                     is_dir: false,
+                    is_symlink: false,
                     hash: Some("abc".to_string()),
                 }),
                 center: None,
