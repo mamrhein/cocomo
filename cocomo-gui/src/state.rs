@@ -1873,6 +1873,11 @@ impl AppState {
                 right.fs(),
                 left.path(),
                 right.path(),
+                // The comparison above uses the default link handling
+                // (preserve, do not follow); the content pass must
+                // mirror it until the option dialogs expose both
+                // settings.
+                false,
                 comparison,
                 Some(&cache),
                 Some(&content_token),

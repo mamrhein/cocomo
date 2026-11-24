@@ -34,7 +34,6 @@ use crate::{
     error::FsError,
     hash::{ContentCache, ContentId, hash_and_cache_node},
     identity::{FileId, NodeId},
-    meta::Metadata,
     scan::{ScanConfig, ScanEntry, resolve_final_target, scan_directory_node},
 };
 
@@ -374,12 +373,16 @@ pub struct CompareConfig {
     pub compare_content: bool,
     /// Compare node meta data (name, size, modification date).
     pub compare_meta_data: bool,
-    /// Resolve links to their final target before comparing them. Only
-    /// meaningful together with `!preserve_links`; a pair of links is
-    /// otherwise compared as a link of its own, by its recorded target.
+    /// Resolve links to their final target before comparing them,
+    /// regardless of `preserve_links`: a pair is then typed by the
+    /// final targets (a link to a directory pairs up with a
+    /// directory), and a side whose chain cannot be resolved
+    /// classifies as [`DirEntryStatus::Unresolvable`].
     pub follow_links: bool,
     /// Handle links as content of their own instead of comparing (and
-    /// later transferring) the node they point at.
+    /// later transferring) the node they point at. Without
+    /// `follow_links`, a pair of links is compared verbatim by the
+    /// target path recorded in each link.
     pub preserve_links: bool,
 }
 
@@ -542,6 +545,12 @@ where
 /// triggered the pass stops with [`FsError::Cancelled`]; the partially
 /// refined comparison is dropped.
 ///
+/// `resolve_links` must mirror the link policy of the comparison being
+/// refined: a link side is hashed through its final target, and a pair
+/// of links is only a candidate when links are resolved — with links
+/// preserved, such a pair is already classified by its recorded target
+/// and hashing the targets could wrongly downgrade it.
+///
 /// Only top-level entries are refined; subdirectory subtrees keep the
 /// statuses from the metadata pass. Callers that display a subtree
 /// re-compare it when the user navigates in.
@@ -551,6 +560,7 @@ pub async fn compare_content_pair_node<L, R>(
     right_fs: &R,
     left_path: &Path,
     right_path: &Path,
+    resolve_links: bool,
     mut comparison: DirComparison,
     cache: Option<&ContentCache>,
     cancel: Option<&CancellationToken>,
@@ -564,15 +574,7 @@ where
         .entries
         .iter()
         .enumerate()
-        .filter(|(_, e)| {
-            e.status == DirEntryStatus::Equal
-                && e.left.as_ref().is_some_and(|l| {
-                    !l.is_dir
-                        && l.size
-                            == e.right.as_ref().map_or(u64::MAX, |r| r.size)
-                })
-                && e.right.as_ref().is_some_and(|r| !r.is_dir)
-        })
+        .filter(|(_, e)| is_content_candidate(e, resolve_links))
         .map(|(i, _)| i)
         .collect();
     let total = candidates.len();
@@ -626,8 +628,34 @@ where
     Ok(comparison)
 }
 
+/// Decide whether an entry is refined by the content pass: a paired row
+/// of two non-directories that the metadata pass rated `Equal` and whose
+/// sides have the same size.
+///
+/// `resolve_links` must mirror the link policy of the compared pair. A
+/// pair of links is only a candidate when the links are resolved; with
+/// links preserved the pair is already classified by the target recorded
+/// in the links, whose link content is not file content.
+fn is_content_candidate(entry: &DirEntry, resolve_links: bool) -> bool {
+    if entry.status != DirEntryStatus::Equal {
+        return false;
+    }
+    let (Some(left), Some(right)) =
+        (entry.left.as_ref(), entry.right.as_ref())
+    else {
+        return false;
+    };
+    if left.is_dir || right.is_dir || left.size != right.size {
+        return false;
+    }
+    resolve_links || !(left.is_symlink && right.is_symlink)
+}
+
 /// Compute the blake3 hash of one file, consulting the optional
 /// [`ContentCache`] and the node's cached hash before reading content.
+///
+/// A link is hashed through its final target; a link whose chain cannot
+/// be resolved yields an error, i.e. unknown content.
 async fn side_content_hash<N>(
     fs: &N,
     path: &Path,
@@ -643,8 +671,14 @@ where
     {
         return Ok(hash);
     }
-    let id = fs.resolve_path(path).await?;
-    let node = fs.get_node(id)?;
+    let mut id = fs.resolve_path(path).await?;
+    let mut node = fs.get_node(id)?;
+    if node.kind().is_symlink() {
+        id = resolve_final_target(fs, id)
+            .await
+            .ok_or_else(|| FsError::not_found(path))?;
+        node = fs.get_node(id)?;
+    }
     let hash = match node
         .cached_hash()
         .and_then(|h| blake3::Hash::from_hex(h).ok())
@@ -817,10 +851,23 @@ where
 /// `same_provider` reports whether both sides share one provider
 /// instance.
 ///
+/// The merge follows copy semantics, decided by
+/// [`CompareConfig::follow_links`] and [`CompareConfig::preserve_links`]:
+///
+/// * When links are resolved (`follow_links || !preserve_links`), a pair is
+///   typed by the link's final target and a side whose chain cannot be
+///   resolved yields a single [`Unresolvable`](DirEntryStatus::Unresolvable)
+///   row.
+/// * Otherwise a link keeps its own (non-directory) type, and a pair of links
+///   is compared verbatim by the target paths recorded in the links: equal
+///   paths are equal, different ones classify by the modification dates like a
+///   differing file pair.
+///
 /// A file is never compared against a directory: when the sides share a
-/// name but differ in type, the result is two orphan rows (`LeftOrphan`
-/// for the left half, `RightOrphan` for the right half) instead of a
-/// paired row. Every other merge produces exactly one row.
+/// name but differ in their effective type, the result is two orphan
+/// rows (`LeftOrphan` for the left half, `RightOrphan` for the right
+/// half) instead of a paired row. Every other merge produces exactly
+/// one row.
 #[allow(clippy::too_many_arguments)]
 async fn merge_entry_sync_node<L, R>(
     left_fs: &L,
@@ -846,37 +893,73 @@ where
     let left_info = left.map(scan_entry_to_info);
     let right_info = right.map(scan_entry_to_info);
 
-    if let (Some(le), Some(re)) = (left, right)
-        && le.meta.is_dir != re.meta.is_dir
-    {
-        // A file colliding with a directory is not a comparison
-        // candidate: each side becomes an orphan entry of its own.
-        return Ok(vec![
-            DirEntry {
-                name: name.clone(),
-                status: DirEntryStatus::LeftOrphan,
-                left: left_info,
-                right: None,
-                center: None,
-                sub_entries: None,
-                name_conflict: true,
-            },
-            DirEntry {
+    // The policy that decides whether a link is compared as its final
+    // target; the same derivation the scan used for
+    // `ScanConfig::resolve_links`.
+    let resolve_links = config.follow_links || !config.preserve_links;
+
+    if let (Some(le), Some(re)) = (left, right) {
+        // When the comparison resolves links, every link side needs a
+        // final target; a chain that never settles on one leaves the
+        // pair unclassifiable.
+        if resolve_links && (le.link_unresolved || re.link_unresolved) {
+            return Ok(vec![DirEntry {
                 name,
-                status: DirEntryStatus::RightOrphan,
-                left: None,
+                status: DirEntryStatus::Unresolvable,
+                left: left_info,
                 right: right_info,
                 center: None,
                 sub_entries: None,
-                name_conflict: true,
-            },
-        ]);
+                name_conflict: false,
+            }]);
+        }
+
+        if le.meta.is_dir != re.meta.is_dir {
+            // A file colliding with a directory is not a comparison
+            // candidate: each side becomes an orphan entry of its own.
+            // The scanned metadata already carries the effective
+            // type: the adopted metadata of a link's final target when
+            // links are resolved, the link itself otherwise (a link is
+            // never a directory).
+            return Ok(vec![
+                DirEntry {
+                    name: name.clone(),
+                    status: DirEntryStatus::LeftOrphan,
+                    left: left_info,
+                    right: None,
+                    center: None,
+                    sub_entries: None,
+                    name_conflict: true,
+                },
+                DirEntry {
+                    name,
+                    status: DirEntryStatus::RightOrphan,
+                    left: None,
+                    right: right_info,
+                    center: None,
+                    sub_entries: None,
+                    name_conflict: true,
+                },
+            ]);
+        }
     }
 
     let status = if let (Some(le), Some(re)) = (left, right) {
         // The type clash was handled above, so a pair is now either two
-        // directories or two files.
-        if le.meta.is_dir {
+        // directories or two files (a link counts as a file).
+        if !resolve_links && le.meta.is_symlink && re.meta.is_symlink {
+            // With links preserved, a pair of links copies as links: the
+            // target path recorded in each link is the content of the
+            // copy. Equal recorded paths copy equally; different ones
+            // classify by the modification dates like a differing file
+            // pair. No target resolution happens, so a pair of links can
+            // never clash by name with a directory on the other side.
+            if le.link_target == re.link_target {
+                DirEntryStatus::Equal
+            } else {
+                newer_status(&le.meta.modified, &re.meta.modified)
+            }
+        } else if le.meta.is_dir {
             // Base bitmap of a shared directory: the identical node (for
             // example two links to the same directory) classifies as
             // `Same`, every other shared directory (including a shared
@@ -1090,11 +1173,11 @@ where
 
 /// Return `true` when both scanned entries denote the identical node.
 ///
-/// Identity is a matching `(device_id, inode)` pair; a symbolic link is
-/// resolved to its final target first, so a link and the node it points
-/// at are the same node. Callers must only consult this when both sides
-/// are addressed on the same provider instance; cross-provider pairs
-/// never classify as the same node.
+/// Identity is a matching `(device_id, inode)` pair; an unresolved
+/// symbolic link is resolved to its final target first, so a link and
+/// the node it points at are the same node. Callers must only consult
+/// this when both sides are addressed on the same provider instance;
+/// cross-provider pairs never classify as the same node.
 async fn entries_are_same_node<L, R>(
     left_fs: &L,
     left_root: &Path,
@@ -1108,17 +1191,12 @@ where
     R: NodeFileSystem<Nid = u64>,
 {
     let Some(left_identity) =
-        side_node_identity(left_fs, &left.content_path(left_root), &left.meta)
-            .await
+        side_node_identity(left_fs, left_root, left).await
     else {
         return false;
     };
-    let Some(right_identity) = side_node_identity(
-        right_fs,
-        &right.content_path(right_root),
-        &right.meta,
-    )
-    .await
+    let Some(right_identity) =
+        side_node_identity(right_fs, right_root, right).await
     else {
         return false;
     };
@@ -1130,27 +1208,29 @@ where
 ///
 /// `None` when the provider exposes no identity metadata or the node
 /// (chain) cannot be resolved. Regular entries are answered from the
-/// scanned metadata without any additional I/O.
+/// scanned metadata without any additional I/O; so is a link whose
+/// scan already resolved it, because the adopted metadata carries the
+/// final target's identity.
 async fn side_node_identity<N>(
     fs: &N,
-    path: &Path,
-    meta: &Metadata,
+    root: &Path,
+    entry: &ScanEntry,
 ) -> Option<(u64, u64)>
 where
     N: NodeFileSystem<Nid = u64>,
 {
-    let (device_id, inode) = match (meta.device_id, meta.inode) {
+    let (device_id, inode) = match (entry.meta.device_id, entry.meta.inode) {
         (Some(device_id), Some(inode)) => (device_id, inode),
         // Providers without identity metadata never classify as the
         // identical node.
         _ => return None,
     };
-    if !meta.is_symlink {
+    if !entry.meta.is_symlink || entry.resolved_path.is_some() {
         return Some((device_id, inode));
     }
 
-    // A symlink is the identical node as its final target.
-    let link_id = fs.resolve_path(path).await.ok()?;
+    // An unresolved link is the identical node as its final target.
+    let link_id = fs.resolve_path(&entry.content_path(root)).await.ok()?;
     let target_id = resolve_final_target(fs, link_id).await?;
     let target = fs.node_metadata(target_id).ok()?;
     match (target.device_id, target.inode) {
@@ -1196,6 +1276,8 @@ mod tests {
     use chrono::{TimeZone, Utc};
 
     use super::*;
+    #[cfg(unix)]
+    use crate::scan::MAX_SYMLINK_HOPS;
     use crate::{FsError, FsOperation, local::LocalFs, mockfs::MockFs};
 
     #[test]
@@ -1650,11 +1732,13 @@ mod tests {
         fs_err::remove_dir_all(&base).ok();
     }
 
-    /// Two symlinks that resolve to the same final target are the
-    /// identical node.
+    /// With links preserved, a pair of links is compared by the target
+    /// paths recorded in the links: equal recorded paths classify as
+    /// equal, even though the links resolve to the identical final
+    /// target.
     #[cfg(unix)]
     #[tokio::test]
-    async fn node_compare_classifies_symlinks_to_same_target_as_same() {
+    async fn preserved_links_with_equal_targets_classify_as_equal() {
         let base = env::temp_dir()
             .join(format!("cocomo_symid_{}", std::process::id()));
         let _ = fs_err::remove_dir_all(&base);
@@ -1680,9 +1764,572 @@ mod tests {
         .await
         .unwrap();
 
+        assert_eq!(status_of(&result, "lnk"), Some(DirEntryStatus::Equal));
+
+        fs_err::remove_dir_all(&base).ok();
+    }
+
+    /// Following links, two links that resolve to the same final
+    /// target are the identical node.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn followed_links_to_same_target_classify_as_same() {
+        let base = env::temp_dir()
+            .join(format!("cocomo_symid_follow_{}", std::process::id()));
+        let _ = fs_err::remove_dir_all(&base);
+
+        let left = base.join("left");
+        let right = base.join("right");
+        fs_err::create_dir_all(&left).unwrap();
+        fs_err::create_dir_all(&right).unwrap();
+        fs_err::write(base.join("target.txt"), "target").unwrap();
+        std::os::unix::fs::symlink("../target.txt", left.join("lnk")).unwrap();
+        std::os::unix::fs::symlink("../target.txt", right.join("lnk"))
+            .unwrap();
+
+        let fs = LocalFs::new("symid_follow");
+        let config = CompareConfig {
+            follow_links: true,
+            ..CompareConfig::meta_data_only()
+        };
+        let result =
+            compare_directories_node(&fs, &left, &right, &config, None, None)
+                .await
+                .unwrap();
+
         assert_eq!(status_of(&result, "lnk"), Some(DirEntryStatus::Same));
 
         fs_err::remove_dir_all(&base).ok();
+    }
+
+    // -----------------------------------------------------------------------
+    // Copy-semantics link matrix tests
+    //
+    // They need real symlinks, so they only run on unix.
+    // -----------------------------------------------------------------------
+
+    /// A `meta_data_only` config with explicit link handling.
+    #[cfg(unix)]
+    fn link_config(follow_links: bool, preserve_links: bool) -> CompareConfig {
+        CompareConfig {
+            follow_links,
+            preserve_links,
+            ..CompareConfig::meta_data_only()
+        }
+    }
+
+    #[cfg(unix)]
+    fn sym(target: &str, link: &Path) {
+        std::os::unix::fs::symlink(target, link).unwrap();
+    }
+
+    /// Fresh `base/left` and `base/right` directories under a uniquely
+    /// named temp base; returns `(base, left, right)`.
+    #[cfg(unix)]
+    fn make_link_fixture(
+        tag: &str,
+    ) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
+        let base = env::temp_dir()
+            .join(format!("cocomo_l{tag}_{}", std::process::id()));
+        let _ = fs_err::remove_dir_all(&base);
+        let left = base.join("left");
+        let right = base.join("right");
+        fs_err::create_dir_all(&left).unwrap();
+        fs_err::create_dir_all(&right).unwrap();
+        (base, left, right)
+    }
+
+    /// With links preserved, a pair of links is typed by the links
+    /// themselves and classified by the target paths recorded in them:
+    /// different recorded paths classify by the modification dates, and
+    /// even a link whose target is a directory never clashes by name.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn preserved_links_with_different_targets_classify_by_dates() {
+        let (base, left, right) = make_link_fixture("ldates");
+        // Broken on both sides: classification must not resolve.
+        sym("a.txt", &left.join("lnk"));
+        sym("b.txt", &right.join("lnk"));
+        // The left target is a directory, the right one a file; the
+        // recorded strings still decide, so no name conflict arises.
+        fs_err::create_dir(base.join("d")).unwrap();
+        fs_err::write(base.join("f.txt"), "file").unwrap();
+        sym("../d", &left.join("mixed"));
+        sym("../f.txt", &right.join("mixed"));
+
+        let fs = LocalFs::new("ldates");
+        let result = compare_directories_node(
+            &fs,
+            &left,
+            &right,
+            &link_config(false, true),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+        for name in ["lnk", "mixed"] {
+            let rows = entries_named(&result, name);
+            assert_eq!(
+                rows.len(),
+                1,
+                "a pair of links must never split into a name conflict"
+            );
+            assert!(
+                !rows[0].name_conflict,
+                "`{name}` must not be flagged as a conflict"
+            );
+            assert!(
+                rows[0].status.intersects(DirEntryStatus::DIFFERENT)
+                    && !rows[0].status.intersects(DirEntryStatus::EQUAL),
+                "different recorded targets must classify by the dates: {:?}",
+                rows[0].status
+            );
+            assert!(
+                !rows[0].status.intersects(DirEntryStatus::Unresolvable),
+                "preserved links are never resolved: {:?}",
+                rows[0].status
+            );
+        }
+
+        fs_err::remove_dir_all(&base).ok();
+    }
+
+    /// When links are resolved, a pair is compared by its final target
+    /// nodes: links to the same target are the identical node, distinct
+    /// nodes with equal content are `Equal`, and a mixed pair of a link
+    /// and a regular file follows the same file logic.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn resolved_file_links_compare_their_final_targets() {
+        let (base, left, right) = make_link_fixture("ltarget");
+        // Two links to one and the same final target.
+        fs_err::write(base.join("t1.txt"), "hello").unwrap();
+        sym("../t1.txt", &left.join("twin"));
+        sym("../t1.txt", &right.join("twin"));
+        // Distinct final targets with equal content (both 5 bytes).
+        fs_err::write(base.join("t2.txt"), "hello").unwrap();
+        fs_err::write(base.join("t3.txt"), "hello").unwrap();
+        sym("../t2.txt", &right.join("pair"));
+        sym("../t3.txt", &left.join("pair"));
+        // Mixed pair: a link on the left, a regular file on the right.
+        sym("../t1.txt", &left.join("mixed"));
+        fs_err::write(right.join("mixed"), "hello").unwrap();
+        // Equal-size targets with different content.
+        fs_err::write(base.join("u1.txt"), "aaaa").unwrap();
+        fs_err::write(base.join("u2.txt"), "bbbb").unwrap();
+        sym("../u1.txt", &left.join("content"));
+        sym("../u2.txt", &right.join("content"));
+
+        let fs = LocalFs::new("ltarget");
+        let result = compare_directories_node(
+            &fs,
+            &left,
+            &right,
+            &link_config(false, false),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+        assert_eq!(
+            status_of(&result, "twin"),
+            Some(DirEntryStatus::Same),
+            "links to one final target are the identical node"
+        );
+        let pair = status_of(&result, "pair").expect("`pair` missing");
+        assert!(
+            pair.intersects(DirEntryStatus::Equal)
+                && !pair.intersects(DirEntryStatus::Same),
+            "distinct final targets must be equal, not the same: {pair:?}"
+        );
+        let mixed = status_of(&result, "mixed").expect("`mixed` missing");
+        assert!(
+            mixed.intersects(DirEntryStatus::Equal)
+                && !mixed.intersects(DirEntryStatus::Same),
+            "a link facing a regular file compares as a file pair: {mixed:?}"
+        );
+        assert_eq!(entries_named(&result, "mixed").len(), 1);
+        // Metadata alone cannot see through to the differing content.
+        assert_eq!(status_of(&result, "content"), Some(DirEntryStatus::Equal));
+
+        // With content comparison, the hashes of the final targets
+        // downgrade the pair.
+        let config = CompareConfig {
+            preserve_links: false,
+            ..CompareConfig::full()
+        };
+        let result =
+            compare_directories_node(&fs, &left, &right, &config, None, None)
+                .await
+                .unwrap();
+        let content =
+            status_of(&result, "content").expect("`content` missing");
+        assert!(
+            content.intersects(DirEntryStatus::DIFFERENT)
+                && !content.intersects(DirEntryStatus::EQUAL),
+            "differing final targets must classify as differing: {content:?}"
+        );
+
+        fs_err::remove_dir_all(&base).ok();
+    }
+
+    /// When links are resolved, links to directories pair up as
+    /// directories: two links to the identical directory are the
+    /// identical node, and links to different directories are compared
+    /// by the children of their targets.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn resolved_dir_links_compare_by_children_and_identity() {
+        let (base, left, right) = make_link_fixture("ldir");
+        // `shared` is reached by both sides through their links; `subL`
+        // has one child more than `subR`.
+        fs_err::create_dir_all(base.join("shared")).unwrap();
+        fs_err::write(base.join("shared/inner.txt"), "deep").unwrap();
+        sym("../shared", &left.join("dlink"));
+        sym("../shared", &right.join("dlink"));
+        fs_err::create_dir_all(base.join("subL")).unwrap();
+        fs_err::write(base.join("subL/one.txt"), "one").unwrap();
+        fs_err::write(base.join("subL/extra.txt"), "x").unwrap();
+        fs_err::create_dir_all(base.join("subR")).unwrap();
+        fs_err::write(base.join("subR/one.txt"), "one").unwrap();
+        sym("../subL", &left.join("d2"));
+        sym("../subR", &right.join("d2"));
+
+        let fs = LocalFs::new("ldir");
+        let result = compare_directories_node(
+            &fs,
+            &left,
+            &right,
+            &link_config(true, true),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+        // Both links resolve to one and the same directory node.
+        let dlink = status_of(&result, "dlink").expect("`dlink` missing");
+        assert!(
+            dlink.intersects(DirEntryStatus::Same),
+            "links to the identical directory are the identical node: \
+             {dlink:?}"
+        );
+        assert_eq!(
+            status_of(&result, "dlink/inner.txt"),
+            Some(DirEntryStatus::Same),
+            "the walked target's child is the identical node"
+        );
+        // Links to different directories compare by their children.
+        let d2 = status_of(&result, "d2").expect("`d2` missing");
+        assert!(
+            !d2.intersects(DirEntryStatus::Same)
+                && d2.intersects(
+                    DirEntryStatus::Equal | DirEntryStatus::LeftOrphan
+                ),
+            "distinct target directories aggregate their children: {d2:?}"
+        );
+        assert_eq!(
+            status_of(&result, "d2/one.txt"),
+            Some(DirEntryStatus::Equal)
+        );
+        assert_eq!(
+            status_of(&result, "d2/extra.txt"),
+            Some(DirEntryStatus::LeftOrphan)
+        );
+
+        fs_err::remove_dir_all(&base).ok();
+    }
+
+    /// A resolved pair whose final targets are one and the same inode
+    /// still classifies as `Equal`, not `Same`, when the sides come from
+    /// different providers.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn resolved_links_from_different_providers_are_never_same() {
+        let (base, left, right) = make_link_fixture("lprov");
+        // One inode, reached from both sides through a link.
+        fs_err::write(left.join("target.txt"), "identical").unwrap();
+        fs_err::hard_link(left.join("target.txt"), base.join("twin.txt"))
+            .unwrap();
+        sym("target.txt", &left.join("lnk.txt"));
+        sym("../twin.txt", &right.join("lnk.txt"));
+
+        // Two `LocalFs` instances are distinct providers, so the shared
+        // inode may not produce a `Same` classification.
+        let left_fs = LocalFs::new("lprov-left");
+        let right_fs = LocalFs::new("lprov-right");
+        let config = CompareConfig {
+            follow_links: true,
+            preserve_links: false,
+            ..CompareConfig::full()
+        };
+        let result = compare_directories_pair_node(
+            &left_fs, &right_fs, &left, &right, &config, None, None,
+        )
+        .await
+        .unwrap();
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+        let status = status_of(&result, "lnk.txt").expect("`lnk.txt` missing");
+        assert!(
+            status.intersects(DirEntryStatus::EQUAL),
+            "the shared inode must be content-equal: {status:?}"
+        );
+        assert!(
+            !status.contains(DirEntryStatus::Same),
+            "identity is never established across providers: {status:?}"
+        );
+
+        fs_err::remove_dir_all(&base).ok();
+    }
+
+    // -----------------------------------------------------------------------
+    // Unresolvable link tests
+    // -----------------------------------------------------------------------
+
+    /// A link side whose chain never settles on a final target leaves the
+    /// pair unclassifiable: one `Unresolvable` row carrying both sides.
+    #[cfg(unix)]
+    async fn assert_unresolvable_pairs(
+        follow_links: bool,
+        preserve_links: bool,
+    ) {
+        let (base, left, right) = make_link_fixture("lunres");
+        // A pair of broken links.
+        sym("../gone.txt", &left.join("broken"));
+        sym("../gone.txt", &right.join("broken"));
+        // A cycle on both sides.
+        for side in [&left, &right] {
+            sym("cycle-b", &side.join("cycle-a"));
+            sym("cycle-a", &side.join("cycle-b"));
+        }
+        // Chains one hop longer than the resolution budget.
+        fs_err::write(base.join("target.txt"), "target").unwrap();
+        let long_chain = format!("chain{}", MAX_SYMLINK_HOPS + 1);
+        for side in [&left, &right] {
+            let mut prev = "../target.txt".to_string();
+            for hop in 1..=MAX_SYMLINK_HOPS + 1 {
+                let name = format!("chain{hop}");
+                sym(&prev, &side.join(&name));
+                prev = name;
+            }
+        }
+        // A broken link without a counterpart on the other side.
+        sym("../gone.txt", &left.join("alone"));
+
+        let fs = LocalFs::new("lunres");
+        let result = compare_directories_node(
+            &fs,
+            &left,
+            &right,
+            &link_config(follow_links, preserve_links),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+        for name in ["broken", "cycle-a", "cycle-b", long_chain.as_str()] {
+            let rows = entries_named(&result, name);
+            assert_eq!(
+                rows.len(),
+                1,
+                "`{name}` must be a single unclassifiable row"
+            );
+            assert_eq!(
+                rows[0].status,
+                DirEntryStatus::Unresolvable,
+                "`{name}` must be unresolvable"
+            );
+            assert!(
+                rows[0].left.is_some() && rows[0].right.is_some(),
+                "both sides must be reported: {:?}",
+                rows[0]
+            );
+            assert!(
+                !rows[0].name_conflict,
+                "an unresolvable pair is not a name conflict"
+            );
+        }
+        assert_eq!(
+            status_of(&result, "chain1"),
+            Some(DirEntryStatus::Same),
+            "a chain within the resolution budget still resolves"
+        );
+        assert_eq!(
+            status_of(&result, "alone"),
+            Some(DirEntryStatus::LeftOrphan),
+            "a broken link without a counterpart stays an orphan"
+        );
+
+        fs_err::remove_dir_all(&base).ok();
+    }
+
+    /// Every config that resolves links (follow links, or links not
+    /// preserved) treats an unresolved chain the same way.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unresolvable_links_classify_as_unresolvable() {
+        assert_unresolvable_pairs(true, false).await;
+        assert_unresolvable_pairs(true, true).await;
+        assert_unresolvable_pairs(false, false).await;
+    }
+
+    // -----------------------------------------------------------------------
+    // Content-pass link policy tests
+    // -----------------------------------------------------------------------
+
+    /// The background content pass must run under the same link policy as
+    /// the comparison it refines: a pair of links compared as links keeps
+    /// its verdict, a pair compared through its final targets gets its
+    /// target content hashed.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn content_pass_mirrors_the_link_policy() {
+        let (base, left, right) = make_link_fixture("lpass");
+        // Equal-size files with different content.
+        fs_err::write(left.join("t.txt"), "aaaa").unwrap();
+        fs_err::write(right.join("t.txt"), "bbbb").unwrap();
+        sym("t.txt", &left.join("lnk"));
+        sym("t.txt", &right.join("lnk"));
+
+        let fs = LocalFs::new("lpass");
+        let progress = |_done, _total| {};
+
+        // Preserved links: the pair of links is equal through its
+        // recorded target, and the content pass leaves it alone.
+        let preserved = compare_directories_node(
+            &fs,
+            &left,
+            &right,
+            &link_config(false, true),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(status_of(&preserved, "lnk"), Some(DirEntryStatus::Equal));
+        let refined = compare_content_pair_node(
+            &fs, &fs, &left, &right, false, preserved, None, None, &progress,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            status_of(&refined, "lnk"),
+            Some(DirEntryStatus::Equal),
+            "link content is the recorded target, not the target's content"
+        );
+        let file = status_of(&refined, "t.txt").expect("`t.txt` missing");
+        assert!(
+            file.intersects(DirEntryStatus::DIFFERENT)
+                && !file.intersects(DirEntryStatus::EQUAL),
+            "the regular file pair must still be refined: {file:?}"
+        );
+
+        // Resolved links: the pair is compared through its final targets,
+        // so the content pass hashes those and finds a difference.
+        let resolved = compare_directories_node(
+            &fs,
+            &left,
+            &right,
+            &link_config(false, false),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            status_of(&resolved, "lnk"),
+            Some(DirEntryStatus::Equal),
+            "meta data alone cannot tell the targets apart"
+        );
+        let refined = compare_content_pair_node(
+            &fs, &fs, &left, &right, true, resolved, None, None, &progress,
+        )
+        .await
+        .unwrap();
+        let link = status_of(&refined, "lnk").expect("`lnk` missing");
+        assert!(
+            link.intersects(DirEntryStatus::DIFFERENT)
+                && !link.intersects(DirEntryStatus::EQUAL),
+            "resolved links must be hashed through their targets: {link:?}"
+        );
+
+        fs_err::remove_dir_all(&base).ok();
+    }
+
+    // -----------------------------------------------------------------------
+    // Link vs. directory clash tests
+    // -----------------------------------------------------------------------
+
+    /// A link and a directory that share a name clash whenever their
+    /// effective types differ: both halves appear as orphan rows flagged
+    /// as a name conflict, and the link half is never descended into.
+    #[cfg(unix)]
+    async fn assert_clashing_link_rows(follow: bool, preserve: bool) {
+        let (base, left, right) = make_link_fixture("lclash");
+        // A link to a file on the left, a real directory on the right.
+        fs_err::write(base.join("file.txt"), "file content").unwrap();
+        sym("../file.txt", &left.join("sub"));
+        fs_err::create_dir(right.join("sub")).unwrap();
+        fs_err::write(right.join("sub/x.txt"), "x").unwrap();
+
+        let fs = LocalFs::new("lclash");
+        let result = compare_directories_node(
+            &fs,
+            &left,
+            &right,
+            &link_config(follow, preserve),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+        let rows = entries_named(&result, "sub");
+        assert_eq!(rows.len(), 2, "both clash halves must be reported");
+        assert_eq!(rows[0].status, DirEntryStatus::LeftOrphan);
+        assert_eq!(rows[1].status, DirEntryStatus::RightOrphan);
+        for row in &rows {
+            assert!(
+                row.name_conflict,
+                "a link and a directory under one name clash: {row:?}"
+            );
+        }
+        assert!(
+            rows[0].sub_entries.is_none(),
+            "the link half must not be descended into"
+        );
+        assert!(
+            rows[1].sub_entries.is_some(),
+            "the directory half is walked like any orphan directory"
+        );
+
+        fs_err::remove_dir_all(&base).ok();
+    }
+
+    /// With links preserved the link is typed by itself (never a
+    /// directory), so it clashes with the directory of the same name.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn preserved_link_vs_dir_clashes() {
+        assert_clashing_link_rows(false, true).await;
+    }
+
+    /// With links resolved the effective type of the final target decides:
+    /// a link to a file still clashes with the directory.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn resolved_link_vs_dir_clash_uses_the_target_type() {
+        assert_clashing_link_rows(true, false).await;
     }
 
     // -----------------------------------------------------------------------
@@ -2337,6 +2984,9 @@ mod tests {
             &fs,
             &left,
             &right,
+            // The fixture's comparison runs with the default link
+            // handling (links preserved, not resolved).
+            false,
             comparison,
             None,
             None,
@@ -2395,6 +3045,7 @@ mod tests {
             &fs,
             &left,
             &right,
+            false,
             comparison,
             None,
             Some(&token),
