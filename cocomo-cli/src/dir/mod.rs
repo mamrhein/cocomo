@@ -198,6 +198,9 @@ pub(crate) async fn dir_sync<R: EndpointResolver>(
         operation,
         dry_run: args.dry_run,
         compare_content: args.compare_files,
+        // A CLI Follow links flag is out of scope; plan with links
+        // preserved as before.
+        follow_links: false,
         copy_options: CopyOptions::default(),
     };
 

@@ -189,6 +189,10 @@ pub struct SessionSettings {
     /// Optional row color overrides for the comparison views.
     #[serde(default)]
     pub color_overrides: ColorOverrides,
+    /// Resolve links to their final target before comparing them.
+    /// `None` inherits the global default; see [`resolve_follow_links`].
+    #[serde(default)]
+    pub follow_links: Option<bool>,
     /// Copy symbolic links as symbolic links and preserve hard links in
     /// transfers (`cp -d`). `None` inherits the global default; see
     /// [`resolve_copy_options`].
@@ -218,6 +222,7 @@ impl Default for SessionSettings {
             show_statuses: default_all_statuses(),
             ignored: Vec::new(),
             color_overrides: ColorOverrides::default(),
+            follow_links: None,
             copy_preserve_links: None,
             copy_preserve_mode: None,
             copy_preserve_timestamps: None,
@@ -280,6 +285,14 @@ fn default_all_statuses() -> Vec<String> {
     crate::compare::DirEntryStatus::all_bit_names()
         .map(str::to_string)
         .to_vec()
+}
+
+/// Resolve the effective "Follow links" comparison option for a session.
+///
+/// An explicit per-session setting wins; `None` inherits the `global`
+/// default (typically from [`crate::compare_defaults`]).
+pub fn resolve_follow_links(settings: &SessionSettings, global: bool) -> bool {
+    settings.follow_links.unwrap_or(global)
 }
 
 impl SessionConfig {
@@ -917,6 +930,71 @@ mod tests {
         assert!(!resolved.preserve_links, "unset entry inherits global");
         assert!(!resolved.preserve_mode, "explicit value wins");
         assert!(!resolved.preserve_timestamps, "unset entry inherits global");
+    }
+
+    #[test]
+    fn follow_links_absent_in_toml_stays_none() {
+        // Session files written before the Follow links option exists
+        // carry the key nowhere; they must load as `None` (inherit the
+        // global default), not as an explicit boolean.
+        let toml_str = r#"
+name = "Legacy"
+type = "DirCompare"
+[left]
+provider = "local"
+path = "/x"
+[right]
+provider = "local"
+path = "/y"
+"#;
+        let loaded = SessionConfig::from_toml(toml_str).unwrap();
+        assert_eq!(loaded.settings.follow_links, None);
+    }
+
+    #[test]
+    fn follow_links_round_trip_through_toml() {
+        let config = SessionConfig {
+            name: "FollowLinks".to_string(),
+            session_type: SessionType::DirCompare,
+            left: ProviderRef {
+                provider: "local".to_string(),
+                path: PathBuf::from("/x"),
+            },
+            right: ProviderRef {
+                provider: "local".to_string(),
+                path: PathBuf::from("/y"),
+            },
+            center: None,
+            settings: SessionSettings {
+                follow_links: Some(true),
+                ..SessionSettings::default()
+            },
+        };
+
+        let toml_str = config.to_toml().unwrap();
+        assert!(toml_str.contains("follow_links = true"));
+        let loaded = SessionConfig::from_toml(&toml_str).unwrap();
+        assert_eq!(config, loaded);
+    }
+
+    #[test]
+    fn resolve_follow_links_override_wins_and_none_inherits() {
+        // Without an override the global default applies, both ways.
+        let settings = SessionSettings::default();
+        assert!(!resolve_follow_links(&settings, false));
+        assert!(resolve_follow_links(&settings, true));
+
+        // The explicit per-session value wins over the global default.
+        let settings = SessionSettings {
+            follow_links: Some(true),
+            ..SessionSettings::default()
+        };
+        assert!(resolve_follow_links(&settings, false));
+        let settings = SessionSettings {
+            follow_links: Some(false),
+            ..SessionSettings::default()
+        };
+        assert!(!resolve_follow_links(&settings, true));
     }
 
     #[test]

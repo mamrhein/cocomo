@@ -46,7 +46,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::Sha256;
 use thiserror::Error;
 
-use crate::{fs::CopyOptions, provider::Provider};
+use crate::{CompareConfig, fs::CopyOptions, provider::Provider};
 
 type HmacSha256 = SimpleHmac<Sha256>;
 
@@ -729,6 +729,11 @@ struct ConfigFile {
     /// built-in [`CopyOptions::default`] apply.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     copy: Option<CopyFile>,
+    /// The `[compare]` section: global comparison defaults shared by the
+    /// TUI and the GUI. `None` when the section is absent, i.e. the
+    /// built-in [`CompareConfig::default`] apply.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    compare: Option<CompareFile>,
 }
 
 /// Serialized form of the `[copy]` section in `config.toml`.
@@ -774,6 +779,35 @@ impl CopyFile {
             preserve_links: Some(options.preserve_links),
             preserve_mode: Some(options.preserve_mode),
             preserve_timestamps: Some(options.preserve_timestamps),
+        }
+    }
+}
+
+/// Serialized form of the `[compare]` section in `config.toml`.
+///
+/// Every field is optional so a partially written section keeps working:
+/// entries the file omits fall back to the built-in defaults of
+/// [`CompareConfig`] when the section is resolved.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+struct CompareFile {
+    /// Resolve links to their final target before comparing them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    follow_links: Option<bool>,
+}
+
+impl CompareFile {
+    /// Resolve the section into the effective "Follow links" setting: an
+    /// entry the file omits falls back to [`CompareConfig::default`].
+    fn to_follow_links(&self) -> bool {
+        self.follow_links
+            .unwrap_or_else(|| CompareConfig::default().follow_links)
+    }
+
+    /// Render the setting as an explicit section: the entry is always
+    /// written, so the file fully documents the current default.
+    fn from_follow_links(follow_links: bool) -> Self {
+        Self {
+            follow_links: Some(follow_links),
         }
     }
 }
@@ -896,6 +930,44 @@ fn write_copy_defaults(
 ) -> ProfileResult<()> {
     let mut config = read_config(config_path)?;
     config.copy = Some(CopyFile::from_options(options));
+    write_config(config_path, &config)
+}
+
+/// Read the global "Follow links" comparison default from `config.toml`.
+///
+/// The `[compare]` section is the cross-app home of the comparison
+/// defaults, shared by the TUI and the GUI. A missing file or section
+/// yields [`CompareConfig::default`]'s `follow_links`; a partially
+/// written section resolves its absent entries to the built-in defaults.
+pub fn compare_defaults() -> ProfileResult<bool> {
+    read_compare_defaults(&default_config_path())
+}
+
+/// Path-taking variant of [`compare_defaults`] for tests.
+fn read_compare_defaults(config_path: &Path) -> ProfileResult<bool> {
+    let config = read_config(config_path)?;
+    Ok(match config.compare {
+        Some(compare) => compare.to_follow_links(),
+        None => CompareConfig::default().follow_links,
+    })
+}
+
+/// Persist the global "Follow links" comparison default to
+/// `config.toml`.
+///
+/// Writes an explicit `[compare]` section, preserving the other entries
+/// of the file (notably the master key and the `[copy]` section).
+pub fn set_compare_defaults(follow_links: bool) -> ProfileResult<()> {
+    write_compare_defaults(&default_config_path(), follow_links)
+}
+
+/// Path-taking variant of [`set_compare_defaults`] for tests.
+fn write_compare_defaults(
+    config_path: &Path,
+    follow_links: bool,
+) -> ProfileResult<()> {
+    let mut config = read_config(config_path)?;
+    config.compare = Some(CompareFile::from_follow_links(follow_links));
     write_config(config_path, &config)
 }
 
@@ -1481,6 +1553,92 @@ mod tests {
             "the master key must survive: {content}"
         );
         assert_eq!(read_copy_defaults(&path).unwrap(), options);
+    }
+
+    #[test]
+    fn compare_defaults_absent_file_is_default() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let builtin = CompareConfig::default().follow_links;
+        assert_eq!(read_compare_defaults(&path).unwrap(), builtin);
+
+        // A config without a `[compare]` section behaves the same.
+        fs_err::write(&path, "master_key = \"00\"").unwrap();
+        assert_eq!(read_compare_defaults(&path).unwrap(), builtin);
+    }
+
+    #[test]
+    fn compare_defaults_partial_section_fills_default() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+
+        // An empty section falls back to the built-in default.
+        fs_err::write(&path, "[compare]\n").unwrap();
+        assert_eq!(
+            read_compare_defaults(&path).unwrap(),
+            CompareConfig::default().follow_links
+        );
+
+        fs_err::write(&path, "[compare]\nfollow_links = true\n").unwrap();
+        assert!(read_compare_defaults(&path).unwrap());
+    }
+
+    #[test]
+    fn set_compare_defaults_round_trip() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+
+        write_compare_defaults(&path, true).unwrap();
+        assert!(read_compare_defaults(&path).unwrap());
+        let content = fs_err::read_to_string(&path).unwrap();
+        assert!(content.contains("[compare]"));
+        assert!(content.contains("follow_links = true"));
+
+        write_compare_defaults(&path, false).unwrap();
+        assert!(!read_compare_defaults(&path).unwrap());
+    }
+
+    #[test]
+    fn set_compare_defaults_preserves_other_entries() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let key = hex::encode([0x42u8; 32]);
+        fs_err::write(
+            &path,
+            format!("master_key = \"{key}\"\n[copy]\npreserve_mode = true\n"),
+        )
+        .unwrap();
+
+        write_compare_defaults(&path, true).unwrap();
+
+        let content = fs_err::read_to_string(&path).unwrap();
+        assert!(
+            content.contains(&key),
+            "the master key must survive: {content}"
+        );
+        assert!(read_compare_defaults(&path).unwrap());
+        assert_eq!(
+            read_copy_defaults(&path).unwrap(),
+            CopyOptions {
+                preserve_mode: true,
+                ..CopyOptions::default()
+            },
+            "the `[copy]` section must survive: {content}"
+        );
+    }
+
+    #[test]
+    fn set_copy_defaults_preserves_compare_section() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        fs_err::write(&path, "[compare]\nfollow_links = true\n").unwrap();
+
+        write_copy_defaults(&path, &CopyOptions::default()).unwrap();
+
+        assert!(
+            read_compare_defaults(&path).unwrap(),
+            "the `[compare]` section must survive"
+        );
     }
 
     #[test]

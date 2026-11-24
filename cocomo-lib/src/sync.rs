@@ -111,6 +111,10 @@ pub struct SyncRules {
     pub dry_run: bool,
     /// Compare file contents. If `false`, uses size/mtime only.
     pub compare_content: bool,
+    /// Resolve links to their final target before comparing them,
+    /// mirroring [`CompareConfig::follow_links`]. Planning must use the
+    /// same link policy the executed transfers would reflect.
+    pub follow_links: bool,
     /// POSIX `cp`-like preservation behavior for executed copies.
     ///
     /// Only consulted when transfers are executed; planning ignores it.
@@ -207,10 +211,11 @@ where
     let compare_config = CompareConfig {
         compare_content: rules.compare_content,
         compare_meta_data: true,
-        // Syncing preserves links as links; following them is wired up
-        // together with the transfer options.
-        follow_links: false,
-        preserve_links: true,
+        // Planning must reflect copy semantics: both link options come
+        // from the rules, so the plan matches what a transfer driven by
+        // the same rules would do.
+        follow_links: rules.follow_links,
+        preserve_links: rules.copy_options.preserve_links,
     };
 
     let comparison = match pair {
@@ -1126,6 +1131,77 @@ mod tests {
         assert!(fs_err::metadata(left.join("notes")).unwrap().is_file());
         assert!(fs_err::metadata(right.join("notes")).unwrap().is_dir());
         assert!(right.join("notes/inner.txt").exists());
+
+        fs_err::remove_dir_all(&base).ok();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn plan_sync_link_policy_follows_the_rules() {
+        // A link facing a directory of the same name on the other side:
+        // with links preserved the pair clashes (link vs. dir), while
+        // following links types the pair by the resolved target, so the
+        // plan must reflect the rules' link policy.
+        let base = env::temp_dir()
+            .join(format!("cocomo_sync_follow_{}", process::id()));
+        let _ = fs_err::remove_dir_all(&base);
+        let left = base.join("left");
+        let right = base.join("right");
+        fs_err::create_dir_all(left.join("realdir")).unwrap();
+        fs_err::create_dir_all(right.join("lnk")).unwrap();
+        fs_err::write(left.join("realdir/file.txt"), "content").unwrap();
+        fs_err::write(right.join("lnk/file.txt"), "content").unwrap();
+        std::os::unix::fs::symlink("realdir", left.join("lnk")).unwrap();
+
+        let fs = LocalFs::new("sync_follow");
+
+        // Preserved links (the default): the link keeps its own
+        // (non-dir) type and clashes with the directory of the same
+        // name.
+        let rules = SyncRules {
+            operation: SyncOperation::MirrorLeft,
+            dry_run: true,
+            ..Default::default()
+        };
+        let result = plan_sync(&fs, &left, &right, &rules).await.unwrap();
+        assert_eq!(
+            result.conflicts.len(),
+            1,
+            "conflicts: {:?}",
+            result.conflicts
+        );
+        assert_eq!(result.conflicts[0].name, "lnk");
+
+        // Followed links: both sides are dirs, so no conflict arises.
+        let follow_rules = SyncRules {
+            follow_links: true,
+            ..rules.clone()
+        };
+        let result =
+            plan_sync(&fs, &left, &right, &follow_rules).await.unwrap();
+        assert!(
+            result.conflicts.is_empty(),
+            "conflicts: {:?}",
+            result.conflicts
+        );
+
+        // Not preserving links resolves the link just as well: the
+        // node it points to would be copied.
+        let unpreserved_rules = SyncRules {
+            copy_options: CopyOptions {
+                preserve_links: false,
+                ..CopyOptions::default()
+            },
+            ..rules.clone()
+        };
+        let result = plan_sync(&fs, &left, &right, &unpreserved_rules)
+            .await
+            .unwrap();
+        assert!(
+            result.conflicts.is_empty(),
+            "conflicts: {:?}",
+            result.conflicts
+        );
 
         fs_err::remove_dir_all(&base).ok();
     }

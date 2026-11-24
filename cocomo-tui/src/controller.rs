@@ -193,6 +193,9 @@ async fn plan_sync_session(
         operation,
         dry_run: true,
         compare_content,
+        // The per-session Follow links option is wired up with the
+        // session options.
+        follow_links: false,
         copy_options: *copy_options,
     };
 
@@ -232,6 +235,7 @@ async fn execute_sync_session(
         operation,
         dry_run: false,
         compare_content,
+        follow_links: false,
         copy_options: *copy_options,
     };
 
