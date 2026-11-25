@@ -4216,6 +4216,44 @@ mod tests {
         });
     }
 
+    /// An orphan entry has no side on the missing side, so there is no
+    /// path to copy for it.
+    #[gpui::test]
+    fn side_paths_are_none_for_the_missing_side_of_an_orphan(
+        cx: &mut TestAppContext,
+    ) {
+        let state = cx.new(|cx| {
+            let mut state = AppState::new(
+                Endpoint::local("/left"),
+                Endpoint::local("/right"),
+                "test".into(),
+                cx,
+            );
+            state.set_comparison_for_test(comparison(sample_entries()));
+            state
+        });
+
+        state.update(cx, |state, cx| {
+            // Name ascending: row 1 is the right orphan.
+            state.select_row(1, cx);
+            assert_eq!(state.selected_entry().unwrap().name, "bravo.txt");
+            assert!(state.selected_left_path().is_none());
+            assert_eq!(
+                state.selected_right_path().as_deref(),
+                Some("/right/bravo.txt")
+            );
+
+            // Row 2 is the left orphan.
+            state.select_row(2, cx);
+            assert_eq!(state.selected_entry().unwrap().name, "charlie.txt");
+            assert_eq!(
+                state.selected_left_path().as_deref(),
+                Some("/left/charlie.txt")
+            );
+            assert!(state.selected_right_path().is_none());
+        });
+    }
+
     /// A selection that is a file on both sides yields the endpoints a
     /// two-way merge seeds from; orphans do not.
     #[gpui::test]
