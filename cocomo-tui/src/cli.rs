@@ -119,7 +119,21 @@ impl Cli {
             ));
         }
 
-        match compare(&left, &right, self.content).await {
+        // A fresh startup session has no overrides yet, so it follows the
+        // on-disk global link-handling defaults.
+        let follow_links = cocomo_lib::compare_defaults().unwrap_or_default();
+        let preserve_links = cocomo_lib::copy_defaults()
+            .unwrap_or_default()
+            .preserve_links;
+        match compare(
+            &left,
+            &right,
+            self.content,
+            follow_links,
+            preserve_links,
+        )
+        .await
+        {
             Ok(comparison) => {
                 let mut session =
                     SessionView::new_dir_compare(left, right, self.content);

@@ -30,7 +30,7 @@ use cocomo_lib::{
     WhitespaceMode, compare_texts,
     filter::DisplayFilters,
     report::{ReportConfig, ReportFormat},
-    resolve_copy_options,
+    resolve_copy_options, resolve_follow_links,
 };
 use ratatui_kit::{Atom, components::table::TableState};
 use regex::RegexBuilder;
@@ -602,8 +602,9 @@ pub enum StatusFilter {
     /// Entries that are identical or compare equal (umbrella over both
     /// equal bits).
     Equal,
-    /// Entries that differ, either side newer (umbrella over both
-    /// direction bits).
+    /// Entries that differ, either side newer, or an unresolvable link
+    /// (umbrella over both direction bits and the unresolvable bit, since
+    /// an unresolvable link is a difference like any other).
     Different,
     /// The left side has the newer modification date.
     LeftNewer,
@@ -623,7 +624,9 @@ impl StatusFilter {
     pub fn mask(self) -> DirEntryStatus {
         match self {
             Self::Equal => DirEntryStatus::EQUAL,
-            Self::Different => DirEntryStatus::DIFFERENT,
+            Self::Different => {
+                DirEntryStatus::DIFFERENT | DirEntryStatus::Unresolvable
+            }
             Self::LeftNewer => DirEntryStatus::LeftNewer,
             Self::RightNewer => DirEntryStatus::RightNewer,
             Self::Orphans => DirEntryStatus::ORPHAN,
@@ -722,6 +725,9 @@ pub enum SettingItem {
     CompareContent,
     /// Toggle hiding identical entries (mirrors `F`, folder sessions).
     HideSame,
+    /// Override whether the comparison follows links to their final
+    /// targets (folder sessions; `None` inherits the global default).
+    FollowLinks,
     /// Override whether copies preserve symlinks and hard links (folder
     /// sessions; `None` inherits the global default).
     CopyPreserveLinks,
@@ -894,6 +900,9 @@ pub struct DirView {
     /// drives the `sync` command-line command, and is snapshotted by the
     /// execute task).
     pub sync_operation: SyncOperation,
+    /// Per-session override of the global "Follow links" comparison
+    /// default. `None` inherits the global default.
+    pub follow_links: Option<bool>,
     /// Per-session override of the global `preserve_links` copy default
     /// (`cp -d`). `None` inherits the global default.
     pub copy_preserve_links: Option<bool>,
@@ -929,6 +938,21 @@ impl DirView {
                 copy_preserve_links: self.copy_preserve_links,
                 copy_preserve_mode: self.copy_preserve_mode,
                 copy_preserve_timestamps: self.copy_preserve_timestamps,
+                ..SessionSettings::default()
+            },
+            global,
+        )
+    }
+
+    /// The effective "Follow links" comparison option for this session:
+    /// the per-session override where set, `global` elsewhere.
+    ///
+    /// Delegates to the lib's [`resolve_follow_links`] so the inheritance
+    /// rule lives in one place shared with the GUI.
+    pub fn resolved_follow_links(&self, global: bool) -> bool {
+        resolve_follow_links(
+            &SessionSettings {
+                follow_links: self.follow_links,
                 ..SessionSettings::default()
             },
             global,
@@ -1128,6 +1152,7 @@ impl SessionView {
                 display: DisplayFilters::all(),
                 pending_sync: None,
                 sync_operation: SyncOperation::default(),
+                follow_links: None,
                 copy_preserve_links: None,
                 copy_preserve_mode: None,
                 copy_preserve_timestamps: None,
@@ -1738,6 +1763,16 @@ pub struct AppState {
     /// precedence over these values (see
     /// [`DirView::resolved_copy_options`]).
     pub copy_options: CopyOptions,
+    /// The global "Follow links" comparison default, shared by all
+    /// sessions.
+    ///
+    /// Loaded from the `[compare]` section of the shared `config.toml` at
+    /// startup (see [`cocomo_lib::compare_defaults`]); the Options menu
+    /// toggle flips it and persists it through
+    /// [`cocomo_lib::set_compare_defaults`]. A session's own override
+    /// takes precedence over this value (see
+    /// [`DirView::resolved_follow_links`]).
+    pub follow_links: bool,
 }
 
 /// Global reactive application state, subscribed to via
@@ -1765,6 +1800,7 @@ impl AppState {
             pending_tasks: Vec::new(),
             quit_armed: false,
             copy_options: CopyOptions::default(),
+            follow_links: false,
         }
     }
 

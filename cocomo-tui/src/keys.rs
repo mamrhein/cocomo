@@ -142,8 +142,10 @@ pub enum Cmd {
     ToggleShortcuts,
     // -- App-level Options menu toggles: executed by the controller's
     //    menu confirmation, never by a key binding or `execute`. They
-    //    flip one entry of the global copy defaults and persist them to
-    //    the shared `config.toml`.
+    //    flip one entry of the global comparison or copy defaults and
+    //    persist them to the shared `config.toml`.
+    /// Toggle the global "Follow links" comparison default.
+    ToggleFollowLinks,
     /// Toggle the global `preserve_links` copy default.
     ToggleCopyPreserveLinks,
     /// Toggle the global `preserve_mode` copy default.
@@ -1514,6 +1516,7 @@ fn execute(cmd: Cmd, session: &mut SessionView) -> SessionAction {
         | Cmd::Quit
         | Cmd::ToggleHelp
         | Cmd::ToggleShortcuts
+        | Cmd::ToggleFollowLinks
         | Cmd::ToggleCopyPreserveLinks
         | Cmd::ToggleCopyPreserveMode
         | Cmd::ToggleCopyPreserveTimestamps => SessionAction::None,

@@ -1430,8 +1430,11 @@ mod render_tests {
         {
             let session = app.active_mut().unwrap();
             let dir = session.dir_mut().unwrap();
-            dir.display.show_statuses =
-                DirEntryStatus::DIFFERENT | DirEntryStatus::ORPHAN;
+            // `Unresolvable` is part of the different umbrella, so it
+            // must be in the mask for the group to read as shown.
+            dir.display.show_statuses = DirEntryStatus::DIFFERENT
+                | DirEntryStatus::Unresolvable
+                | DirEntryStatus::ORPHAN;
             dir.display.show_hidden = false;
             session.ui.name_filter = Some(NamePattern::new("^log").unwrap());
             session.ui.mode = SessionMode::Info;

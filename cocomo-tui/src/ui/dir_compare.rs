@@ -322,7 +322,7 @@ fn filter_symbols(
         spans.push(Span::styled(".", theme.dim));
     }
     let equal = StatusFilter::Equal.is_shown(mask);
-    let states: [(DirEntryStatus, bool); 6] = [
+    let states: [(DirEntryStatus, bool); 7] = [
         (DirEntryStatus::Same, equal),
         (DirEntryStatus::Equal, equal),
         (
@@ -340,6 +340,10 @@ fn filter_symbols(
         (
             DirEntryStatus::RightOrphan,
             StatusFilter::RightOnly.is_shown(mask),
+        ),
+        (
+            DirEntryStatus::Unresolvable,
+            StatusFilter::Different.is_shown(mask),
         ),
     ];
     for (state, shown) in states {

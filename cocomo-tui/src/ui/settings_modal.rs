@@ -65,6 +65,7 @@ pub(super) fn SettingsModal(
                     // per-session overrides resolved against the global
                     // copy defaults.
                     let copy = dir.resolved_copy_options(&app.copy_options);
+                    let follow = dir.resolved_follow_links(app.follow_links);
                     vec![
                         OptionItem::new(
                             SettingItem::CompareContent,
@@ -76,6 +77,11 @@ pub(super) fn SettingsModal(
                             "Hide identical",
                         )
                         .hint(on_off(!dir.shows_equal())),
+                        OptionItem::new(
+                            SettingItem::FollowLinks,
+                            "Follow links",
+                        )
+                        .hint(on_off(follow)),
                         OptionItem::new(
                             SettingItem::CopyPreserveLinks,
                             "Preserve links",
@@ -153,7 +159,7 @@ pub(super) fn SettingsModal(
         Modal(
             open: true,
             // Reuse this component's layer; see `FilterPanel`. The height
-            // follows the entry count (5 rows for dir, 3 for text) plus
+            // follows the entry count (6 rows for dir, 3 for text) plus
             // the border, padding and titles.
             layer: Some(layer),
             width: Constraint::Length(48),

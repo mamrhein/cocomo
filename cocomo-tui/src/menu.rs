@@ -443,6 +443,11 @@ pub const MENUS: &[MenuDef] = &[
                 Cmd::ToggleCompareContent,
                 MenuViews::DIR,
             ),
+            item(
+                "Follow links on/off",
+                Cmd::ToggleFollowLinks,
+                MenuViews::DIR,
+            ),
             MenuEntry::Separator,
             // The global `cp`-like copy defaults; `item_label` renders them
             // as `Preserve …`/`Don't preserve …` state verbs, and toggling
@@ -1043,6 +1048,10 @@ mod tests {
         assert!(
             lists(options.entries, Cmd::ToggleCompareContent),
             "Options menu misses the content toggle",
+        );
+        assert!(
+            lists(options.entries, Cmd::ToggleFollowLinks),
+            "Options menu misses the Follow links toggle",
         );
         for cmd in [
             Cmd::ToggleCopyPreserveLinks,

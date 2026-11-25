@@ -35,7 +35,7 @@ use cocomo_lib::{
     SyncOperation, SyncResult, SyncRules, compare_texts, default_session_dir,
     execute_transfers, list_saved_sessions,
     report::generate_report,
-    session_file_exists_in,
+    resolve_final_target, resolve_follow_links, session_file_exists_in,
     workspace::{WindowWorkspace, Workspace},
 };
 use ratatui_kit::crossterm::event::{KeyCode, KeyEvent};
@@ -46,9 +46,9 @@ use crate::{
     menu::{self, MenuEntry, MenuState},
     session_store::session_to_config,
     state::{
-        APP_STATE, AppState, NamePattern, SessionAction, SessionContent,
-        SessionMode, SessionView, SettingItem, StatusFilter, TextRules,
-        TextSource, TransferChoice, TransferMenuState,
+        APP_STATE, AppState, DirView, NamePattern, SessionAction,
+        SessionContent, SessionMode, SessionView, SettingItem, StatusFilter,
+        TextRules, TextSource, TransferChoice, TransferMenuState,
     },
 };
 
@@ -69,14 +69,21 @@ pub(crate) async fn compare(
     left: &Endpoint,
     right: &Endpoint,
     compare_content: bool,
+    follow_links: bool,
+    preserve_links: bool,
 ) -> Result<DirComparison> {
     let cache = ContentCache::default_config();
 
-    let config = if compare_content {
+    let mut config = if compare_content {
         CompareConfig::full()
     } else {
         CompareConfig::meta_data_only()
     };
+    // The link policy is resolved per session: the session's "Follow
+    // links" override against the global default, plus the effective
+    // `preserve_links` copy option.
+    config.follow_links = follow_links;
+    config.preserve_links = preserve_links;
 
     if left.same_provider(right) {
         Ok(cocomo_lib::compare_directories_node(
@@ -99,6 +106,39 @@ pub(crate) async fn compare(
             None,
         )
         .await?)
+    }
+}
+
+/// The final target of `endpoint` as a new endpoint, or `None` when it
+/// isn't a symlink (callers keep the endpoint itself then). Resolving
+/// through a broken or non-symlink path yields `None` as well.
+async fn resolve_link_endpoint(endpoint: &Endpoint) -> Option<Endpoint> {
+    let fs = endpoint.fs();
+    let id = fs.resolve_path(endpoint.path()).await.ok()?;
+    let node = fs.get_node(id).ok()?;
+    if !node.kind().is_symlink() {
+        return None;
+    }
+    let target = resolve_final_target(fs, id).await?;
+    let node = fs.get_node(target).ok()?;
+    Some(endpoint.with_path(node.path()))
+}
+
+/// The endpoints to open a comparison of `left` and `right` on: when both
+/// sides are links the pair resolves to the links' final targets, so the
+/// user compares what's behind the links rather than the links
+/// themselves. With only one side a link the pair is kept as-is, since
+/// the other side has no equivalent jump.
+pub(crate) async fn resolve_open_pair(
+    left: Endpoint,
+    right: Endpoint,
+) -> (Endpoint, Endpoint) {
+    match (
+        resolve_link_endpoint(&left).await,
+        resolve_link_endpoint(&right).await,
+    ) {
+        (Some(left), Some(right)) => (left, right),
+        _ => (left, right),
     }
 }
 
@@ -187,15 +227,14 @@ async fn plan_sync_session(
     right: &Endpoint,
     operation: SyncOperation,
     compare_content: bool,
+    follow_links: bool,
     copy_options: &CopyOptions,
 ) -> Result<SyncResult> {
     let rules = SyncRules {
         operation,
         dry_run: true,
         compare_content,
-        // The per-session Follow links option is wired up with the
-        // session options.
-        follow_links: false,
+        follow_links,
         copy_options: *copy_options,
     };
 
@@ -229,13 +268,14 @@ async fn execute_sync_session(
     right: &Endpoint,
     operation: SyncOperation,
     compare_content: bool,
+    follow_links: bool,
     copy_options: &CopyOptions,
 ) -> Result<SyncResult> {
     let rules = SyncRules {
         operation,
         dry_run: false,
         compare_content,
-        follow_links: false,
+        follow_links,
         copy_options: *copy_options,
     };
 
@@ -317,10 +357,23 @@ async fn open_dir_session(
     right: Endpoint,
 ) -> Result<SessionView> {
     let compare_files = config.settings.compare_files;
+    // Resolve the saved link-handling overrides against the on-disk
+    // defaults, so a session opens with the same toggle state it was saved
+    // with (or the current global defaults where it never overrode them).
+    let global_follow = cocomo_lib::compare_defaults().unwrap_or_default();
+    let follow_links = resolve_follow_links(&config.settings, global_follow);
+    let preserve_links =
+        config.settings.copy_preserve_links.unwrap_or_else(|| {
+            cocomo_lib::copy_defaults()
+                .unwrap_or_default()
+                .preserve_links
+        });
 
     // Run the comparison; propagate failures so the caller can report them
     // instead of opening a session with a permanently empty view.
-    let comparison = compare(&left, &right, compare_files).await?;
+    let comparison =
+        compare(&left, &right, compare_files, follow_links, preserve_links)
+            .await?;
 
     let mut session = SessionView::new_dir_compare(left, right, compare_files);
     session.set_comparison(Some(comparison));
@@ -342,6 +395,8 @@ async fn open_dir_session(
         dir.copy_preserve_mode = config.settings.copy_preserve_mode;
         dir.copy_preserve_timestamps =
             config.settings.copy_preserve_timestamps;
+        // Same for the follow-links override.
+        dir.follow_links = config.settings.follow_links;
     }
     // Restore the name filter; a saved pattern that no longer compiles is
     // skipped with a warning instead of failing the whole load.
@@ -401,6 +456,9 @@ struct SessionSnapshot {
     right: Endpoint,
     compare_content: bool,
     sync_operation: SyncOperation,
+    /// Resolved per-session Follow links override, captured with the
+    /// rest of the session inputs.
+    follow_links: bool,
     /// Per-session copy overrides resolved against the global defaults,
     /// captured with the rest of the session inputs.
     copy_options: CopyOptions,
@@ -411,7 +469,8 @@ impl SessionSnapshot {
     /// session, which has no directory-scoped async work.
     fn from_session(
         session: &SessionView,
-        global: &CopyOptions,
+        global_copy: &CopyOptions,
+        global_follow: bool,
     ) -> Option<Self> {
         let dir = session.dir()?;
         Some(Self {
@@ -419,8 +478,50 @@ impl SessionSnapshot {
             right: session.core.right.clone(),
             compare_content: dir.compare_content,
             sync_operation: dir.sync_operation,
-            copy_options: dir.resolved_copy_options(global),
+            follow_links: dir.resolved_follow_links(global_follow),
+            copy_options: dir.resolved_copy_options(global_copy),
         })
+    }
+}
+
+/// The inputs a task that opens a *new* dir session (from Enter on a row
+/// or from GoUp) needs, captured under a single read lock from the
+/// originating session.
+struct SpawnDirSnapshot {
+    left: Endpoint,
+    right: Endpoint,
+    compare_content: bool,
+    /// The parent session's Follow links *override*, inherited by the new
+    /// session so it keeps following the same policy (`None` means the new
+    /// session follows the global default).
+    follow_override: Option<bool>,
+    /// The resolved Follow links the new comparison runs with.
+    follow_links: bool,
+    /// The resolved `preserve_links` copy option the new comparison runs
+    /// with.
+    preserve_links: bool,
+}
+
+impl SpawnDirSnapshot {
+    /// Capture from the originating dir session, with the endpoints the
+    /// new session will compare.
+    fn new(
+        left: Endpoint,
+        right: Endpoint,
+        dir: &DirView,
+        global_copy: &CopyOptions,
+        global_follow: bool,
+    ) -> Self {
+        Self {
+            left,
+            right,
+            compare_content: dir.compare_content,
+            follow_override: dir.follow_links,
+            follow_links: dir.resolved_follow_links(global_follow),
+            preserve_links: dir
+                .resolved_copy_options(global_copy)
+                .preserve_links,
+        }
     }
 }
 
@@ -460,12 +561,18 @@ struct TransferSnapshot {
     right_root: PathBuf,
     is_dir: bool,
     compare_content: bool,
+    /// Resolved per-session Follow links override.
+    follow_links: bool,
     /// Per-session copy overrides resolved against the global defaults.
     copy_options: CopyOptions,
 }
 
 impl TransferSnapshot {
-    fn from_session(session: &SessionView, global: &CopyOptions) -> Self {
+    fn from_session(
+        session: &SessionView,
+        global_copy: &CopyOptions,
+        global_follow: bool,
+    ) -> Self {
         // A text session's endpoints are the files themselves, while the
         // executor addresses an entry as `root.join(name)`.
         let root = |path: &Path, is_dir: bool| {
@@ -485,9 +592,12 @@ impl TransferSnapshot {
             compare_content: session
                 .dir()
                 .is_some_and(|dir| dir.compare_content),
-            copy_options: session
-                .dir()
-                .map_or(*global, |dir| dir.resolved_copy_options(global)),
+            follow_links: session.dir().map_or(global_follow, |dir| {
+                dir.resolved_follow_links(global_follow)
+            }),
+            copy_options: session.dir().map_or(*global_copy, |dir| {
+                dir.resolved_copy_options(global_copy)
+            }),
         }
     }
 }
@@ -594,20 +704,46 @@ pub(crate) fn process_session_action(action: SessionAction) {
         SessionAction::OpenDir { left, right } => {
             spawn_task(
                 move |app| {
-                    let compare_content = app
-                        .active()
-                        .and_then(|s| s.dir())
-                        .is_some_and(|d| d.compare_content);
-                    Some((left, right, compare_content))
+                    let snapshot = match app.active().and_then(|s| s.dir()) {
+                        Some(dir) => SpawnDirSnapshot::new(
+                            left,
+                            right,
+                            dir,
+                            &app.copy_options,
+                            app.follow_links,
+                        ),
+                        None => SpawnDirSnapshot {
+                            left,
+                            right,
+                            compare_content: false,
+                            follow_override: None,
+                            follow_links: app.follow_links,
+                            preserve_links: app.copy_options.preserve_links,
+                        },
+                    };
+                    Some(snapshot)
                 },
-                move |(left, right, compare_content)| async move {
-                    let comparison =
-                        compare(&left, &right, compare_content).await?;
+                move |snapshot| async move {
+                    // Opening a pair of links compares what's behind
+                    // them.
+                    let (left, right) =
+                        resolve_open_pair(snapshot.left, snapshot.right).await;
+                    let comparison = compare(
+                        &left,
+                        &right,
+                        snapshot.compare_content,
+                        snapshot.follow_links,
+                        snapshot.preserve_links,
+                    )
+                    .await?;
                     let mut session = SessionView::new_dir_compare(
                         left,
                         right,
-                        compare_content,
+                        snapshot.compare_content,
                     );
+                    if let Some(dir) = session.dir_mut() {
+                        dir.follow_links = snapshot.follow_override;
+                    }
                     session.set_comparison(Some(comparison));
                     Ok(session)
                 },
@@ -619,7 +755,11 @@ pub(crate) fn process_session_action(action: SessionAction) {
         SessionAction::OpenFile { left, right } => {
             spawn_task(
                 |_| Some(()),
-                move |_| async move { run_text_comparison(left, right).await },
+                move |_| async move {
+                    // Opening a pair of links diffs what's behind them.
+                    let (left, right) = resolve_open_pair(left, right).await;
+                    run_text_comparison(left, right).await
+                },
                 |app, session| app.add_session(session),
                 "Text comparison failed",
                 "Comparing",
@@ -632,16 +772,31 @@ pub(crate) fn process_session_action(action: SessionAction) {
                         app.active().filter(|s| s.content.is_dir())?;
                     let left = session.core.left.parent()?;
                     let right = session.core.right.parent()?;
-                    Some((left, right, session.dir()?.compare_content))
-                },
-                move |(left, right, compare_content)| async move {
-                    let comparison =
-                        compare(&left, &right, compare_content).await?;
-                    let mut session = SessionView::new_dir_compare(
+                    Some(SpawnDirSnapshot::new(
                         left,
                         right,
-                        compare_content,
+                        session.dir()?,
+                        &app.copy_options,
+                        app.follow_links,
+                    ))
+                },
+                move |snapshot| async move {
+                    let comparison = compare(
+                        &snapshot.left,
+                        &snapshot.right,
+                        snapshot.compare_content,
+                        snapshot.follow_links,
+                        snapshot.preserve_links,
+                    )
+                    .await?;
+                    let mut session = SessionView::new_dir_compare(
+                        snapshot.left,
+                        snapshot.right,
+                        snapshot.compare_content,
                     );
+                    if let Some(dir) = session.dir_mut() {
+                        dir.follow_links = snapshot.follow_override;
+                    }
                     session.set_comparison(Some(comparison));
                     Ok(session)
                 },
@@ -666,7 +821,11 @@ pub(crate) fn process_session_action(action: SessionAction) {
                 spawn_task(
                     move |app| {
                         app.session(id).and_then(|s| {
-                            SessionSnapshot::from_session(s, &app.copy_options)
+                            SessionSnapshot::from_session(
+                                s,
+                                &app.copy_options,
+                                app.follow_links,
+                            )
                         })
                     },
                     move |snapshot| async move {
@@ -678,6 +837,8 @@ pub(crate) fn process_session_action(action: SessionAction) {
                             &snapshot.left,
                             &snapshot.right,
                             snapshot.compare_content,
+                            snapshot.follow_links,
+                            snapshot.copy_options.preserve_links,
                         )
                         .await
                     },
@@ -747,7 +908,11 @@ pub(crate) fn process_session_action(action: SessionAction) {
             spawn_task(
                 move |app| {
                     app.session(id).and_then(|s| {
-                        SessionSnapshot::from_session(s, &app.copy_options)
+                        SessionSnapshot::from_session(
+                            s,
+                            &app.copy_options,
+                            app.follow_links,
+                        )
                     })
                 },
                 move |snapshot| async move {
@@ -763,6 +928,7 @@ pub(crate) fn process_session_action(action: SessionAction) {
                         &snapshot.right,
                         operation,
                         snapshot.compare_content,
+                        snapshot.follow_links,
                         &snapshot.copy_options,
                     )
                     .await
@@ -802,7 +968,11 @@ pub(crate) fn process_session_action(action: SessionAction) {
             spawn_task(
                 move |app| {
                     app.session(id).and_then(|s| {
-                        SessionSnapshot::from_session(s, &app.copy_options)
+                        SessionSnapshot::from_session(
+                            s,
+                            &app.copy_options,
+                            app.follow_links,
+                        )
                     })
                 },
                 move |snapshot| async move {
@@ -813,6 +983,7 @@ pub(crate) fn process_session_action(action: SessionAction) {
                         &snapshot.right,
                         snapshot.sync_operation,
                         snapshot.compare_content,
+                        snapshot.follow_links,
                         &snapshot.copy_options,
                     )
                     .await
@@ -843,6 +1014,8 @@ pub(crate) fn process_session_action(action: SessionAction) {
                         &snapshot.left,
                         &snapshot.right,
                         snapshot.compare_content,
+                        snapshot.follow_links,
+                        snapshot.copy_options.preserve_links,
                     )
                     .await
                     .map_err(|e| e.with_context(endpoints))?;
@@ -948,7 +1121,11 @@ pub(crate) fn process_session_action(action: SessionAction) {
             spawn_task(
                 move |app| {
                     app.session(id).map(|s| {
-                        TransferSnapshot::from_session(s, &app.copy_options)
+                        TransferSnapshot::from_session(
+                            s,
+                            &app.copy_options,
+                            app.follow_links,
+                        )
                     })
                 },
                 move |snapshot| async move {
@@ -989,6 +1166,8 @@ pub(crate) fn process_session_action(action: SessionAction) {
                             &snapshot.left,
                             &snapshot.right,
                             snapshot.compare_content,
+                            snapshot.follow_links,
+                            snapshot.copy_options.preserve_links,
                         )
                         .await?;
                         Ok(PostTransfer::Dir(Box::new(comparison)))
@@ -1454,6 +1633,12 @@ pub(crate) fn toggle_setting(item: SettingItem) {
         .active()
         .and_then(|s| s.dir())
         .map(|dir| dir.resolved_copy_options(&app.copy_options));
+    // Same for the Follow links row: it toggles against the resolved
+    // value, which needs the app-level default before the mutable borrow.
+    let resolved_follow = app
+        .active()
+        .and_then(|s| s.dir())
+        .map(|dir| dir.resolved_follow_links(app.follow_links));
     let Some(session) = app.active_mut() else {
         return;
     };
@@ -1464,6 +1649,14 @@ pub(crate) fn toggle_setting(item: SettingItem) {
         SettingItem::CompareContent => {
             if let Some(dir) = session.dir_mut() {
                 dir.compare_content = !dir.compare_content;
+            }
+        }
+        SettingItem::FollowLinks => {
+            if let Some(dir) = session.dir_mut() {
+                // The row shows the effective value; toggling records the
+                // opposite as this session's explicit override, so the
+                // session stops following the global follow-links default.
+                dir.follow_links = Some(!resolved_follow.unwrap_or(false));
             }
         }
         SettingItem::HideSame => {
@@ -1880,6 +2073,22 @@ pub(crate) fn confirm_menu_item() -> MenuOutcome {
                 app.show_shortcuts = !app.show_shortcuts;
                 return MenuOutcome::Handled;
             }
+            Cmd::ToggleFollowLinks => {
+                // App-level command: flip the global follow-links default
+                // (shared with the GUI) and persist it.
+                app.follow_links = !app.follow_links;
+                let follow_links = app.follow_links;
+                // `report_error` takes the state lock itself, so persist
+                // and report only after the guard above is dropped.
+                drop(app);
+                if let Err(e) = cocomo_lib::set_compare_defaults(follow_links)
+                {
+                    report_error(format!(
+                        "Failed to save compare defaults: {e}"
+                    ));
+                }
+                return MenuOutcome::Handled;
+            }
             Cmd::ToggleCopyPreserveLinks
             | Cmd::ToggleCopyPreserveMode
             | Cmd::ToggleCopyPreserveTimestamps => {
@@ -2175,6 +2384,58 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, TuiError::Lib(_)));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn resolve_open_pair_follows_link_pairs_to_their_targets() {
+        // Two sides that are both links open on the links' final
+        // targets, so the new view compares what's behind them.
+        let dir = tempfile::tempdir().unwrap();
+        for side in ["left", "right"] {
+            let root = dir.path().join(side);
+            fs_err::tokio::create_dir_all(root.join("target"))
+                .await
+                .unwrap();
+            fs_err::tokio::write(root.join("target/f.txt"), "x")
+                .await
+                .unwrap();
+            std::os::unix::fs::symlink("target", root.join("link")).unwrap();
+        }
+        let left = Endpoint::local(dir.path().join("left/link"));
+        let right = Endpoint::local(dir.path().join("right/link"));
+        let (l, r) = resolve_open_pair(left, right).await;
+        assert!(l.path().ends_with("left/target"), "{}", l.path().display());
+        assert!(r.path().ends_with("right/target"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn resolve_open_pair_keeps_half_and_broken_pairs_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let left = dir.path().join("left");
+        let right = dir.path().join("right");
+        fs_err::tokio::create_dir_all(left.join("target"))
+            .await
+            .unwrap();
+        fs_err::tokio::create_dir_all(&right).await.unwrap();
+        std::os::unix::fs::symlink("target", left.join("link")).unwrap();
+        std::os::unix::fs::symlink("nowhere", right.join("broken")).unwrap();
+
+        // Only one side is a link: the other side has no equivalent
+        // jump, so the pair stays as given.
+        let l = Endpoint::local(left.join("link"));
+        let r = Endpoint::local(right.clone());
+        let (l_out, r_out) = resolve_open_pair(l.clone(), r.clone()).await;
+        assert_eq!(l_out.path(), l.path());
+        assert_eq!(r_out.path(), r.path());
+
+        // Both sides link, but one target is unreachable: resolving
+        // through a broken link must not hijack the pair either.
+        let rb = Endpoint::local(right.join("broken"));
+        let (l_out, r_out) = resolve_open_pair(l.clone(), rb.clone()).await;
+        assert_eq!(l_out.path(), l.path());
+        assert_eq!(r_out.path(), rb.path());
     }
 
     #[tokio::test]
@@ -2883,6 +3144,42 @@ mod tests {
         let dir = app.active().unwrap().dir().unwrap();
         assert_eq!(dir.copy_preserve_mode, Some(false));
         assert!(!app.copy_options.preserve_mode);
+    }
+
+    #[test]
+    fn toggle_setting_records_explicit_follow_links_override() {
+        let mut app = AppState::new();
+        // A global default of "don't follow links"; the session follows
+        // it while its override is unset.
+        app.follow_links = false;
+        app.add_session(SessionView::new_dir_compare(
+            Endpoint::local("/left"),
+            Endpoint::local("/right"),
+            true,
+        ));
+        app.active_mut().unwrap().ui.mode = SessionMode::Settings;
+        APP_STATE.set(app);
+
+        // The row shows the resolved global value, so toggling records
+        // its negation as an explicit override; the copy overrides stay
+        // unset and keep following the global defaults.
+        toggle_setting(SettingItem::FollowLinks);
+        {
+            let state = APP_STATE.state();
+            let app = state.read();
+            let dir = app.active().unwrap().dir().unwrap();
+            assert_eq!(dir.follow_links, Some(true));
+            assert_eq!(dir.copy_preserve_links, None);
+        }
+
+        // Toggling again flips the explicit override; the global default
+        // is untouched (that is the Options menu's job).
+        toggle_setting(SettingItem::FollowLinks);
+        let state = APP_STATE.state();
+        let app = state.read();
+        let dir = app.active().unwrap().dir().unwrap();
+        assert_eq!(dir.follow_links, Some(false));
+        assert!(!app.follow_links);
     }
 
     #[test]

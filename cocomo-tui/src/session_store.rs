@@ -53,6 +53,8 @@ pub(crate) fn session_to_config(session: &SessionView) -> SessionConfig {
                 copy_preserve_links: dir.copy_preserve_links,
                 copy_preserve_mode: dir.copy_preserve_mode,
                 copy_preserve_timestamps: dir.copy_preserve_timestamps,
+                // Same for the follow-links override.
+                follow_links: dir.follow_links,
                 // The shown status bits by name, so the TOML stays
                 // human-readable like the old coarse booleans.
                 show_statuses: dir
@@ -142,6 +144,7 @@ mod tests {
         if let Some(dir) = session.dir_mut() {
             dir.copy_preserve_links = Some(false);
             dir.copy_preserve_mode = Some(true);
+            dir.follow_links = Some(true);
         }
         let config = session_to_config(&session);
         let loaded =
@@ -149,6 +152,7 @@ mod tests {
         assert_eq!(loaded.settings.copy_preserve_links, Some(false));
         assert_eq!(loaded.settings.copy_preserve_mode, Some(true));
         assert_eq!(loaded.settings.copy_preserve_timestamps, None);
+        assert_eq!(loaded.settings.follow_links, Some(true));
     }
 
     #[test]

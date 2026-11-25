@@ -219,14 +219,16 @@ fn sync_menu_commands_plan_and_sync_key_replans() {
 
 #[test]
 fn copy_toggle_menu_commands_leave_the_session_untouched() {
-    // The copy toggles are app-level menu commands the controller executes
-    // itself (they flip the persisted global default), so the session-level
-    // dispatch must be a no-op that touches no session state.
+    // The copy and follow-links toggles are app-level menu commands the
+    // controller executes itself (they flip the persisted global
+    // default), so the session-level dispatch must be a no-op that
+    // touches no session state.
     let mut session = dir_session();
     for cmd in [
         Cmd::ToggleCopyPreserveLinks,
         Cmd::ToggleCopyPreserveMode,
         Cmd::ToggleCopyPreserveTimestamps,
+        Cmd::ToggleFollowLinks,
     ] {
         assert_eq!(run_menu_command(&mut session, cmd), SessionAction::None);
     }
@@ -234,6 +236,7 @@ fn copy_toggle_menu_commands_leave_the_session_untouched() {
     assert_eq!(dir.copy_preserve_links, None);
     assert_eq!(dir.copy_preserve_mode, None);
     assert_eq!(dir.copy_preserve_timestamps, None);
+    assert_eq!(dir.follow_links, None);
 }
 
 #[test]
@@ -261,6 +264,20 @@ fn dir_copy_overrides_resolve_against_global_defaults() {
     assert!(resolved.preserve_links);
     assert!(resolved.preserve_mode);
     assert!(!resolved.preserve_timestamps);
+}
+
+#[test]
+fn dir_follow_links_override_resolves_against_global_default() {
+    let mut session = dir_session();
+    // Without an override the session follows the global default.
+    assert!(!session.dir().unwrap().resolved_follow_links(false));
+    assert!(session.dir().unwrap().resolved_follow_links(true));
+
+    // An explicit override wins over the global default.
+    session.dir_mut().unwrap().follow_links = Some(true);
+    assert!(session.dir().unwrap().resolved_follow_links(false));
+    session.dir_mut().unwrap().follow_links = Some(false);
+    assert!(!session.dir().unwrap().resolved_follow_links(true));
 }
 
 #[test]
