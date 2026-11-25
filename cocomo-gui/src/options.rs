@@ -19,7 +19,8 @@ use std::{collections::HashMap, path::PathBuf};
 
 use anyhow::{Context as _, Result};
 use cocomo_lib::{
-    ColorOverrides, CopyOptions, copy_defaults, set_copy_defaults,
+    ColorOverrides, CopyOptions, compare_defaults, copy_defaults,
+    set_compare_defaults, set_copy_defaults,
 };
 use gpui::{
     AnyElement, App, AppContext as _, ElementId, Entity, FontWeight, Rgba,
@@ -278,6 +279,10 @@ struct OptionsDraft {
     /// `config.toml` (the TUI edits the same section), not in
     /// [`AppOptions`], so they are drafted alongside it.
     copy: CopyOptions,
+    /// Drafted global "Follow links" comparison default. Like
+    /// [`Self::copy`] it lives in the shared `config.toml` under
+    /// `[compare]`, so it is drafted alongside the copy defaults.
+    follow_links: bool,
     /// Color inputs, created on first visit of the Colors page.
     color_inputs: Option<HashMap<String, Entity<InputState>>>,
     /// Binding inputs, created on first visit of the Commands page.
@@ -292,10 +297,12 @@ pub fn open_options_dialog(window: &mut Window, cx: &mut App) {
     // An unreadable `config.toml` starts the draft from the built-in
     // defaults; saving still reports a write failure.
     let copy = copy_defaults().unwrap_or_default();
+    let follow_links = compare_defaults().unwrap_or_default();
     let draft = cx.new(|_| OptionsDraft {
         page: 0,
         working,
         copy,
+        follow_links,
         color_inputs: None,
         binding_inputs: None,
         message: None,
@@ -469,6 +476,28 @@ fn render_general_page(draft: &Entity<OptionsDraft>, cx: &App) -> AnyElement {
             ))
     };
 
+    // The global comparison defaults, shared with the TUI through the
+    // lib's `config.toml`. Folder sessions override them in their rules.
+    let follow_links = draft.read(cx).follow_links;
+    let compare_heading = div()
+        .text_xs()
+        .font_weight(FontWeight::BOLD)
+        .text_color(cx.theme().muted_foreground)
+        .child("Compare");
+    let follow_links_switch = {
+        let draft_links = draft.clone();
+        Switch::new("options_compare_follow_links")
+            .label("Follow symbolic links")
+            .checked(follow_links)
+            .on_click(move |checked, _, cx| {
+                let checked = *checked;
+                draft_links.update(cx, |d, cx| {
+                    d.follow_links = checked;
+                    cx.notify();
+                });
+            })
+    };
+
     // The global copy defaults, shared with the TUI through the lib's
     // `config.toml`. Folder sessions override them in their rules.
     let copy = draft.read(cx).copy;
@@ -529,6 +558,19 @@ fn render_general_page(draft: &Entity<OptionsDraft>, cx: &App) -> AnyElement {
                 .child(
                     "Auto-save writes a snapshot of open sessions so an \
                      unexpected quit can be recovered at the next launch.",
+                ),
+        )
+        .child(div().w_full().h_px().bg(cx.theme().border))
+        .child(compare_heading)
+        .child(follow_links_switch)
+        .child(
+            div()
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child(
+                    "Followed links are compared as the nodes they finally \
+                     point to; a folder session overrides this in its rules \
+                     dialog.",
                 ),
         )
         .child(div().w_full().h_px().bg(cx.theme().border))
@@ -739,11 +781,12 @@ fn ensure_binding_inputs(
 /// An invalid color or binding aborts the apply and leaves the dialog
 /// open with a message, so a typo never silently drops a preference.
 fn apply_options(draft: Entity<OptionsDraft>, cx: &mut App) {
-    let (working, copy, color_inputs, binding_inputs) = {
+    let (working, copy, follow_links, color_inputs, binding_inputs) = {
         let d = draft.read(cx);
         (
             d.working.clone(),
             d.copy,
+            d.follow_links,
             d.color_inputs.clone(),
             d.binding_inputs.clone(),
         )
@@ -815,6 +858,15 @@ fn apply_options(draft: Entity<OptionsDraft>, cx: &mut App) {
         set_message(
             &draft,
             format!("Couldn't save the copy defaults. {e}"),
+            cx,
+        );
+        return;
+    }
+    // The "Follow links" default shares the same `config.toml`.
+    if let Err(e) = set_compare_defaults(follow_links) {
+        set_message(
+            &draft,
+            format!("Couldn't save the comparison defaults. {e}"),
             cx,
         );
         return;

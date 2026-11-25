@@ -667,37 +667,107 @@ impl FolderCompareView {
             // Fallback: use the same file on the other side.
             action.left_path.clone()
         });
-        let kind = crate::file_formats::FileFormatRegistry::view_kind(
-            action.left_path.path(),
+        self.open_resolved_pair(
+            action.left_path.clone(),
+            right_path,
+            false,
             cx,
         );
+    }
+
+    /// Open a diff tab on the given endpoints, resolving them to their
+    /// final targets first when both sides address a symbolic link, so a
+    /// view opened on a link pair shows the nodes the links finally
+    /// point to. A pair that settles on two directories opens as a dir
+    /// diff even on the file intent; a pair that cannot be resolved
+    /// (either side is not a link or its chain never settles) opens
+    /// unchanged, as before.
+    fn open_resolved_pair(
+        &self,
+        left: Endpoint,
+        right: Endpoint,
+        dir_intent: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let mgr = self.session_manager.clone();
         let parent = self.state.downgrade();
-        self.session_manager.update(cx, |mgr, cx| {
-            mgr.add_file_pair_tab(
-                kind,
-                action.left_path.clone(),
-                right_path,
-                Some(parent),
-                cx,
-            );
+        let join_handle = crate::runtime::spawn_on_tokio({
+            // Clone into the resolution future; the originals stay for
+            // the fallback below.
+            let (resolve_left, resolve_right) = (left.clone(), right.clone());
+            async move {
+                anyhow::Ok(
+                    crate::state::resolve_open_pair(
+                        resolve_left,
+                        resolve_right,
+                    )
+                    .await,
+                )
+            }
         });
+        cx.spawn(move |_, cx: &mut gpui::AsyncApp| {
+            let async_app = cx.clone();
+            async move {
+                let resolved = join_handle.await.ok().and_then(|r| r.ok());
+                let _ = async_app.update(|cx| {
+                    mgr.update(cx, |mgr, cx| {
+                        let open = |l: Endpoint,
+                                    r: Endpoint,
+                                    dir_intent: bool,
+                                    mgr: &mut GuiSessionManager,
+                                    cx: &mut Context<GuiSessionManager>| {
+                            if dir_intent {
+                                mgr.add_dir_diff_tab(l, r, cx);
+                            } else {
+                                let kind = crate::file_formats::
+                                    FileFormatRegistry::view_kind(
+                                        l.path(),
+                                        cx,
+                                    );
+                                mgr.add_file_pair_tab(
+                                    kind,
+                                    l,
+                                    r,
+                                    Some(parent.clone()),
+                                    cx,
+                                );
+                            }
+                        };
+                        match resolved {
+                            // Both links settle on directories: a dir
+                            // diff is the only view that shows the pair.
+                            Some((l, r, true)) => {
+                                mgr.add_dir_diff_tab(l, r, cx);
+                            }
+                            Some((l, r, false)) => {
+                                open(l, r, dir_intent, mgr, cx);
+                            }
+                            None => {
+                                open(left, right, dir_intent, mgr, cx);
+                            }
+                        }
+                    });
+                });
+            }
+        })
+        .detach();
     }
 
     /// Handle OpenDirDiff: dispatch to session manager to create a dir diff
-    /// tab.
+    /// tab. A link pair is resolved to its final targets first (see
+    /// [`Self::open_resolved_pair`]).
     fn handle_open_dir_diff(
         &mut self,
         action: &OpenDirDiff,
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.session_manager.update(cx, |mgr, cx| {
-            mgr.add_dir_diff_tab(
-                action.left_path.clone(),
-                action.right_path.clone(),
-                cx,
-            );
-        });
+        self.open_resolved_pair(
+            action.left_path.clone(),
+            action.right_path.clone(),
+            true,
+            cx,
+        );
     }
 
     /// Handle OpenMerge: open the pair as a text merge tab. Without an
@@ -2211,7 +2281,7 @@ pub(crate) fn format_modified(modified: &str) -> String {
 /// Every single-bit [`DirEntryStatus`] the table can show appears here, so
 /// the dot and glyph are never a color-only or cryptic-symbol-only cue.
 /// Aggregated multi-bit statuses resolve to the `!` marker.
-const STATUS_LEGEND: [(DirEntryStatus, &str, &str); 6] = [
+const STATUS_LEGEND: [(DirEntryStatus, &str, &str); 7] = [
     (DirEntryStatus::Same, "Same", "Identical node on both sides"),
     (DirEntryStatus::Equal, "Equal", "Equal size and content"),
     (
@@ -2233,6 +2303,11 @@ const STATUS_LEGEND: [(DirEntryStatus, &str, &str); 6] = [
         DirEntryStatus::RightOrphan,
         "Right orphan",
         "Exists only on the right side",
+    ),
+    (
+        DirEntryStatus::Unresolvable,
+        "Unresolvable",
+        "A link whose final target cannot be resolved",
     ),
 ];
 
@@ -2631,6 +2706,13 @@ struct FolderRulesBody {
     /// whose draft differs from them on Apply records an explicit
     /// per-session override; an untouched one keeps inheriting.
     copy_resolved: CopyOptions,
+    /// Drafted "follow symbolic links" comparison option, seeded with
+    /// the resolved value. Only written into
+    /// `SessionSettings::follow_links` on Apply once it differs from
+    /// that, so an untouched dialog keeps inheriting the global
+    /// default.
+    follow_links: bool,
+    follow_links_resolved: bool,
     name_filter: Entity<InputState>,
     colors: ColorFields,
     /// A validation problem to show above the Apply button, if any.
@@ -2648,6 +2730,7 @@ impl FolderRulesBody {
         // override, else the global defaults from the shared
         // `config.toml`), so the user sees what a transfer will do.
         let copy_resolved = state.read(cx).resolved_copy_options();
+        let follow_links_resolved = state.read(cx).resolved_follow_links();
         Self {
             compare_files: settings.compare_files,
             compare_structure: settings.compare_structure,
@@ -2658,6 +2741,8 @@ impl FolderRulesBody {
             copy_preserve_mode: copy_resolved.preserve_mode,
             copy_preserve_timestamps: copy_resolved.preserve_timestamps,
             copy_resolved,
+            follow_links: follow_links_resolved,
+            follow_links_resolved,
             name_filter: cx.new(|cx| {
                 InputState::new(window, cx)
                     .placeholder("Name filters (comma-separated globs)")
@@ -2699,6 +2784,12 @@ impl FolderRulesBody {
         {
             settings.copy_preserve_timestamps =
                 Some(self.copy_preserve_timestamps);
+        }
+        // Likewise, a moved "follow links" checkbox records an
+        // explicit override; an untouched one keeps inheriting the
+        // global default.
+        if self.follow_links != self.follow_links_resolved {
+            settings.follow_links = Some(self.follow_links);
         }
         settings.color_overrides = colors;
         settings.name_filter = self
@@ -2745,6 +2836,11 @@ impl Render for FolderRulesBody {
                 "Compare directory structure",
                 self.compare_structure,
                 |this, v| this.compare_structure = v,
+            ))
+            .child(row(
+                "Follow symbolic links",
+                self.follow_links,
+                |this, v| this.follow_links = v,
             ))
             .child(row(
                 "Ignore whitespace",
@@ -2914,6 +3010,7 @@ mod tests {
             DirEntryStatus::RightNewer,
             DirEntryStatus::LeftOrphan,
             DirEntryStatus::RightOrphan,
+            DirEntryStatus::Unresolvable,
         ];
         for status in all {
             assert!(
@@ -3257,6 +3354,114 @@ mod tests {
             .expect("failed to rebuild the rules body");
         reopened.update(cx, |body, _| {
             assert_eq!(body.copy_preserve_mode, !global.preserve_mode);
+        });
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The rules dialog shows the effective "follow symbolic links"
+    /// value, stores an explicit override only once the checkbox moved,
+    /// and shows the stored override when reopened.
+    #[gpui::test]
+    fn rules_dialog_round_trips_the_follow_links_override(
+        cx: &mut TestAppContext,
+    ) {
+        use gpui::{Bounds, WindowBounds, WindowOptions};
+
+        // Apply re-runs the comparison over the tokio bridge, whose
+        // completion wake lands on a tokio worker thread.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        {
+            let _guard = rt.enter();
+            crate::runtime::set_handle();
+        }
+        cx.update(|cx| {
+            gpui::init(cx);
+            cx.set_global(crate::options::AppOptions::default());
+            cx.set_global(crate::log::LogBuffer::default());
+        });
+        cx.executor().allow_parking();
+
+        // The re-run comparison touches the pair, so both sides exist.
+        let base = std::env::temp_dir().join("cocomo-ui-rules-follow");
+        let left = base.join("left");
+        let right = base.join("right");
+        std::fs::create_dir_all(&left).unwrap();
+        std::fs::create_dir_all(&right).unwrap();
+        let state = cx.new(|cx| {
+            AppState::new(
+                Endpoint::local(left),
+                Endpoint::local(right),
+                "rules-follow".into(),
+                cx,
+            )
+        });
+        let store = cx.new(|_| SavedSessionStore::new(std::env::temp_dir()));
+        let manager = cx.new(|_| GuiSessionManager::new(store));
+        let (window, _view) = cx.update(|cx| {
+            gpui::open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(
+                        Bounds::maximized(None, cx),
+                    )),
+                    ..Default::default()
+                },
+                cx,
+                |_, cx| {
+                    cx.new(|cx| {
+                        FolderCompareView::new(
+                            state.clone(),
+                            manager.clone(),
+                            cx,
+                        )
+                    })
+                },
+            )
+            .expect("failed to open the test window")
+        });
+
+        let body = cx
+            .update_window(window, |_, window, cx| {
+                cx.new(|cx| FolderRulesBody::new(state.clone(), window, cx))
+            })
+            .expect("failed to build the rules body");
+
+        // The checkbox seeds with the global comparison default.
+        let global = cocomo_lib::compare_defaults().unwrap_or_default();
+        body.update(cx, |body, _| {
+            assert_eq!(
+                body.follow_links, global,
+                "the checkbox must seed with the global default"
+            );
+            body.follow_links = !global;
+        });
+        body.update(cx, |body, cx| body.apply(cx));
+        cx.run_until_parked();
+
+        cx.update(|cx| {
+            let settings = state.read(cx).settings();
+            assert_eq!(
+                settings.follow_links,
+                Some(!global),
+                "the moved checkbox must store an explicit override"
+            );
+            // The session config carries the override through a save.
+            let config = state.read(cx).to_config("rules-follow".into());
+            assert_eq!(config.settings.follow_links, Some(!global));
+        });
+
+        // A freshly opened dialog shows the override as the effective
+        // value, so the session visibly stopped following the global
+        // default.
+        let reopened = cx
+            .update_window(window, |_, window, cx| {
+                cx.new(|cx| FolderRulesBody::new(state.clone(), window, cx))
+            })
+            .expect("failed to rebuild the rules body");
+        reopened.update(cx, |body, _| {
+            assert_eq!(body.follow_links, !global);
         });
         let _ = std::fs::remove_dir_all(&base);
     }

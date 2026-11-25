@@ -23,15 +23,16 @@ use std::{
 
 use cocomo_lib::{
     CancellationToken, CompareConfig, ContentCache, CopyOptions,
-    DirComparison, DirEntry, DirEntryStatus, Endpoint, FsPair, ProviderRef,
-    SessionConfig, SessionSettings, SessionType, TransferAction, TransferItem,
-    compare_content_pair_node, compare_directories_node,
-    compare_directories_pair_node, copy_defaults, execute_transfers,
+    DirComparison, DirEntry, DirEntryStatus, Endpoint, FsPair, NodeFileSystem,
+    ProviderRef, SessionConfig, SessionSettings, SessionType, TransferAction,
+    TransferItem, compare_content_pair_node, compare_defaults,
+    compare_directories_node, compare_directories_pair_node, copy_defaults,
+    execute_transfers,
     filter::{
         DisplayFilters as LibDisplayFilters, FilterSet, NameFilter,
         OtherFilters, Pattern,
     },
-    resolve_copy_options,
+    resolve_copy_options, resolve_final_target, resolve_follow_links,
 };
 use gpui::{App, Context, FocusHandle, SharedString};
 use serde::{Deserialize, Serialize};
@@ -98,7 +99,9 @@ pub enum StatusCategory {
 /// wins with precedence Different > Orphan > Same: a state the user can
 /// act on outranks one-sided content, which in turn outranks equality.
 pub fn status_category(status: &DirEntryStatus) -> StatusCategory {
-    if status.intersects(DirEntryStatus::DIFFERENT) {
+    if status
+        .intersects(DirEntryStatus::DIFFERENT | DirEntryStatus::Unresolvable)
+    {
         StatusCategory::Different
     } else if status.intersects(DirEntryStatus::ORPHAN) {
         StatusCategory::Orphan
@@ -140,7 +143,11 @@ impl StatusFilter {
     pub fn mask(self) -> DirEntryStatus {
         match self {
             Self::Equal => DirEntryStatus::EQUAL,
-            Self::Different => DirEntryStatus::DIFFERENT,
+            // An unresolvable link is a difference like any other, so
+            // the "different" umbrella covers its bit too.
+            Self::Different => {
+                DirEntryStatus::DIFFERENT | DirEntryStatus::Unresolvable
+            }
             Self::LeftNewer => DirEntryStatus::LeftNewer,
             Self::RightNewer => DirEntryStatus::RightNewer,
             Self::Orphans => DirEntryStatus::ORPHAN,
@@ -290,7 +297,9 @@ impl FilterPreset {
             Self::All => DirEntryStatus::all(),
             Self::NoOrphans => DirEntryStatus::all() ^ DirEntryStatus::ORPHAN,
             Self::NoSame => DirEntryStatus::all() ^ DirEntryStatus::EQUAL,
-            Self::DiffNoOrphans => DirEntryStatus::DIFFERENT,
+            Self::DiffNoOrphans => {
+                DirEntryStatus::DIFFERENT | DirEntryStatus::Unresolvable
+            }
             Self::SameOnly => DirEntryStatus::EQUAL,
             Self::OrphansOnly => DirEntryStatus::ORPHAN,
             Self::LeftNewer => DirEntryStatus::LeftNewer,
@@ -700,6 +709,50 @@ pub(crate) fn entry_endpoints(
             .map_or(entry.name.as_str(), |r| r.path.as_str()),
     );
     (left, right)
+}
+
+/// Resolve one endpoint that addresses a symbolic link to its final
+/// target.
+///
+/// Returns the endpoint located at the final target and whether that
+/// node is a directory, or `None` when the endpoint addresses something
+/// other than a link or its chain never settles on a final target
+/// (broken link, cycle, or a chain longer than the resolution budget).
+async fn resolve_link_endpoint(
+    endpoint: &Endpoint,
+) -> Option<(Endpoint, bool)> {
+    let fs = endpoint.fs();
+    let id = fs.resolve_path(endpoint.path()).await.ok()?;
+    let node = fs.get_node(id).ok()?;
+    if !node.kind().is_symlink() {
+        return None;
+    }
+    let target_id = resolve_final_target(fs, id).await?;
+    let target = fs.get_node(target_id).ok()?;
+    let is_dir = target.metadata().is_dir;
+    Some((endpoint.with_path(target.path().to_path_buf()), is_dir))
+}
+
+/// Resolve an endpoint pair for opening a new comparison view on it.
+///
+/// When both sides address links they are replaced by their final
+/// targets — also when both resolve to the same node — so the new view
+/// shows the nodes a copy operation would produce. If either side is
+/// not a link or cannot be resolved, the pair is returned unchanged
+/// (and `both_dirs` is `false`), so callers always have a usable pair.
+pub(crate) async fn resolve_open_pair(
+    left: Endpoint,
+    right: Endpoint,
+) -> (Endpoint, Endpoint, bool) {
+    let Some((left_target, left_dir)) = resolve_link_endpoint(&left).await
+    else {
+        return (left, right, false);
+    };
+    let Some((right_target, right_dir)) = resolve_link_endpoint(&right).await
+    else {
+        return (left, right, false);
+    };
+    (left_target, right_target, left_dir && right_dir)
 }
 
 /// One entered directory of the paired navigation, with the per-side
@@ -1516,6 +1569,17 @@ impl AppState {
         resolve_copy_options(&self.settings, &global)
     }
 
+    /// The effective "Follow links" comparison option for this
+    /// session: the per-session override in the settings resolved
+    /// against the global default in the shared `config.toml`.
+    ///
+    /// Like [`Self::resolved_copy_options`], an unreadable config falls
+    /// back to the built-in default rather than failing the comparison.
+    pub(crate) fn resolved_follow_links(&self) -> bool {
+        let global = compare_defaults().unwrap_or_default();
+        resolve_follow_links(&self.settings, global)
+    }
+
     /// Whether the entry name is marked ignored in the session settings.
     pub fn is_ignored(&self, name: &str) -> bool {
         self.settings.ignored.iter().any(|n| n == name)
@@ -1598,8 +1662,14 @@ impl AppState {
         // through the single-filesystem path; a mixed pair compares
         // across providers.
         let scan_token = token.clone();
+        let follow_links = self.resolved_follow_links();
+        let preserve_links = self.resolved_copy_options().preserve_links;
         let join_handle = crate::runtime::spawn_on_tokio(async move {
-            let config = CompareConfig::meta_data_only();
+            let config = CompareConfig {
+                follow_links,
+                preserve_links,
+                ..CompareConfig::meta_data_only()
+            };
             let comparison = if left.same_provider(&right) {
                 compare_directories_node(
                     left.fs(),
@@ -1714,8 +1784,14 @@ impl AppState {
         let revision = self.load_revision;
         let weak = cx.entity().downgrade();
 
+        let follow_links = self.resolved_follow_links();
+        let preserve_links = self.resolved_copy_options().preserve_links;
         let join_handle = crate::runtime::spawn_on_tokio(async move {
-            let config = CompareConfig::meta_data_only();
+            let config = CompareConfig {
+                follow_links,
+                preserve_links,
+                ..CompareConfig::meta_data_only()
+            };
             async fn scan_pair(
                 config: &CompareConfig,
                 a: Endpoint,
@@ -1841,6 +1917,11 @@ impl AppState {
         let left = self.left.clone();
         let right = self.right.clone();
         let cache = self.content_cache.clone();
+        // The same link policy the metadata pass above was run with:
+        // a link is only resolved when the comparison follows links and
+        // does not preserve them.
+        let resolve_links = self.resolved_follow_links()
+            || !self.resolved_copy_options().preserve_links;
         let weak = cx.entity().downgrade();
 
         // Progress flows back on an unbounded channel; the sending side
@@ -1873,11 +1954,9 @@ impl AppState {
                 right.fs(),
                 left.path(),
                 right.path(),
-                // The comparison above uses the default link handling
-                // (preserve, do not follow); the content pass must
-                // mirror it until the option dialogs expose both
-                // settings.
-                false,
+                // The content pass must mirror the link policy of the
+                // comparison it refines.
+                resolve_links,
                 comparison,
                 Some(&cache),
                 Some(&content_token),
@@ -2096,6 +2175,11 @@ impl AppState {
     }
 
     /// Navigate into a subdirectory if the selected entry is a directory.
+    ///
+    /// A pair of links enters the subtree of the finally targeted nodes
+    /// rather than of the links themselves (see [`resolve_open_pair`]);
+    /// the resolution runs on the tokio runtime and the step is applied
+    /// when it finishes, unless the pair has moved on in the meantime.
     pub fn navigate_into_subdir(&mut self, cx: &mut Context<Self>) {
         let entry = match self.selected_entry() {
             Some(e) => e,
@@ -2117,9 +2201,77 @@ impl AppState {
         let left_sub = self.left.join(&step.left);
         let right_sub = self.right.join(&step.right);
 
+        let both_links = entry.left.as_ref().is_some_and(|l| l.is_symlink)
+            && entry.right.as_ref().is_some_and(|r| r.is_symlink);
+        if !both_links {
+            self.enter_subdir(step, left_sub, right_sub, None, cx);
+            return;
+        }
+
+        let depth = self.nav_steps.len();
+        let base_left = self.left.clone();
+        let base_right = self.right.clone();
+        let weak = cx.entity().downgrade();
+        let join_handle = crate::runtime::spawn_on_tokio({
+            // Clone into the resolution future; the originals stay for
+            // the fallback pair below.
+            let (resolve_left, resolve_right) =
+                (left_sub.clone(), right_sub.clone());
+            async move {
+                anyhow::Ok(
+                    resolve_open_pair(resolve_left, resolve_right).await,
+                )
+            }
+        });
+        cx.spawn(move |_, cx: &mut gpui::AsyncApp| {
+            let async_app = cx.clone();
+            async move {
+                let resolved = join_handle.await.ok().and_then(|r| r.ok());
+                async_app.update(|cx| {
+                    let Some(state) = weak.upgrade() else { return };
+                    state.update(cx, |state, cx| {
+                        // A navigation that happened while the links
+                        // were being resolved owns the pair; drop this
+                        // stale step instead of stacking it onto it.
+                        if state.nav_steps.len() != depth
+                            || state.left != base_left
+                            || state.right != base_right
+                        {
+                            return;
+                        }
+                        state.enter_subdir(
+                            step, left_sub, right_sub, resolved, cx,
+                        );
+                    });
+                });
+            }
+        })
+        .detach();
+    }
+
+    /// Apply an entered directory step and reload the comparison.
+    ///
+    /// `resolved` carries the final targets of a pair of links (see
+    /// [`resolve_open_pair`], whose third element reports whether both
+    /// are directories); entered endpoints are the resolved targets
+    /// when they are, and the link paths otherwise — a link that could
+    /// not be resolved still navigates through the link, which the
+    /// providers follow when listing it.
+    fn enter_subdir(
+        &mut self,
+        step: NavStep,
+        left_sub: Endpoint,
+        right_sub: Endpoint,
+        resolved: Option<(Endpoint, Endpoint, bool)>,
+        cx: &mut Context<Self>,
+    ) {
+        let (left, right) = match resolved {
+            Some((left, right, true)) => (left, right),
+            _ => (left_sub, right_sub),
+        };
         self.nav_steps.push(step);
-        self.left = left_sub;
-        self.right = right_sub;
+        self.left = left;
+        self.right = right;
         self.notice = None;
         self.expanded.clear();
         self.record_history();
@@ -3532,6 +3684,15 @@ mod tests {
         }
     }
 
+    /// A link entry carrying directory metadata, as a scan with link
+    /// resolution records a link to a directory.
+    fn link_dir_info(path: &str) -> EntryInfo {
+        EntryInfo {
+            is_symlink: true,
+            ..dir_info(path)
+        }
+    }
+
     fn entry(
         name: &str,
         status: DirEntryStatus,
@@ -4754,6 +4915,92 @@ mod tests {
             assert_eq!(state.left().display(), "/left/sub");
             assert_eq!(state.nav_steps().len(), 1);
         });
+    }
+
+    /// Navigating into a pair of links enters the directories the links
+    /// finally point to; navigating up restores the session roots.
+    #[gpui::test]
+    fn navigate_into_link_pair_round_trips_through_final_targets(
+        cx: &mut TestAppContext,
+    ) {
+        // Resolution and comparison run over the tokio bridge.
+        let _rt = init_tokio_handle();
+        init_log_globals(cx);
+        // The resolution completion wakes from a tokio worker thread,
+        // so the test executor must be allowed to park and wait for it.
+        cx.executor().allow_parking();
+
+        // A real on-disk pair: both sides hold a link to a directory
+        // with a side-specific target name, so the entered endpoints
+        // are distinguishable from each other and from the link.
+        let base = std::env::temp_dir().join("cocomo-state-nav-links");
+        let _ = std::fs::remove_dir_all(&base);
+        let left_root = base.join("left");
+        let right_root = base.join("right");
+        std::fs::create_dir_all(left_root.join("alpha/inner")).unwrap();
+        std::fs::create_dir_all(right_root.join("beta/inner")).unwrap();
+        std::os::unix::fs::symlink("alpha", left_root.join("link")).unwrap();
+        std::os::unix::fs::symlink("beta", right_root.join("link")).unwrap();
+
+        let state = cx.new(|cx| {
+            let mut state = AppState::new(
+                Endpoint::local(&left_root),
+                Endpoint::local(&right_root),
+                "nav-links".into(),
+                cx,
+            );
+            // A scan with link resolution records the pair as symlinks
+            // carrying their targets' directory metadata.
+            state.set_comparison_for_test(comparison(vec![entry(
+                "link",
+                DirEntryStatus::Same,
+                Some(link_dir_info("link")),
+                Some(link_dir_info("link")),
+            )]));
+            state.select_row(0, cx);
+            state
+        });
+
+        state.update(cx, |state, cx| state.navigate_into_subdir(cx));
+        // The resolution completes on a tokio worker thread; drive both
+        // executors until its result lands in the session.
+        for _ in 0..500 {
+            cx.run_until_parked();
+            let entered = state.read_with(cx, |state, _cx| {
+                state.left().path().ends_with("alpha")
+                    && state.right().path().ends_with("beta")
+            });
+            if entered {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        // The entered endpoints are the final targets, not the links.
+        state.update(cx, |state, _cx| {
+            assert!(
+                state.left().path().ends_with("alpha"),
+                "left entered {} instead of the target",
+                state.left().display()
+            );
+            assert!(
+                state.right().path().ends_with("beta"),
+                "right entered {} instead of the target",
+                state.right().display()
+            );
+            assert_eq!(state.nav_steps().len(), 1);
+        });
+
+        // Navigating up restores the session roots, so the round trip
+        // leaves the session where it started.
+        state.update(cx, |state, cx| state.navigate_up(cx));
+        cx.run_until_parked();
+        state.update(cx, |state, _cx| {
+            assert_eq!(*state.left(), Endpoint::local(&left_root));
+            assert_eq!(*state.right(), Endpoint::local(&right_root));
+            assert!(state.nav_steps().is_empty());
+        });
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[gpui::test]

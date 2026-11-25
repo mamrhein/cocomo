@@ -466,6 +466,17 @@ mod tests {
             ("◀", ColorRole::Orphan)
         );
 
+        // An unresolvable link shows its own marker in the difference
+        // color.
+        let unresolvable = DirEntry {
+            status: DirEntryStatus::Unresolvable,
+            ..different.clone()
+        };
+        assert_eq!(
+            status_glyph(&unresolvable, false),
+            ("¿", ColorRole::Important)
+        );
+
         // An aggregated multi-bit bitmap resolves to the generic marker.
         let aggregated = DirEntry {
             status: DirEntryStatus::Equal | DirEntryStatus::LeftOrphan,
