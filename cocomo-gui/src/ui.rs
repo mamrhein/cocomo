@@ -709,7 +709,7 @@ impl FolderCompareView {
             let async_app = cx.clone();
             async move {
                 let resolved = join_handle.await.ok().and_then(|r| r.ok());
-                let _ = async_app.update(|cx| {
+                async_app.update(|cx| {
                     mgr.update(cx, |mgr, cx| {
                         let open = |l: Endpoint,
                                     r: Endpoint,
