@@ -856,6 +856,8 @@ impl Render for WindowRoot {
                         .can_transfer(TransferAction::CopyLeft),
                     can_copy_right: state
                         .can_transfer(TransferAction::CopyRight),
+                    can_copy_path_left: state.can_copy_path_left(),
+                    can_copy_path_right: state.can_copy_path_right(),
                     can_move_left: state
                         .can_transfer(TransferAction::MoveLeft),
                     can_move_right: state

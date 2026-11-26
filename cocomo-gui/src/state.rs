@@ -1489,15 +1489,37 @@ impl AppState {
         self.entry_at(self.selected_index)
     }
 
+    /// Whether the selected entry exists on the left, so its left path
+    /// can be copied to the clipboard.
+    pub fn can_copy_path_left(&self) -> bool {
+        self.selected_entry()
+            .is_some_and(|entry| entry.left.is_some())
+    }
+
+    /// Whether the selected entry exists on the right, so its right path
+    /// can be copied to the clipboard.
+    pub fn can_copy_path_right(&self) -> bool {
+        self.selected_entry()
+            .is_some_and(|entry| entry.right.is_some())
+    }
+
     /// Display path of the selected entry's left side, for the clipboard.
+    /// `None` when the entry is an orphan missing on the left.
     pub fn selected_left_path(&self) -> Option<String> {
+        if !self.can_copy_path_left() {
+            return None;
+        }
         let entry = self.selected_entry()?;
         let (left, _) = entry_endpoints(entry, &self.left, &self.right);
         Some(left.display())
     }
 
     /// Display path of the selected entry's right side, for the clipboard.
+    /// `None` when the entry is an orphan missing on the right.
     pub fn selected_right_path(&self) -> Option<String> {
+        if !self.can_copy_path_right() {
+            return None;
+        }
         let entry = self.selected_entry()?;
         let (_, right) = entry_endpoints(entry, &self.left, &self.right);
         Some(right.display())

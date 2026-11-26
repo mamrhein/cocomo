@@ -190,6 +190,12 @@ pub struct MenuState {
     pub can_copy_left: bool,
     /// Whether the selected entry can be copied to the right.
     pub can_copy_right: bool,
+    /// Whether the selected entry exists on the left (enables the Edit
+    /// menu's Copy left path).
+    pub can_copy_path_left: bool,
+    /// Whether the selected entry exists on the right (enables the Edit
+    /// menu's Copy right path).
+    pub can_copy_path_right: bool,
     /// Whether the selected entry can be moved to the left.
     pub can_move_left: bool,
     /// Whether the selected entry can be moved to the right.
@@ -272,6 +278,8 @@ impl MenuState {
             loading: false,
             can_copy_left: false,
             can_copy_right: false,
+            can_copy_path_left: false,
+            can_copy_path_right: false,
             can_move_left: false,
             can_move_right: false,
             can_delete_left: false,
@@ -724,9 +732,11 @@ fn build_app_menus(
             items([
                 show(hidden, "edit.copy_path_left", || {
                     MenuItem::action("Copy left path", CopyPathLeft)
+                        .disabled(!state.can_copy_path_left)
                 }),
                 show(hidden, "edit.copy_path_right", || {
                     MenuItem::action("Copy right path", CopyPathRight)
+                        .disabled(!state.can_copy_path_right)
                 }),
             ]),
             items([show(hidden, "edit.select_all_entries", || {
@@ -2337,6 +2347,51 @@ mod tests {
         let names: Vec<String> =
             menus.iter().map(|m| m.name.to_string()).collect();
         assert_eq!(names, ["Sessions", "View", "Options", "Help"]);
+    }
+
+    /// The Edit menu's path-copy items are gated on the selected entry
+    /// existing on the respective side, so an orphan's missing side
+    /// shows its item disabled.
+    #[test]
+    fn edit_menu_gates_the_path_copy_items_on_the_sides() {
+        let path_items = |can_left: bool, can_right: bool| {
+            let menus = build_app_menus(
+                MenuState {
+                    is_folder: true,
+                    can_copy_path_left: can_left,
+                    can_copy_path_right: can_right,
+                    ..MenuState::empty()
+                },
+                &HashSet::new(),
+            );
+            let edit = menus.iter().find(|m| m.name == "Edit").unwrap();
+            edit.items
+                .iter()
+                .filter_map(|item| match item {
+                    MenuItem::Action { name, disabled, .. }
+                        if name == "Copy left path"
+                            || name == "Copy right path" =>
+                    {
+                        Some((name.to_string(), *disabled))
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            path_items(false, false),
+            [
+                ("Copy left path".to_string(), true),
+                ("Copy right path".to_string(), true),
+            ]
+        );
+        assert_eq!(
+            path_items(true, true),
+            [
+                ("Copy left path".to_string(), false),
+                ("Copy right path".to_string(), false),
+            ]
+        );
     }
 
     /// A merge tab gains the Merge menu directly after the (titled
