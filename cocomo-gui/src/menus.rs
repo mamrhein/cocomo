@@ -42,7 +42,7 @@ use gpui::{
         text::TextView,
         v_flex,
     },
-    div,
+    div, img,
     prelude::*,
     px,
 };
@@ -2133,19 +2133,37 @@ pub fn register_menu_handlers(cx: &mut App) {
                 dialog
                     .title("About cocomo")
                     .child(
-                        v_flex()
-                            .gap_2()
-                            .child(format!(
-                                "cocomo {}",
-                                env!("CARGO_PKG_VERSION")
-                            ))
+                        h_flex()
+                            .gap_4()
+                            .items_center()
+                            // The embedded app icon, so the dialog identifies
+                            // the app visually like the title bar does. The
+                            // `img` element falls back to the image's
+                            // intrinsic 256px size unless the size is pinned
+                            // explicitly (see `preset_icon` in `chrome.rs`).
                             .child(
-                                "COmpare, COpy & MOve directories and files.",
+                                img(SharedString::from(
+                                    "icons/app-icon-256.png",
+                                ))
+                                .size(px(64.))
+                                .flex_shrink_0(),
                             )
-                            .child("Copyright © 2026 Michael Amrhein")
                             .child(
-                                "Distributed under the cocomo license; see \
-                                 LICENSE.TXT.",
+                                v_flex()
+                                    .gap_2()
+                                    .child(format!(
+                                        "cocomo {}",
+                                        env!("CARGO_PKG_VERSION")
+                                    ))
+                                    .child(
+                                        "COmpare, COpy & MOve directories \
+                                         and files.",
+                                    )
+                                    .child("Copyright © 2026 Michael Amrhein")
+                                    .child(
+                                        "Distributed under the cocomo \
+                                         license; see LICENSE.TXT.",
+                                    ),
                             ),
                     )
                     .footer(h_flex().justify_end().child(
