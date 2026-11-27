@@ -2151,6 +2151,12 @@ pub fn register_menu_handlers(cx: &mut App) {
                             .child(
                                 v_flex()
                                     .gap_2()
+                                    // Give the text column the width left
+                                    // over by the icon, so long lines wrap
+                                    // instead of being clipped by the
+                                    // dialog's hidden overflow.
+                                    .flex_1()
+                                    .min_w_0()
                                     .child(format!(
                                         "cocomo {}",
                                         env!("CARGO_PKG_VERSION")
@@ -2160,10 +2166,11 @@ pub fn register_menu_handlers(cx: &mut App) {
                                          and files.",
                                     )
                                     .child("Copyright © 2026 Michael Amrhein")
-                                    .child(
-                                        "Distributed under the cocomo \
-                                         license; see LICENSE.TXT.",
-                                    ),
+                                    .child(format!(
+                                        "Distributed under the {}; see \
+                                         LICENSE.TXT.",
+                                        env!("CARGO_PKG_LICENSE_NAME")
+                                    )),
                             ),
                     )
                     .footer(h_flex().justify_end().child(
