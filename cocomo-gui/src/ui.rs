@@ -124,8 +124,9 @@ pub struct SetSidePath {
 pub struct OpenFileDiff {
     /// Left file endpoint.
     pub left_path: Endpoint,
-    /// Right file endpoint (optional).
-    pub right_path: Option<Endpoint>,
+    /// Right file endpoint. The side missing an orphan entry addresses
+    /// the mirrored path, which the diff renders as an empty file.
+    pub right_path: Endpoint,
 }
 
 /// Action to open a text merge for a file pair in a new tab.
@@ -573,15 +574,10 @@ impl FolderCompareView {
             return;
         }
         let endpoints = self.state.read(cx).selected_endpoints();
-        let has_right = self
-            .state
-            .read(cx)
-            .selected_entry()
-            .is_some_and(|e| e.right.is_some());
         if let Some((left, right)) = endpoints {
             cx.dispatch_action(&OpenFileDiff {
                 left_path: left,
-                right_path: has_right.then_some(right),
+                right_path: right,
             });
         }
     }
@@ -663,13 +659,9 @@ impl FolderCompareView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let right_path = action.right_path.clone().unwrap_or_else(|| {
-            // Fallback: use the same file on the other side.
-            action.left_path.clone()
-        });
         self.open_resolved_pair(
             action.left_path.clone(),
-            right_path,
+            action.right_path.clone(),
             false,
             cx,
         );
@@ -2046,12 +2038,10 @@ impl FolderCompareView {
         }
         let action = self.state.update(cx, |state, cx| {
             state.select_row(row_ix, cx);
-            let has_right =
-                state.selected_entry().is_some_and(|e| e.right.is_some());
             let (left, right) = state.selected_endpoints()?;
             Some(OpenFileDiff {
                 left_path: left,
-                right_path: has_right.then_some(right),
+                right_path: right,
             })
         });
         if let Some(action) = action {
@@ -3237,6 +3227,158 @@ mod tests {
             assert_eq!(state.entry_count(), 1);
             assert_eq!(state.entry_at(0).unwrap().name, "b.txt");
         });
+    }
+
+    /// UI integration test: double-clicking an orphan row opens a text
+    /// diff whose missing side is the mirrored endpoint (rendered as an
+    /// empty file), not a second copy of the side that has the file.
+    #[gpui::test]
+    fn double_click_on_orphan_opens_diff_with_mirrored_missing_side(
+        cx: &mut TestAppContext,
+    ) {
+        use cocomo_lib::{DirComparison, SessionType};
+        use gpui::{Bounds, WindowBounds, WindowOptions, test::TestWindowExt};
+
+        // Opening the diff resolves the endpoint pair over the tokio
+        // bridge and the text session loads through it, so the test
+        // needs a tokio runtime whose worker threads keep driving the
+        // spawned tasks while the gpui executor is parked.
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        {
+            let _guard = rt.enter();
+            crate::runtime::set_handle();
+        }
+        cx.update(|cx| {
+            gpui::init(cx);
+            // The view reads the options global when it renders.
+            cx.set_global(crate::options::AppOptions::default());
+            cx.set_global(crate::log::LogBuffer::default());
+        });
+        cx.executor().allow_parking();
+
+        let orphan =
+            |name: &str, status: DirEntryStatus, left: bool| DirEntry {
+                name: name.to_string(),
+                status,
+                left: left.then(|| entry_info(name, false)),
+                right: (!left).then(|| entry_info(name, false)),
+                center: None,
+                sub_entries: None,
+                name_conflict: false,
+            };
+
+        let state = cx.new(|cx| {
+            let mut state = AppState::new(
+                Endpoint::local("/left"),
+                Endpoint::local("/right"),
+                "test".into(),
+                cx,
+            );
+            state.set_comparison_for_test(DirComparison {
+                entries: vec![
+                    orphan("only-left.txt", DirEntryStatus::LeftOrphan, true),
+                    orphan(
+                        "only-right.txt",
+                        DirEntryStatus::RightOrphan,
+                        false,
+                    ),
+                ],
+                counts: Default::default(),
+                errors: Vec::new(),
+            });
+            state
+        });
+        let base = std::env::temp_dir().join("cocomo-ui-orphan-diff");
+        let _ = std::fs::remove_dir_all(&base);
+        let store = cx.new(|_| SavedSessionStore::new(base.join("sessions")));
+        let manager = cx.new(|_| GuiSessionManager::new(store));
+
+        let (window, view) = cx.update(|cx| {
+            gpui::open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(
+                        Bounds::maximized(None, cx),
+                    )),
+                    ..Default::default()
+                },
+                cx,
+                |_, cx| {
+                    cx.new(|cx| {
+                        FolderCompareView::new(
+                            state.clone(),
+                            manager.clone(),
+                            cx,
+                        )
+                    })
+                },
+            )
+            .expect("failed to open the test window")
+        });
+
+        // Double-click the left-only orphan. The diff must open on the
+        // mirrored right endpoint, exactly like Quick compare does.
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            // `App::dispatch_action` (used by the double-click) only
+            // reaches the window that is active at the platform level.
+            window.activate_window();
+            let focus = view.read(cx).focus_handle(cx);
+            focus.focus(window, cx);
+        })
+        .expect("failed to focus the test window");
+        // The double-click runs outside the window update so the
+        // view's app-level `dispatch_action` can re-enter the window.
+        cx.update(|cx| {
+            view.update(cx, |view, cx| view.handle_row_double_click(0, cx));
+        });
+        cx.run_until_parked();
+
+        cx.update(|cx| {
+            let manager = manager.read(cx);
+            assert_eq!(manager.len(), 1, "double-click must open one tab");
+            let config = manager.active_config().expect("the text-diff tab");
+            assert_eq!(config.session_type, SessionType::TextCompare);
+            assert_eq!(
+                config.left.path,
+                std::path::Path::new("/left/only-left.txt")
+            );
+            assert_eq!(
+                config.right.path,
+                std::path::Path::new("/right/only-left.txt"),
+                "the missing side must mirror the entry name onto the \
+                 opposite root, not duplicate the left file",
+            );
+        });
+
+        // Double-click the right-only orphan for the mirrored case.
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+        })
+        .expect("failed to render the test window");
+        cx.update(|cx| {
+            view.update(cx, |view, cx| view.handle_row_double_click(1, cx));
+        });
+        cx.run_until_parked();
+
+        cx.update(|cx| {
+            let manager = manager.read(cx);
+            assert_eq!(manager.len(), 2, "both rows must open their tab");
+            let config = manager.active_config().expect("the text-diff tab");
+            assert_eq!(config.session_type, SessionType::TextCompare);
+            assert_eq!(
+                config.left.path,
+                std::path::Path::new("/left/only-right.txt")
+            );
+            assert_eq!(
+                config.right.path,
+                std::path::Path::new("/right/only-right.txt")
+            );
+        });
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// UI integration test: the folder rules dialog round-trips the copy

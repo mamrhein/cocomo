@@ -1089,9 +1089,7 @@ impl TableRow {
         } else {
             Box::new(OpenFileDiff {
                 left_path: self.left_endpoint.clone(),
-                right_path: self
-                    .has_right
-                    .then(|| self.right_endpoint.clone()),
+                right_path: self.right_endpoint.clone(),
             })
         }
     }
@@ -1889,22 +1887,25 @@ mod tests {
         );
         let expected = OpenFileDiff {
             left_path: Endpoint::local("/left/a.txt"),
-            right_path: Some(Endpoint::local("/right/a.txt")),
+            right_path: Endpoint::local("/right/a.txt"),
         };
         assert!(row(&entry, cx).open_action().partial_eq(&expected));
     }
 
     #[gpui::test]
-    fn open_action_omits_missing_right_side(cx: &mut TestAppContext) {
+    fn open_action_mirrors_the_missing_right_side(cx: &mut TestAppContext) {
         let entry = entry(
             "only-left.txt",
             DirEntryStatus::LeftOrphan,
             Some(info("only-left.txt", false)),
             None,
         );
+        // The missing side addresses the mirrored path, so opening the
+        // entry shows an empty file there instead of duplicating the
+        // left file (issue #39).
         let expected = OpenFileDiff {
             left_path: Endpoint::local("/left/only-left.txt"),
-            right_path: None,
+            right_path: Endpoint::local("/right/only-left.txt"),
         };
         assert!(row(&entry, cx).open_action().partial_eq(&expected));
     }
