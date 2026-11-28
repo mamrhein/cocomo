@@ -457,8 +457,14 @@ pub fn toolbar_element(
     let can_copy_left = active_state.as_ref().is_some_and(|state| {
         state.read(cx).can_transfer(TransferAction::CopyLeft)
     });
+    let can_move_right = active_state.as_ref().is_some_and(|state| {
+        state.read(cx).can_transfer(TransferAction::MoveRight)
+    });
+    let can_move_left = active_state.as_ref().is_some_and(|state| {
+        state.read(cx).can_transfer(TransferAction::MoveLeft)
+    });
     let copy_right_btn = Button::new("toolbar_copy_right")
-        .icon(IconName::ArrowRightFromLine)
+        .icon(Icon::default().path("icons/copy-right.svg"))
         .ghost()
         .small()
         .disabled(!can_copy_right)
@@ -477,8 +483,28 @@ pub fn toolbar_element(
                 }
             }
         });
+    let move_right_btn = Button::new("toolbar_move_right")
+        .icon(Icon::default().path("icons/move-right.svg"))
+        .ghost()
+        .small()
+        .disabled(!can_move_right)
+        .tooltip("Move to right")
+        .accessibility_label("Move to right")
+        .on_click({
+            let state = active_state.clone();
+            move |_, window, cx| {
+                if let Some(state) = &state {
+                    run_transfer_action(
+                        state.clone(),
+                        TransferAction::MoveRight,
+                        window,
+                        cx,
+                    );
+                }
+            }
+        });
     let copy_left_btn = Button::new("toolbar_copy_left")
-        .icon(IconName::ArrowLeftFromLine)
+        .icon(Icon::default().path("icons/copy-left.svg"))
         .ghost()
         .small()
         .disabled(!can_copy_left)
@@ -491,6 +517,26 @@ pub fn toolbar_element(
                     run_transfer_action(
                         state.clone(),
                         TransferAction::CopyLeft,
+                        window,
+                        cx,
+                    );
+                }
+            }
+        });
+    let move_left_btn = Button::new("toolbar_move_left")
+        .icon(Icon::default().path("icons/move-left.svg"))
+        .ghost()
+        .small()
+        .disabled(!can_move_left)
+        .tooltip("Move to left")
+        .accessibility_label("Move to left")
+        .on_click({
+            let state = active_state.clone();
+            move |_, window, cx| {
+                if let Some(state) = &state {
+                    run_transfer_action(
+                        state.clone(),
+                        TransferAction::MoveLeft,
                         window,
                         cx,
                     );
@@ -675,8 +721,14 @@ pub fn toolbar_element(
     if commands::is_visible("file.copy_right", cx) {
         ops_group = ops_group.child(copy_right_btn);
     }
+    if commands::is_visible("file.move_right", cx) {
+        ops_group = ops_group.child(move_right_btn);
+    }
     if commands::is_visible("file.copy_left", cx) {
         ops_group = ops_group.child(copy_left_btn);
+    }
+    if commands::is_visible("file.move_left", cx) {
+        ops_group = ops_group.child(move_left_btn);
     }
     if commands::is_visible("toolbar.expand", cx) {
         ops_group = ops_group.child(expand_btn);
@@ -982,5 +1034,65 @@ mod tests {
                 Some(FilterPreset::DiffNoOrphans)
             );
         });
+    }
+
+    /// UI integration test: with no selection the transfer buttons are
+    /// rendered but inert, mirroring `can_transfer`. Also guards the
+    /// registry invariant that the ops group keeps its move controls
+    /// visible under the default command visibility.
+    #[gpui::test]
+    fn toolbar_move_buttons_are_disabled_without_selection(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(|cx| {
+            gpui::init(cx);
+            cx.set_global(crate::options::AppOptions::default());
+            cx.set_global(crate::log::LogBuffer::default());
+        });
+        let state = cx.new(|cx| {
+            AppState::new(
+                Endpoint::local("/left"),
+                Endpoint::local("/right"),
+                "test".into(),
+                cx,
+            )
+        });
+        let store = cx.new(|_| {
+            SavedSessionStore::new(std::path::PathBuf::from(
+                "/tmp/cocomo-chrome-tests",
+            ))
+        });
+        let manager = cx.new(|_| GuiSessionManager::new(store));
+        let window = open_toolbar(cx, state.clone(), manager);
+
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            for id in [
+                "toolbar_copy_right",
+                "toolbar_move_right",
+                "toolbar_copy_left",
+                "toolbar_move_left",
+            ] {
+                // Without a selection no transfer is possible, so the
+                // button must be present yet disabled.
+                assert!(
+                    !state.read(cx).can_transfer(match id {
+                        "toolbar_copy_right" => TransferAction::CopyRight,
+                        "toolbar_move_right" => TransferAction::MoveRight,
+                        "toolbar_copy_left" => TransferAction::CopyLeft,
+                        _ => TransferAction::MoveLeft,
+                    }),
+                    "{id}: expected can_transfer to be false"
+                );
+                let button = window
+                    .try_find(id)
+                    .unwrap_or_else(|| panic!("{id} is not rendered"));
+                assert!(
+                    button.disabled() == Some(true),
+                    "{id} must be disabled without a selection"
+                );
+            }
+        })
+        .expect("failed to inspect the toolbar");
     }
 }
