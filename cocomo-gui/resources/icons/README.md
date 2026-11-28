@@ -20,12 +20,12 @@ circles: left column = left side, right column = right side.
 
 ## Color / layer semantics
 
-| Layer    | Shape                        | Color      |
-| -------- | ---------------------------- | ---------- |
-| `newer`  | filled circle                | `#e5484d`  |
-| `older`  | filled circle                | `#9b9b9b`  |
-| `orphan` | filled circle                | `#3b82f6`  |
-| `same`   | hollow circle (ring)         | `#9b9b9b`  |
+| Layer    | Shape                | Color     |
+| -------- | -------------------- | --------- |
+| `newer`  | filled circle        | `#e5484d` |
+| `older`  | filled circle        | `#9b9b9b` |
+| `orphan` | filled circle        | `#3b82f6` |
+| `same`   | hollow circle (ring) | `#9b9b9b` |
 
 ## Layered icons
 
@@ -62,3 +62,14 @@ stepped across three indent levels (expand) or held on a single rail at one
 level (collapse). Like the Lucide catalog icons they draw with
 `stroke="currentColor"` so the theme foreground tints them, and are rendered
 through `Icon::path()` rather than the `icon_assets!` catalog.
+
+`copy-right.svg`, `copy-left.svg`, `move-right.svg` and `move-left.svg`
+are the Operations toolbar glyphs for the transfer ops. They share an
+arrow motif — an arrow originating at a vertical rule on the source side
+and pointing in the direction of the op; the copy variants ghost the
+source rule (opacity `.45`) behind a solid one to show the original stays,
+the move variants draw a single solid rule (the item leaves). Unlike the
+catalog icons these carry fixed colors instead of `currentColor`, so they
+keep their meaning on any theme: amber-yellow `#f59e0b` for copy, red
+`#e5484d` for move (the status-icon `newer` red). They are rendered
+through `Icon::path()` as well.

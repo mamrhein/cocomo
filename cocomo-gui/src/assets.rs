@@ -180,13 +180,48 @@ mod tests {
         }
     }
 
+    /// The custom transfer-op glyphs rendered through `Icon::path()`.
+    fn op_icon_paths() -> [&'static str; 4] {
+        [
+            "icons/copy-right.svg",
+            "icons/copy-left.svg",
+            "icons/move-right.svg",
+            "icons/move-left.svg",
+        ]
+    }
+
     #[test]
     fn toolbar_action_icons_are_served() {
-        for path in ["icons/expand-all.svg", "icons/collapse-all.svg"] {
+        for path in [
+            "icons/expand-all.svg",
+            "icons/collapse-all.svg",
+            "icons/copy-right.svg",
+            "icons/copy-left.svg",
+            "icons/move-right.svg",
+            "icons/move-left.svg",
+        ] {
             let bytes = AppAssets
                 .load(path)
                 .unwrap_or_else(|e| panic!("{path}: {e}"));
             assert!(bytes.is_some(), "{path} is not embedded");
+        }
+    }
+
+    #[test]
+    fn op_icons_keep_their_fixed_colors() {
+        for path in op_icon_paths() {
+            let bytes = AppAssets
+                .load(path)
+                .unwrap()
+                .unwrap_or_else(|| panic!("{path} is not embedded"));
+            let svg = std::str::from_utf8(&bytes)
+                .unwrap_or_else(|e| panic!("{path}: {e}"));
+            // The op icons encode copy vs. move in their stroke color, so
+            // they must not be themed away via `currentColor`.
+            assert!(
+                !svg.contains("currentColor"),
+                "{path} must use a fixed color"
+            );
         }
     }
 
